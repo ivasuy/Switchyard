@@ -5,6 +5,7 @@ import type { RunStore } from "../ports/run-store.js";
 import type { RuntimeAdapter } from "../ports/runtime-adapter.js";
 import type { SessionStore } from "../ports/session-store.js";
 import type { EventBus } from "./event-bus.js";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 export interface RuntimeRunnerDependencies {
   runs: RunStore;
@@ -38,6 +39,7 @@ export class RuntimeRunnerService {
 
     let latest = started;
     let session: RuntimeSession | undefined;
+    let terminalized = false;
 
     try {
       const startResult = await adapter.start({
@@ -78,11 +80,52 @@ export class RuntimeRunnerService {
         const normalized = this.normalizeEvent(event, started.id, sequence++);
 
         if (normalized.type === "run.completed" || normalized.type === "run.failed") {
-          const terminal = await this.terminalizeRunFromAdapterEvent(started, normalized, sequence - 1, session);
+          const terminalSequence = sequence - 1;
+          if (this.deps.artifacts && session) {
+            const artifactSequence = { value: terminalSequence };
+            try {
+              await this.persistArtifacts(
+                this.deps.adapters.get(started.runtime),
+                session,
+                started,
+                latest,
+                artifactSequence
+              );
+              sequence = artifactSequence.value;
+            } catch (error) {
+              sequence = artifactSequence.value;
+              throw error;
+            }
+            // Preserve adapter sequence ordering; artifact persistence occurs before terminalization.
+            // If artifacts persist, terminal event should follow those events.
+            const terminal = await this.terminalizeRunFromAdapterEvent(started, normalized, sequence, session);
+            if (!terminal) {
+              break;
+            }
+            latest = terminal;
+            terminalized = true;
+            if (normalized.type === "run.completed") {
+              session = {
+                ...session,
+                status: "completed",
+                updatedAt: terminal.endedAt
+              };
+            } else {
+              session = {
+                ...session,
+                status: "failed",
+                updatedAt: terminal.endedAt
+              };
+            }
+            break;
+          }
+
+          const terminal = await this.terminalizeRunFromAdapterEvent(started, normalized, terminalSequence, session);
           if (!terminal) {
             break;
           }
           latest = terminal;
+          terminalized = true;
           if (normalized.type === "run.completed") {
             session = {
               ...session,
@@ -107,43 +150,18 @@ export class RuntimeRunnerService {
         return finalRun ?? latest;
       }
 
-      if (this.deps.artifacts && session) {
-        const adapterArtifacts = await adapter.artifacts(this.adapterSession(session));
-        for (const artifact of adapterArtifacts) {
-          if (await this.isCancelled(started.id)) {
-            break;
-          }
-          const content = typeof artifact.metadata["content"] === "string" ? artifact.metadata["content"] : undefined;
-          const path = content && this.deps.artifactContent
-            ? await this.deps.artifactContent.writeText(artifact.path, content)
-            : artifact.path;
-
-          const metadata = { ...artifact.metadata };
-          delete metadata.content;
-          const storedArtifact = await this.deps.artifacts.create({
-            ...artifact,
-            path,
-            id: this.uniqueArtifactId(artifact.id),
-            runId: started.id,
-            provider: artifact.provider ?? started.provider,
-            model: artifact.model ?? started.model,
-            metadata: {
-              ...metadata,
-              contentStored: content !== undefined
-            },
-            createdAt: artifact.createdAt ?? new Date().toISOString()
-          });
-          const artifactEvent = this.eventForRun(
+      if (!terminalized && this.deps.artifacts && session) {
+        const artifactSequence = { value: sequence };
+        try {
+          await this.persistArtifacts(
+            this.deps.adapters.get(started.runtime),
+            session,
+            started,
             latest,
-            "artifact.created",
-            sequence++,
-            {
-              artifactId: storedArtifact.id,
-              path: storedArtifact.path,
-              type: storedArtifact.type
-            }
+            artifactSequence
           );
-          await this.appendAndPublish(artifactEvent);
+        } finally {
+          sequence = artifactSequence.value;
         }
       }
 
@@ -230,6 +248,63 @@ export class RuntimeRunnerService {
     ));
 
     return failed;
+  }
+
+  private async persistArtifacts(
+    adapter: RuntimeAdapter | undefined,
+    session: RuntimeSession,
+    templateRun: Run,
+    baseRun: Run,
+    sequence: { value: number }
+  ): Promise<void> {
+    if (!this.deps.artifacts || !adapter) {
+      return;
+    }
+
+    const adapterArtifacts = await adapter.artifacts(this.adapterSession(session));
+    for (const artifact of adapterArtifacts) {
+      if (await this.isCancelled(baseRun.id)) {
+        return;
+      }
+
+      const safePath = this.normalizeArtifactPath(artifact.path);
+      const content = typeof artifact.metadata["content"] === "string" ? artifact.metadata["content"] : undefined;
+      const metadata = { ...artifact.metadata };
+      delete metadata.content;
+
+      let storedPath = safePath;
+      let contentStored = false;
+      if (content && this.deps.artifactContent) {
+        storedPath = await this.deps.artifactContent.writeText(safePath, content);
+        contentStored = true;
+      }
+      if (content) {
+        metadata.contentStored = contentStored;
+      }
+
+      const storedArtifact = await this.deps.artifacts.create({
+        ...artifact,
+        path: storedPath,
+        id: this.uniqueArtifactId(artifact.id),
+        runId: baseRun.id,
+        provider: artifact.provider ?? templateRun.provider,
+        model: artifact.model ?? templateRun.model,
+        metadata,
+        createdAt: artifact.createdAt ?? new Date().toISOString()
+      });
+      const artifactEvent = this.eventForRun(
+        templateRun,
+        "artifact.created",
+        sequence.value,
+        {
+          artifactId: storedArtifact.id,
+          path: storedArtifact.path,
+          type: storedArtifact.type
+        }
+      );
+      sequence.value += 1;
+      await this.appendAndPublish(artifactEvent);
+    }
   }
 
   private async terminalizeRunFromAdapterEvent(
@@ -342,6 +417,28 @@ export class RuntimeRunnerService {
       throw new Error(`Runtime session not found for run: ${runId}`);
     }
     return session;
+  }
+
+  private normalizeArtifactPath(path: string): string {
+    if (
+      /^[A-Za-z]:/.test(path) ||
+      path.startsWith("//") ||
+      path.startsWith("\\\\") ||
+      isAbsolute(path) ||
+      path.includes("\\")
+    ) {
+      throw new Error("Artifact path escapes root");
+    }
+
+    const target = resolve(path);
+    const rel = relative(process.cwd(), target);
+    const segments = rel.split(sep);
+
+    if (rel === "" || rel === "." || segments.includes("..")) {
+      throw new Error("Artifact path escapes root");
+    }
+
+    return rel.replaceAll("\\", "/");
   }
 
   private adapterSession(session: RuntimeSession): Record<string, unknown> {

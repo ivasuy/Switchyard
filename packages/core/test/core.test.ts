@@ -200,7 +200,8 @@ describe("core service shells", () => {
     await runner.start(run);
 
     expect(await artifacts.listByRun(run.id)).toHaveLength(1);
-    expect(events.items.at(-1)?.type).toBe("artifact.created");
+    expect(events.items.at(-1)?.type).toBe("run.completed");
+    expect(events.items.some((event) => event.type === "artifact.created")).toBe(true);
   });
 
   it("stores adapter artifact content when artifact content store is available", async () => {
@@ -256,8 +257,59 @@ describe("core service shells", () => {
     const [storedArtifact] = await artifacts.listByRun(run.id);
     expect(storedArtifact?.path).toBe(adapter.artifactPath);
     expect(storedArtifact?.metadata).toMatchObject({
-      contentStored: true
+      contentStored: false
     });
+    expect(storedArtifact?.metadata).not.toHaveProperty("content");
+  });
+
+  it("fails run when adapter artifact path is unsafe and no artifact content store is configured", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const adapter = new UnsafePathArtifactAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    const failed = await runner.start(run);
+
+    expect(failed.status).toBe("failed");
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    expect(events.items.at(-1)?.type).toBe("run.failed");
+    expect(await artifacts.listByRun(run.id)).toHaveLength(0);
+    expect((events.items.at(-1)?.payload as { error?: string }).error).toBe("Artifact path escapes root");
+  });
+
+  it("fails run when artifact content persistence throws during terminalization", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const adapter = new ContentfulArtifactAdapter();
+    const artifactContent = new ThrowingArtifactContentStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      artifactContent,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    const failed = await runner.start(run);
+
+    expect(failed.status).toBe("failed");
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    expect(events.items.at(-1)?.type).toBe("run.failed");
+    expect((events.items.at(-1)?.payload as { error?: string }).error).toBe("artifact write failed");
+    expect(await artifacts.listByRun(run.id)).toHaveLength(0);
   });
 
   it("publishes completed events after persisting completed run state", async () => {
@@ -290,7 +342,7 @@ describe("core service shells", () => {
     await runner.start(run);
     unsubscribe();
 
-    expect(eventRunStatuses).toEqual(["completed", "completed"]);
+    expect(eventRunStatuses).toEqual(["completed"]);
     expect((await runs.get(run.id))?.status).toBe("completed");
   });
 
@@ -441,8 +493,8 @@ describe("core service shells", () => {
 
     await runner.start(run);
 
-    expect(received.at(-1)?.type).toBe("artifact.created");
-    expect(events.items.at(-1)?.type).toBe("artifact.created");
+    expect(received.at(-1)?.type).toBe("run.completed");
+    expect(events.items.at(-1)?.type).toBe("run.completed");
   });
 
   it("runtime runner publishes adapter stream events and artifact events to event bus", async () => {
@@ -469,7 +521,7 @@ describe("core service shells", () => {
     await runner.start(run);
     unsubscribe();
 
-    expect(received.at(-1)?.type).toBe("artifact.created");
+    expect(received.some((event) => event.type === "artifact.created")).toBe(true);
     expect(received.some((event) => event.type === "run.started")).toBe(true);
     expect(received.some((event) => event.type === "runtime.output")).toBe(true);
     expect(received.some((event) => event.type === "artifact.created")).toBe(true);
@@ -605,6 +657,12 @@ class InMemoryArtifactContentStore {
   async writeText(path: string, content: string): Promise<string> {
     this.writes.push({ path, content });
     return `stored/${path}`;
+  }
+}
+
+class ThrowingArtifactContentStore {
+  async writeText(): Promise<string> {
+    throw new Error("artifact write failed");
   }
 }
 
@@ -749,6 +807,22 @@ class ContentfulArtifactAdapter extends NoopAdapter {
           content: this.artifactContent,
           source: "unit-test"
         },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      }
+    ];
+  }
+}
+
+class UnsafePathArtifactAdapter extends EventfulAdapter {
+  readonly artifactPath = "../unsafe/transcript.jsonl";
+
+  override async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
+    return [
+      {
+        id: `adapter_unsafe_${String(session["runId"])}`,
+        type: "transcript",
+        path: this.artifactPath,
+        metadata: {},
         createdAt: "2026-05-11T00:00:00.000Z"
       }
     ];
