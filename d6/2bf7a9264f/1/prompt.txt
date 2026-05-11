@@ -1,45 +1,3 @@
-Quality review returned CHANGES_REQUESTED for Task 7. Please fix the concrete issues in the current checkout only, run verification, and commit a follow-up fix commit. Do not revert unrelated work.
-
-Findings to address:
-1. High: `apps/daemon/src/main.ts` loads config but calls `createDaemonApp()` with no config, so production daemon still uses in-memory stores. Pass `config` into `createDaemonApp(config)`. This adds `main.ts` to Task 7 fix scope because otherwise storage wiring is dead in production.
-2. High: SQLite lifecycle is unmanaged. `openSqliteStorage()` returns a live sqlite handle; retain it and close it on `app.close()` via a Fastify `onClose` hook. Inspect the exact return shape from `openSqliteStorage` and close the right handle. Add a regression test if feasible, or at minimum make repeated app close/reopen safe.
-3. Medium: Smoke persistence test should validate persisted event history too. Extend the local-storage reopen test to request `/runs/${runId}/events` after reopening and assert it includes `event: run.queued` and `event: run.completed` (or equivalent current route output). This directly proves event durability.
-4. Medium: `FilesystemArtifactContentStore` is currently instantiated but unused. Do not attempt broad content-pipeline integration if no port exists yet. Make the intent explicit in code in a minimal way (e.g. keep initialization only to validate/create artifact content root, with a concise comment) or otherwise reduce confusion without breaking the spec.
-
-Also keep the existing lockfile update from `5ee7ad5`; no need to redo it unless your changes require it.
-
-Run:
-- `pnpm --filter @switchyard/daemon test`
-- `pnpm --filter @switchyard/daemon typecheck`
-- `pnpm --filter @switchyard/daemon build`
-
-Commit follow-up with a clear message, e.g. `fix: complete daemon storage startup wiring`.
-
-Final response format:
-- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
-- Files changed
-- Tests run and results
-- Commit SHA
-- Notes on how each review finding was addressed
-
----
-
-Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
-
----
-
-Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
-
----
-
-Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
-
----
-
-Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
-
----
-
 Quality re-review still returned CHANGES_REQUESTED with low-severity but actionable items. Please make a small follow-up fix in the current checkout only, run verification, and commit.
 
 Fix these:
@@ -61,3 +19,11 @@ Final response format:
 - Tests run and results
 - Commit SHA
 - Notes
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
