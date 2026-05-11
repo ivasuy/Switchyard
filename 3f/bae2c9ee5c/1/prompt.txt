@@ -1,0 +1,65 @@
+Task 4 quality review found path handling issues to fix before moving on.
+
+Fix these:
+1. `rel.includes("..")` is overbroad. It rejects safe filenames like `a..b.txt`. Replace traversal check with segment-aware/root-aware validation.
+2. Return value currently normalizes `logicalPath`, not the actual path written. Avoid mismatch for backslash/weird separator cases.
+3. Add tests for:
+   - safe dotted filename accepted, e.g. `runs/a..b.txt` writes and returns `runs/a..b.txt`.
+   - traversal with `../escape.txt` rejects.
+   - traversal with `runs/../../escape.txt` rejects.
+   - absolute path input rejects.
+   - returned path maps to the exact written file for accepted paths.
+
+Implementation guidance:
+- Use path resolution against root. A robust approach: resolve root and resolve(root, logicalPath), then ensure target is inside root by checking `relative(root, target)` is non-empty, does not start with `..`, and is not absolute. Import `isAbsolute` and `resolve` if needed.
+- To avoid backslash mismatch on POSIX, either reject logical paths containing backslashes or normalize them before both validation and write. Prefer rejecting backslashes with the same `Artifact path escapes root` error unless you have a cleaner cross-platform approach.
+- Keep existing test behavior passing.
+
+Run:
+- `pnpm --filter @switchyard/storage test`
+- `pnpm --filter @switchyard/storage typecheck`
+- `pnpm --filter @switchyard/storage build`
+- `pnpm test`
+
+Commit with a concise fix message. Do not touch unrelated files.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Task 4 quality re-review found one high issue to fix.
+
+Issue:
+- `safePath()` does not reject Windows drive-relative / drive-qualified logical paths like `D:foo`, `C:..`, and UNC-style paths. Even though current environment is macOS/POSIX, this storage package should be cross-platform-safe.
+
+Fix:
+1. Reject logical paths that are Windows drive-qualified or UNC-style before resolving/writing. Examples to reject with `Artifact path escapes root`:
+   - `D:foo`
+   - `C:..`
+   - `C:/escape.txt` or `C:\escape.txt`
+   - `//server/share/file.txt` and `\\server\share\file.txt`
+2. Keep existing behavior:
+   - accept `runs/a..b.txt`
+   - reject backslashes generally if that remains your approach
+   - reject POSIX absolute paths and `../` traversal
+3. Add tests for drive-relative/drive-qualified/UNC-style rejection. Since this runs on macOS too, tests should assert the input is rejected by our string checks, not by platform-specific path behavior.
+4. Run:
+   - `pnpm --filter @switchyard/storage test`
+   - `pnpm --filter @switchyard/storage typecheck`
+   - `pnpm --filter @switchyard/storage build`
+   - `pnpm test`
+   - `pnpm typecheck`
+   - `pnpm build`
+5. Commit with a concise fix message.
+
+Do not attempt symlink resolution in this task; symlink-safe storage can be a later hardening item if needed. Do not touch unrelated files.
