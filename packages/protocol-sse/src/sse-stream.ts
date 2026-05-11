@@ -15,7 +15,7 @@ function normalizeStopAfter(stopAfter: number, replayLength: number): number {
   if (!Number.isFinite(stopAfter) || stopAfter <= 0) {
     return replayLength;
   }
-  return Math.floor(stopAfter);
+  return Math.max(1, Math.floor(stopAfter));
 }
 
 function normalizeTimeoutMs(timeoutMs: number | undefined): number {

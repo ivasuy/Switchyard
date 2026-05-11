@@ -166,7 +166,7 @@ function normalizeStopAfter(stopAfter: number | undefined, replayLength: number)
   if (stopAfter === undefined || !Number.isFinite(stopAfter) || stopAfter <= 0) {
     return replayLength;
   }
-  return Math.floor(stopAfter);
+  return Math.max(1, Math.floor(stopAfter));
 }
 
 function inputBody(value: unknown): Record<string, unknown> {

@@ -147,6 +147,36 @@ describe("protocol-sse", () => {
     expect(body).not.toContain("event: run.started");
   });
 
+  it("normalizes fractional stopAfter to at least one event in replay", async () => {
+    const eventBus = new EventBus();
+    const first: SwitchyardEvent = {
+      id: "event_queued",
+      runId: "run_123",
+      type: "run.queued",
+      sequence: 0,
+      payload: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    };
+    const second: SwitchyardEvent = {
+      id: "event_started",
+      runId: "run_123",
+      type: "run.started",
+      sequence: 1,
+      payload: {},
+      createdAt: "2026-05-11T00:00:01.000Z"
+    };
+
+    const body = await collectReplayAndLiveEvents({
+      runId: "run_123",
+      replay: [first, second],
+      eventBus,
+      stopAfter: 0.5
+    });
+
+    expect(body).toContain(formatSseEvent(first));
+    expect(body).not.toContain("event: run.started");
+  });
+
   it("falls back to replay length for non-positive stopAfter", async () => {
     const eventBus = new EventBus();
     const first: SwitchyardEvent = {

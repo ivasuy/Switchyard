@@ -182,6 +182,44 @@ describe("run routes", () => {
     expect(streamResponse.body.match(/^event: .*$/gm)?.length).toBe(stopAfter);
   });
 
+  it("normalizes fractional stopAfter to one for non-live replay", async () => {
+    const harness = createRouteHarness({ withEventBus: true });
+
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Fractional non-live stopAfter run")
+    });
+    const runId = createResponse.json().run.id;
+
+    const streamResponse = await harness.app.inject({
+      method: "GET",
+      url: `/runs/${runId}/events?stopAfter=0.5`
+    });
+
+    expect(streamResponse.statusCode).toBe(200);
+    expect(streamResponse.body.match(/^event: .*$/gm)?.length).toBe(1);
+  });
+
+  it("normalizes fractional stopAfter to one for live replay", async () => {
+    const harness = createRouteHarness({ withEventBus: true });
+
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Fractional live stopAfter run")
+    });
+    const runId = createResponse.json().run.id;
+
+    const streamResponse = await harness.app.inject({
+      method: "GET",
+      url: `/runs/${runId}/events?live=1&stopAfter=0.5`
+    });
+
+    expect(streamResponse.statusCode).toBe(200);
+    expect(streamResponse.body.match(/^event: .*$/gm)?.length).toBe(1);
+  });
+
   it("keeps live request bounded when eventBus is absent", async () => {
     const harness = createRouteHarness();
 
