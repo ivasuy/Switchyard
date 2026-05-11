@@ -5,8 +5,8 @@ import {
   RuntimeRunnerService,
   RunService
 } from "../src/index.js";
-import type { EventPublisher, EventStore, RunStore, RuntimeAdapter, SessionStore } from "../src/index.js";
-import type { Run, RuntimeSession, SwitchyardEvent } from "@switchyard/contracts";
+import type { ArtifactStore, EventStore, RunStore, RuntimeAdapter, SessionStore } from "../src/index.js";
+import type { Artifact, Run, RuntimeSession, SwitchyardEvent } from "@switchyard/contracts";
 
 describe("core service shells", () => {
   it("creates domain not-implemented errors with stable codes", () => {
@@ -181,6 +181,57 @@ describe("core service shells", () => {
     expect(adapter.sentSession?.["runId"]).toBe(run.id);
   });
 
+  it("runtime runner stores adapter artifacts and emits artifact events", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const adapter = new EventfulAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    await runner.start(run);
+
+    expect(await artifacts.listByRun(run.id)).toHaveLength(1);
+    expect(events.items.at(-1)?.type).toBe("artifact.created");
+  });
+
+  it("runtime runner publishes adapter stream events and artifact events to event bus", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const bus = new EventBus();
+    const received: SwitchyardEvent[] = [];
+    const unsubscribe = bus.subscribe((event) => {
+      received.push(event);
+    });
+    const adapter = new EventfulAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      eventBus: bus,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    await runner.start(run);
+    unsubscribe();
+
+    expect(received.at(-1)?.type).toBe("artifact.created");
+    expect(received.some((event) => event.type === "run.started")).toBe(true);
+    expect(received.some((event) => event.type === "runtime.output")).toBe(true);
+    expect(received.some((event) => event.type === "artifact.created")).toBe(true);
+  });
+
   it("runtime runner cancels the active session and marks the run cancelled", async () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();
@@ -278,6 +329,33 @@ class MemorySessionStore implements SessionStore {
   }
 }
 
+class MemoryArtifactStore implements ArtifactStore {
+  readonly items: Artifact[] = [];
+
+  async create(artifact: Artifact): Promise<Artifact> {
+    this.items.push(artifact);
+    return artifact;
+  }
+
+  async get(id: string): Promise<Artifact | undefined> {
+    return this.items.find((artifact) => artifact.id === id);
+  }
+
+  async update(artifact: Artifact): Promise<Artifact> {
+    const index = this.items.findIndex((entry) => entry.id === artifact.id);
+    if (index < 0) {
+      this.items.push(artifact);
+      return artifact;
+    }
+    this.items[index] = artifact;
+    return artifact;
+  }
+
+  async listByRun(runId: string): Promise<Artifact[]> {
+    return this.items.filter((artifact) => artifact.runId === runId);
+  }
+}
+
 class NoopAdapter implements RuntimeAdapter {
   readonly id = "fake";
 
@@ -328,6 +406,18 @@ class EventfulAdapter extends NoopAdapter {
 
   override async cancel(session: Record<string, unknown>) {
     this.cancelledSession = session;
+  }
+
+  override async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
+    return [
+      {
+        id: `adapter_artifact_${String(session["runId"])}`,
+        type: "transcript",
+        path: `artifacts/${String(session["runId"])}/transcript.jsonl`,
+        metadata: {},
+        createdAt: "2026-05-11T00:00:00.000Z"
+      }
+    ];
   }
 
   override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {

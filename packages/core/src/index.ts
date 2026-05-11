@@ -28,6 +28,7 @@ export * from "./services/event-service.js";
 export * from "./services/evidence-service.js";
 export * from "./services/memory-service.js";
 export * from "./services/message-router.js";
+export * from "./services/run-launcher-service.js";
 export * from "./services/placement-service.js";
 export * from "./services/registry-service.js";
 export * from "./services/session-service.js";

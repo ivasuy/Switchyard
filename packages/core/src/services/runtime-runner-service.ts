@@ -1,14 +1,18 @@
 import type { Run, RuntimeSession, SwitchyardEvent } from "@switchyard/contracts";
+import type { ArtifactStore } from "../ports/artifact-store.js";
 import type { EventStore } from "../ports/event-store.js";
 import type { RunStore } from "../ports/run-store.js";
 import type { RuntimeAdapter } from "../ports/runtime-adapter.js";
 import type { SessionStore } from "../ports/session-store.js";
+import type { EventBus } from "./event-bus.js";
 
 export interface RuntimeRunnerDependencies {
   runs: RunStore;
   events: EventStore;
   sessions: SessionStore;
   adapters: Map<string, RuntimeAdapter>;
+  artifacts?: ArtifactStore;
+  eventBus?: EventBus;
 }
 
 export class RuntimeRunnerService {
@@ -27,7 +31,7 @@ export class RuntimeRunnerService {
       startedAt: new Date().toISOString()
     };
     await this.deps.runs.update(started);
-    await this.deps.events.append(this.eventForRun(started, "run.started", sequence++, {}));
+    await this.appendAndPublish(this.eventForRun(started, "run.started", sequence++, {}));
 
     const startResult = await adapter.start({
       runId: started.id,
@@ -61,9 +65,10 @@ export class RuntimeRunnerService {
 
     let latest = started;
     for await (const event of adapter.events({ ...startResult, runId: started.id })) {
-      await this.deps.events.append(this.normalizeEvent(event, started.id, sequence++));
+      const normalized = this.normalizeEvent(event, started.id, sequence++);
+      await this.appendAndPublish(normalized);
 
-      if (event.type === "run.completed") {
+      if (normalized.type === "run.completed") {
         latest = {
           ...started,
           status: "completed",
@@ -73,7 +78,7 @@ export class RuntimeRunnerService {
         await this.deps.runs.update(latest);
         await this.deps.sessions.update(session);
       }
-      if (event.type === "run.failed") {
+      if (normalized.type === "run.failed") {
         latest = {
           ...started,
           status: "failed",
@@ -82,6 +87,31 @@ export class RuntimeRunnerService {
         session = { ...session, status: "failed", updatedAt: new Date().toISOString() };
         await this.deps.runs.update(latest);
         await this.deps.sessions.update(session);
+      }
+    }
+
+    if (this.deps.artifacts) {
+      const adapterArtifacts = await adapter.artifacts(this.adapterSession(session));
+      for (const artifact of adapterArtifacts) {
+        const storedArtifact = await this.deps.artifacts.create({
+          ...artifact,
+          id: artifact.id.startsWith("artifact_") ? artifact.id : `artifact_${crypto.randomUUID()}`,
+          runId: started.id,
+          provider: artifact.provider ?? started.provider,
+          model: artifact.model ?? started.model,
+          createdAt: artifact.createdAt ?? new Date().toISOString()
+        });
+        const artifactEvent = this.eventForRun(
+          latest,
+          "artifact.created",
+          sequence++,
+          {
+            artifactId: storedArtifact.id,
+            path: storedArtifact.path,
+            type: storedArtifact.type
+          }
+        );
+        await this.appendAndPublish(artifactEvent);
       }
     }
 
@@ -116,7 +146,7 @@ export class RuntimeRunnerService {
     };
     await this.deps.runs.update(cancelledRun);
     await this.deps.sessions.update(cancelledSession);
-    await this.deps.events.append(this.eventForRun(
+    await this.appendAndPublish(this.eventForRun(
       cancelledRun,
       "run.cancelled",
       (await this.deps.events.listByRun(runId)).length,
@@ -135,6 +165,11 @@ export class RuntimeRunnerService {
       payload,
       createdAt: new Date().toISOString()
     };
+  }
+
+  private async appendAndPublish(event: SwitchyardEvent): Promise<void> {
+    await this.deps.events.append(event);
+    await this.deps.eventBus?.publish(event);
   }
 
   private normalizeEvent(event: SwitchyardEvent, runId: string, sequence: number): SwitchyardEvent {
