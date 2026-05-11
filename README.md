@@ -203,7 +203,7 @@ collect artifacts
 
 ## Local Testing
 
-The current local MVP runs a fake runtime through the Switchyard daemon. It does not call Claude, Codex, OpenCode, or any external model yet.
+The current local MVP runs a fake runtime through the Switchyard daemon. It uses local SQLite state and filesystem artifact metadata by default. It does not call Claude, Codex, OpenCode, or any external model yet.
 
 From the repo root:
 
@@ -267,6 +267,12 @@ Fetch the run events:
 
 ```bash
 curl -s http://127.0.0.1:4545/runs/<RUN_ID>/events
+```
+
+Fetch artifacts for a completed run:
+
+```bash
+curl -s http://127.0.0.1:4545/runs/<RUN_ID>/artifacts
 ```
 
 Expected event types:

@@ -20,6 +20,14 @@ All notable changes to Switchyard will be documented in this file.
 - Added `RuntimeRunnerService` as the runtime-facing execution boundary for adapter start, input, cancellation, session records, and event normalization.
 - Added runtime session lookup support and in-memory session store support for adapter lifecycle tests.
 - Added REST lifecycle endpoints for `POST /runs/:id/input` and `POST /runs/:id/cancel`.
+- Added local SQLite-backed run, event, session, and artifact stores.
+- Added local SQLite-backed message, approval, registry, and placement-decision stores.
+- Added filesystem artifact content storage for local daemon mode.
+- Added `GET /runs/:id/artifacts`.
+- Added registry lookup routes for providers, runtimes, and models.
+- Added `@switchyard/protocol-sse` for replay and live run event streams.
+- Added async run launch support for local daemon execution.
+- Added required-field negative contract coverage for public schemas.
 
 ### Changed
 
