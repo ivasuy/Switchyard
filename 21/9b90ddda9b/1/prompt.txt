@@ -1,0 +1,85 @@
+You are implementing Task 10 in the current checkout only: /Users/vasuyadav/Downloads/Projects/switchyard. Do NOT create a separate worktree. You are not alone in this codebase; do not revert edits made by others. Current head includes Task 9 through `a53abae`.
+
+User requested subagent-driven implementation. Own Task 10 end-to-end: add tests first where practical, implement, run verification, self-review, and commit before final response.
+
+Task 10: Complete SQLite Store Scope
+
+Files:
+- Modify: `packages/storage/src/sqlite/schema.ts`
+- Modify: `packages/storage/src/sqlite/database.ts`
+- Create: `packages/storage/src/sqlite/message-store.ts`
+- Create: `packages/storage/src/sqlite/approval-store.ts`
+- Create: `packages/storage/src/sqlite/registry-store.ts`
+- Create: `packages/storage/src/sqlite/placement-store.ts`
+- Modify: `packages/storage/src/index.ts`
+- Modify: `packages/storage/test/sqlite-storage.test.ts`
+
+Required behavior/spec:
+1. Add SQLite schema tables to `schema.ts` for:
+- messages: id, fromRunId, toRunId, channel, content, attachmentsJson, deliveryStatus, createdAt, deliveredAt
+- approvals: id, runId, approvalType, status, payloadJson, createdAt, resolvedAt
+- providers: id, name, authMode, status
+- runtimes: id, name, adapterType, status
+- models: id, providerId, modelName, supportsTools, supportsStreaming, supportsBrowser, status
+- placementDecisions: id, runId, decision, reason, mode, targetNode, requiredCapabilitiesJson, deniedCapabilitiesJson, approvalRequired, policyTraceJson, createdAt
+Use the plan column names/types. Include placement_decisions run_id index in migration.
+2. Add matching `CREATE TABLE IF NOT EXISTS` blocks to `packages/storage/src/sqlite/database.ts` for all tables plus `CREATE INDEX IF NOT EXISTS placement_decisions_run_id_idx ON placement_decisions(run_id);`.
+3. Implement new SQLite stores:
+- `SqliteMessageStore implements MessageStore` for `RoutedMessage`, JSON attachments, optional fromRunId/toRunId/channel/deliveredAt roundtrips.
+- `SqliteApprovalStore implements ApprovalStore`, JSON payload, optional runId/resolvedAt roundtrips.
+- `SqliteRegistryStore implements RegistryStore`, supports provider/runtime/model create/get methods, boolean model flags roundtrip, typed casts for runtime/model statuses/adapterType.
+- `SqlitePlacementStore implements PlacementStore`, create/get/update/listByRun, JSON arrays for requiredCapabilities/deniedCapabilities/policyTrace, optional runId/targetNode roundtrips.
+
+Use the plan snippets as the baseline, but inspect current core ports/contracts for exact names and types. Preserve exactOptionalPropertyTypes behavior: omit optional properties on read when DB value is null, do not return `undefined` properties unless contract allows them explicitly.
+4. Expand `packages/storage/test/sqlite-storage.test.ts`:
+- Create one message, approval, provider, runtime, model, placement decision before closing first DB handle.
+- Reopen DB and assert all can be read back:
+```ts
+expect(await new SqliteMessageStore(second.db).get("message_storage")).toMatchObject({ content: "hello" });
+expect(await new SqliteApprovalStore(second.db).get("approval_storage")).toMatchObject({ payload: { command: "git commit" } });
+expect(await new SqliteRegistryStore(second.db).getProvider("provider_storage")).toMatchObject({ name: "Test" });
+expect(await new SqliteRegistryStore(second.db).getRuntime("runtime_storage")).toMatchObject({ name: "Fake" });
+expect(await new SqliteRegistryStore(second.db).getModel("model_storage")).toMatchObject({ modelName: "test-model" });
+expect(await new SqlitePlacementStore(second.db).listByRun("run_storage")).toHaveLength(1);
+```
+Add stronger assertions if useful for optional fields/booleans/list filtering.
+5. Export all new stores from `packages/storage/src/index.ts`.
+6. Run verification:
+- `pnpm --filter @switchyard/storage test`
+- `pnpm --filter @switchyard/storage typecheck`
+- Also run storage build if available and cheap.
+7. Commit exactly:
+`feat: complete local sqlite store scope`
+
+Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Tests run and results
+- Commit SHA
+- Self-review notes, including any intentional deviations from plan.
+
+---
+
+Quality review returned CHANGES_REQUESTED for Task 10. Please fix in the current checkout only, run verification, and commit a follow-up.
+
+Required fix:
+1. Align `SqlitePlacementStore` with the in-memory placement store invariant: reject create/update records without `runId` using a clear error message, e.g. `placement records require a runId`. Keep the schema/migration column nullable if needed to preserve the written Task 10 DB shape; enforce at store boundary.
+2. Add storage tests for:
+   - `SqlitePlacementStore.create` rejects missing `runId`;
+   - `SqlitePlacementStore.update` rejects missing `runId`;
+   - `SqlitePlacementStore.listByRun` filters out other-run records.
+3. If practical, add one compact update/clear test for new stores that verifies null-clearing behavior for optional fields on `SqliteMessageStore` and `SqliteApprovalStore`, and update behavior for `SqlitePlacementStore` remains queryable by run after update. This addresses residual risks but keep it scoped.
+
+Run:
+- `pnpm --filter @switchyard/storage test`
+- `pnpm --filter @switchyard/storage typecheck`
+- `pnpm --filter @switchyard/storage build`
+
+Commit follow-up with a clear message, e.g. `fix: harden sqlite placement store invariants`.
+
+Final response format:
+- Status
+- Files changed
+- Tests run and results
+- Commit SHA
+- Notes
