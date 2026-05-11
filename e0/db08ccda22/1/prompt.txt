@@ -1,0 +1,115 @@
+You are implementing Task 9 in the current checkout only: /Users/vasuyadav/Downloads/Projects/switchyard. Do NOT create a separate worktree. You are not alone in this codebase; do not revert edits made by others. Current head includes Task 8 through `cfa833f`.
+
+User requested subagent-driven implementation. Own Task 9 end-to-end: add tests first where applicable, implement, run verification, self-review, and commit before final response.
+
+Task 9: Add Placement and Missing In-Memory Stores
+
+Files:
+- Create: `packages/core/src/ports/placement-store.ts`
+- Modify: `packages/core/src/index.ts`
+- Modify: `packages/testkit/src/fake-stores.ts`
+- Modify: `packages/testkit/src/index.ts`
+- Modify: `packages/testkit/test/fake-runtime-adapter.test.ts`
+
+Required behavior/spec:
+1. Add placement store port at `packages/core/src/ports/placement-store.ts`:
+```ts
+import type { PlacementDecision } from "@switchyard/contracts";
+import type { GenericStore } from "./generic-stores.js";
+
+export interface PlacementDecisionRecord extends PlacementDecision {
+  id: string;
+  runId?: string;
+  createdAt: string;
+}
+
+export interface PlacementStore extends GenericStore<PlacementDecisionRecord> {
+  listByRun(runId: string): Promise<PlacementDecisionRecord[]>;
+}
+```
+Export it from `packages/core/src/index.ts`:
+```ts
+export * from "./ports/placement-store.js";
+```
+2. Add in-memory artifact and placement stores to `packages/testkit/src/fake-stores.ts`:
+```ts
+import type { Artifact } from "@switchyard/contracts";
+import type { ArtifactStore, PlacementDecisionRecord, PlacementStore } from "@switchyard/core";
+
+export class InMemoryArtifactStore implements ArtifactStore {
+  readonly items = new Map<string, Artifact>();
+  async create(artifact: Artifact): Promise<Artifact> { this.items.set(artifact.id, artifact); return artifact; }
+  async get(id: string): Promise<Artifact | undefined> { return this.items.get(id); }
+  async update(artifact: Artifact): Promise<Artifact> { this.items.set(artifact.id, artifact); return artifact; }
+  async listByRun(runId: string): Promise<Artifact[]> {
+    return [...this.items.values()].filter((artifact) => artifact.runId === runId);
+  }
+}
+
+export class InMemoryPlacementStore implements PlacementStore {
+  readonly items = new Map<string, PlacementDecisionRecord>();
+  async create(record: PlacementDecisionRecord): Promise<PlacementDecisionRecord> { this.items.set(record.id, record); return record; }
+  async get(id: string): Promise<PlacementDecisionRecord | undefined> { return this.items.get(id); }
+  async update(record: PlacementDecisionRecord): Promise<PlacementDecisionRecord> { this.items.set(record.id, record); return record; }
+  async listByRun(runId: string): Promise<PlacementDecisionRecord[]> {
+    return [...this.items.values()].filter((record) => record.runId === runId);
+  }
+}
+```
+Adapt imports to avoid duplicate imports if file already imports these types.
+3. Ensure `packages/testkit/src/index.ts` exports `fake-stores.ts`.
+4. Add test assertions in `packages/testkit/test/fake-runtime-adapter.test.ts`:
+```ts
+import { InMemoryArtifactStore, InMemoryPlacementStore } from "../src/index.js";
+
+it("provides in-memory artifact and placement stores", async () => {
+  const artifacts = new InMemoryArtifactStore();
+  const placements = new InMemoryPlacementStore();
+  await artifacts.create({ id: "artifact_memory", runId: "run_123", type: "transcript", path: "runs/run_123/transcript.jsonl", metadata: {}, createdAt: "2026-05-11T00:00:00.000Z" });
+  await placements.create({ id: "placement_123", runId: "run_123", decision: "local", reason: "test", mode: "local", requiredCapabilities: [], deniedCapabilities: [], approvalRequired: false, policyTrace: [], createdAt: "2026-05-11T00:00:00.000Z" });
+
+  expect(await artifacts.listByRun("run_123")).toHaveLength(1);
+  expect(await placements.listByRun("run_123")).toHaveLength(1);
+});
+```
+5. Run verification:
+- `pnpm --filter @switchyard/core test`
+- `pnpm --filter @switchyard/testkit test`
+- Also run core/testkit typecheck/build if available and cheap.
+6. Commit exactly:
+`feat: add placement and artifact test stores`
+
+Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Tests run and results
+- Commit SHA
+- Self-review notes.
+
+---
+
+Quality review returned CHANGES_REQUESTED for Task 9. Please fix in the current checkout only, run verification, and commit a follow-up.
+
+Findings to address:
+1. `PlacementDecisionRecord.runId` is optional in the written Task 9 spec, so do NOT change the port type unless absolutely necessary. Instead, enforce runtime safety in `InMemoryPlacementStore`: reject `create`/`update` records without `runId` (throw a clear error). This preserves the spec shape while preventing unqueryable placement records in the testkit store.
+2. Strengthen `fake-runtime-adapter.test.ts` for the new stores:
+   - create artifacts and placements across two run IDs;
+   - assert `listByRun("run_123")` excludes non-matching run records;
+   - assert update behavior for both stores keeps filtering stable (e.g. update an existing record’s metadata/reason or runId and verify get/list results).
+
+Run:
+- `pnpm --filter @switchyard/core test`
+- `pnpm --filter @switchyard/testkit test`
+- `pnpm --filter @switchyard/core typecheck`
+- `pnpm --filter @switchyard/testkit typecheck`
+- `pnpm --filter @switchyard/core build`
+- `pnpm --filter @switchyard/testkit build`
+
+Commit follow-up with a clear message, e.g. `fix: harden in-memory placement store coverage`.
+
+Final response format:
+- Status
+- Files changed
+- Tests run and results
+- Commit SHA
+- Notes
