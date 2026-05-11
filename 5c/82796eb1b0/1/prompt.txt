@@ -1,0 +1,93 @@
+You are implementing Task 3 of the Switchyard Phase 0/1 gap closure plan in the existing repository at /Users/vasuyadav/Downloads/Projects/switchyard. You are not alone in the codebase: do not revert or overwrite changes you did not make; work only in the task-owned files below and adapt to existing code.
+
+User override: do NOT create a separate git worktree. Work in the current checkout only. Commit your completed task changes after tests pass.
+
+Task 3: Implement SQLite Stores
+
+Owned files:
+- Create: packages/storage/src/sqlite/run-store.ts
+- Create: packages/storage/src/sqlite/event-store.ts
+- Create: packages/storage/src/sqlite/session-store.ts
+- Create: packages/storage/src/sqlite/artifact-store.ts
+- Modify: packages/storage/src/index.ts
+- Create: packages/storage/test/sqlite-storage.test.ts
+
+Existing context:
+- Task 2 already created packages/storage, schema.ts, database.ts, and a minimal storage-package.test.ts.
+- Important accepted adjustment: runEvents.runId is nullable in schema/migration because SwitchyardEvent.runId is optional. In event-store toRow, do NOT coerce missing runId to empty string; store null/undefined as null. listByRun(runId) still filters concrete run ids.
+- The plan snippets may use event.runId ?? "" from before nullability was fixed; prefer null for missing runId.
+
+Required TDD:
+1. First create packages/storage/test/sqlite-storage.test.ts with a persistence test for runs, events, sessions, and artifacts across re-open. Use mkdtempSync/rmSync tmp dir cleanup as in the plan. The test should import openSqliteStorage, SqliteArtifactStore, SqliteEventStore, SqliteRunStore, SqliteSessionStore from ../src/index.js. It should create one Run with metadata { source: "test" }, one event for run_storage, one RuntimeSession with state { cursor: 1 }, and one Artifact with metadata { bytes: 12 }. Close DB, reopen DB, assert persisted values using get/listByRun/getByRunId. Close second DB.
+2. Run `pnpm --filter @switchyard/storage test` and confirm it fails because the store classes are not exported/defined. Report expected red failure in final notes.
+3. Implement:
+   - SqliteRunStore implements RunStore with create/get/update.
+   - SqliteEventStore implements EventStore with append/listByRun ordered by sequence ascending. Preserve optional event.runId as null in DB and omit runId on fromRow if null.
+   - SqliteSessionStore implements SessionStore with create/get/getByRunId/update.
+   - SqliteArtifactStore implements ArtifactStore plus listByRun(runId). Note ArtifactStore in core may currently be a type alias GenericStore<Artifact>; if it lacks listByRun, update only if necessary? In this task, implement listByRun on concrete class regardless. Do not modify core unless typecheck requires it.
+   - All JSON fields stringify on write and parse on read.
+   - Use exactOptionalPropertyTypes-compatible object construction: omit optional fields when absent rather than setting undefined.
+4. Export all stores in packages/storage/src/index.ts along with database export.
+5. Run:
+   - `pnpm --filter @switchyard/storage test`
+   - `pnpm --filter @switchyard/storage typecheck`
+   - `pnpm --filter @switchyard/storage build`
+6. Commit with: git add packages/storage && git commit -m "feat: add sqlite run event session artifact stores"
+
+Implementation guidance:
+- Use imports from @switchyard/contracts and @switchyard/core ports.
+- Use `eq` and `asc` from drizzle-orm where needed.
+- Respect existing schema names: runs, runEvents, runtimeSessions, artifacts.
+- Keep changes narrowly scoped to owned files unless typecheck forces a tiny port type adjustment; if so, explain it.
+
+Final response format:
+STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED
+CHANGED FILES: list paths
+TESTS: commands run and pass/fail, including the initial red test failure
+COMMIT: commit sha if committed
+NOTES: concise self-review and concerns
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Task 3 quality review found issues that need fixing before we move on.
+
+Fix these issues:
+
+1. MEDIUM: Update methods leave stale nullable values because `toRow(...)` omits optional nullable fields. For update paths, optional nullable columns must be explicitly set to null when absent so values can be cleared.
+   - Affected: run-store (`startedAt`, `endedAt`), session-store (`externalSessionKey`, `processId`, `updatedAt`), artifact-store (`runId`, `debateId`, `provider`, `model`).
+   - Suggested approach: either make `toRow` always set nullable fields to `value ?? null`, or have a separate `toUpdateRow` that explicitly nulls nullable fields. Keep exactOptionalPropertyTypes-compatible returned contract objects.
+
+2. MEDIUM: Expand tests in `packages/storage/test/sqlite-storage.test.ts`:
+   - verify `update(...)` can clear optional fields for runs/sessions/artifacts.
+   - verify `SqliteEventStore.listByRun` orders by `sequence` when multiple events exist and filters out other run ids.
+   - verify `SqliteArtifactStore.listByRun` filters by run id when multiple artifacts exist.
+   Follow TDD: add/adjust tests, run `pnpm --filter @switchyard/storage test` and observe failure before implementation if possible.
+
+3. LOW but easy: Pull forward the core port change: update `packages/core/src/ports/artifact-store.ts` so `ArtifactStore` is an interface extending `GenericStore<Artifact>` with `listByRun(runId: string): Promise<Artifact[]>`. This matches the concrete sqlite implementation and future tasks. Run affected tests/typecheck.
+
+Accepted/deferred: Do NOT add JSON.parse corruption handling right now; this is deferred because rows are written by our own stores and later validation/error policy can handle corrupted DB rows.
+
+Run:
+- `pnpm --filter @switchyard/storage test`
+- `pnpm --filter @switchyard/storage typecheck`
+- `pnpm --filter @switchyard/storage build`
+- `pnpm --filter @switchyard/core typecheck`
+- `pnpm test`
+
+Commit with a concise fix message. Do not touch unrelated files.
