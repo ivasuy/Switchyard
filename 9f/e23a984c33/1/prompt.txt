@@ -1,28 +1,3 @@
-Quality re-review still has CHANGES_REQUESTED for Task 13. Please fix in current checkout only, run verification, and commit a follow-up.
-
-Findings to address:
-1. Empty-string artifact content should be treated as explicit content. Use `content !== undefined` instead of truthiness for persistence and metadata decisions. If `artifactContent` exists, write empty string and set `contentStored: true`; if no content store, strip content and set `contentStored: false`. Add a core regression test.
-2. Avoid partial artifact commits if later artifact persistence fails. Preferred: prepare/normalize/write all artifacts first into an in-memory list, then persist artifact rows/events only after all content writes and path validation succeed. That way a failure while preparing any artifact fails the run before any artifact row/event is committed. Add a core test with two artifacts where the second write fails and assert no artifact rows / artifact.created events were committed and run is failed.
-
-Keep existing event ordering guarantees from the prior fix: artifact persistence must happen before terminal run.completed is committed so artifact persistence failures can fail the run.
-
-Run:
-- `pnpm --filter @switchyard/core test`
-- `pnpm --filter @switchyard/storage test`
-- `pnpm --filter @switchyard/daemon test`
-- `pnpm --filter @switchyard/core typecheck`
-- `pnpm --filter @switchyard/storage typecheck`
-- `pnpm --filter @switchyard/daemon typecheck`
-- `pnpm --filter @switchyard/core build`
-- `pnpm --filter @switchyard/storage build`
-- `pnpm --filter @switchyard/daemon build`
-
-Commit follow-up with a clear message, e.g. `fix: make artifact content persistence atomic`.
-
-Final response: status, files changed, tests, commit SHA, notes.
-
----
-
 Final review approved Task 13 but surfaced one residual risk worth fixing before we move on: artifact-created events and terminal events may share duplicate `sequence` values after the artifact-before-terminal refactor.
 
 Please fix in the current checkout only, run verification, and commit a small follow-up:
