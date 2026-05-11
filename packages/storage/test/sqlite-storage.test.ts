@@ -400,4 +400,185 @@ describe("sqlite persistence stores", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("enforces placement records to always include runId", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-storage-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let connection: ReturnType<typeof openSqliteStorage> | undefined;
+
+    try {
+      connection = openSqliteStorage(dbPath);
+      const placements = new SqlitePlacementStore(connection.db);
+
+      const invalidCreate = {
+        id: "placement_missing_run",
+        decision: "local",
+        reason: "policy default",
+        mode: "local",
+        requiredCapabilities: [],
+        deniedCapabilities: [],
+        approvalRequired: false,
+        policyTrace: [],
+        createdAt: startedAt
+      } as PlacementDecisionRecord;
+
+      await expect(placements.create(invalidCreate)).rejects.toThrow("placement records require a runId");
+
+      await placements.create({
+        id: "placement_update_target",
+        runId: "run_update_scope",
+        decision: "local",
+        reason: "policy",
+        mode: "local",
+        requiredCapabilities: ["a"],
+        deniedCapabilities: [],
+        approvalRequired: false,
+        policyTrace: [],
+        createdAt: startedAt
+      });
+
+      const invalidUpdate = {
+        id: "placement_update_target",
+        decision: "reject",
+        reason: "should fail",
+        mode: "hybrid",
+        requiredCapabilities: [],
+        deniedCapabilities: [],
+        approvalRequired: true,
+        policyTrace: ["manual"],
+        createdAt: startedAt
+      } as PlacementDecisionRecord;
+
+      await expect(placements.update(invalidUpdate)).rejects.toThrow("placement records require a runId");
+    } finally {
+      connection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("filters placement decisions by runId and clears optional message and approval fields on update", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-storage-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let connection: ReturnType<typeof openSqliteStorage> | undefined;
+
+    try {
+      connection = openSqliteStorage(dbPath);
+      const messages = new SqliteMessageStore(connection.db);
+      const approvals = new SqliteApprovalStore(connection.db);
+      const placements = new SqlitePlacementStore(connection.db);
+
+      await messages.create({
+        id: "message_update_scope",
+        content: "hello",
+        attachments: [{ role: "operator", body: "hello" }],
+        deliveryStatus: "queued",
+        fromRunId: "run_a",
+        toRunId: "run_b",
+        channel: "chat",
+        deliveredAt: startedAt,
+        createdAt: startedAt
+      });
+      await approvals.create({
+        id: "approval_update_scope",
+        runId: "run_a",
+        approvalType: "before_commit",
+        status: "pending",
+        payload: { command: "git commit" },
+        createdAt: startedAt,
+        resolvedAt: startedAt
+      });
+      await placements.create({
+        id: "placement_a_1",
+        runId: "run_a",
+        decision: "local",
+        reason: "initial policy",
+        mode: "local",
+        requiredCapabilities: ["storage"],
+        deniedCapabilities: ["network"],
+        approvalRequired: false,
+        policyTrace: ["start"],
+        createdAt: startedAt
+      });
+      await placements.create({
+        id: "placement_b_1",
+        runId: "run_b",
+        decision: "local",
+        reason: "secondary",
+        mode: "local",
+        requiredCapabilities: ["runtime"],
+        deniedCapabilities: [],
+        approvalRequired: true,
+        policyTrace: ["other"],
+        createdAt: startedAt
+      });
+
+      await messages.update({
+        id: "message_update_scope",
+        content: "hello world",
+        attachments: [],
+        deliveryStatus: "delivered",
+        createdAt: startedAt
+      });
+      await approvals.update({
+        id: "approval_update_scope",
+        approvalType: "before_commit",
+        status: "approved",
+        payload: {},
+        createdAt: startedAt
+      });
+      await placements.update({
+        id: "placement_a_1",
+        runId: "run_a",
+        decision: "local",
+        reason: "updated policy",
+        mode: "local",
+        requiredCapabilities: ["storage", "approval"],
+        deniedCapabilities: [],
+        approvalRequired: true,
+        policyTrace: ["start", "update"],
+        createdAt: updatedAt
+      });
+
+      expect(await messages.get("message_update_scope")).toMatchObject({
+        content: "hello world",
+        attachments: []
+      });
+      expect(await messages.get("message_update_scope")).toEqual(
+        expect.not.objectContaining({
+          fromRunId: "run_a",
+          toRunId: "run_b",
+          channel: "chat",
+          deliveredAt: startedAt
+        })
+      );
+
+      expect(await approvals.get("approval_update_scope")).toMatchObject({
+        approvalType: "before_commit",
+        status: "approved",
+        payload: {}
+      });
+      expect(await approvals.get("approval_update_scope")).toEqual(
+        expect.not.objectContaining({
+          runId: "run_a",
+          resolvedAt: startedAt
+        })
+      );
+
+      const runAPlacements = await placements.listByRun("run_a");
+      expect(runAPlacements).toHaveLength(1);
+      expect(runAPlacements[0]).toMatchObject({
+        id: "placement_a_1",
+        reason: "updated policy",
+        approvalRequired: true,
+        requiredCapabilities: ["storage", "approval"]
+      });
+      expect(await placements.listByRun("run_a")).toEqual(runAPlacements);
+      expect(await placements.listByRun("run_b")).toHaveLength(1);
+      expect(await placements.listByRun("run_b")).toMatchObject([{ id: "placement_b_1" }]);
+      expect(await placements.listByRun("run_other")).toHaveLength(0);
+    } finally {
+      connection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

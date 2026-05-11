@@ -81,6 +81,9 @@ export class SqlitePlacementStore implements PlacementStore {
   constructor(private readonly db: SwitchyardSqliteDatabase) {}
 
   async create(record: PlacementDecisionRecord): Promise<PlacementDecisionRecord> {
+    if (!record.runId) {
+      throw new Error("placement records require a runId");
+    }
     await this.db.insert(placementDecisions).values(toRow(record));
     return record;
   }
@@ -99,6 +102,9 @@ export class SqlitePlacementStore implements PlacementStore {
   }
 
   async update(record: PlacementDecisionRecord): Promise<PlacementDecisionRecord> {
+    if (!record.runId) {
+      throw new Error("placement records require a runId");
+    }
     await this.db.update(placementDecisions).set(toUpdateRow(record)).where(eq(placementDecisions.id, record.id));
     return record;
   }
