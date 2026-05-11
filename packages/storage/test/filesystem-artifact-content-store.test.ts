@@ -64,6 +64,25 @@ describe("FilesystemArtifactContentStore", () => {
     await expect(store.writeText("/tmp/escape.txt", "bad")).rejects.toThrow("Artifact path escapes root");
   });
 
+  it("rejects Windows drive-qualified and UNC paths", async () => {
+    const root = mkdtempSync(join(tmpdir(), "switchyard-artifact-content-store-"));
+    dirs.push(root);
+
+    const store = new FilesystemArtifactContentStore(root);
+    const rejectedPaths = [
+      "D:foo",
+      "C:..",
+      "C:/escape.txt",
+      "C:\\escape.txt",
+      "//server/share/file.txt",
+      "\\\\server\\share\\file.txt"
+    ];
+
+    for (const path of rejectedPaths) {
+      await expect(store.writeText(path, "bad")).rejects.toThrow("Artifact path escapes root");
+    }
+  });
+
   it("returns the exact written path", async () => {
     const root = mkdtempSync(join(tmpdir(), "switchyard-artifact-content-store-"));
     dirs.push(root);

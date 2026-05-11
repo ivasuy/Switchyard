@@ -18,7 +18,13 @@ export class FilesystemArtifactContentStore {
   }
 
   private safePath(logicalPath: string): string {
-    if (isAbsolute(logicalPath) || logicalPath.includes("\\")) {
+    if (
+      /^[A-Za-z]:/.test(logicalPath) ||
+      logicalPath.startsWith("//") ||
+      logicalPath.startsWith("\\\\") ||
+      isAbsolute(logicalPath) ||
+      logicalPath.includes("\\")
+    ) {
       throw new Error("Artifact path escapes root");
     }
 
