@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ArtifactStore, EventBus, EventStore, RunLauncherService, RunService, RunStore } from "@switchyard/core";
 import { adapterTypeSchema } from "@switchyard/contracts";
-import { formatSseEvent } from "./sse.js";
+import { collectReplayAndLiveEvents, formatSseEvent } from "@switchyard/protocol-sse";
 
 export interface RunRouteDependencies {
   runService: RunService;
@@ -61,7 +61,18 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     }
 
     const events = await deps.events.listByRun(id);
-    const body = events.map(formatSseEvent).join("");
+    const query = request.query as Record<string, unknown>;
+    const live = query["live"] === "1";
+    const rawStopAfter = typeof query["stopAfter"] === "string" ? Number(query["stopAfter"]) : events.length;
+    const stopAfter = Number.isFinite(rawStopAfter) && rawStopAfter >= 0 ? rawStopAfter : events.length;
+    const body = live && deps.eventBus
+      ? await collectReplayAndLiveEvents({
+          runId: id,
+          replay: events,
+          eventBus: deps.eventBus,
+          stopAfter
+        })
+      : events.map(formatSseEvent).join("");
 
     return reply
       .header("content-type", "text/event-stream; charset=utf-8")

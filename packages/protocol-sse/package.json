@@ -1,5 +1,5 @@
 {
-  "name": "@switchyard/protocol-rest",
+  "name": "@switchyard/protocol-sse",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,17 +8,16 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@switchyard/contracts": "workspace:*",
-    "@switchyard/core": "workspace:*",
-    "@switchyard/protocol-sse": "workspace:*",
-    "fastify": "^5.8.5"
+    "@switchyard/core": "workspace:*"
   },
   "devDependencies": {
-    "@switchyard/testkit": "workspace:*"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5"
   }
 }

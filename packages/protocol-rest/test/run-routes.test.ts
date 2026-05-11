@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import {
   type ArtifactStore,
+  EventBus,
   RunLauncherService,
   RunService,
   RuntimeRunnerService
@@ -129,6 +130,56 @@ describe("run routes", () => {
     expect(streamResponse.body).toContain("fake runtime output");
   });
 
+  it("supports live SSE events with replay plus stopAfter", async () => {
+    const harness = createRouteHarness({ withEventBus: true });
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: fakeRunPayload("Streaming live run test")
+    });
+    const runId = createResponse.json().run.id;
+    const startReplay = await harness.events.listByRun(runId);
+    const stopAfter = startReplay.length + 1;
+
+    const streamResponsePromise = harness.app.inject({
+      method: "GET",
+      url: `/runs/${runId}/events?live=1&stopAfter=${stopAfter}`
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await harness.eventBus?.publish({
+      id: "event_test_live_completed",
+      type: "run.completed",
+      runId,
+      sequence: startReplay.length,
+      payload: { status: "completed" },
+      createdAt: "2026-05-11T00:00:01.000Z"
+    });
+    const streamResponse = await streamResponsePromise;
+
+    expect(streamResponse.statusCode).toBe(200);
+    expect(streamResponse.body).toContain("event: run.queued");
+    expect(streamResponse.body).toContain("event: run.completed");
+  });
+
+  it("treats invalid stopAfter as replay-length fallback", async () => {
+    const harness = createRouteHarness({ withEventBus: true });
+
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Invalid stopAfter run")
+    });
+    const runId = createResponse.json().run.id;
+
+    const streamResponse = await harness.app.inject({
+      method: "GET",
+      url: `/runs/${runId}/events?live=1&stopAfter=not-a-number`
+    });
+
+    expect(streamResponse.statusCode).toBe(200);
+    expect(streamResponse.body).toContain("event: run.queued");
+  });
+
   it("sends input and cancels a run", async () => {
     const harness = createRouteHarness();
     const createResponse = await harness.app.inject({
@@ -160,18 +211,21 @@ interface RouteHarness {
   runs: InMemoryRunStore;
   events: InMemoryEventStore;
   sessions: InMemorySessionStore;
+  eventBus?: EventBus;
   artifacts?: InMemoryArtifactStore;
 }
 
 interface RouteHarnessOptions {
   withArtifacts?: boolean;
   withLauncher?: boolean;
+  withEventBus?: boolean;
 }
 
 function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
   const runs = new InMemoryRunStore();
   const events = new InMemoryEventStore();
   const sessions = new InMemorySessionStore();
+  const eventBus = options.withEventBus ? new EventBus() : undefined;
   const artifacts = options.withArtifacts ? new InMemoryArtifactStore() : undefined;
   const adapters = new Map([["fake", new FakeRuntimeAdapter()]]);
   const runner = new RuntimeRunnerService({
@@ -179,6 +233,7 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
     events,
     sessions,
     adapters,
+    ...(eventBus ? { eventBus } : {}),
     ...(artifacts ? { artifacts } : {})
   });
   const runService = new RunService({ runs, events, runner });
@@ -190,10 +245,19 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
     runs,
     events,
     ...(artifacts ? { artifacts } : {}),
+    ...(eventBus ? { eventBus } : {}),
     ...(launcher ? { launcher } : {})
   });
 
-  return { app, runService, runs, events, sessions, ...(artifacts ? { artifacts } : {}) };
+  return {
+    app,
+    runService,
+    runs,
+    events,
+    sessions,
+    ...(eventBus ? { eventBus } : {}),
+    ...(artifacts ? { artifacts } : {})
+  };
 }
 
 function fakeRunPayload(task: string): {
