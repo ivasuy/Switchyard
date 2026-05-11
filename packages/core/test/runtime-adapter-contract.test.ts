@@ -20,10 +20,10 @@ describe("runtime adapter contract", () => {
       events.push(event);
     }
 
-    await adapter.send(session, { text: "continue" });
-    await adapter.cancel(session);
-    const tools = await adapter.tools(session);
-    const artifacts = await adapter.artifacts(session);
+    await adapter.send({ ...session, runId: "run_contract" }, { text: "continue" });
+    await adapter.cancel({ ...session, runId: "run_contract" });
+    const tools = await adapter.tools({ ...session, runId: "run_contract" });
+    const artifacts = await adapter.artifacts({ ...session, runId: "run_contract" });
 
     expect(check.ok).toBe(true);
     expect(session.sessionId).toMatch(/^session_/);
