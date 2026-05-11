@@ -6,7 +6,9 @@ export class RunLauncherService {
 
   launch(run: Run): void {
     queueMicrotask(() => {
-      void this.runService.startRun(run.id);
+      void this.runService.startRun(run.id).catch(() => {
+        // Fire-and-forget launcher contract: prevent unhandled promise rejections.
+      });
     });
   }
 }

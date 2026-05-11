@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createNotImplementedError,
   EventBus,
   RuntimeRunnerService,
+  RunLauncherService,
   RunService
 } from "../src/index.js";
 import type { ArtifactStore, EventStore, RunStore, RuntimeAdapter, SessionStore } from "../src/index.js";
@@ -199,6 +200,191 @@ describe("core service shells", () => {
     await runner.start(run);
 
     expect(await artifacts.listByRun(run.id)).toHaveLength(1);
+    expect(events.items.at(-1)?.type).toBe("artifact.created");
+  });
+
+  it("publishes completed events after persisting completed run state", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const bus = new EventBus();
+    const eventRunStatuses: string[] = [];
+    const unsubscribe = bus.subscribe(async () => {
+      const persisted = await runs.get(run.id);
+      if (persisted?.status === "completed") {
+        eventRunStatuses.push(persisted.status);
+      }
+    });
+
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      eventBus: bus,
+      adapters: new Map([[
+        "fake",
+        new EventfulAdapter()
+      ]])
+    });
+
+    await runner.start(run);
+    unsubscribe();
+
+    expect(eventRunStatuses).toEqual(["completed", "completed"]);
+    expect((await runs.get(run.id))?.status).toBe("completed");
+  });
+
+  it("terminalizes adapter startup failures to failed run state", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const adapter = new FailingStartAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([[
+        "fake",
+        adapter
+      ]])
+    });
+
+    const failed = await runner.start(run);
+
+    expect(failed.status).toBe("failed");
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    expect(events.items.at(-1)?.type).toBe("run.failed");
+    expect((events.items.at(-1)?.payload as { error?: string }).error).toBe("startup failure");
+  });
+
+  it("keeps launch fire-and-forget start calls from creating unhandled rejections", async () => {
+    const run: Run = {
+      id: "run_1",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "Test task",
+      status: "queued",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    };
+    const runService = {
+      startRun: vi.fn().mockRejectedValue(new Error("launch failed"))
+    } as unknown as RunService;
+    const launcher = new RunLauncherService(runService);
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    launcher.launch(run);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    process.off("unhandledRejection", onUnhandled);
+
+    expect(unhandled).toHaveLength(0);
+    expect(runService.startRun).toHaveBeenCalledWith(run.id);
+  });
+
+  it("does not collect artifacts after cancellation", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const adapter = new CancelBeforeCompleteAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      adapters: new Map([[
+        "fake",
+        adapter
+      ]])
+    });
+
+    const running = runner.start(run);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await runner.cancel(run.id);
+    await running;
+
+    expect(adapter.artifactsCalled).toBe(false);
+    expect(await artifacts.listByRun(run.id)).toHaveLength(0);
+    expect((await runs.get(run.id))?.status).toBe("cancelled");
+    expect(events.items.some((event) => event.type === "artifact.created")).toBe(false);
+  });
+
+  it("deduplicates persisted artifact ids when adapter returns duplicate artifact ids", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const adapter = new DuplicateArtifactAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      adapters: new Map([[
+        "fake",
+        adapter
+      ]])
+    });
+
+    await runner.start(run);
+
+    const storedArtifacts = await artifacts.listByRun(run.id);
+    expect(storedArtifacts).toHaveLength(2);
+    expect(storedArtifacts[0]!.id).not.toBe(storedArtifacts[1]!.id);
+    expect(storedArtifacts[0]?.id.startsWith("artifact_")).toBe(true);
+    expect(storedArtifacts[1]?.id.startsWith("artifact_")).toBe(true);
+  });
+
+  it("isolates event bus subscriber failures from runtime execution", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const bus = new EventBus();
+    const received: SwitchyardEvent[] = [];
+    bus.subscribe((event) => {
+      received.push(event);
+    });
+    bus.subscribe(() => {
+      throw new Error("subscriber failed");
+    });
+
+    const adapter = new EventfulAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      eventBus: bus,
+      adapters: new Map([[
+        "fake",
+        adapter
+      ]])
+    });
+
+    await runner.start(run);
+
+    expect(received.at(-1)?.type).toBe("artifact.created");
     expect(events.items.at(-1)?.type).toBe("artifact.created");
   });
 
@@ -443,6 +629,71 @@ class EventfulAdapter extends NoopAdapter {
         type: "run.completed",
         runId: String(session["runId"]),
         sequence: 101,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class FailingStartAdapter extends EventfulAdapter {
+  override async start(request: Record<string, unknown>) {
+    this.startedWith = request;
+    throw new Error("startup failure");
+  }
+}
+
+class DuplicateArtifactAdapter extends EventfulAdapter {
+  override async artifacts(_session: Record<string, unknown>): Promise<Artifact[]> {
+    return [
+      {
+        id: "artifact_duplicate",
+        type: "transcript",
+        path: "artifacts/duplicate/transcript.jsonl",
+        metadata: {},
+        createdAt: "2026-05-11T00:00:00.000Z"
+      },
+      {
+        id: "artifact_duplicate",
+        type: "transcript",
+        path: "artifacts/duplicate/transcript-2.jsonl",
+        metadata: {},
+        createdAt: "2026-05-11T00:00:00.000Z"
+      }
+    ];
+  }
+}
+
+class CancelBeforeCompleteAdapter extends EventfulAdapter {
+  artifactsCalled = false;
+
+  override async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
+    this.artifactsCalled = true;
+    return [{
+      id: `artifact_cancel_${String(session["runId"])}`,
+      type: "transcript",
+      path: "artifacts/cancelled/transcript.jsonl",
+      metadata: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    }];
+  }
+
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_adapter_running",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 99,
+        payload: { status: "running" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      yield {
+        id: "event_adapter_completed",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 100,
         payload: { status: "completed" },
         createdAt: "2026-05-11T00:00:00.000Z"
       };
