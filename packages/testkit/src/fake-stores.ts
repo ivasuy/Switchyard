@@ -80,6 +80,9 @@ export class InMemoryPlacementStore implements PlacementStore {
   readonly items = new Map<string, PlacementDecisionRecord>();
 
   async create(record: PlacementDecisionRecord): Promise<PlacementDecisionRecord> {
+    if (!record.runId) {
+      throw new Error("placement records require a runId");
+    }
     this.items.set(record.id, record);
     return record;
   }
@@ -89,6 +92,9 @@ export class InMemoryPlacementStore implements PlacementStore {
   }
 
   async update(record: PlacementDecisionRecord): Promise<PlacementDecisionRecord> {
+    if (!record.runId) {
+      throw new Error("placement records require a runId");
+    }
     this.items.set(record.id, record);
     return record;
   }
