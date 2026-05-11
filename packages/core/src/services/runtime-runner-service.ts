@@ -1,4 +1,4 @@
-import type { Run, RuntimeSession, RunStatus, SwitchyardEvent } from "@switchyard/contracts";
+import type { Artifact, Run, RuntimeSession, RunStatus, SwitchyardEvent } from "@switchyard/contracts";
 import type { ArtifactStore } from "../ports/artifact-store.js";
 import type { EventStore } from "../ports/event-store.js";
 import type { RunStore } from "../ports/run-store.js";
@@ -262,6 +262,8 @@ export class RuntimeRunnerService {
     }
 
     const adapterArtifacts = await adapter.artifacts(this.adapterSession(session));
+    const preparedArtifacts: Array<Artifact> = [];
+
     for (const artifact of adapterArtifacts) {
       if (await this.isCancelled(baseRun.id)) {
         return;
@@ -269,20 +271,21 @@ export class RuntimeRunnerService {
 
       const safePath = this.normalizeArtifactPath(artifact.path);
       const content = typeof artifact.metadata["content"] === "string" ? artifact.metadata["content"] : undefined;
+      const hasContent = content !== undefined;
       const metadata = { ...artifact.metadata };
       delete metadata.content;
 
       let storedPath = safePath;
       let contentStored = false;
-      if (content && this.deps.artifactContent) {
+      if (hasContent && this.deps.artifactContent) {
         storedPath = await this.deps.artifactContent.writeText(safePath, content);
         contentStored = true;
       }
-      if (content) {
+      if (hasContent) {
         metadata.contentStored = contentStored;
       }
 
-      const storedArtifact = await this.deps.artifacts.create({
+      preparedArtifacts.push({
         ...artifact,
         path: storedPath,
         id: this.uniqueArtifactId(artifact.id),
@@ -292,6 +295,14 @@ export class RuntimeRunnerService {
         metadata,
         createdAt: artifact.createdAt ?? new Date().toISOString()
       });
+    }
+
+    for (const prepared of preparedArtifacts) {
+      if (await this.isCancelled(baseRun.id)) {
+        return;
+      }
+
+      const storedArtifact = await this.deps.artifacts.create(prepared);
       const artifactEvent = this.eventForRun(
         templateRun,
         "artifact.created",

@@ -237,6 +237,39 @@ describe("core service shells", () => {
     });
   });
 
+  it("stores explicit empty artifact content when artifact content store is available", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const artifactContent = new InMemoryArtifactContentStore();
+    const adapter = new EmptyContentArtifactAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      artifactContent,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    await runner.start(run);
+
+    const [storedArtifact] = await artifacts.listByRun(run.id);
+    expect(storedArtifact).toMatchObject({
+      path: `stored/${adapter.artifactPath}`,
+      metadata: {
+        contentStored: true
+      }
+    });
+    expect(storedArtifact?.metadata).not.toHaveProperty("content");
+    expect(artifactContent.writes.at(-1)).toEqual({
+      path: adapter.artifactPath,
+      content: adapter.artifactContent
+    });
+  });
+
   it("does not attempt content persistence when artifact content store is unavailable", async () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();
@@ -260,6 +293,58 @@ describe("core service shells", () => {
       contentStored: false
     });
     expect(storedArtifact?.metadata).not.toHaveProperty("content");
+  });
+
+  it("does not attempt empty artifact content persistence when artifact content store is unavailable", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const adapter = new EmptyContentArtifactAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    await runner.start(run);
+
+    const [storedArtifact] = await artifacts.listByRun(run.id);
+    expect(storedArtifact?.path).toBe(adapter.artifactPath);
+    expect(storedArtifact?.metadata).toMatchObject({
+      contentStored: false
+    });
+    expect(storedArtifact?.metadata).not.toHaveProperty("content");
+  });
+
+  it("prevents partial artifact commits when later artifact persistence fails", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const adapter = new TwoArtifactAdapter();
+    const artifactContent = new ThrowingAfterFirstArtifactContentStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      artifactContent,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    const failed = await runner.start(run);
+
+    expect(failed.status).toBe("failed");
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    expect(events.items.at(-1)?.type).toBe("run.failed");
+    expect((events.items.at(-1)?.payload as { error?: string }).error).toBe("artifact write failed");
+    expect(await artifacts.listByRun(run.id)).toHaveLength(0);
+    expect(events.items.some((event) => event.type === "artifact.created")).toBe(false);
   });
 
   it("fails run when adapter artifact path is unsafe and no artifact content store is configured", async () => {
@@ -813,6 +898,58 @@ class ContentfulArtifactAdapter extends NoopAdapter {
   }
 }
 
+class EmptyContentArtifactAdapter extends NoopAdapter {
+  readonly artifactPath = `artifacts/${crypto.randomUUID()}/transcript.jsonl`;
+  readonly artifactContent = "";
+
+  override async start() {
+    return { sessionId: "session_1" };
+  }
+
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_content_adapter_running",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 99,
+        payload: { status: "running" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_content_adapter_output",
+        type: "runtime.output",
+        runId: String(session["runId"]),
+        sequence: 100,
+        payload: { text: "hello" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_content_adapter_completed",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 101,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+
+  override async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
+    return [
+      {
+        id: `adapter_empty_${String(session["runId"])}`,
+        type: "transcript",
+        path: this.artifactPath,
+        metadata: {
+          content: this.artifactContent
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      }
+    ];
+  }
+}
+
 class UnsafePathArtifactAdapter extends EventfulAdapter {
   readonly artifactPath = "../unsafe/transcript.jsonl";
 
@@ -891,6 +1028,46 @@ class CancelBeforeCompleteAdapter extends EventfulAdapter {
         createdAt: "2026-05-11T00:00:00.000Z"
       };
     })();
+  }
+}
+
+class TwoArtifactAdapter extends EventfulAdapter {
+  readonly firstArtifactPath = `artifacts/${crypto.randomUUID()}/first.jsonl`;
+  readonly secondArtifactPath = `artifacts/${crypto.randomUUID()}/second.jsonl`;
+
+  override async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
+    return [
+      {
+        id: `adapter_two_${String(session["runId"])}_first`,
+        type: "transcript",
+        path: this.firstArtifactPath,
+        metadata: {
+          content: "{\"type\":\"runtime.output\",\"text\":\"first\"}\n"
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      },
+      {
+        id: `adapter_two_${String(session["runId"])}_second`,
+        type: "transcript",
+        path: this.secondArtifactPath,
+        metadata: {
+          content: "{\"type\":\"runtime.output\",\"text\":\"second\"}\n"
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      }
+    ];
+  }
+}
+
+class ThrowingAfterFirstArtifactContentStore {
+  readonly writes: Array<{ path: string; content: string }> = [];
+
+  async writeText(path: string, content: string): Promise<string> {
+    this.writes.push({ path, content });
+    if (this.writes.length > 1) {
+      throw new Error("artifact write failed");
+    }
+    return `stored/${path}`;
   }
 }
 
