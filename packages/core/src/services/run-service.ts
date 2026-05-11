@@ -48,6 +48,68 @@ export class RunService {
     return run;
   }
 
+  async startRun(runId: string): Promise<Run> {
+    const run = await this.deps.runs.get(runId);
+    if (!run) {
+      throw new Error(`Run not found: ${runId}`);
+    }
+
+    const adapter = this.deps.adapters.get(run.runtime);
+    if (!adapter) {
+      throw new Error(`Runtime adapter not found: ${run.runtime}`);
+    }
+
+    let sequence = (await this.deps.events.listByRun(run.id)).length;
+    const started: Run = {
+      ...run,
+      status: "running",
+      startedAt: new Date().toISOString()
+    };
+    await this.deps.runs.update(started);
+    await this.deps.events.append(this.eventForRun(started, "run.started", sequence++, {}));
+
+    const session = await adapter.start({
+      runId: started.id,
+      runtime: started.runtime,
+      provider: started.provider,
+      model: started.model,
+      cwd: started.cwd,
+      task: started.task,
+      metadata: started.metadata
+    });
+
+    let latest = started;
+    for await (const event of adapter.events({ ...session, runId: started.id })) {
+      const normalized = {
+        ...event,
+        id: `event_${crypto.randomUUID()}`,
+        runId: started.id,
+        sequence: sequence++,
+        createdAt: event.createdAt ?? new Date().toISOString()
+      };
+      await this.deps.events.append(normalized);
+
+      if (event.type === "run.completed") {
+        latest = {
+          ...started,
+          status: "completed",
+          endedAt: new Date().toISOString()
+        };
+        await this.deps.runs.update(latest);
+      }
+      if (event.type === "run.failed") {
+        latest = {
+          ...started,
+          status: "failed",
+          endedAt: new Date().toISOString()
+        };
+        await this.deps.runs.update(latest);
+      }
+    }
+
+    return latest;
+  }
+
   private eventForRun(run: Run, type: SwitchyardEvent["type"], sequence: number, payload: Record<string, unknown>): SwitchyardEvent {
     return {
       id: `event_${crypto.randomUUID()}`,

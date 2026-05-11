@@ -201,6 +201,92 @@ cancel
 collect artifacts
 ```
 
+## Local Testing
+
+The current local MVP runs a fake runtime through the Switchyard daemon. It does not call Claude, Codex, OpenCode, or any external model yet.
+
+From the repo root:
+
+```bash
+cd /Users/vasuyadav/Downloads/Projects/switchyard
+pnpm install
+pnpm --filter @switchyard/daemon dev
+```
+
+The daemon starts on:
+
+```text
+http://127.0.0.1:4545
+```
+
+In another terminal, check health:
+
+```bash
+curl -s http://127.0.0.1:4545/health
+```
+
+Expected response:
+
+```json
+{"ok":true}
+```
+
+Create a fake run:
+
+```bash
+curl -s -X POST http://127.0.0.1:4545/runs \
+  -H 'content-type: application/json' \
+  -d '{
+    "runtime": "fake",
+    "provider": "test",
+    "model": "test-model",
+    "adapterType": "process",
+    "cwd": "/repo",
+    "task": "Test Switchyard locally"
+  }'
+```
+
+The response includes a run id:
+
+```json
+{
+  "run": {
+    "id": "run_...",
+    "status": "completed"
+  }
+}
+```
+
+Fetch the run:
+
+```bash
+curl -s http://127.0.0.1:4545/runs/<RUN_ID>
+```
+
+Fetch the run events:
+
+```bash
+curl -s http://127.0.0.1:4545/runs/<RUN_ID>/events
+```
+
+Expected event types:
+
+```text
+run.queued
+run.started
+runtime.status
+runtime.output
+run.completed
+```
+
+Run verification:
+
+```bash
+pnpm test
+pnpm typecheck
+pnpm build
+```
+
 ## Deployment Modes
 
 Switchyard is designed to run locally, hosted, or hybrid with the same API semantics.

@@ -14,7 +14,11 @@ All notable changes to Switchyard will be documented in this file.
 - Added root workspace scripts for build, test, typecheck, and lint.
 - Added public architecture documentation with repository shape, deployment modes, protocol choices, remote-node control, and package responsibilities.
 - Added adapter research and verification docs for OpenCode, Claude Code, Codex, Cursor Agent, AgentField, Generic HTTP, OpenClaw, and Paperclip.
+- Added `@switchyard/protocol-rest` with initial run routes for `POST /runs`, `GET /runs/:id`, and `GET /runs/:id/events`.
+- Added `@switchyard/daemon` local gateway app wired to Fastify, in-memory stores, the core run service, and the fake runtime adapter.
+- Added core run start behavior that drives a runtime adapter, stores normalized events, and updates completed/failed run state.
 
 ### Changed
 
 - Expanded `.gitignore` to keep generated artifacts, dependencies, caches, environment files, logs, editor files, `docs/decisions`, and `docs/superpowers` out of the repository.
+- Updated the daemon dev script to suppress Node 26's upstream `tsx` `DEP0205` warning while keeping other process warnings visible.

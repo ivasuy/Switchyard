@@ -57,6 +57,98 @@ OpenClaw      AgentField  Browser/Search
 Paperclip     Cursor      Generic HTTP
 ```
 
+## Where The Code Lives
+
+This diagram uses the same high-level architecture terms and maps each box to the monorepo packages that implement it.
+
+```text
+Frontend / Backend / CLI / Automation
+        |
+        | uses generated/typed client
+        v
++-----------------------------+
+|        Switchyard SDK       |
+| packages/sdk                |
++--------------+--------------+
+               |
+               | REST / SSE / WebSocket / acpx
+               v
++--------------------------------------------------+
+|              Switchyard API Layer                |
+| packages/protocol-rest                           |
+| packages/protocol-sse                            |
+| packages/protocol-ws                             |
+| packages/protocol-acpx                           |
+| apps/daemon                                      |
+| apps/server                                      |
++-------------------------+------------------------+
+                          |
+                          | validates with shared contracts
+                          v
++--------------------------------------------------+
+|        Shared Contract / Schema Suite            |
+| packages/contracts                               |
+| run debate event message artifact approval       |
+| memory evidence tool registry placement node     |
++-------------------------+------------------------+
+                          |
+                          | passes typed commands/events
+                          v
++--------------------------------------------------+
+|              Gateway Core Domain                 |
+| packages/core                                    |
+| Run Debate Session Event Message Artifact        |
+| Approval Memory Evidence Tool Registry Context   |
++-------------------------+------------------------+
+                          |
+              +-----------+-----------+
+              |                       |
+              v                       v
++-----------------------------+   +-----------------------------+
+| Placement / Policy Layer    |   | Event Bus / Message Router  |
+| packages/policy             |   | packages/core/services      |
+| placement approval runtime  |   | event-bus message-router    |
+| tool budget node policy     |   | event-service               |
++--------------+--------------+   +--------------+--------------+
+               |                                 |
+               | chooses where/how to run        | streams/routes outcomes
+               v                                 v
++--------------------------------------------------+
+|              Runtime Adapter Layer               |
+| packages/adapters                                |
+| packages/protocol-acpx client                    |
+| packages/protocol-node                           |
+| packages/queue                                   |
++-------------------------+------------------------+
+                          |
+          +---------------+---------------+
+          |                               |
+          v                               v
++-----------------------------+   +-----------------------------+
+| Local / Remote Execution    |   | Hosted Execution            |
+| apps/daemon                 |   | apps/server                 |
+| apps/node                   |   | apps/worker                 |
+| SQLite + filesystem         |   | Postgres + Redis + S3/R2    |
+| packages/storage/sqlite     |   | packages/storage/postgres   |
+| packages/storage/filesystem |   | packages/storage/s3         |
++--------------+--------------+   +--------------+--------------+
+               |                                 |
+               v                                 v
+Claude/Codex/OpenCode/Cursor           Wrappers / HTTP / Browser/Search
+OpenClaw/Paperclip/AgentField          Generic HTTP / Process / PTY
+```
+
+Short mapping:
+
+- `Switchyard API Layer`: protocol packages plus app entrypoints.
+- `Shared Contract / Schema Suite`: `packages/contracts`.
+- `Gateway Core Domain`: `packages/core`.
+- `Placement / Policy Layer`: `packages/policy` plus placement services in core.
+- `Event Bus / Message Router`: event and message services in `packages/core`.
+- `Runtime Adapter Layer`: `packages/adapters`, `packages/protocol-acpx`, `packages/protocol-node`, and queue integration.
+- `Local / Remote Execution`: `apps/daemon`, `apps/node`, SQLite, filesystem artifacts.
+- `Hosted Execution`: `apps/server`, `apps/worker`, Postgres, Redis/BullMQ, S3/R2 artifacts.
+
 ## Layer-by-Layer Design
 
 ### Client Layer
