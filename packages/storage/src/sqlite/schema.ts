@@ -21,7 +21,7 @@ export const runs = sqliteTable("runs", {
 export const runEvents = sqliteTable("run_events", {
   id: text("id").primaryKey(),
   type: text("type").notNull(),
-  runId: text("run_id").notNull(),
+  runId: text("run_id"),
   debateId: text("debate_id"),
   participantId: text("participant_id"),
   provider: text("provider"),

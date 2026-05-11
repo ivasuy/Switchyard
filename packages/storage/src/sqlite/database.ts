@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS run_events (
   id TEXT PRIMARY KEY NOT NULL,
   type TEXT NOT NULL,
-  run_id TEXT NOT NULL,
+  run_id TEXT,
   debate_id TEXT,
   participant_id TEXT,
   provider TEXT,
