@@ -56,6 +56,28 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       .header("cache-control", "no-cache")
       .send(`${body}\n`);
   });
+
+  app.post("/runs/:id/input", async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const run = await deps.runs.get(id);
+    if (!run) {
+      return reply.code(404).send({ error: { code: "run_not_found", message: `Run not found: ${id}` } });
+    }
+
+    await deps.runService.sendInput(id, inputBody(request.body));
+    return reply.code(202).send({ accepted: true });
+  });
+
+  app.post("/runs/:id/cancel", async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const run = await deps.runs.get(id);
+    if (!run) {
+      return reply.code(404).send({ error: { code: "run_not_found", message: `Run not found: ${id}` } });
+    }
+
+    const cancelled = await deps.runService.cancelRun(id);
+    return reply.send({ run: cancelled });
+  });
 }
 
 interface CreateRunBody {
@@ -100,4 +122,11 @@ function requiredString(body: Record<string, unknown>, key: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function inputBody(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error("Input body must be an object");
+  }
+  return value;
 }

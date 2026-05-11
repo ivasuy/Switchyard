@@ -18,6 +18,7 @@ export const eventTypeSchema = z.enum([
   "debate.consensus",
   "approval.requested",
   "run.completed",
+  "run.cancelled",
   "run.failed"
 ]);
 

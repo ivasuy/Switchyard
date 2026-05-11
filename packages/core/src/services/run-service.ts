@@ -1,7 +1,7 @@
 import type { Run, SwitchyardEvent } from "@switchyard/contracts";
 import type { EventStore } from "../ports/event-store.js";
 import type { RunStore } from "../ports/run-store.js";
-import type { RuntimeAdapter } from "../ports/runtime-adapter.js";
+import type { RuntimeRunnerService } from "./runtime-runner-service.js";
 
 export interface CreateRunInput {
   runtime: string;
@@ -19,7 +19,7 @@ export interface CreateRunInput {
 export interface RunServiceDependencies {
   runs: RunStore;
   events: EventStore;
-  adapters: Map<string, RuntimeAdapter>;
+  runner: RuntimeRunnerService;
 }
 
 export class RunService {
@@ -54,60 +54,15 @@ export class RunService {
       throw new Error(`Run not found: ${runId}`);
     }
 
-    const adapter = this.deps.adapters.get(run.runtime);
-    if (!adapter) {
-      throw new Error(`Runtime adapter not found: ${run.runtime}`);
-    }
+    return this.deps.runner.start(run);
+  }
 
-    let sequence = (await this.deps.events.listByRun(run.id)).length;
-    const started: Run = {
-      ...run,
-      status: "running",
-      startedAt: new Date().toISOString()
-    };
-    await this.deps.runs.update(started);
-    await this.deps.events.append(this.eventForRun(started, "run.started", sequence++, {}));
+  async sendInput(runId: string, input: Record<string, unknown>): Promise<void> {
+    await this.deps.runner.sendInput(runId, input);
+  }
 
-    const session = await adapter.start({
-      runId: started.id,
-      runtime: started.runtime,
-      provider: started.provider,
-      model: started.model,
-      cwd: started.cwd,
-      task: started.task,
-      metadata: started.metadata
-    });
-
-    let latest = started;
-    for await (const event of adapter.events({ ...session, runId: started.id })) {
-      const normalized = {
-        ...event,
-        id: `event_${crypto.randomUUID()}`,
-        runId: started.id,
-        sequence: sequence++,
-        createdAt: event.createdAt ?? new Date().toISOString()
-      };
-      await this.deps.events.append(normalized);
-
-      if (event.type === "run.completed") {
-        latest = {
-          ...started,
-          status: "completed",
-          endedAt: new Date().toISOString()
-        };
-        await this.deps.runs.update(latest);
-      }
-      if (event.type === "run.failed") {
-        latest = {
-          ...started,
-          status: "failed",
-          endedAt: new Date().toISOString()
-        };
-        await this.deps.runs.update(latest);
-      }
-    }
-
-    return latest;
+  async cancelRun(runId: string): Promise<Run> {
+    return this.deps.runner.cancel(runId);
   }
 
   private eventForRun(run: Run, type: SwitchyardEvent["type"], sequence: number, payload: Record<string, unknown>): SwitchyardEvent {

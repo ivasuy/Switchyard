@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   createNotImplementedError,
   EventBus,
+  RuntimeRunnerService,
   RunService
 } from "../src/index.js";
-import type { EventPublisher, EventStore, RunStore, RuntimeAdapter } from "../src/index.js";
-import type { Run, SwitchyardEvent } from "@switchyard/contracts";
+import type { EventPublisher, EventStore, RunStore, RuntimeAdapter, SessionStore } from "../src/index.js";
+import type { Run, RuntimeSession, SwitchyardEvent } from "@switchyard/contracts";
 
 describe("core service shells", () => {
   it("creates domain not-implemented errors with stable codes", () => {
@@ -18,8 +19,10 @@ describe("core service shells", () => {
   it("run service creates a queued run and emits an event through ports", async () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
     const adapter = new NoopAdapter();
-    const service = new RunService({ runs, events, adapters: new Map([["fake", adapter]]) });
+    const runner = new RuntimeRunnerService({ runs, events, sessions, adapters: new Map([["fake", adapter]]) });
+    const service = new RunService({ runs, events, runner });
 
     const run = await service.createRun({
       runtime: "fake",
@@ -43,8 +46,10 @@ describe("core service shells", () => {
   it("run service starts a queued run through its adapter and stores normalized events", async () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
     const adapter = new EventfulAdapter();
-    const service = new RunService({ runs, events, adapters: new Map([["fake", adapter]]) });
+    const runner = new RuntimeRunnerService({ runs, events, sessions, adapters: new Map([["fake", adapter]]) });
+    const service = new RunService({ runs, events, runner });
     const run = await service.createRun({
       runtime: "fake",
       provider: "test",
@@ -71,6 +76,131 @@ describe("core service shells", () => {
       "run.completed"
     ]);
     expect(events.items.map((event) => event.sequence)).toEqual([0, 1, 2, 3, 4]);
+    expect([...sessions.items.values()][0]).toMatchObject({
+      runId: run.id,
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      protocol: "process",
+      status: "completed"
+    });
+  });
+
+  it("run service sends input and cancels through the runtime runner", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const adapter = new EventfulAdapter();
+    const runner = new RuntimeRunnerService({ runs, events, sessions, adapters: new Map([["fake", adapter]]) });
+    const service = new RunService({ runs, events, runner });
+    const run = await service.createRun({
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "Test task",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {}
+    });
+    await service.startRun(run.id);
+
+    await service.sendInput(run.id, { text: "continue" });
+    const cancelled = await service.cancelRun(run.id);
+
+    expect(adapter.sentInput).toEqual({ text: "continue" });
+    expect(cancelled.status).toBe("cancelled");
+  });
+
+  it("runtime runner stores adapter session details before streaming events", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run: Run = {
+      id: "run_1",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "Test task",
+      status: "queued",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    };
+    await runs.create(run);
+    await events.append({
+      id: "event_queued",
+      type: "run.queued",
+      runId: run.id,
+      sequence: 0,
+      payload: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new EventfulAdapter()]])
+    });
+
+    await runner.start(run);
+
+    const session = [...sessions.items.values()][0];
+    expect(session).toMatchObject({
+      id: "session_1",
+      runId: "run_1",
+      protocol: "process",
+      status: "completed"
+    });
+    expect(events.items.map((event) => event.sequence)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("runtime runner sends input to the active session", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const adapter = new EventfulAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]])
+    });
+    await runner.start(run);
+
+    await runner.sendInput(run.id, { text: "continue" });
+
+    expect(adapter.sentInput).toEqual({ text: "continue" });
+    expect(adapter.sentSession?.["runId"]).toBe(run.id);
+  });
+
+  it("runtime runner cancels the active session and marks the run cancelled", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const adapter = new EventfulAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]])
+    });
+    await runner.start(run);
+
+    const cancelled = await runner.cancel(run.id);
+
+    expect(adapter.cancelledSession?.["runId"]).toBe(run.id);
+    expect(cancelled.status).toBe("cancelled");
+    expect((await sessions.getByRunId(run.id))?.status).toBe("cancelled");
+    expect(events.items.at(-1)?.type).toBe("run.cancelled");
   });
 
   it("event bus publishes events to subscribers", async () => {
@@ -126,6 +256,28 @@ class MemoryEventStore implements EventStore {
   }
 }
 
+class MemorySessionStore implements SessionStore {
+  readonly items = new Map<string, RuntimeSession>();
+
+  async create(session: RuntimeSession): Promise<RuntimeSession> {
+    this.items.set(session.id, session);
+    return session;
+  }
+
+  async get(id: string): Promise<RuntimeSession | undefined> {
+    return this.items.get(id);
+  }
+
+  async getByRunId(runId: string): Promise<RuntimeSession | undefined> {
+    return [...this.items.values()].find((session) => session.runId === runId);
+  }
+
+  async update(session: RuntimeSession): Promise<RuntimeSession> {
+    this.items.set(session.id, session);
+    return session;
+  }
+}
+
 class NoopAdapter implements RuntimeAdapter {
   readonly id = "fake";
 
@@ -160,10 +312,22 @@ class NoopAdapter implements RuntimeAdapter {
 
 class EventfulAdapter extends NoopAdapter {
   startedWith: Record<string, unknown> | undefined;
+  sentSession: Record<string, unknown> | undefined;
+  sentInput: Record<string, unknown> | undefined;
+  cancelledSession: Record<string, unknown> | undefined;
 
   override async start(request: Record<string, unknown>) {
     this.startedWith = request;
     return { sessionId: "session_1" };
+  }
+
+  override async send(session: Record<string, unknown>, input: Record<string, unknown>) {
+    this.sentSession = session;
+    this.sentInput = input;
+  }
+
+  override async cancel(session: Record<string, unknown>) {
+    this.cancelledSession = session;
   }
 
   override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
@@ -194,4 +358,24 @@ class EventfulAdapter extends NoopAdapter {
       };
     })();
   }
+}
+
+async function createStoredRun(runs: RunStore): Promise<Run> {
+  const run: Run = {
+    id: `run_${crypto.randomUUID()}`,
+    runtime: "fake",
+    provider: "test",
+    model: "test-model",
+    adapterType: "process",
+    cwd: "/repo",
+    task: "Test task",
+    status: "queued",
+    placement: "local",
+    approvalPolicy: "default",
+    timeoutSeconds: 60,
+    metadata: {},
+    createdAt: "2026-05-11T00:00:00.000Z"
+  };
+  await runs.create(run);
+  return run;
 }

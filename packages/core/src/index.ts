@@ -17,5 +17,6 @@ export * from "./ports/runtime-adapter.js";
 export * from "./ports/session-store.js";
 export * from "./ports/tool-adapter.js";
 export * from "./services/event-bus.js";
+export * from "./services/runtime-runner-service.js";
 export * from "./services/run-service.js";
 export * from "./services/shells.js";
