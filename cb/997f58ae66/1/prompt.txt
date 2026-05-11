@@ -1,0 +1,34 @@
+You are fixing Task 11 review findings in the current checkout only: /Users/vasuyadav/Downloads/Projects/switchyard. Do NOT create a separate worktree. Do not revert unrelated work. Current Task 11 implementation commit is `0354068`.
+
+Quality review requested changes. Fix these in scope:
+1. Enforce `stopAfter` as a cap when replay already has enough events. `collectReplayAndLiveEvents` should return only the first `stopAfter` formatted events when `stopAfter <= replay.length`. Non-live REST replay path should also respect a valid stopAfter cap for consistency.
+2. Prevent indefinite hangs in live mode when no qualifying live event arrives. Add a bounded option to `collectReplayAndLiveEvents`, e.g. optional `timeoutMs?: number`, defaulting to a small safe value suitable for tests or a conservative route value. On timeout, unsubscribe and resolve with whatever chunks exist. Keep the original required input fields compatible by making any new option optional.
+3. Normalize/validate `stopAfter` in protocol-sse and REST route. Treat invalid/NaN/non-positive values conservatively so they do not hang or return surprising all-replay behavior. Prefer defaulting to replay length for non-positive/invalid inputs, unless tests document another safe behavior.
+4. Remove dead duplicate `packages/protocol-rest/src/sse.ts` if it is no longer imported/exported. Verify no public index export relies on it.
+5. Add tests:
+   - protocol-sse: stopAfter truncates replay; invalid/non-positive stopAfter does not hang; no matching live event resolves via timeout and does not include other-run events.
+   - protocol-rest: stopAfter less than replay length truncates body; live with no eventBus or invalid stopAfter is bounded/safe; keep existing live success test.
+
+Files likely involved:
+- `packages/protocol-sse/src/sse-stream.ts`
+- `packages/protocol-sse/test/sse-stream.test.ts`
+- `packages/protocol-rest/src/run-routes.ts`
+- `packages/protocol-rest/test/run-routes.test.ts`
+- delete `packages/protocol-rest/src/sse.ts` if safe
+
+Run:
+- `pnpm --filter @switchyard/protocol-sse test`
+- `pnpm --filter @switchyard/protocol-rest test`
+- `pnpm --filter @switchyard/protocol-sse typecheck`
+- `pnpm --filter @switchyard/protocol-rest typecheck`
+- `pnpm --filter @switchyard/protocol-sse build`
+- `pnpm --filter @switchyard/protocol-rest build`
+
+Commit follow-up with message: `fix: bound sse replay and live collection`.
+
+Final response format:
+- Status
+- Files changed
+- Tests run and results
+- Commit SHA
+- Notes
