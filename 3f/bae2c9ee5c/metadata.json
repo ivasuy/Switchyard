@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "3fbae2c9ee5c",
+  "strategy": "manual-commit",
+  "branch": "publish-main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "packages/storage/src/filesystem-artifact-content-store.ts",
+    "packages/storage/test/filesystem-artifact-content-store.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3f/bae2c9ee5c/0/metadata.json",
+      "transcript": "/3f/bae2c9ee5c/0/full.jsonl",
+      "content_hash": "/3f/bae2c9ee5c/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4890,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1391872,
+    "output_tokens": 1117,
+    "api_call_count": 8
+  }
+}
