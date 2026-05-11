@@ -15,11 +15,14 @@ Instead of integrating separately with Claude Code, Codex, OpenCode, OpenClaw, P
 
 ```text
 POST /runs
+GET  /runs/:id
 GET  /runs/:id/events
 POST /debates
 POST /runs/:id/approve
-GET  /artifacts/:id
+GET  /runs/:id/artifacts (local MVP)
 ```
+
+`GET /artifacts/:id` and `/artifacts` are planned for future deployment modes and are not implemented in the local daemon MVP.
 
 Switchyard lets frontends, backends, CLIs, automations, bots, and internal systems treat every agent runtime like a backend service.
 
@@ -114,7 +117,7 @@ Switchyard exposes product-level endpoints:
 /providers
 /memory
 /tools
-/artifacts
+/artifacts (planned, not implemented in local MVP)
 /approvals
 ```
 
@@ -231,10 +234,10 @@ Expected response:
 {"ok":true}
 ```
 
-Create a fake run:
+Create a fake run (deterministic completion):
 
 ```bash
-curl -s -X POST http://127.0.0.1:4545/runs \
+curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
   -H 'content-type: application/json' \
   -d '{
     "runtime": "fake",
@@ -246,7 +249,7 @@ curl -s -X POST http://127.0.0.1:4545/runs \
   }'
 ```
 
-The response includes a run id:
+The response is the completed run:
 
 ```json
 {
@@ -285,12 +288,15 @@ runtime.output
 run.completed
 ```
 
+Without `wait=1`, `POST /runs` is asynchronous and returns `202` with a queued run; poll `GET /runs/<RUN_ID>` or stream `GET /runs/<RUN_ID>/events` to wait for completion.
+
 Run verification:
 
 ```bash
 pnpm test
 pnpm typecheck
 pnpm build
+pnpm lint
 ```
 
 ## Deployment Modes
