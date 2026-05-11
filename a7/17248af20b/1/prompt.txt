@@ -1,0 +1,51 @@
+Quality review returned CHANGES_REQUESTED for Task 8. Please fix in the current checkout only, run verification, and commit a follow-up fix. Do not revert unrelated work.
+
+Findings to address:
+1. Add required-field coverage for public `modelSchema` from registry contracts. Required keys: likely `id`, `providerId`, `modelName`, `status`; inspect current schema to confirm and use a valid fixture.
+2. Add required-field coverage for public `contextSectionSchema`. Required keys: likely `name`, `content`; inspect current schema to confirm and use a valid fixture.
+3. Strengthen `expectRequiredFields` so it first asserts the baseline `valid` fixture parses successfully before deleting keys. This prevents false positives if a fixture drifts invalid. Keep the helper simple.
+
+Run:
+- `pnpm --filter @switchyard/contracts test`
+- `pnpm --filter @switchyard/contracts typecheck`
+- `pnpm --filter @switchyard/contracts build`
+
+Commit follow-up with a clear message, e.g. `fix: complete contract required field coverage`.
+
+Final response format:
+- Status
+- Files changed
+- Tests run and results
+- Commit SHA
+- Notes
+
+---
+
+Quality re-review found one real bug. Please fix in current checkout only, run verification, and commit a small follow-up.
+
+Issue:
+- `expect(() => schema.parse(valid)).not.toThrow("fixture should parse")` is wrong: the string is a matcher argument, not an assertion message. It does not guarantee the baseline fixture parses.
+
+Fix to either:
+```ts
+expect(() => schema.parse(valid), "fixture should parse").not.toThrow();
+```
+or simply:
+```ts
+expect(() => schema.parse(valid)).not.toThrow();
+```
+Prefer the first if Vitest supports assertion messages there.
+
+Run:
+- `pnpm --filter @switchyard/contracts test`
+- `pnpm --filter @switchyard/contracts typecheck`
+- `pnpm --filter @switchyard/contracts build`
+
+Commit follow-up with a clear message, e.g. `fix: validate contract fixture baselines`.
+
+Final response format:
+- Status
+- Files changed
+- Tests run and results
+- Commit SHA
+- Notes
