@@ -1,29 +1,3 @@
-Task 2 quality review found issues that need fixing before Task 3.
-
-Fix these only:
-
-1. HIGH: `better-sqlite3` runtime smoke fails because pnpm ignored native build scripts. Make the package safely runnable in this repo. Preferred fix: add pnpm configuration in the root `package.json` to allow/build `better-sqlite3` (for example pnpm `onlyBuiltDependencies` if appropriate for pnpm 10), run the needed pnpm command to build/install it, and verify a runtime smoke import/open works. Do not switch away from better-sqlite3 unless impossible.
-
-Runtime smoke to run after build:
-`pnpm --filter @switchyard/storage build`
-then:
-`node --input-type=module -e "import { mkdtempSync, rmSync } from 'node:fs'; import { join } from 'node:path'; import { tmpdir } from 'node:os'; import { openSqliteStorage } from './packages/storage/dist/src/sqlite/database.js'; const dir = mkdtempSync(join(tmpdir(), 'switchyard-storage-')); const opened = openSqliteStorage(join(dir, 'test.sqlite')); opened.sqlite.close(); rmSync(dir, { recursive: true, force: true }); console.log('ok');"`
-Expected output includes `ok`.
-
-2. MEDIUM: `SwitchyardEvent.runId` is optional, but storage schema/migration currently require `run_events.run_id` NOT NULL. Change `runEvents.runId` and migration `run_id` to nullable text (remove `.notNull()` and `NOT NULL`). Keep index on `(run_id, sequence)`.
-
-Do not address the low unused workspace deps issue; the plan intentionally includes `@switchyard/contracts` and `@switchyard/core` because Task 3 will use them.
-
-Run:
-- `pnpm install` or the pnpm build-approval/rebuild command needed for better-sqlite3
-- `pnpm --filter @switchyard/storage typecheck`
-- `pnpm --filter @switchyard/storage build`
-- the runtime smoke command above
-
-Commit with a concise fix message. Final response with STATUS, changed files, tests, commit sha.
-
----
-
 Task 2 quality re-review found one remaining issue to fix.
 
 Issue:
