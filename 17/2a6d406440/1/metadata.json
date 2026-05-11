@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "172a6d406440",
+  "session_id": "019e1536-375e-7da0-b5a0-e4f0383234df",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-11T04:06:54.472373Z",
+  "branch": "publish-main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "packages/storage/src/filesystem-artifact-content-store.ts",
+    "packages/storage/src/index.ts",
+    "packages/storage/test/filesystem-artifact-content-store.test.ts"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.3-codex-spark",
+  "turn_id": "3b301b5acd9b",
+  "token_usage": {
+    "input_tokens": 10006,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 281856,
+    "output_tokens": 3790,
+    "api_call_count": 14
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-11T04:06:54.465128Z",
+    "agent_lines": 59,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 59,
+    "total_lines_changed": 59,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
