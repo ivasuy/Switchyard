@@ -52,3 +52,7 @@ Final response format:
 - Verification commands run and results
 - Commit SHA
 - Self-review notes.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
