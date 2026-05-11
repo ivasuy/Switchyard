@@ -1,15 +1,20 @@
 import type { FastifyInstance } from "fastify";
-import type { RunService, EventStore, RunStore } from "@switchyard/core";
+import type { ArtifactStore, EventBus, EventStore, RunLauncherService, RunService, RunStore } from "@switchyard/core";
 import { adapterTypeSchema } from "@switchyard/contracts";
+import { formatSseEvent } from "./sse.js";
 
 export interface RunRouteDependencies {
   runService: RunService;
   runs: RunStore;
   events: EventStore;
+  artifacts?: ArtifactStore;
+  eventBus?: EventBus;
+  launcher?: RunLauncherService;
 }
 
 export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependencies): void {
   app.post("/runs", async (request, reply) => {
+    const wait = request.query && typeof request.query === "object" && (request.query as Record<string, unknown>)["wait"] === "1";
     const body = createRunBody(request.body);
     const run = await deps.runService.createRun({
       runtime: body.runtime,
@@ -23,9 +28,12 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       timeoutSeconds: body.timeoutSeconds ?? 600,
       metadata: body.metadata ?? {}
     });
-    const completed = await deps.runService.startRun(run.id);
-
-    return reply.code(201).send({ run: completed });
+    if (wait) {
+      const completed = await deps.runService.startRun(run.id);
+      return reply.code(201).send({ run: completed });
+    }
+    deps.launcher?.launch(run);
+    return reply.code(202).send({ run });
   });
 
   app.get("/runs/:id", async (request, reply) => {
@@ -47,14 +55,24 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     }
 
     const events = await deps.events.listByRun(id);
-    const body = events.map((event) => {
-      return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n`;
-    }).join("\n");
+    const body = events.map(formatSseEvent).join("");
 
     return reply
       .header("content-type", "text/event-stream; charset=utf-8")
       .header("cache-control", "no-cache")
-      .send(`${body}\n`);
+      .send(body);
+  });
+
+  app.get("/runs/:id/artifacts", async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const run = await deps.runs.get(id);
+    if (!run) {
+      return reply.code(404).send({ error: { code: "run_not_found", message: `Run not found: ${id}` } });
+    }
+    if (!deps.artifacts) {
+      return { artifacts: [] };
+    }
+    return { artifacts: await deps.artifacts.listByRun(id) };
   });
 
   app.post("/runs/:id/input", async (request, reply) => {
