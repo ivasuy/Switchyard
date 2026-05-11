@@ -1,8 +1,12 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join, normalize, relative } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export class FilesystemArtifactContentStore {
-  constructor(private readonly root: string) {}
+  private readonly normalizedRoot: string;
+
+  constructor(root: string) {
+    this.normalizedRoot = resolve(root);
+  }
 
   async writeText(logicalPath: string, content: string): Promise<string> {
     const safePath = this.safePath(logicalPath);
@@ -10,14 +14,19 @@ export class FilesystemArtifactContentStore {
     await mkdir(dirname(safePath), { recursive: true });
     await writeFile(safePath, content, "utf8");
 
-    return normalize(logicalPath).replaceAll("\\", "/");
+    return relative(this.normalizedRoot, safePath).replaceAll("\\", "/");
   }
 
   private safePath(logicalPath: string): string {
-    const target = join(this.root, logicalPath);
-    const rel = relative(this.root, target);
+    if (isAbsolute(logicalPath) || logicalPath.includes("\\")) {
+      throw new Error("Artifact path escapes root");
+    }
 
-    if (rel === "" || rel.startsWith("..") || rel.includes("..")) {
+    const target = resolve(this.normalizedRoot, logicalPath);
+    const rel = relative(this.normalizedRoot, target);
+    const segments = rel.split(sep);
+
+    if (rel === "" || rel === "." || segments.includes("..")) {
       throw new Error("Artifact path escapes root");
     }
 
