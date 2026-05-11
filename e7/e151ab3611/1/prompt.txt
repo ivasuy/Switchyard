@@ -1,0 +1,138 @@
+You are implementing Task 5 in the current checkout only: /Users/vasuyadav/Downloads/Projects/switchyard. Do NOT create a separate worktree. You are not alone in this codebase; do not revert edits made by others, and accommodate the existing committed changes from Tasks 1-4.
+
+User requested subagent-driven implementation. Own Task 5 end-to-end: write tests first where applicable, implement, run verification, self-review, and commit your changes before final response.
+
+Current prior context:
+- Task 3 already changed `packages/core/src/ports/artifact-store.ts` so `ArtifactStore` likely already extends `GenericStore<Artifact>` with `listByRun(runId)`. Confirm and leave unchanged if already correct.
+- Task 4 finished at commit `d9e99c9`.
+- Root may be clean; verify before editing.
+
+Task 5: Collect Runtime Artifacts and Publish Events
+
+Files:
+- Modify: `packages/core/src/ports/artifact-store.ts`
+- Modify: `packages/core/src/services/runtime-runner-service.ts`
+- Create: `packages/core/src/services/run-launcher-service.ts`
+- Modify: `packages/core/src/index.ts`
+- Modify: `packages/core/test/core.test.ts`
+
+Required behavior/spec:
+1. Ensure artifact store port is:
+```ts
+import type { Artifact } from "@switchyard/contracts";
+import type { GenericStore } from "./generic-stores.js";
+
+export interface ArtifactStore extends GenericStore<Artifact> {
+  listByRun(runId: string): Promise<Artifact[]>;
+}
+```
+2. Add/extend core tests in `packages/core/test/core.test.ts` for runtime artifact collection:
+```ts
+it("runtime runner stores adapter artifacts and emits artifact events", async () => {
+  const runs = new MemoryRunStore();
+  const events = new MemoryEventStore();
+  const sessions = new MemorySessionStore();
+  const artifacts = new MemoryArtifactStore();
+  const adapter = new EventfulAdapter();
+  const run = await createStoredRun(runs);
+  const runner = new RuntimeRunnerService({
+    runs,
+    events,
+    sessions,
+    artifacts,
+    adapters: new Map([["fake", adapter]])
+  });
+
+  await runner.start(run);
+
+  expect(await artifacts.listByRun(run.id)).toHaveLength(1);
+  expect(events.items.at(-1)?.type).toBe("artifact.created");
+});
+```
+Add/import a `MemoryArtifactStore` implementing `ArtifactStore` with create/get/update/listByRun.
+Make `EventfulAdapter` return at least one artifact from `artifacts(...)` if it does not already.
+3. Run `pnpm --filter @switchyard/core test` after the failing test if practical, then implement.
+4. Update `RuntimeRunnerDependencies` to include:
+```ts
+artifacts?: ArtifactStore;
+eventBus?: EventBus;
+```
+Import the needed types/classes.
+5. Publish appended runtime events to the optional event bus. At minimum, publish adapter stream events and artifact.created events. Prefer a small helper if it keeps sequencing clear. If `run.started`/`run.cancelled` events are appended in this service, publish those as well so every event appended by RuntimeRunnerService reaches the bus.
+6. After adapter events complete, collect adapter artifacts:
+```ts
+if (this.deps.artifacts) {
+  const adapterArtifacts = await adapter.artifacts(this.adapterSession(session));
+  for (const artifact of adapterArtifacts) {
+    const storedArtifact = await this.deps.artifacts.create({
+      ...artifact,
+      id: artifact.id.startsWith("artifact_") ? artifact.id : `artifact_${crypto.randomUUID()}`,
+      runId: started.id,
+      provider: artifact.provider ?? started.provider,
+      model: artifact.model ?? started.model,
+      createdAt: artifact.createdAt ?? new Date().toISOString()
+    });
+    const event = await this.deps.events.append(this.eventForRun(
+      latest,
+      "artifact.created",
+      sequence++,
+      { artifactId: storedArtifact.id, path: storedArtifact.path, type: storedArtifact.type }
+    ));
+    await this.deps.eventBus?.publish(event);
+  }
+}
+```
+Adapt to exact project types and exactOptionalPropertyTypes. Be careful that `latest` should represent the latest run state at artifact event time.
+7. Add `packages/core/src/services/run-launcher-service.ts`:
+```ts
+import type { Run } from "@switchyard/contracts";
+import type { RunService } from "./run-service.js";
+
+export class RunLauncherService {
+  constructor(private readonly runService: RunService) {}
+
+  launch(run: Run): void {
+    queueMicrotask(() => {
+      void this.runService.startRun(run.id);
+    });
+  }
+}
+```
+Export it from `packages/core/src/index.ts`.
+8. Run verification: `pnpm --filter @switchyard/core test`. Also run core typecheck/build if available and cheap.
+9. Commit with message exactly: `feat: collect runtime artifacts in core runner`.
+
+Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Tests run and results
+- Commit SHA
+- Self-review notes, including anything intentionally adjusted from the plan.
+
+---
+
+Quality review returned CHANGES_REQUESTED for Task 5. Please fix the concrete issues below in the current checkout only, run verification, and commit a follow-up fix commit. Do not revert unrelated work.
+
+Findings to address:
+1. High: Event ordering can expose stale run/session state to eventBus consumers. In `RuntimeRunnerService.start`, terminal events are appended/published before terminal run/session records are updated. Adjust so persisted run/session state is updated before publishing terminal `run.completed` / `run.failed` events. Keep event sequence correct.
+2. High: Error path leaves inconsistent terminal state. Add handling around adapter startup/stream/artifact collection so adapter failures produce a persisted terminal failed run/session state and a `run.failed` event instead of bubbling without cleanup. Preserve useful error info in event data if project patterns allow.
+3. Medium: `RunLauncherService.launch` drops rejected `startRun` promises. Add a conservative error handling strategy that prevents unhandled rejections without changing the public API. If no logger exists, attach a catch and document why minimally.
+4. Medium: Cancellation can race with completion + artifact collection. Add a guard so if the run has been cancelled, ongoing stream completion/artifact collection cannot overwrite cancellation or publish artifacts after cancellation.
+5. Medium: Duplicate artifact IDs with `artifact_` prefix can collide. Make stored artifact IDs unique per persisted artifact, while still preserving existing behavior where sensible. A deterministic prefix plus random suffix is acceptable.
+6. Medium: EventBus failures can fail runtime execution after event persistence. Decide and implement a resilient behavior for optional event bus publishing so one subscriber failure does not corrupt the run path. Keep this scoped.
+
+Also strengthen tests enough to cover the important fixes: at least terminal event publish-after-state update, adapter failure terminalization, launcher rejection handling or no-unhandled rejection behavior if practical, cancellation/artifact guard if feasible, duplicate artifact id handling, and eventBus subscriber failure isolation.
+
+Run:
+- `pnpm --filter @switchyard/core test`
+- `pnpm --filter @switchyard/core typecheck`
+- `pnpm --filter @switchyard/core build`
+
+Commit follow-up with a clear message, e.g. `fix: harden runtime artifact event flow`.
+
+Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Tests run and results
+- Commit SHA
+- Notes on how each review finding was addressed
