@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   type ArtifactStore,
   RunLauncherService,
@@ -11,6 +11,61 @@ import { FakeRuntimeAdapter, InMemoryEventStore, InMemoryRunStore, InMemorySessi
 import { registerRunRoutes } from "../src/index.js";
 
 describe("run routes", () => {
+  it("falls back to direct async start when launcher is omitted", async () => {
+    const harness = createRouteHarness({ withLauncher: false });
+    const startRunSpy = vi.spyOn(harness.runService, "startRun");
+
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      payload: fakeRunPayload("No launcher run")
+    });
+
+    expect(createResponse.statusCode).toBe(202);
+    const runId = createResponse.json().run.id;
+    const seenRun = await harness.runs.get(runId);
+    expect(seenRun?.id).toBe(runId);
+
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const completed = await harness.runs.get(runId);
+    expect(completed?.status).toBe("completed");
+    expect(startRunSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("parses wait=1 for repeated query values and keeps non-1 async", async () => {
+    const harness = createRouteHarness();
+    const repeatedResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1&wait=0",
+      payload: fakeRunPayload("Repeat wait run")
+    });
+    const waitZeroResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: fakeRunPayload("Async wait run")
+    });
+
+    expect(repeatedResponse.statusCode).toBe(201);
+    expect(waitZeroResponse.statusCode).toBe(202);
+  });
+
+  it("returns empty artifacts for existing run when artifact store is not configured", async () => {
+    const harness = createRouteHarness();
+    const created = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Artifacts missing store run")
+    });
+    const runId = created.json().run.id;
+
+    const response = await harness.app.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ artifacts: [] });
+  });
+
   it("returns artifacts for a completed fake run", async () => {
     const harness = createRouteHarness({ withArtifacts: true });
     const created = await harness.app.inject({
@@ -101,6 +156,7 @@ describe("run routes", () => {
 
 interface RouteHarness {
   app: FastifyInstance;
+  runService: RunService;
   runs: InMemoryRunStore;
   events: InMemoryEventStore;
   sessions: InMemorySessionStore;
@@ -109,6 +165,7 @@ interface RouteHarness {
 
 interface RouteHarnessOptions {
   withArtifacts?: boolean;
+  withLauncher?: boolean;
 }
 
 function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
@@ -125,17 +182,18 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
     ...(artifacts ? { artifacts } : {})
   });
   const runService = new RunService({ runs, events, runner });
-  const launcher = new RunLauncherService(runService);
+  const withLauncher = options.withLauncher !== false;
+  const launcher = withLauncher ? new RunLauncherService(runService) : undefined;
   const app = Fastify();
   registerRunRoutes(app, {
     runService,
     runs,
     events,
     ...(artifacts ? { artifacts } : {}),
-    launcher
+    ...(launcher ? { launcher } : {})
   });
 
-  return { app, runs, events, sessions, ...(artifacts ? { artifacts } : {}) };
+  return { app, runService, runs, events, sessions, ...(artifacts ? { artifacts } : {}) };
 }
 
 function fakeRunPayload(task: string): {

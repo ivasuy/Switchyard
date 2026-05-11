@@ -14,7 +14,7 @@ export interface RunRouteDependencies {
 
 export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependencies): void {
   app.post("/runs", async (request, reply) => {
-    const wait = request.query && typeof request.query === "object" && (request.query as Record<string, unknown>)["wait"] === "1";
+    const wait = shouldWaitForCompletion(request.query);
     const body = createRunBody(request.body);
     const run = await deps.runService.createRun({
       runtime: body.runtime,
@@ -32,7 +32,13 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       const completed = await deps.runService.startRun(run.id);
       return reply.code(201).send({ run: completed });
     }
-    deps.launcher?.launch(run);
+    if (deps.launcher) {
+      deps.launcher.launch(run);
+    } else {
+      queueMicrotask(() => {
+        void deps.runService.startRun(run.id).catch(() => {});
+      });
+    }
     return reply.code(202).send({ run });
   });
 
@@ -147,4 +153,18 @@ function inputBody(value: unknown): Record<string, unknown> {
     throw new Error("Input body must be an object");
   }
   return value;
+}
+
+function shouldWaitForCompletion(query: unknown): boolean {
+  if (!query || typeof query !== "object") {
+    return false;
+  }
+  const wait = (query as Record<string, unknown>)["wait"];
+  if (typeof wait === "string") {
+    return wait === "1";
+  }
+  if (Array.isArray(wait)) {
+    return wait.some((value) => value === "1");
+  }
+  return false;
 }
