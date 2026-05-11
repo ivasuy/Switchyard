@@ -5,10 +5,12 @@ import {
   artifactSchema,
   budgetSchema,
   contextPacketSchema,
+  contextSectionSchema,
   debateSchema,
   errorSchema,
   eventSchema,
   evidenceItemSchema,
+  modelSchema,
   memoryItemSchema,
   messageSchema,
   nodeSchema,
@@ -22,6 +24,7 @@ import {
 } from "../src/index.js";
 
 function expectRequiredFields(schema: z.ZodType, valid: Record<string, unknown>, requiredKeys: string[]): void {
+  expect(() => schema.parse(valid)).not.toThrow("fixture should parse");
   for (const key of requiredKeys) {
     const value = { ...valid };
     delete value[key];
@@ -398,6 +401,17 @@ describe("Switchyard contracts", () => {
     );
 
     expectRequiredFields(
+      modelSchema,
+      {
+        id: "model_123",
+        providerId: "provider_123",
+        modelName: "opencode/big-pickle",
+        status: "available"
+      },
+      ["id", "providerId", "modelName", "status"]
+    );
+
+    expectRequiredFields(
       placementDecisionSchema,
       {
         decision: "local",
@@ -452,6 +466,15 @@ describe("Switchyard contracts", () => {
         createdAt: "2026-05-11T00:00:00.000Z"
       },
       ["id", "target", "sections", "createdAt"]
+    );
+
+    expectRequiredFields(
+      contextSectionSchema,
+      {
+        name: "research-notes",
+        content: "Context captured from repo walk."
+      },
+      ["name", "content"]
     );
 
     expectRequiredFields(
