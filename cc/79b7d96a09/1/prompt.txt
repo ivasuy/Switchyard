@@ -1,0 +1,17 @@
+Quality/doc review returned CHANGES_REQUESTED for Task 14. Please fix in current checkout only, run verification, and commit a follow-up.
+
+Findings to address:
+1. README local-run example incorrectly implies `POST /runs` completes synchronously by default. Update the example to either use `POST /runs?wait=1` when showing completed response, or show the actual async `202/queued` behavior and separate polling/event/artifact checks. Prefer using `?wait=1` in the local smoke example if it is meant to be deterministic.
+2. README advertises generic artifact routes (`GET /artifacts/:id` or `/artifacts`) that are not implemented. Adjust docs so implemented local route is clear: `GET /runs/:id/artifacts`. If future endpoints remain in architecture overview, label them as future/not implemented in local MVP.
+3. CHANGELOG says daemon is wired to in-memory stores; update that line to reflect current default CLI/local daemon behavior: SQLite-backed stores and filesystem artifact content when using daemon config/default config. Avoid contradicting existing new bullets.
+4. README verification block should include `pnpm lint` alongside `pnpm test`, `pnpm typecheck`, and `pnpm build`.
+
+Run:
+- `pnpm test`
+- `pnpm typecheck`
+- `pnpm build`
+- `pnpm lint`
+
+Commit follow-up with a clear message, e.g. `docs: align local mvp endpoints with implementation`.
+
+Final response: status, files changed, verification, commit SHA, notes.
