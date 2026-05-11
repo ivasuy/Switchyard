@@ -46,3 +46,19 @@ CHANGED FILES: list paths
 TESTS: commands run and pass/fail, including the initial red test failure
 COMMIT: commit sha if committed
 NOTES: concise self-review and concerns
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
