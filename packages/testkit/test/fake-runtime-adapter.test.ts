@@ -146,5 +146,8 @@ describe("testkit fake runtime adapter", () => {
     await expect(placements.create({ ...placementRun456, id: "placement_no_run", runId: undefined })).rejects.toThrow(
       "placement records require a runId"
     );
+    await expect(placements.update({ ...placementRun456, id: "placement_no_run_update", runId: undefined })).rejects.toThrow(
+      "placement records require a runId"
+    );
   });
 });
