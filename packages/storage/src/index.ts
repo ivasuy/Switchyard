@@ -3,4 +3,8 @@ export * from "./sqlite/run-store.js";
 export * from "./sqlite/event-store.js";
 export * from "./sqlite/session-store.js";
 export * from "./sqlite/artifact-store.js";
+export * from "./sqlite/message-store.js";
+export * from "./sqlite/approval-store.js";
+export * from "./sqlite/registry-store.js";
+export * from "./sqlite/placement-store.js";
 export * from "./filesystem-artifact-content-store.js";

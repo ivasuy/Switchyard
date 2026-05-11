@@ -68,6 +68,66 @@ CREATE TABLE IF NOT EXISTS artifacts (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY NOT NULL,
+  from_run_id TEXT,
+  to_run_id TEXT,
+  channel TEXT,
+  content TEXT NOT NULL,
+  attachments_json TEXT NOT NULL,
+  delivery_status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  delivered_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+  id TEXT PRIMARY KEY NOT NULL,
+  run_id TEXT,
+  approval_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS providers (
+  id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  auth_mode TEXT NOT NULL,
+  status TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runtimes (
+  id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  adapter_type TEXT NOT NULL,
+  status TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS models (
+  id TEXT PRIMARY KEY NOT NULL,
+  provider_id TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  supports_tools INTEGER NOT NULL,
+  supports_streaming INTEGER NOT NULL,
+  supports_browser INTEGER NOT NULL,
+  status TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS placement_decisions (
+  id TEXT PRIMARY KEY NOT NULL,
+  run_id TEXT,
+  decision TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  target_node TEXT,
+  required_capabilities_json TEXT NOT NULL,
+  denied_capabilities_json TEXT NOT NULL,
+  approval_required INTEGER NOT NULL,
+  policy_trace_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS run_events_run_sequence_idx
   ON run_events (run_id, sequence);
 
@@ -76,6 +136,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_sessions_run_id_idx
 
 CREATE INDEX IF NOT EXISTS artifacts_run_id_idx
   ON artifacts (run_id);
+
+CREATE INDEX IF NOT EXISTS placement_decisions_run_id_idx
+  ON placement_decisions (run_id);
 `;
 
 function migrate(sqlite: Database.Database): void {

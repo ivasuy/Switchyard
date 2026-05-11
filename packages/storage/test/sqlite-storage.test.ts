@@ -2,11 +2,26 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { Artifact, RuntimeSession, Run, SwitchyardEvent } from "@switchyard/contracts";
+import type {
+  Artifact,
+  Approval,
+  Model,
+  Provider,
+  RuntimeSession,
+  RuntimeTarget,
+  RoutedMessage,
+  Run,
+  SwitchyardEvent
+} from "@switchyard/contracts";
+import type { PlacementDecisionRecord } from "@switchyard/core";
 
 import {
+  SqliteApprovalStore,
   SqliteArtifactStore,
   SqliteEventStore,
+  SqliteMessageStore,
+  SqlitePlacementStore,
+  SqliteRegistryStore,
   SqliteRunStore,
   SqliteSessionStore,
   openSqliteStorage
@@ -63,7 +78,7 @@ function buildArtifact(overrides: Partial<Artifact>): Artifact {
 }
 
 describe("sqlite persistence stores", () => {
-  it("persists runs, events, sessions, and artifacts across reopen", async () => {
+  it("persists all sqlite stores across reopen", async () => {
     const run: Run = buildRun({ id: "run_storage_reopen" });
     const event: SwitchyardEvent = {
       id: "event_storage",
@@ -81,6 +96,53 @@ describe("sqlite persistence stores", () => {
       id: "artifact_storage_reopen",
       runId: run.id
     });
+    const message: RoutedMessage = {
+      id: "message_storage",
+      content: "hello",
+      attachments: [{ role: "operator", body: "hello" }],
+      deliveryStatus: "queued",
+      createdAt: startedAt
+    };
+    const approval: Approval = {
+      id: "approval_storage",
+      approvalType: "before_commit",
+      status: "pending",
+      payload: { command: "git commit" },
+      createdAt: startedAt
+    };
+    const provider: Provider = {
+      id: "provider_storage",
+      name: "Test",
+      authMode: "local",
+      status: "available"
+    };
+    const runtime: RuntimeTarget = {
+      id: "runtime_storage",
+      name: "Fake",
+      adapterType: "native",
+      status: "degraded"
+    };
+    const model: Model = {
+      id: "model_storage",
+      providerId: provider.id,
+      modelName: "test-model",
+      supportsTools: true,
+      supportsStreaming: false,
+      supportsBrowser: true,
+      status: "available"
+    };
+    const placementDecision: PlacementDecisionRecord = {
+      id: "placement_storage",
+      runId: run.id,
+      decision: "local",
+      reason: "policy default",
+      mode: "local",
+      requiredCapabilities: ["storage", "routing"],
+      deniedCapabilities: ["external"],
+      approvalRequired: false,
+      policyTrace: ["bootstrap", "allowed"],
+      createdAt: startedAt
+    };
     const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-storage-"));
     const dbPath = join(tempDir, "storage.sqlite");
     let firstConnection: ReturnType<typeof openSqliteStorage> | undefined;
@@ -92,11 +154,21 @@ describe("sqlite persistence stores", () => {
       const firstEvents = new SqliteEventStore(firstConnection.db);
       const firstSessions = new SqliteSessionStore(firstConnection.db);
       const firstArtifacts = new SqliteArtifactStore(firstConnection.db);
+      const firstMessages = new SqliteMessageStore(firstConnection.db);
+      const firstApprovals = new SqliteApprovalStore(firstConnection.db);
+      const firstRegistry = new SqliteRegistryStore(firstConnection.db);
+      const firstPlacement = new SqlitePlacementStore(firstConnection.db);
 
       await firstRuns.create(run);
       await firstEvents.append(event);
       await firstSessions.create(session);
       await firstArtifacts.create(artifact);
+      await firstMessages.create(message);
+      await firstApprovals.create(approval);
+      await firstRegistry.createProvider(provider);
+      await firstRegistry.createRuntime(runtime);
+      await firstRegistry.createModel(model);
+      await firstPlacement.create(placementDecision);
 
       firstConnection.sqlite.close();
       firstConnection = undefined;
@@ -106,12 +178,60 @@ describe("sqlite persistence stores", () => {
       const secondEvents = new SqliteEventStore(secondConnection.db);
       const secondSessions = new SqliteSessionStore(secondConnection.db);
       const secondArtifacts = new SqliteArtifactStore(secondConnection.db);
+      const secondMessages = new SqliteMessageStore(secondConnection.db);
+      const secondApprovals = new SqliteApprovalStore(secondConnection.db);
+      const secondRegistry = new SqliteRegistryStore(secondConnection.db);
+      const secondPlacement = new SqlitePlacementStore(secondConnection.db);
 
       expect(await secondRuns.get(run.id)).toEqual(run);
       expect(await secondEvents.listByRun(run.id)).toEqual([event]);
       expect(await secondSessions.getByRunId(run.id)).toEqual(session);
       expect(await secondArtifacts.get(artifact.id)).toEqual(artifact);
       expect(await secondArtifacts.listByRun(run.id)).toEqual([artifact]);
+      expect(await secondMessages.get("message_storage")).toMatchObject({ content: "hello" });
+      expect(await secondApprovals.get("approval_storage")).toMatchObject({ payload: { command: "git commit" } });
+      expect(await secondRegistry.getProvider("provider_storage")).toMatchObject({ name: "Test" });
+      expect(await secondRegistry.getRuntime("runtime_storage")).toMatchObject({ name: "Fake" });
+      expect(await secondRegistry.getModel("model_storage")).toMatchObject({ modelName: "test-model" });
+      expect(await secondPlacement.listByRun("run_storage_reopen")).toHaveLength(1);
+
+      const persistedMessage = await secondMessages.get("message_storage");
+      expect(persistedMessage).toMatchObject({
+        id: "message_storage",
+        attachments: [{ role: "operator", body: "hello" }]
+      });
+      expect(persistedMessage && "fromRunId" in persistedMessage).toBe(false);
+      expect(persistedMessage && "toRunId" in persistedMessage).toBe(false);
+      expect(persistedMessage && "channel" in persistedMessage).toBe(false);
+      expect(persistedMessage && "deliveredAt" in persistedMessage).toBe(false);
+
+      const persistedApproval = await secondApprovals.get("approval_storage");
+      expect(persistedApproval).toMatchObject({
+        approvalType: "before_commit",
+        status: "pending"
+      });
+      expect(persistedApproval && "runId" in persistedApproval).toBe(false);
+      expect(persistedApproval && "resolvedAt" in persistedApproval).toBe(false);
+
+      const persistedModel = await secondRegistry.getModel("model_storage");
+      expect(persistedModel).toMatchObject({
+        supportsTools: true,
+        supportsStreaming: false,
+        supportsBrowser: true
+      });
+
+      const runPlacements = await secondPlacement.listByRun("run_storage_reopen");
+      expect(runPlacements).toMatchObject([
+        {
+          id: "placement_storage",
+          requiredCapabilities: ["storage", "routing"],
+          deniedCapabilities: ["external"],
+          approvalRequired: false,
+          policyTrace: ["bootstrap", "allowed"]
+        }
+      ]);
+      expect(runPlacements[0] && "targetNode" in runPlacements[0]).toBe(false);
+      expect(await secondPlacement.listByRun("run_storage_missing")).toHaveLength(0);
     } finally {
       firstConnection?.sqlite.close();
       secondConnection?.sqlite.close();
