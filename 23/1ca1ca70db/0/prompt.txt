@@ -1,0 +1,13 @@
+can you the read the current spec and implementation plan and changelog and see if the current implementation is correct or there any gaps
+
+---
+
+$using-superpowers start to work one by one first we create a spec plan of what is missing then we move to the next part which is phase 2 by writing the implementation plan for it but first we cover the gaps of phase 0 and 1
+
+---
+
+do a coverage audit first that you properly coverd all gaps
+
+---
+
+yes revies the gap and partial implementations
