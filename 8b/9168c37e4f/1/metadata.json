@@ -1,0 +1,44 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "8b9168c37e4f",
+  "session_id": "019e1597-fe1b-7a10-a2da-15386a826673",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-11T05:54:19.313955Z",
+  "branch": "publish-main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "CHANGELOG.md",
+    "docs/superpowers/plans/2026-05-11-switchyard-master-implementation-plan.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.3-codex-spark",
+  "turn_id": "5a0179043d02",
+  "token_usage": {
+    "input_tokens": 53962,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 855936,
+    "output_tokens": 5827,
+    "api_call_count": 30
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-11T05:54:19.307487Z",
+    "agent_lines": 925,
+    "agent_removed": 0,
+    "human_added": 7,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 932,
+    "total_lines_changed": 933,
+    "agent_percentage": 99.14255091103966,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
