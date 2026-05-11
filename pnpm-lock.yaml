@@ -36,6 +36,9 @@ importers:
       '@switchyard/protocol-rest':
         specifier: workspace:*
         version: link:../../packages/protocol-rest
+      '@switchyard/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       '@switchyard/testkit':
         specifier: workspace:*
         version: link:../../packages/testkit
