@@ -61,6 +61,9 @@ describe("daemon app", () => {
       const artifacts = await reopened.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
 
       expect(getRun.json().run.status).toBe("completed");
+      const events = await reopened.inject({ method: "GET", url: `/runs/${runId}/events` });
+      expect(events.body).toContain("event: run.queued");
+      expect(events.body).toContain("event: run.completed");
       expect(artifacts.json().artifacts[0]).toMatchObject({ runId, type: "transcript" });
     } finally {
       if (!closed) {

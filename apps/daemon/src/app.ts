@@ -29,9 +29,11 @@ interface DaemonStores {
   artifacts: ArtifactStore;
 }
 
+type DaemonStoreResult = DaemonStores & { close?: () => void };
+
 export function createDaemonApp(config?: DaemonConfig) {
   const app = Fastify({ logger: false });
-  const stores = config ? createStorageStores(config) : createInMemoryStores();
+  const stores: DaemonStoreResult = config ? createStorageStores(config) : createInMemoryStores();
   const adapters = new Map([["fake", new FakeRuntimeAdapter()]]);
   const eventBus = new EventBus();
   const runner = new RuntimeRunnerService({
@@ -45,6 +47,12 @@ export function createDaemonApp(config?: DaemonConfig) {
     runner
   });
   const launcher = new RunLauncherService(runService);
+
+  if (stores.close) {
+    app.addHook("onClose", async () => {
+      stores.close?.();
+    });
+  }
 
   app.get("/health", async () => ({ ok: true }));
   registerRunRoutes(app, {
@@ -66,19 +74,22 @@ function createInMemoryStores(): DaemonStores {
   };
 }
 
-function createStorageStores(config: DaemonConfig): DaemonStores {
+function createStorageStores(config: DaemonConfig): DaemonStoreResult {
   mkdirSync(config.dataDir, { recursive: true });
   mkdirSync(config.artifactDir, { recursive: true });
 
   const storage = openSqliteStorage(config.sqlitePath);
-  // Keep artifact content store initialized for persistence pipeline compatibility.
-  void new FilesystemArtifactContentStore(config.artifactDir);
+  // Initialize filesystem artifact content root to ensure directory exists before artifacts are persisted.
+  new FilesystemArtifactContentStore(config.artifactDir);
 
   return {
     runs: new SqliteRunStore(storage.db),
     events: new SqliteEventStore(storage.db),
     sessions: new SqliteSessionStore(storage.db),
-    artifacts: new SqliteArtifactStore(storage.db)
+    artifacts: new SqliteArtifactStore(storage.db),
+    close: () => {
+      storage.sqlite.close();
+    }
   };
 }
 
