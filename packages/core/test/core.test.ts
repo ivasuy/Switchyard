@@ -204,6 +204,36 @@ describe("core service shells", () => {
     expect(events.items.some((event) => event.type === "artifact.created")).toBe(true);
   });
 
+  it("emits artifact.created before run.completed with unique increasing sequence values", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const adapter = new ContentfulArtifactAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    await runner.start(run);
+
+    const orderedTypes = events.items.map((event) => event.type);
+    const artifactIndex = orderedTypes.indexOf("artifact.created");
+    const completedIndex = orderedTypes.lastIndexOf("run.completed");
+    const sequences = events.items.map((event) => event.sequence);
+
+    expect(artifactIndex).toBeGreaterThan(-1);
+    expect(completedIndex).toBeGreaterThan(-1);
+    expect(artifactIndex).toBeLessThan(completedIndex);
+    expect(new Set(sequences).size).toBe(sequences.length);
+    const sorted = [...sequences].sort((a, b) => a - b);
+    expect(sequences).toEqual(sorted);
+  });
+
   it("stores adapter artifact content when artifact content store is available", async () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();

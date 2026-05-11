@@ -82,7 +82,7 @@ export class RuntimeRunnerService {
         if (normalized.type === "run.completed" || normalized.type === "run.failed") {
           const terminalSequence = sequence - 1;
           if (this.deps.artifacts && session) {
-            const artifactSequence = { value: terminalSequence };
+            const artifactSequence = { value: sequence };
             try {
               await this.persistArtifacts(
                 this.deps.adapters.get(started.runtime),
