@@ -116,4 +116,98 @@ describe("protocol-sse", () => {
 
     expect(body).toBe(formatSseEvent(replay));
   });
+
+  it("truncates replay to stopAfter when replay already exceeds limit", async () => {
+    const eventBus = new EventBus();
+    const first: SwitchyardEvent = {
+      id: "event_queued",
+      runId: "run_123",
+      type: "run.queued",
+      sequence: 0,
+      payload: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    };
+    const second: SwitchyardEvent = {
+      id: "event_started",
+      runId: "run_123",
+      type: "run.started",
+      sequence: 1,
+      payload: {},
+      createdAt: "2026-05-11T00:00:01.000Z"
+    };
+
+    const body = await collectReplayAndLiveEvents({
+      runId: "run_123",
+      replay: [first, second],
+      eventBus,
+      stopAfter: 1
+    });
+
+    expect(body).toContain("event: run.queued");
+    expect(body).not.toContain("event: run.started");
+  });
+
+  it("falls back to replay length for non-positive stopAfter", async () => {
+    const eventBus = new EventBus();
+    const first: SwitchyardEvent = {
+      id: "event_queued",
+      runId: "run_123",
+      type: "run.queued",
+      sequence: 0,
+      payload: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    };
+    const second: SwitchyardEvent = {
+      id: "event_started",
+      runId: "run_123",
+      type: "run.started",
+      sequence: 1,
+      payload: {},
+      createdAt: "2026-05-11T00:00:01.000Z"
+    };
+
+    const body = await collectReplayAndLiveEvents({
+      runId: "run_123",
+      replay: [first, second],
+      eventBus,
+      stopAfter: 0
+    });
+
+    expect(body).toContain(formatSseEvent(first));
+    expect(body).toContain(formatSseEvent(second));
+  });
+
+  it("resolves via timeout when no matching live event arrives", async () => {
+    const eventBus = new EventBus();
+    const replay: SwitchyardEvent = {
+      id: "event_queued",
+      runId: "run_123",
+      type: "run.queued",
+      sequence: 0,
+      payload: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    };
+
+    const bodyPromise = collectReplayAndLiveEvents({
+      runId: "run_123",
+      replay: [replay],
+      eventBus,
+      stopAfter: 2,
+      timeoutMs: 20
+    });
+
+    setTimeout(() => {
+      void eventBus.publish({
+        id: "event_other",
+        runId: "run_999",
+        type: "runtime.output",
+        sequence: 1,
+        payload: { text: "ignored" },
+        createdAt: "2026-05-11T00:00:01.000Z"
+      });
+    }, 0);
+
+    const body = await bodyPromise;
+    expect(body).toBe(formatSseEvent(replay));
+  });
 });

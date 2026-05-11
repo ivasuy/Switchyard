@@ -63,8 +63,11 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     const events = await deps.events.listByRun(id);
     const query = request.query as Record<string, unknown>;
     const live = query["live"] === "1";
-    const rawStopAfter = typeof query["stopAfter"] === "string" ? Number(query["stopAfter"]) : events.length;
-    const stopAfter = Number.isFinite(rawStopAfter) && rawStopAfter >= 0 ? rawStopAfter : events.length;
+    const rawStopAfter = typeof query["stopAfter"] === "string"
+      ? Number(query["stopAfter"])
+      : undefined;
+    const stopAfter = normalizeStopAfter(rawStopAfter, events.length);
+    const replayChunk = events.slice(0, stopAfter).map(formatSseEvent).join("");
     const body = live && deps.eventBus
       ? await collectReplayAndLiveEvents({
           runId: id,
@@ -72,7 +75,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
           eventBus: deps.eventBus,
           stopAfter
         })
-      : events.map(formatSseEvent).join("");
+      : replayChunk;
 
     return reply
       .header("content-type", "text/event-stream; charset=utf-8")
@@ -157,6 +160,13 @@ function requiredString(body: Record<string, unknown>, key: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeStopAfter(stopAfter: number | undefined, replayLength: number): number {
+  if (stopAfter === undefined || !Number.isFinite(stopAfter) || stopAfter <= 0) {
+    return replayLength;
+  }
+  return Math.floor(stopAfter);
 }
 
 function inputBody(value: unknown): Record<string, unknown> {

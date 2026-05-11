@@ -161,6 +161,47 @@ describe("run routes", () => {
     expect(streamResponse.body).toContain("event: run.completed");
   });
 
+  it("truncates replay body when stopAfter is less than replay length", async () => {
+    const harness = createRouteHarness({ withEventBus: true });
+
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Replay truncation run")
+    });
+    const runId = createResponse.json().run.id;
+    const allEvents = await harness.events.listByRun(runId);
+    const stopAfter = Math.max(1, allEvents.length - 1);
+
+    const streamResponse = await harness.app.inject({
+      method: "GET",
+      url: `/runs/${runId}/events?stopAfter=${stopAfter}`
+    });
+
+    expect(streamResponse.statusCode).toBe(200);
+    expect(streamResponse.body.match(/^event: .*$/gm)?.length).toBe(stopAfter);
+  });
+
+  it("keeps live request bounded when eventBus is absent", async () => {
+    const harness = createRouteHarness();
+
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Live request without bus run")
+    });
+    const runId = createResponse.json().run.id;
+    const allEvents = await harness.events.listByRun(runId);
+
+    const streamResponse = await harness.app.inject({
+      method: "GET",
+      url: `/runs/${runId}/events?live=1&stopAfter=-1`
+    });
+
+    expect(streamResponse.statusCode).toBe(200);
+    expect(streamResponse.body.match(/^event: .*$/gm)?.length).toBe(allEvents.length);
+  });
+
   it("treats invalid stopAfter as replay-length fallback", async () => {
     const harness = createRouteHarness({ withEventBus: true });
 
