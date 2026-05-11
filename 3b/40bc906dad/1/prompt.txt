@@ -1,0 +1,123 @@
+You are implementing Task 11 in the current checkout only: /Users/vasuyadav/Downloads/Projects/switchyard. Do NOT create a separate worktree. You are not alone in this codebase; do not revert edits made by others. Current head includes Task 10 through `8faa36c`.
+
+User requested subagent-driven implementation. Own Task 11 end-to-end: add tests first where practical, implement, run verification, self-review, and commit before final response.
+
+Task 11: Add Protocol SSE Package With Live Streams
+
+Files:
+- Create: `packages/protocol-sse/package.json`
+- Create: `packages/protocol-sse/tsconfig.json`
+- Create: `packages/protocol-sse/src/index.ts`
+- Create: `packages/protocol-sse/src/sse-stream.ts`
+- Create: `packages/protocol-sse/test/sse-stream.test.ts`
+- Modify: `packages/protocol-rest/package.json`
+- Modify: `packages/protocol-rest/src/run-routes.ts`
+- Modify: `packages/protocol-rest/test/run-routes.test.ts`
+
+Required behavior/spec:
+1. Add new workspace package `@switchyard/protocol-sse` with package.json:
+```json
+{
+  "name": "@switchyard/protocol-sse",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@switchyard/contracts": "workspace:*",
+    "@switchyard/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5"
+  }
+}
+```
+Add tsconfig:
+```json
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
+```
+2. Implement `packages/protocol-sse/src/sse-stream.ts`:
+```ts
+import type { SwitchyardEvent } from "@switchyard/contracts";
+import type { EventBus } from "@switchyard/core";
+
+export function formatSseEvent(event: SwitchyardEvent): string {
+  return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+export async function collectReplayAndLiveEvents(input: {
+  runId: string;
+  replay: SwitchyardEvent[];
+  eventBus: EventBus;
+  stopAfter: number;
+}): Promise<string> {
+  const chunks = input.replay.map(formatSseEvent);
+  if (chunks.length >= input.stopAfter) {
+    return chunks.join("");
+  }
+  return new Promise((resolve) => {
+    const unsubscribe = input.eventBus.subscribe((event) => {
+      if (event.runId !== input.runId) return;
+      chunks.push(formatSseEvent(event));
+      if (chunks.length >= input.stopAfter) {
+        unsubscribe();
+        resolve(chunks.join(""));
+      }
+    });
+  });
+}
+```
+Export from `packages/protocol-sse/src/index.ts`:
+```ts
+export * from "./sse-stream.js";
+```
+3. Add tests in `packages/protocol-sse/test/sse-stream.test.ts`:
+- `formatSseEvent` contains `event: run.queued` for a run.queued event.
+- `collectReplayAndLiveEvents` combines replay and live events; with replay run.queued and live run.completed for same run, stopAfter 2, final body contains `event: run.completed`.
+Add extra safety tests if useful for filtering other run events or immediate replay resolution.
+4. Wire REST to protocol-sse:
+- Add `@switchyard/protocol-sse` to `packages/protocol-rest/package.json` dependencies.
+- Replace local SSE formatter import/implementation usage in `packages/protocol-rest/src/run-routes.ts` with:
+```ts
+import { collectReplayAndLiveEvents, formatSseEvent } from "@switchyard/protocol-sse";
+```
+- Existing local `packages/protocol-rest/src/sse.ts` may remain if no longer used, but prefer removing dead exports only if safe. Do not break public exports unexpectedly.
+- In `GET /runs/:id/events`, support live mode:
+```ts
+const query = request.query as Record<string, unknown>;
+const live = query["live"] === "1";
+const stopAfter = typeof query["stopAfter"] === "string" ? Number(query["stopAfter"]) : events.length;
+const body = live && deps.eventBus
+  ? await collectReplayAndLiveEvents({ runId: id, replay: events, eventBus: deps.eventBus, stopAfter })
+  : events.map(formatSseEvent).join("");
+```
+Adapt to current code and tests. Be careful: if stopAfter is invalid/NaN, do not hang a request indefinitely in tests; use conservative parsing if needed while preserving spec.
+5. Update `packages/protocol-rest/test/run-routes.test.ts` with coverage for live behavior. It should use `eventBus` from harness and call `/runs/:id/events?live=1&stopAfter=N` in a testable way. Existing replay tests should still pass and assert SSE body includes `event: run.queued` and `event: run.completed`.
+6. Run verification:
+- `pnpm --filter @switchyard/protocol-sse test`
+- `pnpm --filter @switchyard/protocol-rest test`
+- Also run protocol-sse/protocol-rest typecheck/build if available and cheap.
+- If adding a workspace package requires lockfile update, run `pnpm install --offline` if possible and include `pnpm-lock.yaml` changes.
+7. Commit exactly:
+`feat: add replay and live sse protocol package`
+
+Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Tests run and results
+- Commit SHA
+- Self-review notes, including any intentional deviations from plan.
