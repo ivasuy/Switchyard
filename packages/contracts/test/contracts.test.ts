@@ -24,7 +24,7 @@ import {
 } from "../src/index.js";
 
 function expectRequiredFields(schema: z.ZodType, valid: Record<string, unknown>, requiredKeys: string[]): void {
-  expect(() => schema.parse(valid)).not.toThrow("fixture should parse");
+  expect(() => schema.parse(valid), "fixture should parse").not.toThrow();
   for (const key of requiredKeys) {
     const value = { ...valid };
     delete value[key];
