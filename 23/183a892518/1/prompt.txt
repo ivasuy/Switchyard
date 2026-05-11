@@ -1,38 +1,3 @@
-Quality review returned CHANGES_REQUESTED for Task 13. Please fix in current checkout only, run verification, and commit a follow-up.
-
-Findings to address:
-1. High: artifact content write failures after `run.completed` can leave a falsely completed run because `failRun` returns early when run is already terminal. Choose a coherent behavior and test it. Preferred: do artifact collection/content persistence before final terminalization when adapter emits terminal event, so failures can mark the run failed before `run.completed` is committed/published. If this refactor is too large, adjust fail path so artifact persistence failures after completion produce a failed state/event, but avoid impossible event order if possible.
-2. High: `metadata.contentStored` must mean content was actually persisted. Set it true only if `artifactContent.writeText` succeeded. If content exists but no content store is configured, strip raw `content` from metadata and set `contentStored: false` (or omit it only if tests clearly encode the intended behavior; prefer explicit false).
-3. Medium: raw artifact paths should not bypass safety when no content store is configured. Add validation/normalization for stored artifact paths even when no artifactContent is available. Reuse or duplicate a small relative path guard consistent with `FilesystemArtifactContentStore`: reject absolute paths, traversal segments, and Windows drive/UNC paths. Add tests.
-4. Low: harden daemon smoke test assertions: assert POST status/success before dereferencing runId, assert artifact route status and presence before reading file.
-
-Tests to add/update:
-- core: contentful artifact with no artifactContent results in `contentStored: false`, raw `content` stripped, safe path retained.
-- core: unsafe artifact path is rejected/causes failed run (depending chosen behavior) when no artifactContent is configured.
-- core: artifactContent.writeText throwing after adapter terminal event marks run failed / emits failed event according to chosen behavior.
-- daemon: add direct response status assertions around POST/artifacts before file read.
-
-Run:
-- `pnpm --filter @switchyard/core test`
-- `pnpm --filter @switchyard/storage test`
-- `pnpm --filter @switchyard/daemon test`
-- `pnpm --filter @switchyard/core typecheck`
-- `pnpm --filter @switchyard/storage typecheck`
-- `pnpm --filter @switchyard/daemon typecheck`
-- `pnpm --filter @switchyard/core build`
-- `pnpm --filter @switchyard/storage build`
-- `pnpm --filter @switchyard/daemon build`
-
-Commit follow-up with a clear message, e.g. `fix: harden artifact content persistence`.
-
-Final response: status, files changed, tests, commit SHA, notes.
-
----
-
-Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
-
----
-
 Quality re-review still has CHANGES_REQUESTED for Task 13. Please fix in current checkout only, run verification, and commit a follow-up.
 
 Findings to address:
