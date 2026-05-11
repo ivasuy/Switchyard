@@ -1,17 +1,3 @@
-Task 1 needs a narrow follow-up before review.
-
-Findings:
-1. `packages/core/test/runtime-adapter-contract.test.ts` imports `@switchyard/testkit`, but `packages/core/package.json` does not declare `@switchyard/testkit` as a devDependency. Add `"@switchyard/testkit": "workspace:*"` under devDependencies. If pnpm-lock changes are needed, include them.
-2. The task text specified calls to send/cancel/tools/artifacts with `{ ...session, runId: "run_contract" }`. The test currently uses `session` for send/cancel/tools/artifacts. Update those calls to match the task.
-
-Then run:
-- `pnpm --filter @switchyard/core test`
-- `pnpm --filter @switchyard/core typecheck`
-
-Commit the fix with a concise commit message. Do not touch unrelated files or revert anything. Final response with STATUS, changed files, tests, commit sha.
-
----
-
 Task 1 quality review found a medium issue that needs fixing before we move on.
 
 Fix only this issue:
