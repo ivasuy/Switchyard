@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { type FastifyInstance } from "fastify";
 import { createDaemonApp } from "../src/app.js";
 import type { DaemonConfig } from "../src/config.js";
 
 describe("daemon app", () => {
   it("creates a fake run through the local REST API", async () => {
-    const app = createDaemonApp();
+    const app = await createDaemonApp();
     try {
       const response = await app.inject({
         method: "POST",
@@ -43,8 +44,8 @@ describe("daemon app", () => {
       artifactDir: join(dir, "artifacts")
     };
 
-    const app = createDaemonApp(config);
-    let reopened: ReturnType<typeof createDaemonApp> | undefined;
+    const app = await createDaemonApp(config);
+    let reopened: FastifyInstance | undefined;
     try {
       const response = await app.inject({
         method: "POST",
@@ -61,7 +62,7 @@ describe("daemon app", () => {
       const runId = response.json().run.id;
 
       await app.close();
-      reopened = createDaemonApp(config);
+      reopened = await createDaemonApp(config);
       const getRun = await reopened.inject({ method: "GET", url: `/runs/${runId}` });
       const artifacts = await reopened.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
 
