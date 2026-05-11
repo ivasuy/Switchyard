@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "e8383b315630",
+  "strategy": "manual-commit",
+  "branch": "publish-main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "packages/protocol-rest/src/run-routes.ts",
+    "packages/protocol-rest/test/run-routes.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e8/383b315630/0/metadata.json",
+      "transcript": "/e8/383b315630/0/full.jsonl",
+      "content_hash": "/e8/383b315630/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 68958,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 324608,
+    "output_tokens": 2852,
+    "api_call_count": 11
+  }
+}
