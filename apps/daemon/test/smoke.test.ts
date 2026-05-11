@@ -68,9 +68,19 @@ describe("daemon app", () => {
 
       expect(getRun.json().run.status).toBe("completed");
       const events = await reopened.inject({ method: "GET", url: `/runs/${runId}/events` });
+      const provider = await reopened.inject({ method: "GET", url: "/providers/provider_test" });
+      const runtime = await reopened.inject({ method: "GET", url: "/runtimes/runtime_fake" });
+      const model = await reopened.inject({ method: "GET", url: "/models/model_test" });
+
       expect(events.body).toContain("event: run.queued");
       expect(events.body).toContain("event: run.completed");
       expect(artifacts.json().artifacts[0]).toMatchObject({ runId, type: "transcript" });
+      expect(provider.statusCode).toBe(200);
+      expect(provider.json().provider.name).toBe("Test Provider");
+      expect(runtime.statusCode).toBe(200);
+      expect(runtime.json().runtime.name).toBe("Fake Runtime");
+      expect(model.statusCode).toBe(200);
+      expect(model.json().model.modelName).toBe("test-model");
     } finally {
       try {
         await app.close();

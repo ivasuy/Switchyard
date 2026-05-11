@@ -50,13 +50,18 @@ export async function createDaemonApp(config?: DaemonConfig) {
   });
   const launcher = new RunLauncherService(runService);
 
+  try {
+    await seedFakeRegistry(stores.registry);
+  } catch (error) {
+    stores.close?.();
+    throw error;
+  }
+
   if (stores.close) {
     app.addHook("onClose", async () => {
       stores.close?.();
     });
   }
-
-  await seedFakeRegistry(stores.registry);
 
   app.get("/health", async () => ({ ok: true }));
   registerRunRoutes(app, {
