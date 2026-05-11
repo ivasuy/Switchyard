@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "d62bf7a9264f",
+  "strategy": "manual-commit",
+  "branch": "publish-main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "apps/daemon/src/app.ts",
+    "apps/daemon/test/smoke.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d6/2bf7a9264f/0/metadata.json",
+      "transcript": "/d6/2bf7a9264f/0/full.jsonl",
+      "content_hash": "/d6/2bf7a9264f/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 6633,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 482048,
+    "output_tokens": 1216,
+    "api_call_count": 8
+  }
+}
