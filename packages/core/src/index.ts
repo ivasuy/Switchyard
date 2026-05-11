@@ -10,6 +10,7 @@ export * from "./ports/memory-store.js";
 export * from "./ports/message-store.js";
 export * from "./ports/node-store.js";
 export * from "./ports/policy.js";
+export * from "./ports/placement-store.js";
 export * from "./ports/queue.js";
 export * from "./ports/registry-store.js";
 export * from "./ports/run-store.js";

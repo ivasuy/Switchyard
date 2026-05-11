@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { FakeRuntimeAdapter, createFixtureRun, InMemoryRunStore, InMemoryEventStore } from "../src/index.js";
+import {
+  FakeRuntimeAdapter,
+  InMemoryArtifactStore,
+  InMemoryEventStore,
+  InMemoryPlacementStore,
+  InMemoryRunStore,
+  createFixtureRun
+} from "../src/index.js";
 
 describe("testkit fake runtime adapter", () => {
   it("satisfies the runtime adapter lifecycle contract", async () => {
@@ -25,6 +32,8 @@ describe("testkit fake runtime adapter", () => {
   it("provides in-memory stores for core service tests", async () => {
     const runs = new InMemoryRunStore();
     const events = new InMemoryEventStore();
+    const artifacts = new InMemoryArtifactStore();
+    const placements = new InMemoryPlacementStore();
     const run = createFixtureRun();
 
     await runs.create(run);
@@ -39,5 +48,36 @@ describe("testkit fake runtime adapter", () => {
 
     expect(await runs.get(run.id)).toEqual(run);
     expect(await events.listByRun(run.id)).toHaveLength(1);
+    expect(await artifacts.listByRun(run.id)).toHaveLength(0);
+    expect(await placements.listByRun(run.id)).toHaveLength(0);
+  });
+
+  it("provides in-memory artifact and placement stores", async () => {
+    const artifacts = new InMemoryArtifactStore();
+    const placements = new InMemoryPlacementStore();
+
+    await artifacts.create({
+      id: "artifact_memory",
+      runId: "run_123",
+      type: "transcript",
+      path: "runs/run_123/transcript.jsonl",
+      metadata: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    await placements.create({
+      id: "placement_123",
+      runId: "run_123",
+      decision: "local",
+      reason: "test",
+      mode: "local",
+      requiredCapabilities: [],
+      deniedCapabilities: [],
+      approvalRequired: false,
+      policyTrace: [],
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+
+    expect(await artifacts.listByRun("run_123")).toHaveLength(1);
+    expect(await placements.listByRun("run_123")).toHaveLength(1);
   });
 });
