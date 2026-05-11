@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "44ae2a0a7239",
+  "strategy": "manual-commit",
+  "branch": "publish-main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "packages/storage/src/index.ts",
+    "packages/storage/src/sqlite/approval-store.ts",
+    "packages/storage/src/sqlite/database.ts",
+    "packages/storage/src/sqlite/message-store.ts",
+    "packages/storage/src/sqlite/placement-store.ts",
+    "packages/storage/src/sqlite/registry-store.ts",
+    "packages/storage/src/sqlite/schema.ts",
+    "packages/storage/test/sqlite-storage.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/44/ae2a0a7239/0/metadata.json",
+      "transcript": "/44/ae2a0a7239/0/full.jsonl",
+      "content_hash": "/44/ae2a0a7239/0/content_hash.txt",
+      "prompt": "/44/ae2a0a7239/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 10169,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 762112,
+    "output_tokens": 1887,
+    "api_call_count": 7
+  }
+}
