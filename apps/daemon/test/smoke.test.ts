@@ -8,22 +8,29 @@ import type { DaemonConfig } from "../src/config.js";
 describe("daemon app", () => {
   it("creates a fake run through the local REST API", async () => {
     const app = createDaemonApp();
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "fake",
+          provider: "test",
+          model: "test-model",
+          adapterType: "process",
+          cwd: "/repo",
+          task: "Smoke test run"
+        }
+      });
 
-    const response = await app.inject({
-      method: "POST",
-      url: "/runs?wait=1",
-      payload: {
-        runtime: "fake",
-        provider: "test",
-        model: "test-model",
-        adapterType: "process",
-        cwd: "/repo",
-        task: "Smoke test run"
+      expect(response.statusCode).toBe(201);
+      expect(response.json().run.status).toBe("completed");
+    } finally {
+      try {
+        await app.close();
+      } catch {
+        // Ensure test cleanup continues if close fails.
       }
-    });
-
-    expect(response.statusCode).toBe(201);
-    expect(response.json().run.status).toBe("completed");
+    }
   });
 
   it("persists fake run events and artifacts when configured with local storage", async () => {
@@ -38,7 +45,6 @@ describe("daemon app", () => {
 
     const app = createDaemonApp(config);
     let reopened: ReturnType<typeof createDaemonApp> | undefined;
-    let closed = false;
     try {
       const response = await app.inject({
         method: "POST",
@@ -55,7 +61,6 @@ describe("daemon app", () => {
       const runId = response.json().run.id;
 
       await app.close();
-      closed = true;
       reopened = createDaemonApp(config);
       const getRun = await reopened.inject({ method: "GET", url: `/runs/${runId}` });
       const artifacts = await reopened.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
@@ -66,13 +71,24 @@ describe("daemon app", () => {
       expect(events.body).toContain("event: run.completed");
       expect(artifacts.json().artifacts[0]).toMatchObject({ runId, type: "transcript" });
     } finally {
-      if (!closed) {
+      try {
         await app.close();
+      } catch {
+        // Ensure temp data cleanup runs even if app close fails.
       }
+
       if (reopened) {
-        await reopened.close();
+        try {
+          await reopened.close();
+        } catch {
+          // Keep cleanup resilient for repeated-run assertions.
+        }
       }
-      rmSync(dir, { recursive: true, force: true });
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Do not fail cleanup on best-effort temp cleanup.
+      }
     }
   });
 });

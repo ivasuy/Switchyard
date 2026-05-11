@@ -13,7 +13,6 @@ import {
 import { registerRunRoutes } from "@switchyard/protocol-rest";
 import { FakeRuntimeAdapter, InMemoryEventStore, InMemoryRunStore, InMemorySessionStore } from "@switchyard/testkit";
 import {
-  FilesystemArtifactContentStore,
   openSqliteStorage,
   SqliteArtifactStore,
   SqliteEventStore,
@@ -79,8 +78,6 @@ function createStorageStores(config: DaemonConfig): DaemonStoreResult {
   mkdirSync(config.artifactDir, { recursive: true });
 
   const storage = openSqliteStorage(config.sqlitePath);
-  // Initialize filesystem artifact content root to ensure directory exists before artifacts are persisted.
-  new FilesystemArtifactContentStore(config.artifactDir);
 
   return {
     runs: new SqliteRunStore(storage.db),
