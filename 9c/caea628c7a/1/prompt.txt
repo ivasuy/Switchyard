@@ -1,0 +1,77 @@
+You are implementing Task 4 of the Switchyard Phase 0/1 gap closure plan in the existing repository at /Users/vasuyadav/Downloads/Projects/switchyard. You are not alone in the codebase: do not revert or overwrite changes you did not make; work only in the task-owned files below and adapt to existing code.
+
+User override: do NOT create a separate git worktree. Work in the current checkout only. Commit your completed task changes after tests pass.
+
+Task 4: Add Filesystem Artifact Content Store
+
+Owned files:
+- Create: packages/storage/src/filesystem-artifact-content-store.ts
+- Modify: packages/storage/src/index.ts
+- Create: packages/storage/test/filesystem-artifact-content-store.test.ts
+
+Required TDD:
+1. First create packages/storage/test/filesystem-artifact-content-store.test.ts with test:
+   - uses mkdtempSync/readFileSync/rmSync from node:fs; join from node:path; tmpdir from node:os; afterEach/describe/expect/it from vitest; FilesystemArtifactContentStore from ../src/index.js.
+   - keeps `dirs: string[] = []` and afterEach removes dirs.
+   - test name: `writes content under the artifact root and rejects path traversal`.
+   - creates temp root, store = new FilesystemArtifactContentStore(root), writes `runs/run_1/transcript.jsonl` with content `{"ok":true}\n`, expects returned path exactly `runs/run_1/transcript.jsonl`, expects readFileSync(join(root, path), "utf8") equals content, and expects `store.writeText("../escape.txt", "bad")` rejects with `Artifact path escapes root`.
+2. Run `pnpm --filter @switchyard/storage test -- filesystem-artifact-content-store` and confirm it fails because `FilesystemArtifactContentStore` does not exist/export.
+3. Implement packages/storage/src/filesystem-artifact-content-store.ts:
+   - imports mkdir/writeFile from node:fs/promises and dirname/join/normalize/relative from node:path.
+   - class FilesystemArtifactContentStore with constructor(private readonly root: string).
+   - writeText(logicalPath, content): safePath, mkdir parent recursive, writeFile utf8, return normalized logical path with backslashes replaced by forward slashes.
+   - safePath(logicalPath): join root + logicalPath, relative(root, target); throw Error("Artifact path escapes root") if rel startsWith("..") OR rel === "" OR rel includes(".."). Return target otherwise.
+4. Export it from packages/storage/src/index.ts: `export * from "./filesystem-artifact-content-store.js";`
+5. Run:
+   - `pnpm --filter @switchyard/storage test`
+   - `pnpm --filter @switchyard/storage typecheck`
+   - `pnpm --filter @switchyard/storage build`
+6. Commit with: git add packages/storage && git commit -m "feat: add filesystem artifact content store"
+
+Note: If you identify a security issue with the plan's path traversal check, you may strengthen it, but keep the specified test passing and explain in NOTES.
+
+Final response format:
+STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED
+CHANGED FILES: list paths
+TESTS: commands run and pass/fail, including the initial red test failure
+COMMIT: commit sha if committed
+NOTES: concise self-review and concerns
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.
+
+---
+
+Task 4 quality review found path handling issues to fix before moving on.
+
+Fix these:
+1. `rel.includes("..")` is overbroad. It rejects safe filenames like `a..b.txt`. Replace traversal check with segment-aware/root-aware validation.
+2. Return value currently normalizes `logicalPath`, not the actual path written. Avoid mismatch for backslash/weird separator cases.
+3. Add tests for:
+   - safe dotted filename accepted, e.g. `runs/a..b.txt` writes and returns `runs/a..b.txt`.
+   - traversal with `../escape.txt` rejects.
+   - traversal with `runs/../../escape.txt` rejects.
+   - absolute path input rejects.
+   - returned path maps to the exact written file for accepted paths.
+
+Implementation guidance:
+- Use path resolution against root. A robust approach: resolve root and resolve(root, logicalPath), then ensure target is inside root by checking `relative(root, target)` is non-empty, does not start with `..`, and is not absolute. Import `isAbsolute` and `resolve` if needed.
+- To avoid backslash mismatch on POSIX, either reject logical paths containing backslashes or normalize them before both validation and write. Prefer rejecting backslashes with the same `Artifact path escapes root` error unless you have a cleaner cross-platform approach.
+- Keep existing test behavior passing.
+
+Run:
+- `pnpm --filter @switchyard/storage test`
+- `pnpm --filter @switchyard/storage typecheck`
+- `pnpm --filter @switchyard/storage build`
+- `pnpm test`
+
+Commit with a concise fix message. Do not touch unrelated files.
