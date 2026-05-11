@@ -1,2 +1,42 @@
-ARCHITECTURE.md
-docs/
+# Local planning and research docs
+docs/decisions/
+docs/superpowers/
+
+# Dependencies
+node_modules/
+**/node_modules/
+.pnpm-store/
+
+# Build and test output
+dist/
+**/dist/
+build/
+**/build/
+coverage/
+**/coverage/
+.turbo/
+**/.turbo/
+*.tsbuildinfo
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Temporary files
+tmp/
+temp/
+.cache/
