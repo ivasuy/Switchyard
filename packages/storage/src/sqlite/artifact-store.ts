@@ -14,6 +14,12 @@ type ArtifactInsertRow = Omit<
   provider?: string;
   model?: string;
 };
+type ArtifactUpdateRow = Omit<typeof artifacts.$inferInsert, "runId" | "debateId" | "provider" | "model"> & {
+  runId: string | null;
+  debateId: string | null;
+  provider: string | null;
+  model: string | null;
+};
 
 function toRow(artifact: Artifact): ArtifactInsertRow {
   const row: ArtifactInsertRow = {
@@ -36,6 +42,20 @@ function toRow(artifact: Artifact): ArtifactInsertRow {
     row.model = artifact.model;
   }
   return row;
+}
+
+function toUpdateRow(artifact: Artifact): ArtifactUpdateRow {
+  return {
+    id: artifact.id,
+    type: artifact.type,
+    path: artifact.path,
+    metadataJson: JSON.stringify(artifact.metadata),
+    createdAt: artifact.createdAt,
+    runId: artifact.runId ?? null,
+    debateId: artifact.debateId ?? null,
+    provider: artifact.provider ?? null,
+    model: artifact.model ?? null
+  };
 }
 
 function fromRow(row: ArtifactRow): Artifact {
@@ -79,7 +99,7 @@ export class SqliteArtifactStore implements ArtifactStore {
   }
 
   async update(artifact: Artifact): Promise<Artifact> {
-    await this.db.update(artifacts).set(toRow(artifact)).where(eq(artifacts.id, artifact.id));
+    await this.db.update(artifacts).set(toUpdateRow(artifact)).where(eq(artifacts.id, artifact.id));
     return artifact;
   }
 

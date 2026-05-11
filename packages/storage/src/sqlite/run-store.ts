@@ -9,8 +9,12 @@ type RunInsertRow = Omit<typeof runs.$inferInsert, "startedAt" | "endedAt"> & {
   startedAt?: string;
   endedAt?: string;
 };
+type RunUpdateRow = Omit<typeof runs.$inferInsert, "id" | "startedAt" | "endedAt"> & {
+  startedAt: string | null;
+  endedAt: string | null;
+};
 
-function toRow(run: Run): RunInsertRow {
+function toCreateRow(run: Run): RunInsertRow {
   const row: RunInsertRow = {
     id: run.id,
     runtime: run.runtime,
@@ -33,6 +37,25 @@ function toRow(run: Run): RunInsertRow {
     row.endedAt = run.endedAt;
   }
   return row;
+}
+
+function toUpdateRow(run: Run): RunUpdateRow {
+  return {
+    runtime: run.runtime,
+    provider: run.provider,
+    model: run.model,
+    adapterType: run.adapterType,
+    cwd: run.cwd,
+    task: run.task,
+    status: run.status,
+    placement: run.placement,
+    approvalPolicy: run.approvalPolicy,
+    timeoutSeconds: run.timeoutSeconds,
+    metadataJson: JSON.stringify(run.metadata),
+    createdAt: run.createdAt,
+    startedAt: run.startedAt ?? null,
+    endedAt: run.endedAt ?? null
+  };
 }
 
 function fromRow(row: RunRow): Run {
@@ -65,7 +88,7 @@ export class SqliteRunStore implements RunStore {
   constructor(private readonly db: SwitchyardSqliteDatabase) {}
 
   async create(run: Run): Promise<Run> {
-    await this.db.insert(runs).values(toRow(run));
+    await this.db.insert(runs).values(toCreateRow(run));
     return run;
   }
 
@@ -79,7 +102,7 @@ export class SqliteRunStore implements RunStore {
   }
 
   async update(run: Run): Promise<Run> {
-    await this.db.update(runs).set(toRow(run)).where(eq(runs.id, run.id));
+    await this.db.update(runs).set(toUpdateRow(run)).where(eq(runs.id, run.id));
     return run;
   }
 }

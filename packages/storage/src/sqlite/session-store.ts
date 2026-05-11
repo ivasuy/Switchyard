@@ -10,6 +10,14 @@ type SessionInsertRow = Omit<typeof runtimeSessions.$inferInsert, "externalSessi
   processId?: number;
   updatedAt?: string;
 };
+type SessionUpdateRow = Omit<
+  typeof runtimeSessions.$inferInsert,
+  "externalSessionKey" | "processId" | "updatedAt"
+> & {
+  externalSessionKey: string | null;
+  processId: number | null;
+  updatedAt: string | null;
+};
 
 function toRow(session: RuntimeSession): SessionInsertRow {
   const row: SessionInsertRow = {
@@ -33,6 +41,23 @@ function toRow(session: RuntimeSession): SessionInsertRow {
     row.updatedAt = session.updatedAt;
   }
   return row;
+}
+
+function toUpdateRow(session: RuntimeSession): SessionUpdateRow {
+  return {
+    id: session.id,
+    runId: session.runId,
+    runtime: session.runtime,
+    provider: session.provider,
+    model: session.model,
+    protocol: session.protocol,
+    status: session.status,
+    stateJson: JSON.stringify(session.state),
+    createdAt: session.createdAt,
+    externalSessionKey: session.externalSessionKey ?? null,
+    processId: session.processId ?? null,
+    updatedAt: session.updatedAt ?? null
+  };
 }
 
 function fromRow(row: SessionRow): RuntimeSession {
@@ -77,7 +102,7 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   async update(session: RuntimeSession): Promise<RuntimeSession> {
-    await this.db.update(runtimeSessions).set(toRow(session)).where(eq(runtimeSessions.id, session.id));
+    await this.db.update(runtimeSessions).set(toUpdateRow(session)).where(eq(runtimeSessions.id, session.id));
     return session;
   }
 
