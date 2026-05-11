@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "9fe23a984c33",
+  "strategy": "manual-commit",
+  "branch": "publish-main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "packages/core/src/services/runtime-runner-service.ts",
+    "packages/core/test/core.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9f/e23a984c33/0/metadata.json",
+      "transcript": "/9f/e23a984c33/0/full.jsonl",
+      "content_hash": "/9f/e23a984c33/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 5043,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 814080,
+    "output_tokens": 862,
+    "api_call_count": 5
+  }
+}
