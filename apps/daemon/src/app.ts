@@ -19,7 +19,8 @@ import {
   SqliteEventStore,
   SqliteRegistryStore,
   SqliteRunStore,
-  SqliteSessionStore
+  SqliteSessionStore,
+  FilesystemArtifactContentStore
 } from "@switchyard/storage";
 import { type DaemonConfig } from "./config.js";
 
@@ -29,6 +30,9 @@ interface DaemonStores {
   sessions: SessionStore;
   artifacts: ArtifactStore;
   registry: RegistryStore;
+  artifactContent?: {
+    writeText(path: string, content: string): Promise<string>;
+  };
 }
 
 type DaemonStoreResult = DaemonStores & { close?: () => void };
@@ -90,6 +94,7 @@ function createStorageStores(config: DaemonConfig): DaemonStoreResult {
   mkdirSync(config.artifactDir, { recursive: true });
 
   const storage = openSqliteStorage(config.sqlitePath);
+  const artifactContent = new FilesystemArtifactContentStore(config.artifactDir);
 
   return {
     runs: new SqliteRunStore(storage.db),
@@ -97,6 +102,7 @@ function createStorageStores(config: DaemonConfig): DaemonStoreResult {
     sessions: new SqliteSessionStore(storage.db),
     artifacts: new SqliteArtifactStore(storage.db),
     registry: new SqliteRegistryStore(storage.db),
+    artifactContent,
     close: () => {
       storage.sqlite.close();
     }

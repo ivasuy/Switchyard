@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { type FastifyInstance } from "fastify";
@@ -74,7 +74,9 @@ describe("daemon app", () => {
 
       expect(events.body).toContain("event: run.queued");
       expect(events.body).toContain("event: run.completed");
-      expect(artifacts.json().artifacts[0]).toMatchObject({ runId, type: "transcript" });
+      const artifact = artifacts.json().artifacts[0];
+      expect(artifact).toMatchObject({ runId, type: "transcript" });
+      expect(readFileSync(join(config.artifactDir, artifact.path), "utf8")).toContain("fake runtime output");
       expect(provider.statusCode).toBe(200);
       expect(provider.json().provider.name).toBe("Test Provider");
       expect(runtime.statusCode).toBe(200);

@@ -203,6 +203,63 @@ describe("core service shells", () => {
     expect(events.items.at(-1)?.type).toBe("artifact.created");
   });
 
+  it("stores adapter artifact content when artifact content store is available", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const artifactContent = new InMemoryArtifactContentStore();
+    const adapter = new ContentfulArtifactAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      artifactContent,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    await runner.start(run);
+
+    const [storedArtifact] = await artifacts.listByRun(run.id);
+    expect(storedArtifact).toMatchObject({
+      metadata: {
+        contentStored: true
+      }
+    });
+    expect(storedArtifact?.path).toBe(`stored/${adapter.artifactPath}`);
+    expect(storedArtifact?.metadata).not.toHaveProperty("content");
+    expect(artifactContent.writes.at(-1)).toEqual({
+      path: adapter.artifactPath,
+      content: adapter.artifactContent
+    });
+  });
+
+  it("does not attempt content persistence when artifact content store is unavailable", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const adapter = new ContentfulArtifactAdapter();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    await runner.start(run);
+
+    const [storedArtifact] = await artifacts.listByRun(run.id);
+    expect(storedArtifact?.path).toBe(adapter.artifactPath);
+    expect(storedArtifact?.metadata).toMatchObject({
+      contentStored: true
+    });
+  });
+
   it("publishes completed events after persisting completed run state", async () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();
@@ -542,6 +599,15 @@ class MemoryArtifactStore implements ArtifactStore {
   }
 }
 
+class InMemoryArtifactContentStore {
+  readonly writes: Array<{ path: string; content: string }> = [];
+
+  async writeText(path: string, content: string): Promise<string> {
+    this.writes.push({ path, content });
+    return `stored/${path}`;
+  }
+}
+
 class NoopAdapter implements RuntimeAdapter {
   readonly id = "fake";
 
@@ -633,6 +699,59 @@ class EventfulAdapter extends NoopAdapter {
         createdAt: "2026-05-11T00:00:00.000Z"
       };
     })();
+  }
+}
+
+class ContentfulArtifactAdapter extends NoopAdapter {
+  readonly artifactPath = `artifacts/${crypto.randomUUID()}/transcript.jsonl`;
+  readonly artifactContent = "{\"type\":\"runtime.output\",\"text\":\"hello\"}\n";
+
+  override async start() {
+    return { sessionId: "session_1" };
+  }
+
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_content_adapter_running",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 99,
+        payload: { status: "running" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_content_adapter_output",
+        type: "runtime.output",
+        runId: String(session["runId"]),
+        sequence: 100,
+        payload: { text: "hello" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_content_adapter_completed",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 101,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+
+  override async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
+    return [
+      {
+        id: `adapter_content_${String(session["runId"])}`,
+        type: "transcript",
+        path: this.artifactPath,
+        metadata: {
+          content: this.artifactContent,
+          source: "unit-test"
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      }
+    ];
   }
 }
 

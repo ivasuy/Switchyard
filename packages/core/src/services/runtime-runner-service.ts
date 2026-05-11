@@ -13,6 +13,9 @@ export interface RuntimeRunnerDependencies {
   adapters: Map<string, RuntimeAdapter>;
   artifacts?: ArtifactStore;
   eventBus?: EventBus;
+  artifactContent?: {
+    writeText(path: string, content: string): Promise<string>;
+  };
 }
 
 export class RuntimeRunnerService {
@@ -110,12 +113,24 @@ export class RuntimeRunnerService {
           if (await this.isCancelled(started.id)) {
             break;
           }
+          const content = typeof artifact.metadata["content"] === "string" ? artifact.metadata["content"] : undefined;
+          const path = content && this.deps.artifactContent
+            ? await this.deps.artifactContent.writeText(artifact.path, content)
+            : artifact.path;
+
+          const metadata = { ...artifact.metadata };
+          delete metadata.content;
           const storedArtifact = await this.deps.artifacts.create({
             ...artifact,
+            path,
             id: this.uniqueArtifactId(artifact.id),
             runId: started.id,
             provider: artifact.provider ?? started.provider,
             model: artifact.model ?? started.model,
+            metadata: {
+              ...metadata,
+              contentStored: content !== undefined
+            },
             createdAt: artifact.createdAt ?? new Date().toISOString()
           });
           const artifactEvent = this.eventForRun(

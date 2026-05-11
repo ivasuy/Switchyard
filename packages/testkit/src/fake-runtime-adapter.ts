@@ -60,7 +60,9 @@ export class FakeRuntimeAdapter implements RuntimeAdapter {
         id: "artifact_fake_transcript",
         type: "transcript",
         path: "runs/run_fake/transcript.jsonl",
-        metadata: {},
+        metadata: {
+          content: "{\"type\":\"runtime.output\",\"text\":\"fake runtime output\"}\n"
+        },
         createdAt: "2026-05-11T00:00:00.000Z"
       }
     ];

@@ -14,7 +14,9 @@ export class FilesystemArtifactContentStore {
     await mkdir(dirname(safePath), { recursive: true });
     await writeFile(safePath, content, "utf8");
 
-    return relative(this.normalizedRoot, safePath).replaceAll("\\", "/");
+    const relativePath = relative(this.normalizedRoot, safePath).replaceAll("\\", "/");
+
+    return relativePath;
   }
 
   private safePath(logicalPath: string): string {
