@@ -1,0 +1,30 @@
+Task 1 needs a narrow follow-up before review.
+
+Findings:
+1. `packages/core/test/runtime-adapter-contract.test.ts` imports `@switchyard/testkit`, but `packages/core/package.json` does not declare `@switchyard/testkit` as a devDependency. Add `"@switchyard/testkit": "workspace:*"` under devDependencies. If pnpm-lock changes are needed, include them.
+2. The task text specified calls to send/cancel/tools/artifacts with `{ ...session, runId: "run_contract" }`. The test currently uses `session` for send/cancel/tools/artifacts. Update those calls to match the task.
+
+Then run:
+- `pnpm --filter @switchyard/core test`
+- `pnpm --filter @switchyard/core typecheck`
+
+Commit the fix with a concise commit message. Do not touch unrelated files or revert anything. Final response with STATUS, changed files, tests, commit sha.
+
+---
+
+Task 1 quality review found a medium issue that needs fixing before we move on.
+
+Fix only this issue:
+- `packages/core` now depends on `@switchyard/testkit`, but `@switchyard/testkit` depends on `@switchyard/core`, creating a dev/test package cycle.
+
+Required fix:
+1. Remove `@switchyard/testkit` from `packages/core/package.json` devDependencies and update `pnpm-lock.yaml` accordingly.
+2. Keep `packages/core/test/runtime-adapter-contract.test.ts`, but make it self-contained by defining a tiny local `ContractAdapter` class in the test file that implements/imports `RuntimeAdapter` from `../src/index.js` (or otherwise satisfies the adapter shape) and emits the same runtime.status/runtime.output/run.completed events, fake.echo tool, and transcript artifact. Do not import from `@switchyard/testkit` in core tests.
+3. Preserve the task’s contract coverage: check, start, events, send, cancel, tools, artifacts, sessionId /^session_/, runId `run_contract`, event types, tools, artifact type.
+4. Run:
+   - `pnpm --filter @switchyard/core test`
+   - `pnpm --filter @switchyard/core typecheck`
+   - `pnpm --filter @switchyard/core build`
+5. Commit with a concise fix message.
+
+Do not address the low issues; those are accepted as intentional plan constraints for now. Do not touch unrelated files.
