@@ -1,0 +1,103 @@
+You are implementing Task 6 in the current checkout only: /Users/vasuyadav/Downloads/Projects/switchyard. Do NOT create a separate worktree. You are not alone in this codebase; do not revert edits made by others, and accommodate the existing committed changes through Task 5 (`a88fa0c`).
+
+User requested subagent-driven implementation. Own Task 6 end-to-end: write tests first where applicable, implement, run verification, self-review, and commit your changes before final response.
+
+Task 6: Add REST Artifact Endpoint and Replay SSE Formatting
+
+Files:
+- Create: `packages/protocol-rest/src/sse.ts`
+- Modify: `packages/protocol-rest/src/run-routes.ts`
+- Modify: `packages/protocol-rest/test/run-routes.test.ts`
+
+Required behavior/spec:
+1. Add REST test in `packages/protocol-rest/test/run-routes.test.ts` for artifacts:
+```ts
+it("returns artifacts for a completed fake run", async () => {
+  const harness = createRouteHarness();
+  const created = await harness.app.inject({
+    method: "POST",
+    url: "/runs?wait=1",
+    payload: fakeRunPayload("Artifact test run")
+  });
+  const runId = created.json().run.id;
+
+  const response = await harness.app.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
+
+  expect(response.statusCode).toBe(200);
+  expect(response.json().artifacts[0]).toMatchObject({ runId, type: "transcript" });
+});
+```
+Adapt to current test helpers. The harness probably needs a MemoryArtifactStore and dependencies wired so completed fake runs produce artifacts from Task 5 runtime runner behavior.
+2. Add replay SSE assertion to the existing event replay test:
+```ts
+expect(streamResponse.body).toContain("event: run.queued");
+expect(streamResponse.body).toContain("event: run.completed");
+```
+3. Run `pnpm --filter @switchyard/protocol-rest test` after adding tests if practical and observe expected failure.
+4. Create `packages/protocol-rest/src/sse.ts`:
+```ts
+import type { SwitchyardEvent } from "@switchyard/contracts";
+
+export function formatSseEvent(event: SwitchyardEvent): string {
+  return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+```
+5. Extend `RunRouteDependencies` in `packages/protocol-rest/src/run-routes.ts`:
+```ts
+import type { ArtifactStore, EventBus, RunLauncherService } from "@switchyard/core";
+
+export interface RunRouteDependencies {
+  runService: RunService;
+  runs: RunStore;
+  events: EventStore;
+  artifacts?: ArtifactStore;
+  eventBus?: EventBus;
+  launcher?: RunLauncherService;
+}
+```
+Adapt imports to existing style.
+6. Make `POST /runs` optionally non-blocking:
+```ts
+const wait = request.query && typeof request.query === "object" && (request.query as Record<string, unknown>)["wait"] === "1";
+if (wait) {
+  const completed = await deps.runService.startRun(run.id);
+  return reply.code(201).send({ run: completed });
+}
+deps.launcher?.launch(run);
+return reply.code(202).send({ run });
+```
+Important: preserve existing validation/error behavior and existing run creation behavior. If current behavior is already async/sync, adjust carefully to satisfy this contract.
+7. Add artifact route inside `registerRunRoutes`:
+```ts
+app.get("/runs/:id/artifacts", async (request, reply) => {
+  const id = (request.params as { id: string }).id;
+  const run = await deps.runs.get(id);
+  if (!run) {
+    return reply.code(404).send({ error: { code: "run_not_found", message: `Run not found: ${id}` } });
+  }
+  if (!deps.artifacts) {
+    return reply.send({ artifacts: [] });
+  }
+  return { artifacts: await deps.artifacts.listByRun(id) };
+});
+```
+8. Use SSE formatter for replay. Change event stream response body to use:
+```ts
+const body = events.map(formatSseEvent).join("");
+return reply
+  .header("content-type", "text/event-stream; charset=utf-8")
+  .header("cache-control", "no-cache")
+  .send(body);
+```
+9. Run verification:
+- `pnpm --filter @switchyard/protocol-rest test`
+- Also run protocol-rest typecheck/build if available and cheap.
+10. Commit exactly:
+`feat: add run artifacts and async run route`
+
+Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Tests run and results
+- Commit SHA
+- Self-review notes, including anything intentionally adjusted from the plan.
