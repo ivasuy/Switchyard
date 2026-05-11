@@ -62,9 +62,6 @@ importers:
         specifier: workspace:*
         version: link:../contracts
     devDependencies:
-      '@switchyard/testkit':
-        specifier: workspace:*
-        version: link:../testkit
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
