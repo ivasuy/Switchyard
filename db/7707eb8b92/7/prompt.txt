@@ -1,0 +1,47 @@
+You are the review agent for Switchyard Task 6. Do not edit files. Review the implementation against the spec and Task 6 requirements. This is a combined spec-compliance and implementation-quality review.
+
+Repo: /Users/vasuyadav/Downloads/Projects/switchyard
+Spec: docs/superpowers/specs/2026-05-14-codex-exec-json-provider-design.md
+Plan: docs/superpowers/plans/2026-05-14-codex-exec-json-provider.md
+
+Task 6 implemented by another agent:
+- Modified apps/daemon/package.json
+- Modified apps/daemon/src/app.ts
+- Modified apps/daemon/test/smoke.test.ts
+- Updated pnpm-lock.yaml via pnpm install
+- Verification reportedly passed:
+  - pnpm --filter @switchyard/daemon test -- smoke
+  - pnpm --filter @switchyard/daemon typecheck
+
+Review scope:
+1. Confirm daemon depends on @switchyard/adapters correctly.
+2. Confirm createDaemonApp probes Codex once, registers fake and codex adapters, and passes modelCatalog to CodexExecJsonAdapter.
+3. Confirm OpenAI/Codex provider/runtime/model registry seeding matches required ids and fields, is dedupe-safe, and preserves fake registry seeding.
+4. Confirm smoke test verifies Codex registry records without requiring a live Codex run and tolerates available/unavailable status.
+5. Confirm pnpm-lock.yaml update is appropriate for workspace dependency.
+6. Run relevant checks. Do not edit files.
+
+Final response format:
+- Review: APPROVED or CHANGES_REQUESTED
+- Findings, with file/line references if any
+- Verification performed
+- If changes are requested, give exact instructions for the implementation agent
+
+---
+
+Please re-review Task 6 after fixes. Do not edit files.
+
+Fix summary:
+- Added optional Codex probe injection to createDaemonApp(config?, options?) so tests avoid real Codex CLI.
+- Production default still calls real probeCodexCatalog when no override is provided.
+- Codex registry seeding now refreshes provider_openai/runtime_codex fields/status on startup for reused storage.
+- Smoke tests now cover unavailable probe, available probe with model_gpt_5_5 fields, and persistent status refresh.
+- Verification passed:
+  - pnpm --filter @switchyard/daemon test -- smoke (5 passed)
+  - pnpm --filter @switchyard/daemon typecheck
+
+Review against prior findings and Task 6 spec. Final response format:
+- Review: APPROVED or CHANGES_REQUESTED
+- Findings
+- Verification performed
+- If changes requested, exact instructions

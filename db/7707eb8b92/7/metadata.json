@@ -1,0 +1,65 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "db7707eb8b92",
+  "session_id": "019e26ea-6c75-75a1-a304-c12a5a6e64dc",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-14T14:42:06.420998Z",
+  "branch": "publish-main",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "apps/daemon/package.json",
+    "apps/daemon/src/app.ts",
+    "apps/daemon/test/smoke.test.ts",
+    "pnpm-lock.yaml"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.4",
+  "turn_id": "f9dd48581a04",
+  "token_usage": {
+    "input_tokens": 75279,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 875776,
+    "output_tokens": 10033,
+    "api_call_count": 19
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-14T14:42:06.412683Z",
+    "agent_lines": 155,
+    "agent_removed": 5,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 1,
+    "total_committed": 155,
+    "total_lines_changed": 161,
+    "agent_percentage": 99.37888198757764,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 102,
+      "user_lines_removed": 1,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "apps/daemon/package.json": 1,
+        "apps/daemon/src/app.ts": 53,
+        "apps/daemon/test/smoke.test.ts": 29,
+        "pnpm-lock.yaml": 19
+      },
+      "user_removed_per_file": {
+        "apps/daemon/src/app.ts": 1
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 258,
+      "agent_lines_removed": 6
+    }
+  ]
+}
