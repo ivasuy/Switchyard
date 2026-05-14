@@ -206,7 +206,12 @@ collect artifacts
 
 ## Local Testing
 
-The current local MVP runs a fake runtime through the Switchyard daemon. It uses local SQLite state and filesystem artifact metadata by default. It does not call Claude, Codex, OpenCode, or any external model yet.
+The current local MVP runs through the Switchyard daemon with local SQLite state and filesystem artifact storage by default.
+
+Supported local runtimes:
+
+- `fake`: deterministic in-process test runtime; safe for repeatable smoke tests.
+- `codex`: local Codex CLI runtime using `codex exec --json`; this can spend local Codex usage and can read the configured working directory according to the selected Codex sandbox.
 
 From the repo root:
 
@@ -290,9 +295,58 @@ run.completed
 
 Without `wait=1`, `POST /runs` is asynchronous and returns `202` with a queued run; poll `GET /runs/<RUN_ID>` or stream `GET /runs/<RUN_ID>/events` to wait for completion.
 
+Check registered local provider/runtime records:
+
+```bash
+curl -s http://127.0.0.1:4545/providers/provider_openai
+curl -s http://127.0.0.1:4545/runtimes/runtime_codex
+curl -s http://127.0.0.1:4545/models/model_gpt_5_5
+```
+
+If local Codex is unavailable, the OpenAI provider and Codex runtime records return `status: "unavailable"`. Model records are seeded from `codex debug models` when the local Codex catalog can be read.
+
+Create a Codex exec-json run:
+
+```bash
+curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{
+    "runtime": "codex",
+    "provider": "openai",
+    "model": "gpt-5.5",
+    "adapterType": "process",
+    "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
+    "task": "Return one sentence describing this repository. Do not edit files.",
+    "metadata": {
+      "reasoningEffort": "low",
+      "reasoningSummary": "auto",
+      "verbosity": "low",
+      "sandbox": "read-only"
+    }
+  }'
+```
+
+Fetch Codex run events and transcript metadata the same way as fake runs:
+
+```bash
+curl -s http://127.0.0.1:4545/runs/<RUN_ID>/events
+curl -s http://127.0.0.1:4545/runs/<RUN_ID>/artifacts
+```
+
+Codex exec-json runs are non-interactive in this slice. Sending input to a Codex run returns `409`:
+
+```bash
+curl -s -X POST "http://127.0.0.1:4545/runs/<RUN_ID>/input" \
+  -H 'content-type: application/json' \
+  -d '{"text":"continue"}'
+```
+
 Run verification:
 
 ```bash
+pnpm --filter @switchyard/adapters test
+pnpm --filter @switchyard/protocol-rest test
+pnpm --filter @switchyard/daemon test
 pnpm test
 pnpm typecheck
 pnpm build

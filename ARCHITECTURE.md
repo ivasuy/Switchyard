@@ -599,7 +599,7 @@ Adapter details are time-sensitive. Switchyard should treat every real adapter a
 |---|---|---|---|---|---|
 | OpenCode | ACP via `opencode acp` | CLI/process | local or hosted worker with installed binary | High | OpenCode documents ACP support through JSON-RPC over stdio. This should be the first real ACP adapter. |
 | Claude Code | TypeScript Agent SDK or `claude -p --output-format stream-json` | PTY/process | local first, hosted only with explicit credentials/sandbox | High | Claude Code exposes a current Agent SDK and programmatic CLI path with streaming JSON. Treat SDK as preferred over terminal scraping. |
-| Codex CLI | `codex exec --json` / process adapter after local validation | PTY/process | local first | Medium | Codex is local-terminal oriented with approval modes. Its JSON output should be version-tested because public issues show schema/documentation drift concerns. |
+| Codex CLI | `codex exec --json` process adapter | PTY/process for future interactive mode | local first | Medium-High | First real provider slice is implemented for non-interactive runs. The adapter reads the local model catalog with `codex debug models`, normalizes JSONL events, and preserves raw transcript artifacts. |
 | Cursor | `cursor-agent -p --output-format stream-json` | PTY/process | local first | Medium | Cursor documents headless CLI and streaming JSON. Treat as experimental until command behavior is tested locally. |
 | OpenClaw | HTTP/gateway adapter | process only for local dev | hosted or local depending on deployment | Medium | OpenClaw is itself a gateway with sessions, workspace, streaming, queue behavior, skills, and tool policy. Switchyard should integrate at its gateway boundary, not by controlling its internals. |
 | AgentField | REST API adapter, async execution preferred | HTTP sync for fast tasks | hosted or local | High | AgentField exposes REST execution APIs with async execution for long-running LLM workflows. Switchyard should treat it as a wrapper runtime. |
@@ -622,11 +622,11 @@ Adapter details are time-sensitive. Switchyard should treat every real adapter a
 
 ### Architecture Implications
 
-The first real adapter should be OpenCode over ACP because it directly validates Switchyard's structured protocol path.
+The first real provider slice is Codex exec-json. This validates Switchyard's local process adapter path before broader hosted, debate, and SDK layers.
 
 Claude Code should not start with PTY. Use the TypeScript Agent SDK or streaming JSON CLI first, then keep PTY as an interactive fallback.
 
-Codex should be integrated through a process adapter only after a local spike confirms the current `codex exec --json` event format. Switchyard must version its Codex parser and preserve raw JSONL logs as artifacts.
+Codex is integrated through a process adapter for non-interactive `codex exec --json` runs. Switchyard validates requested reasoning effort against the local Codex model catalog when available, maps JSONL into normalized events, marks input as unsupported for this mode, and persists raw stdout/stderr as transcript artifacts.
 
 Hosted mode must avoid arbitrary PTY/subprocess execution by default. Process and PTY adapters should run locally or inside an explicitly sandboxed hosted worker class.
 
@@ -805,7 +805,7 @@ switchyard/
 
 ### Runtime and Integration Packages
 
-- `packages/adapters`: runtime and tool integrations. Adapter folders include `opencode`, `claude-code`, `codex`, `cursor`, `openclaw`, `paperclip`, `agentfield`, `browser-search`, `generic-http`, `process`, and `pty`.
+- `packages/adapters`: runtime and tool integrations. The current implemented adapter is `codex` for non-interactive local `codex exec --json` runs. Planned adapter folders include `opencode`, `claude-code`, `cursor`, `openclaw`, `paperclip`, `agentfield`, `browser-search`, `generic-http`, `process`, and `pty`.
 - `packages/storage`: persistence implementations for in-memory tests, SQLite local mode, Postgres hosted mode, filesystem artifacts, and S3/R2-compatible object storage.
 - `packages/queue`: local in-process queue and hosted Redis/BullMQ queue implementations.
 - `packages/sdk`: typed client for frontend, backend, CLI, automation, and third-party consumers.
@@ -928,15 +928,16 @@ The architecture includes the full product map, but implementation should prove 
 0. Adapter research matrix and local command verification.
 1. Contract foundation.
 2. Local gateway with fake runtime.
-3. acpx inbound and outbound protocol package.
-4. First real ACP adapter: OpenCode.
-5. Claude Code SDK/headless adapter.
-6. Hosted gateway with workers.
-7. Generic HTTP and AgentField adapters.
-8. Codex and Cursor process/headless adapters after parser spikes.
-9. Debate engine.
-10. Hybrid node connectivity.
-11. Memory, tools, approvals, SDK, and CLI completion.
+3. First real provider slice: Codex `exec --json` process adapter.
+4. acpx inbound and outbound protocol package.
+5. OpenCode ACP adapter.
+6. Generic HTTP and AgentField adapters.
+7. Claude Code SDK/headless adapter.
+8. Hosted gateway with workers.
+9. Cursor process/headless adapter after parser and auth spikes.
+10. Debate engine.
+11. Hybrid node connectivity.
+12. Memory, tools, approvals, SDK, and CLI completion.
 
 Each phase should produce a runnable proof rather than only internal scaffolding.
 
