@@ -1,8 +1,10 @@
 import Fastify from "fastify";
 import { mkdirSync } from "node:fs";
+import { CodexExecJsonAdapter, probeCodexCatalog } from "@switchyard/adapters";
 import {
   type ArtifactStore,
   EventBus,
+  type RuntimeAdapter,
   RunLauncherService,
   RunService,
   RuntimeRunnerService,
@@ -35,12 +37,28 @@ interface DaemonStores {
   };
 }
 
-type DaemonStoreResult = DaemonStores & { close?: () => void };
+type DaemonStoreResult = DaemonStores & {
+  close?: () => void;
+  sqlite?: {
+    prepare(sql: string): { run(...params: unknown[]): unknown };
+  };
+};
 
-export async function createDaemonApp(config?: DaemonConfig) {
+type CodexCatalogProbe = Awaited<ReturnType<typeof probeCodexCatalog>>;
+
+interface CreateDaemonAppOptions {
+  codexProbe?: CodexCatalogProbe;
+  probeCodexCatalog?: () => Promise<CodexCatalogProbe>;
+}
+
+export async function createDaemonApp(config?: DaemonConfig, options: CreateDaemonAppOptions = {}) {
   const app = Fastify({ logger: false });
   const stores: DaemonStoreResult = config ? createStorageStores(config) : createInMemoryStores();
-  const adapters = new Map([["fake", new FakeRuntimeAdapter()]]);
+  const codexProbe = options.codexProbe ?? (await (options.probeCodexCatalog ?? probeCodexCatalog)());
+  const adapters = new Map<string, RuntimeAdapter>([
+    ["fake", new FakeRuntimeAdapter()],
+    ["codex", new CodexExecJsonAdapter({ modelCatalog: codexProbe.models })]
+  ]);
   const eventBus = new EventBus();
   const runner = new RuntimeRunnerService({
     adapters,
@@ -56,6 +74,7 @@ export async function createDaemonApp(config?: DaemonConfig) {
 
   try {
     await seedFakeRegistry(stores.registry);
+    await seedCodexRegistry(stores, codexProbe);
   } catch (error) {
     stores.close?.();
     throw error;
@@ -103,6 +122,7 @@ function createStorageStores(config: DaemonConfig): DaemonStoreResult {
     artifacts: new SqliteArtifactStore(storage.db),
     registry: new SqliteRegistryStore(storage.db),
     artifactContent,
+    sqlite: storage.sqlite,
     close: () => {
       storage.sqlite.close();
     }
@@ -137,6 +157,94 @@ async function seedFakeRegistry(registry: RegistryStore): Promise<void> {
       status: "available"
     });
   }
+}
+
+async function seedCodexRegistry(
+  stores: DaemonStoreResult,
+  codexProbe: CodexCatalogProbe
+): Promise<void> {
+  const registry = stores.registry;
+  const status = codexProbe.ok ? "available" : "unavailable";
+
+  const existingProvider = await registry.getProvider("provider_openai");
+  if (!existingProvider) {
+    await registry.createProvider({
+      id: "provider_openai",
+      name: "OpenAI",
+      authMode: "local",
+      status
+    });
+  } else {
+    await updateProviderRecord(stores, {
+      id: "provider_openai",
+      name: "OpenAI",
+      authMode: "local",
+      status
+    });
+  }
+
+  const existingRuntime = await registry.getRuntime("runtime_codex");
+  if (!existingRuntime) {
+    await registry.createRuntime({
+      id: "runtime_codex",
+      name: "Codex",
+      adapterType: "process",
+      status
+    });
+  } else {
+    await updateRuntimeRecord(stores, {
+      id: "runtime_codex",
+      name: "Codex",
+      adapterType: "process",
+      status
+    });
+  }
+
+  for (const model of codexProbe.models) {
+    const id = toCodexModelId(model.slug);
+    if (await registry.getModel(id)) {
+      continue;
+    }
+    await registry.createModel({
+      id,
+      providerId: "provider_openai",
+      modelName: model.slug,
+      supportsTools: true,
+      supportsStreaming: true,
+      supportsBrowser: false,
+      status: "available"
+    });
+  }
+}
+
+function toCodexModelId(slug: string): string {
+  return `model_${slug.replace(/[.-]/g, "_")}`;
+}
+
+async function updateProviderRecord(
+  stores: DaemonStoreResult,
+  provider: Parameters<RegistryStore["createProvider"]>[0]
+): Promise<void> {
+  if (stores.sqlite) {
+    stores.sqlite
+      .prepare("UPDATE providers SET name = ?, auth_mode = ?, status = ? WHERE id = ?")
+      .run(provider.name, provider.authMode, provider.status, provider.id);
+    return;
+  }
+  await stores.registry.createProvider(provider);
+}
+
+async function updateRuntimeRecord(
+  stores: DaemonStoreResult,
+  runtime: Parameters<RegistryStore["createRuntime"]>[0]
+): Promise<void> {
+  if (stores.sqlite) {
+    stores.sqlite
+      .prepare("UPDATE runtimes SET name = ?, adapter_type = ?, status = ? WHERE id = ?")
+      .run(runtime.name, runtime.adapterType, runtime.status, runtime.id);
+    return;
+  }
+  await stores.registry.createRuntime(runtime);
 }
 
 class InMemoryArtifactStore implements ArtifactStore {

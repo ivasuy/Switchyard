@@ -30,6 +30,9 @@ importers:
 
   apps/daemon:
     dependencies:
+      '@switchyard/adapters':
+        specifier: workspace:*
+        version: link:../../packages/adapters
       '@switchyard/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -45,6 +48,22 @@ importers:
       fastify:
         specifier: ^5.8.5
         version: 5.8.5
+
+  packages/adapters:
+    dependencies:
+      '@switchyard/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@switchyard/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.5
+        version: 4.1.5(@types/node@24.12.3)(vite@8.0.11(@types/node@24.12.3)(esbuild@0.27.7)(tsx@4.21.0))
 
   packages/contracts:
     dependencies:

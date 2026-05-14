@@ -6,9 +6,23 @@ import { type FastifyInstance } from "fastify";
 import { createDaemonApp } from "../src/app.js";
 import type { DaemonConfig } from "../src/config.js";
 
+type CodexProbe = NonNullable<Parameters<typeof createDaemonApp>[1]>["codexProbe"];
+
+const unavailableCodexProbe = {
+  ok: false,
+  models: [],
+  message: "codex not installed"
+} satisfies CodexProbe;
+
+const availableCodexProbe = {
+  ok: true,
+  version: "codex 0.0.0-test",
+  models: [{ slug: "gpt-5.5", supportedReasoningLevels: ["low", "medium", "high"] }]
+} satisfies CodexProbe;
+
 describe("daemon app", () => {
   it("creates a fake run through the local REST API", async () => {
-    const app = await createDaemonApp();
+    const app = await createDaemonApp(undefined, { codexProbe: unavailableCodexProbe });
     try {
       const response = await app.inject({
         method: "POST",
@@ -44,7 +58,7 @@ describe("daemon app", () => {
       artifactDir: join(dir, "artifacts")
     };
 
-    const app = await createDaemonApp(config);
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
     let reopened: FastifyInstance | undefined;
     try {
       const response = await app.inject({
@@ -65,7 +79,7 @@ describe("daemon app", () => {
       const runId = run.id;
 
       await app.close();
-      reopened = await createDaemonApp(config);
+      reopened = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
       const getRun = await reopened.inject({ method: "GET", url: `/runs/${runId}` });
       const artifacts = await reopened.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
       const events = await reopened.inject({ method: "GET", url: `/runs/${runId}/events` });
@@ -101,6 +115,116 @@ describe("daemon app", () => {
           await reopened.close();
         } catch {
           // Keep cleanup resilient for repeated-run assertions.
+        }
+      }
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Do not fail cleanup on best-effort temp cleanup.
+      }
+    }
+  });
+
+  it("marks codex provider/runtime unavailable and does not seed codex models when probe is unavailable", async () => {
+    const app = await createDaemonApp(undefined, { codexProbe: unavailableCodexProbe });
+    try {
+      const provider = await app.inject({ method: "GET", url: "/providers/provider_openai" });
+      const runtime = await app.inject({ method: "GET", url: "/runtimes/runtime_codex" });
+      const model = await app.inject({ method: "GET", url: "/models/model_gpt_5_5" });
+
+      expect(provider.statusCode).toBe(200);
+      expect(runtime.statusCode).toBe(200);
+      expect(provider.json().provider).toMatchObject({
+        id: "provider_openai",
+        name: "OpenAI",
+        authMode: "local"
+      });
+      expect(runtime.json().runtime).toMatchObject({
+        id: "runtime_codex",
+        name: "Codex",
+        adapterType: "process"
+      });
+      expect(provider.json().provider.status).toBe("unavailable");
+      expect(runtime.json().runtime.status).toBe("unavailable");
+      expect(model.statusCode).toBe(404);
+    } finally {
+      try {
+        await app.close();
+      } catch {
+        // Keep test cleanup resilient if close throws.
+      }
+    }
+  });
+
+  it("marks codex provider/runtime available and seeds codex model records when probe is available", async () => {
+    const app = await createDaemonApp(undefined, { codexProbe: availableCodexProbe });
+    try {
+      const provider = await app.inject({ method: "GET", url: "/providers/provider_openai" });
+      const runtime = await app.inject({ method: "GET", url: "/runtimes/runtime_codex" });
+      const model = await app.inject({ method: "GET", url: "/models/model_gpt_5_5" });
+
+      expect(provider.statusCode).toBe(200);
+      expect(runtime.statusCode).toBe(200);
+      expect(model.statusCode).toBe(200);
+      expect(provider.json().provider.status).toBe("available");
+      expect(runtime.json().runtime.status).toBe("available");
+      expect(model.json().model).toMatchObject({
+        id: "model_gpt_5_5",
+        providerId: "provider_openai",
+        modelName: "gpt-5.5",
+        supportsTools: true,
+        supportsStreaming: true,
+        supportsBrowser: false,
+        status: "available"
+      });
+    } finally {
+      try {
+        await app.close();
+      } catch {
+        // Keep test cleanup resilient if close throws.
+      }
+    }
+  });
+
+  it("refreshes codex provider/runtime status on startup when persistent storage is reused", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchyard-daemon-codex-status-"));
+    const config: DaemonConfig = {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir: dir,
+      sqlitePath: join(dir, "switchyard.sqlite"),
+      artifactDir: join(dir, "artifacts")
+    };
+
+    let first: FastifyInstance | undefined;
+    let second: FastifyInstance | undefined;
+    try {
+      first = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+      let provider = await first.inject({ method: "GET", url: "/providers/provider_openai" });
+      let runtime = await first.inject({ method: "GET", url: "/runtimes/runtime_codex" });
+      expect(provider.json().provider.status).toBe("unavailable");
+      expect(runtime.json().runtime.status).toBe("unavailable");
+      await first.close();
+      first = undefined;
+
+      second = await createDaemonApp(config, { codexProbe: availableCodexProbe });
+      provider = await second.inject({ method: "GET", url: "/providers/provider_openai" });
+      runtime = await second.inject({ method: "GET", url: "/runtimes/runtime_codex" });
+      expect(provider.json().provider.status).toBe("available");
+      expect(runtime.json().runtime.status).toBe("available");
+    } finally {
+      if (first) {
+        try {
+          await first.close();
+        } catch {
+          // Ensure cleanup remains best-effort.
+        }
+      }
+      if (second) {
+        try {
+          await second.close();
+        } catch {
+          // Ensure cleanup remains best-effort.
         }
       }
       try {
