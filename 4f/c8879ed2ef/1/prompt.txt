@@ -1,0 +1,47 @@
+You are the review agent for Switchyard Task 3. Do not edit files. Review the implementation against the spec and Task 3 requirements. This is a combined spec-compliance and implementation-quality review.
+
+Repo: /Users/vasuyadav/Downloads/Projects/switchyard
+Spec: docs/superpowers/specs/2026-05-14-codex-exec-json-provider-design.md
+Plan: docs/superpowers/plans/2026-05-14-codex-exec-json-provider.md
+
+Task 3 implemented by another agent:
+- Created packages/adapters/src/codex/codex-jsonl-parser.ts
+- Created packages/adapters/test/codex-jsonl-parser.test.ts
+- Modified packages/adapters/src/index.ts to export ./codex/codex-jsonl-parser.js
+- Verification reportedly passed:
+  - pnpm --filter @switchyard/adapters test -- codex-jsonl-parser
+  - pnpm --filter @switchyard/adapters typecheck
+- Implementer noted: parser uses a local SwitchyardEvent type shape instead of importing @switchyard/contracts.
+
+Review scope:
+1. Confirm parseCodexJsonLine behavior for valid object JSON, invalid JSON, arrays, and non-objects.
+2. Confirm codexEventToSwitchyardEvent maps thread.started/turn.started, text-bearing item events, turn.completed, turn.failed, error, and unknown events correctly.
+3. Confirm text extraction covers top-level text/message/delta, nested item, and content arrays.
+4. Confirm event type and payload shapes are compatible with @switchyard/contracts SwitchyardEvent. Specifically assess whether the local type alias is acceptable or should be replaced with the real imported contract type now.
+5. Confirm tests are adequate and deterministic.
+6. Run relevant checks if useful. Do not edit files.
+
+Final response format:
+- Review: APPROVED or CHANGES_REQUESTED
+- Findings, with file/line references if any
+- Verification performed
+- If changes are requested, give exact instructions for the implementation agent
+
+---
+
+Please re-review Task 3 after the implementation agent's fixes. Do not edit files.
+
+Fix summary from implementer:
+- `runtime.output` promotion is now restricted to `item.*` events only.
+- Unknown non-item events with textual fields remain `runtime.status`.
+- Local event alias replaced with `import type { SwitchyardEvent } from "@switchyard/contracts";`.
+- Added tests for top-level `text`, `message`, `delta` on `item.*`, unknown non-item textual events, and scalar invalid JSON (`null`, `1`).
+- Verification passed:
+  - pnpm --filter @switchyard/adapters test -- codex-jsonl-parser (14 tests)
+  - pnpm --filter @switchyard/adapters typecheck
+
+Review against your prior findings plus the Task 3 spec. Final response format:
+- Review: APPROVED or CHANGES_REQUESTED
+- Findings
+- Verification performed
+- If changes requested, exact instructions
