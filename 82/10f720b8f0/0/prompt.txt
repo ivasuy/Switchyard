@@ -1,0 +1,175 @@
+You are the implementation agent for Switchyard Task 4. You are not alone in the codebase; do not revert edits made by others. Work only on Task 4 and the files listed below.
+
+Repo: /Users/vasuyadav/Downloads/Projects/switchyard
+Spec: docs/superpowers/specs/2026-05-14-codex-exec-json-provider-design.md
+Plan: docs/superpowers/plans/2026-05-14-codex-exec-json-provider.md
+
+Current state:
+- @switchyard/adapters exists.
+- Codex types, model catalog parser, and JSONL parser exist and are exported.
+
+Task 4 goal: Implement `CodexExecJsonAdapter` using a process factory, with deterministic fake-process tests. Do not call the real Codex binary in tests.
+
+Files you own:
+- Create packages/adapters/src/codex/codex-exec-json-adapter.ts
+- Create packages/adapters/test/codex-exec-json-adapter.test.ts
+- Modify packages/adapters/src/index.ts to export ./codex/codex-exec-json-adapter.js
+
+Requirements:
+1. Implement `CodexInputUnsupportedError` with name `CodexInputUnsupportedError` and message `Codex exec-json does not support input after start`.
+2. Implement `CodexExecJsonAdapter implements RuntimeAdapter` with id `codex`.
+3. Constructor accepts optional `{ command?: string; processFactory?: CodexProcessFactory; modelCatalog?: CodexModelCatalogEntry[] }`.
+4. Default command is `codex`; default processFactory must use `spawn(command, args, options)` without shell.
+5. `check()` calls `probeCodexCatalog(command)` and returns RuntimeAdapterCheck with ok/message/details `{ version, models }`.
+6. `start(request)` validates required string `cwd`, `model`, `task`; reads Codex run options from `request.metadata`; validates reasoning effort against constructor modelCatalog; builds argv; starts process; stores session state under generated `session_...`; captures stderr; records exitCode; returns `{ sessionId, processId }`.
+7. `buildCodexExecArgs` must produce argv in this shape:
+   `exec --json --model <model> [-c model_reasoning_effort="..."] [-c model_reasoning_summary="..."] [-c model_verbosity="..."] --cd <cwd> --sandbox <sandbox default workspace-write> [--skip-git-repo-check] [--ephemeral] <task>`
+8. `events(session)` reads stdout line-by-line, stores raw lines, parses each line with parseCodexJsonLine, maps with codexEventToSwitchyardEvent, yields events, tracks terminal events. Parser failure yields one `run.failed` event and stops. If stdout ends without terminal event and exit code is non-zero, yield `run.failed` with exitCode and stderr.
+9. Be careful about process exit/stdout ordering in fake and real processes. It is acceptable to await a process exit promise after stdout line iteration before deciding non-zero fallback failure.
+10. `cancel(session)` terminates the process with SIGTERM.
+11. `send()` throws CodexInputUnsupportedError.
+12. `tools()` returns empty array.
+13. `artifacts(session)` returns one transcript artifact with id `artifact_codex_transcript`, type `transcript`, path `runs/<runId>/codex-transcript.jsonl`, metadata `{ content, runtime: "codex", mode: "exec-json" }`, and createdAt. Include raw stdout JSONL and stderr as a JSONL `stderr` record if stderr exists.
+14. Tests must use a fake process, no live Codex. Cover args/options/transcript happy path, non-zero exit fallback failure, parser failure, cancel, and send unsupported.
+15. Update index export.
+
+Run verification:
+- pnpm --filter @switchyard/adapters test -- codex-exec-json-adapter
+- pnpm --filter @switchyard/adapters typecheck
+Expected: PASS.
+
+Do not commit. Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Verification run and result
+- Notes/concerns
+
+---
+
+Reviewer requested changes for Task 4. Please fix only Task 4 files you own.
+
+Blocking issue:
+- Transcript capture is currently dependent on the caller continuing to consume `events()`. RuntimeRunnerService persists artifacts immediately after receiving `run.completed` or `run.failed`, so trailing stdout/stderr emitted after a terminal event can be missing from artifacts.
+
+Exact changes requested:
+1. Change transcript capture so it is not dependent on caller continuing to consume `events()`.
+   - Start draining stdout/stderr at `start()` time or otherwise maintain a session-owned background capture path.
+   - Preserve all raw stdout lines and stderr until stream end / process exit, even after yielding a terminal event or parser-generated failure.
+   - `artifacts()` should read from fully captured session state. If needed, it may await a session completion/drain promise before returning artifacts, so RuntimeRunnerService gets the complete transcript.
+2. Keep current event semantics.
+   - `events()` should still surface `run.completed`, parser failures, and non-zero exit fallback.
+   - A terminal event must not stop transcript capture.
+3. Add regression tests using fake process only:
+   - Simulate `turn.completed`, then emit extra stderr or stdout after that. Stop consuming `events()` at terminal event and verify `artifacts()` still contains late bytes.
+   - Simulate parser failure, then trailing stderr/output, and verify `artifacts()` contains late bytes.
+
+Run:
+- pnpm --filter @switchyard/adapters test -- codex-exec-json-adapter
+- pnpm --filter @switchyard/adapters typecheck
+
+Do not commit. Final response format:
+- Status
+- Files changed
+- Verification result
+- Notes
+
+---
+
+Reviewer requested more Task 4 changes. Please fix only Task 4 files.
+
+Issues:
+1. `events()` currently continues yielding after terminal events if more stdout arrives. It must stop immediately after yielding `run.completed` or `run.failed`.
+2. `artifacts()` unconditionally waiting for full process drain can hang terminalization if Codex emits `turn.completed` but the process lingers.
+
+Implementation direction:
+- Keep background stdout/stderr capture started at `start()`.
+- Make `events()` yield the terminal event and then return/stop the iterator. Later stdout/stderr can still be captured in background, but must not be yielded to the caller after terminal.
+- Change `artifacts()` so it does not wait indefinitely. Add a bounded drain grace period. Suggested implementation:
+  - Add constructor option `artifactDrainGraceMs?: number`, default maybe `100` or `250` ms.
+  - In `artifacts()`, await `Promise.race([active.drainPromise, delay(artifactDrainGraceMs)])` before snapshotting transcript.
+  - This gives late bytes a chance to arrive when available, without hanging run completion forever.
+- Keep tests deterministic by using a small grace value where helpful.
+
+Add regression tests:
+1. `events()` does not yield anything after `run.completed`, even if more stdout arrives later.
+2. `artifacts()` does not hang when a terminal event occurs and the fake process/streams remain open. Verify it returns within the bounded grace and contains bytes captured before snapshot.
+3. Keep existing late-byte tests adjusted to use the grace period: late bytes emitted within grace should appear in transcript.
+
+Run:
+- pnpm --filter @switchyard/adapters test -- codex-exec-json-adapter
+- pnpm --filter @switchyard/adapters typecheck
+
+Do not commit. Final response format:
+- Status
+- Files changed
+- Verification result
+- Notes
+
+---
+
+Reviewer still requests changes. This requires a small core lifecycle adjustment in addition to Task 4 adapter changes. You may now also edit core files/tests directly related to terminal artifact ordering.
+
+Goal: preserve both guarantees:
+- `run.completed` / `run.failed` event delivery must not be blocked by artifact transcript draining.
+- Transcript artifacts should contain the full stdout JSONL + stderr for the Codex process lifetime, not a bounded snapshot.
+
+Adapter changes:
+1. Remove bounded snapshot behavior from `artifacts()`; it should await the session's full drain/completion promise before returning transcript content.
+2. Add a bounded post-terminal process shutdown, not a bounded artifact snapshot:
+   - Constructor option like `terminalShutdownGraceMs?: number`, default 250ms.
+   - When `events()` sees a terminal Codex event or parser-generated failure, yield the terminal Switchyard event, schedule SIGTERM after the grace if the process has not exited, and return from the iterator. Background capture continues until streams close/process exits.
+   - This means `artifacts()` can await full drain without hanging indefinitely in normal fake/real cases, because the adapter owns shutdown after terminal.
+3. Keep `events()` from yielding anything after terminal.
+
+Core changes:
+4. Modify `packages/core/src/services/runtime-runner-service.ts` terminal handling so terminal events are persisted/terminalized before artifact persistence. In other words: when adapter yields `run.completed` or `run.failed`, first update run/session and append/publish terminal event. Then persist artifacts after that. This prevents terminal event delivery from waiting on artifact collection.
+5. Keep artifact persistence awaited after terminalization if that is simplest, but terminal run state/event must already be persisted by then.
+6. Update affected core tests that currently require `artifact.created` before `run.completed`. The new invariant should be: terminal event can appear before artifact.created for terminal-run artifacts, and artifacts are still eventually persisted with unique sequence values.
+
+Tests to add/update:
+- Adapter test proving late stdout/stderr after terminal but before forced shutdown is included in artifact.
+- Adapter test proving events() yields no post-terminal events.
+- Adapter test proving lingering process after terminal is terminated by scheduled SIGTERM and artifacts resolves with complete captured content.
+- Core test proving run.completed is persisted/published before slow artifact persistence completes.
+- Adjust old core ordering test accordingly.
+
+Run:
+- pnpm --filter @switchyard/adapters test -- codex-exec-json-adapter
+- pnpm --filter @switchyard/adapters typecheck
+- pnpm --filter @switchyard/core test
+- pnpm --filter @switchyard/core typecheck
+
+Do not commit. Final response format:
+- Status
+- Files changed
+- Verification result
+- Notes/concerns
+
+---
+
+Reviewer requested one remaining Task 4 change. Please fix only Task 4/core files already touched.
+
+Keep:
+- Core terminal state/event before artifact persistence.
+- events() stops yielding after terminal.
+- artifacts() awaits full natural process drain.
+
+Change:
+1. Remove unconditional post-terminal SIGTERM / terminalShutdownGraceMs behavior from transcript path.
+   - Seeing run.completed/run.failed should stop event delivery, but must not forcibly truncate stdout/stderr that belong in the transcript artifact.
+   - Remove constructor option if it exists only for this.
+2. If cleanup is needed, leave it out of Task 4; future watchdog cleanup can be designed later.
+3. Add/update regression test:
+   - Emit valid trailing stdout/stderr after the old terminalShutdownGraceMs would have fired, then naturally close streams/process, and verify transcript contains those late bytes.
+
+Run:
+- pnpm --filter @switchyard/adapters test -- codex-exec-json-adapter
+- pnpm --filter @switchyard/adapters typecheck
+- pnpm --filter @switchyard/core test
+- pnpm --filter @switchyard/core typecheck
+
+Do not commit. Final response format:
+- Status
+- Files changed
+- Verification result
+- Notes
