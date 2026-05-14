@@ -1,0 +1,25 @@
+okay till now what all phases have been completed for this app
+
+---
+
+awesome now what i think is we are treating this app wrong we are bulding it from top down when it should be bottom up we should first add the providers and then build on top of it as it will be much easy to work with and create layers around it what do you say ?
+
+---
+
+actually i was thinking codex
+
+---
+
+what will be the difference b/w non-interactive codex exec --json runs only, or should we aim immediately for long-running interactive sessions i'm going with codex as i'm running it locally so i can test it properly
+
+---
+
+sure then let's go with exec-json
+
+---
+
+sure we'll also have to configure the model and it's reasoning as well search for live slugs that codex provides
+
+---
+
+okay let's move to implementation plan
