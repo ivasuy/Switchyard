@@ -1,0 +1,38 @@
+You are the implementation agent for Switchyard Task 2. You are not alone in the codebase; do not revert edits made by others. Work only on Task 2 and the files listed below.
+
+Repo: /Users/vasuyadav/Downloads/Projects/switchyard
+Spec: docs/superpowers/specs/2026-05-14-codex-exec-json-provider-design.md
+Plan: docs/superpowers/plans/2026-05-14-codex-exec-json-provider.md
+
+Current state from Task 1:
+- packages/adapters package exists.
+- packages/adapters/src/index.ts currently exports only ./codex/types.js intentionally.
+
+Task 2 goal: Add Codex model catalog parsing, run option validation, and catalog probing.
+
+Files you own:
+- Create packages/adapters/src/codex/codex-model-catalog.ts
+- Create packages/adapters/test/codex-model-catalog.test.ts
+- Modify packages/adapters/src/index.ts to also export ./codex/codex-model-catalog.js
+
+Requirements:
+1. Implement `parseCodexModelCatalog(raw: string): CodexModelCatalogEntry[]`.
+2. It must parse JSON from `codex debug models` shaped like `{ models: [{ slug, display_name, description, default_reasoning_level, supported_reasoning_levels, supports_reasoning_summaries, support_verbosity, default_verbosity }] }`.
+3. `supported_reasoning_levels` can be entries like `{ effort: "low" }`; handle string entries too.
+4. Implement `validateCodexRunOptions({ model, options, models }): CodexRunOptions`.
+5. If selected model exists and options.reasoningEffort is set but not supported, throw: `Reasoning effort <effort> is not supported by Codex model <model>`.
+6. If model catalog is unavailable or selected model is not present, allow the options through.
+7. Implement `probeCodexCatalog(command = "codex"): Promise<CodexCatalogProbe>` using execFile/promisify. It should first run `<command> --version`; if that fails return `{ ok: false, models: [], message }`. If version succeeds but `debug models` fails, return ok true with version, empty models, and message. If both succeed, return ok true with version and parsed models.
+8. Add tests from Task 2 in the plan, and any small edge tests needed. Keep tests deterministic; do not call the real Codex binary in tests.
+9. Update `packages/adapters/src/index.ts` to export the new module.
+
+Run verification:
+- pnpm --filter @switchyard/adapters test -- codex-model-catalog
+- pnpm --filter @switchyard/adapters typecheck
+Expected: PASS.
+
+Do not commit. Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Verification run and result
+- Notes/concerns
