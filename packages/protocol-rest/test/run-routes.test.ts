@@ -97,6 +97,10 @@ describe("run routes", () => {
     const created = createResponse.json();
     expect(created.run.status).toBe("completed");
     expect(created.run.id).toMatch(/^run_/);
+    expect(created.response).toEqual({
+      text: "fake runtime output",
+      outputs: [{ sequence: 3, text: "fake runtime output" }]
+    });
 
     const getResponse = await harness.app.inject({
       method: "GET",

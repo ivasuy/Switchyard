@@ -5,6 +5,7 @@ import {
   type ArtifactStore,
   EventBus,
   type RuntimeAdapter,
+  type RuntimeLogger,
   RunLauncherService,
   RunService,
   RuntimeRunnerService,
@@ -40,7 +41,11 @@ interface DaemonStores {
 type DaemonStoreResult = DaemonStores & {
   close?: () => void;
   sqlite?: {
-    prepare(sql: string): { run(...params: unknown[]): unknown };
+    prepare(sql: string): {
+      all(...params: unknown[]): Array<Record<string, unknown>>;
+      get(...params: unknown[]): Record<string, unknown> | undefined;
+      run(...params: unknown[]): unknown;
+    };
   };
 };
 
@@ -49,22 +54,34 @@ type CodexCatalogProbe = Awaited<ReturnType<typeof probeCodexCatalog>>;
 interface CreateDaemonAppOptions {
   codexProbe?: CodexCatalogProbe;
   probeCodexCatalog?: () => Promise<CodexCatalogProbe>;
+  logger?: RuntimeLogger | undefined;
 }
 
 export async function createDaemonApp(config?: DaemonConfig, options: CreateDaemonAppOptions = {}) {
   const app = Fastify({ logger: false });
   const stores: DaemonStoreResult = config ? createStorageStores(config) : createInMemoryStores();
   const codexProbe = options.codexProbe ?? (await (options.probeCodexCatalog ?? probeCodexCatalog)());
+  reconcileInterruptedRuns(stores, options.logger);
+  const codexOptions: ConstructorParameters<typeof CodexExecJsonAdapter>[0] = {
+    modelCatalog: codexProbe.models
+  };
+  if (options.logger) {
+    codexOptions.logger = options.logger;
+  }
   const adapters = new Map<string, RuntimeAdapter>([
     ["fake", new FakeRuntimeAdapter()],
-    ["codex", new CodexExecJsonAdapter({ modelCatalog: codexProbe.models })]
+    ["codex", new CodexExecJsonAdapter(codexOptions)]
   ]);
   const eventBus = new EventBus();
-  const runner = new RuntimeRunnerService({
+  const runnerOptions: ConstructorParameters<typeof RuntimeRunnerService>[0] = {
     adapters,
     eventBus,
     ...stores
-  });
+  };
+  if (options.logger) {
+    runnerOptions.logger = options.logger;
+  }
+  const runner = new RuntimeRunnerService(runnerOptions);
   const runService = new RunService({
     runs: stores.runs,
     events: stores.events,
@@ -156,6 +173,48 @@ async function seedFakeRegistry(registry: RegistryStore): Promise<void> {
       supportsBrowser: false,
       status: "available"
     });
+  }
+}
+
+function reconcileInterruptedRuns(stores: DaemonStoreResult, logger?: RuntimeLogger): void {
+  if (!stores.sqlite) {
+    return;
+  }
+
+  const staleRuns = stores.sqlite
+    .prepare("SELECT id FROM runs WHERE status = 'running'")
+    .all();
+
+  for (const staleRun of staleRuns) {
+    const runId = typeof staleRun["id"] === "string" ? staleRun["id"] : undefined;
+    if (!runId) {
+      continue;
+    }
+
+    const endedAt = new Date().toISOString();
+    const sequenceRow = stores.sqlite
+      .prepare("SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence FROM run_events WHERE run_id = ?")
+      .get(runId);
+    const sequence = typeof sequenceRow?.["sequence"] === "number" ? sequenceRow["sequence"] : 0;
+
+    stores.sqlite
+      .prepare("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ? AND status = 'running'")
+      .run(endedAt, runId);
+    stores.sqlite
+      .prepare("UPDATE runtime_sessions SET status = 'failed', updated_at = ? WHERE run_id = ? AND status = 'active'")
+      .run(endedAt, runId);
+    stores.sqlite
+      .prepare(
+        "INSERT INTO run_events (id, type, run_id, sequence, payload_json, created_at) VALUES (?, 'run.failed', ?, ?, ?, ?)"
+      )
+      .run(
+        `event_${crypto.randomUUID()}`,
+        runId,
+        sequence,
+        JSON.stringify({ status: "failed", error: "daemon_restarted" }),
+        endedAt
+      );
+    logger?.warn("run.reconciled_interrupted", { runId });
   }
 }
 

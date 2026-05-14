@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { type FastifyInstance } from "fastify";
 import { createDaemonApp } from "../src/app.js";
 import type { DaemonConfig } from "../src/config.js";
+import { openSqliteStorage } from "@switchyard/storage";
 
 type CodexProbe = NonNullable<Parameters<typeof createDaemonApp>[1]>["codexProbe"];
 
@@ -225,6 +226,86 @@ describe("daemon app", () => {
           await second.close();
         } catch {
           // Ensure cleanup remains best-effort.
+        }
+      }
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Do not fail cleanup on best-effort temp cleanup.
+      }
+    }
+  });
+
+  it("marks persisted running runs failed on daemon restart", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchyard-daemon-reconcile-"));
+    const config: DaemonConfig = {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir: dir,
+      sqlitePath: join(dir, "switchyard.sqlite"),
+      artifactDir: join(dir, "artifacts")
+    };
+
+    let app: FastifyInstance | undefined;
+    try {
+      app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+      await app.close();
+      app = undefined;
+
+      const storage = openSqliteStorage(config.sqlitePath);
+      storage.sqlite.prepare(
+        `INSERT INTO runs (
+          id, runtime, provider, model, adapter_type, cwd, task, status, placement,
+          approval_policy, timeout_seconds, metadata_json, created_at, started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        "run_interrupted",
+        "codex",
+        "openai",
+        "gpt-5.5",
+        "process",
+        "/repo",
+        "stale task",
+        "running",
+        "local",
+        "default",
+        600,
+        "{}",
+        "2026-05-14T00:00:00.000Z",
+        "2026-05-14T00:00:01.000Z"
+      );
+      storage.sqlite.prepare(
+        `INSERT INTO runtime_sessions (
+          id, run_id, runtime, provider, model, protocol, status, process_id, state_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        "session_interrupted",
+        "run_interrupted",
+        "codex",
+        "openai",
+        "gpt-5.5",
+        "process",
+        "active",
+        1234,
+        "{}",
+        "2026-05-14T00:00:01.000Z"
+      );
+      storage.sqlite.close();
+
+      app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+      const response = await app.inject({ method: "GET", url: "/runs/run_interrupted" });
+      const events = await app.inject({ method: "GET", url: "/runs/run_interrupted/events" });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().run.status).toBe("failed");
+      expect(events.body).toContain("event: run.failed");
+      expect(events.body).toContain("daemon_restarted");
+    } finally {
+      if (app) {
+        try {
+          await app.close();
+        } catch {
+          // Keep cleanup resilient for repeated-run assertions.
         }
       }
       try {

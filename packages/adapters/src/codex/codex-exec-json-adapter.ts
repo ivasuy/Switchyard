@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Artifact, SwitchyardEvent } from "@switchyard/contracts";
-import type { RuntimeAdapter, RuntimeAdapterCheck, RuntimeStartResult } from "@switchyard/core";
+import type { RuntimeAdapter, RuntimeAdapterCheck, RuntimeLogger, RuntimeStartResult } from "@switchyard/core";
 import { codexEventToSwitchyardEvent, parseCodexJsonLine } from "./codex-jsonl-parser.js";
 import { probeCodexCatalog, validateCodexRunOptions } from "./codex-model-catalog.js";
 import type {
@@ -69,6 +69,7 @@ interface CodexExecJsonAdapterOptions {
   command?: string;
   processFactory?: CodexProcessFactory;
   modelCatalog?: CodexModelCatalogEntry[];
+  logger?: RuntimeLogger | undefined;
 }
 
 export class CodexInputUnsupportedError extends Error {
@@ -84,6 +85,7 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
   private readonly processFactory: CodexProcessFactory;
   private readonly modelCatalog: CodexModelCatalogEntry[];
   private readonly sessions = new Map<string, CodexAdapterSession>();
+  private readonly logger: RuntimeLogger | undefined;
 
   constructor(options: CodexExecJsonAdapterOptions = {}) {
     this.command = options.command ?? "codex";
@@ -91,6 +93,7 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
       options.processFactory ??
       ((args, processOptions) => spawn(this.command, args, { ...processOptions, shell: false }));
     this.modelCatalog = options.modelCatalog ?? [];
+    this.logger = options.logger;
   }
 
   async check(): Promise<RuntimeAdapterCheck> {
@@ -113,6 +116,7 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
     const model = requireString(request["model"], "model");
     const task = requireString(request["task"], "task");
     const metadata = readMetadata(request["metadata"]);
+    const runId = typeof request["runId"] === "string" ? request["runId"] : undefined;
     const options = validateCodexRunOptions({
       model,
       options: toCodexRunOptions(metadata),
@@ -120,7 +124,17 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
     });
     const args = buildCodexExecArgs({ model, cwd, task, options });
     const child = this.processFactory(args, { cwd, env: process.env });
+    child.stdin.end();
     const startedAt = new Date().toISOString();
+    this.log("info", "codex.spawned", {
+      runId,
+      pid: child.pid,
+      model,
+      cwd,
+      sandbox: options.sandbox ?? "workspace-write",
+      ignoreUserConfig: options.ignoreUserConfig,
+      ignoreRules: options.ignoreRules
+    });
 
     let resolveExit: ((code: number | null) => void) | undefined;
     const exitPromise = new Promise<number | null>((resolve) => {
@@ -145,7 +159,13 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
     });
 
     child.stderr.on("data", (chunk: string | Buffer) => {
-      session.stderrLines.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      session.stderrLines.push(text);
+      this.log("warn", "codex.stderr", {
+        runId,
+        pid: child.pid,
+        text: truncate(text, 400)
+      });
     });
     child.stderr.once("end", () => {
       resolveStderrEnd?.();
@@ -154,6 +174,11 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
       session.exitCode = code;
       resolveStderrEnd?.();
       resolveExit?.(code);
+      this.log("info", "codex.exit", {
+        runId,
+        pid: child.pid,
+        code
+      });
     });
     child.once("error", (error) => {
       session.stderrLines.push(error instanceof Error ? error.message : String(error));
@@ -162,9 +187,18 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
       }
       resolveStderrEnd?.();
       resolveExit?.(session.exitCode);
+      this.log("error", "codex.process_error", {
+        runId,
+        pid: child.pid,
+        error: error instanceof Error ? error.message : String(error)
+      });
     });
 
-    const stdoutCapturePromise = this.captureStdoutLines(child, session);
+    const stdoutCapturePromise = this.captureStdoutLines(
+      child,
+      session,
+      runId ? { runId } : {}
+    );
     session.drainPromise = Promise.all([stdoutCapturePromise, stderrEndPromise, exitPromise]).then(() => undefined);
 
     const sessionId = `session_${crypto.randomUUID()}`;
@@ -282,7 +316,8 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
 
   private async captureStdoutLines(
     process: ReturnType<CodexProcessFactory>,
-    session: Pick<CodexAdapterSession, "rawLines" | "stdoutQueue">
+    session: Pick<CodexAdapterSession, "rawLines" | "stdoutQueue">,
+    context: { runId?: string }
   ): Promise<void> {
     const lines = createInterface({
       input: process.stdout,
@@ -294,12 +329,22 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
         if (line.length === 0) {
           continue;
         }
+        if (session.rawLines.length === 0) {
+          this.log("info", "codex.stdout.first_line", {
+            runId: context.runId,
+            pid: process.pid
+          });
+        }
         session.rawLines.push(line);
         session.stdoutQueue.push(line);
       }
     } finally {
       session.stdoutQueue.close();
     }
+  }
+
+  private log(level: keyof RuntimeLogger, event: string, details?: Record<string, unknown>): void {
+    this.logger?.[level](event, details);
   }
 }
 
@@ -325,6 +370,12 @@ export function buildCodexExecArgs(input: { model: string; cwd: string; task: st
   if (input.options.ephemeral) {
     args.push("--ephemeral");
   }
+  if (input.options.ignoreUserConfig) {
+    args.push("--ignore-user-config");
+  }
+  if (input.options.ignoreRules) {
+    args.push("--ignore-rules");
+  }
 
   args.push(input.task);
   return args;
@@ -341,7 +392,9 @@ function buildTranscriptContent(rawLines: string[], stderrLines: string[]): stri
 function toCodexRunOptions(metadata: Record<string, unknown>): CodexRunOptions {
   const options: CodexRunOptions = {
     skipGitRepoCheck: metadata["skipGitRepoCheck"] === true,
-    ephemeral: metadata["ephemeral"] === true
+    ephemeral: metadata["ephemeral"] === true,
+    ignoreUserConfig: metadata["ignoreUserConfig"] !== false,
+    ignoreRules: metadata["ignoreRules"] === true
   };
 
   const reasoningEffort = readEnum<CodexReasoningEffort>(metadata["reasoningEffort"], ["minimal", "low", "medium", "high", "xhigh"]);
@@ -355,6 +408,10 @@ function toCodexRunOptions(metadata: Record<string, unknown>): CodexRunOptions {
   if (sandbox) options.sandbox = sandbox;
 
   return options;
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value;
 }
 
 function readEnum<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {

@@ -14,9 +14,9 @@ Codex should support coding/repo tasks through a structured headless path before
 
 - Binary: `/opt/homebrew/bin/codex`
 - Version: `codex-cli 0.130.0`
-- `codex exec` exposes `--json`, `--model`, `--cd`, `--sandbox`, `--skip-git-repo-check`, `--ephemeral`, and `-c key=value`.
+- `codex exec` exposes `--json`, `--model`, `--cd`, `--sandbox`, `--skip-git-repo-check`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, and `-c key=value`.
 - `codex debug models` returns local model slugs and supported reasoning levels.
-- Live `codex exec --json` probe was deferred to avoid spend and unintended workspace changes.
+- Live `codex exec --json` through Switchyard completed locally on 2026-05-14 with `gpt-5.5`, `reasoningEffort: low`, `sandbox: read-only`, and `ignoreUserConfig: true`.
 
 ## Implementation Notes
 
@@ -26,35 +26,14 @@ Codex should support coding/repo tasks through a structured headless path before
 - JSONL stdout is normalized to Switchyard events.
 - Raw stdout JSONL plus stderr are preserved as transcript artifacts.
 - `POST /runs/:id/input` is unsupported for this mode and returns `409`.
+- Daemon logs include run id, process id, stderr snippets, first stdout detection, terminal state, and timeout state.
+- `ignoreUserConfig` defaults to `true` to keep daemon-launched Codex jobs isolated from local interactive config such as MCP servers; set it to `false` per run when that config is required.
+- Run-level `timeoutSeconds` is enforced by the runner so a process that never emits JSONL is terminalized as `timeout` instead of remaining `running`.
 - CI-safe tests use fake process fixtures and do not call the real Codex CLI.
 
-## Local Run Example
+## Local Development
 
-```bash
-curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
-  -H 'content-type: application/json' \
-  -d '{
-    "runtime": "codex",
-    "provider": "openai",
-    "model": "gpt-5.5",
-    "adapterType": "process",
-    "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
-    "task": "Return one sentence describing this repository. Do not edit files.",
-    "metadata": {
-      "reasoningEffort": "low",
-      "reasoningSummary": "auto",
-      "verbosity": "low",
-      "sandbox": "read-only"
-    }
-  }'
-```
-
-Focused local verification:
-
-```bash
-pnpm --filter @switchyard/adapters test
-pnpm --filter @switchyard/daemon test
-```
+For prebuilt local curls, focused verification commands, PID checks, SQLite queries, and stuck-state interpretation, see [Codex Adapter Local Development](../development/adapters/CODEX.md).
 
 ## Status
 

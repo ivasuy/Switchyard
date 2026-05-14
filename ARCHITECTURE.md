@@ -599,7 +599,7 @@ Adapter details are time-sensitive. Switchyard should treat every real adapter a
 |---|---|---|---|---|---|
 | OpenCode | ACP via `opencode acp` | CLI/process | local or hosted worker with installed binary | High | OpenCode documents ACP support through JSON-RPC over stdio. This should be the first real ACP adapter. |
 | Claude Code | TypeScript Agent SDK or `claude -p --output-format stream-json` | PTY/process | local first, hosted only with explicit credentials/sandbox | High | Claude Code exposes a current Agent SDK and programmatic CLI path with streaming JSON. Treat SDK as preferred over terminal scraping. |
-| Codex CLI | `codex exec --json` process adapter | PTY/process for future interactive mode | local first | Medium-High | First real provider slice is implemented for non-interactive runs. The adapter reads the local model catalog with `codex debug models`, normalizes JSONL events, and preserves raw transcript artifacts. |
+| Codex CLI | `codex exec --json` process adapter | PTY/process for future interactive mode | local first | Medium-High | First real provider slice is implemented for non-interactive runs. The adapter reads the local model catalog with `codex debug models`, normalizes JSONL events, logs process lifecycle details, enforces run timeouts, and preserves raw transcript artifacts. |
 | Cursor | `cursor-agent -p --output-format stream-json` | PTY/process | local first | Medium | Cursor documents headless CLI and streaming JSON. Treat as experimental until command behavior is tested locally. |
 | OpenClaw | HTTP/gateway adapter | process only for local dev | hosted or local depending on deployment | Medium | OpenClaw is itself a gateway with sessions, workspace, streaming, queue behavior, skills, and tool policy. Switchyard should integrate at its gateway boundary, not by controlling its internals. |
 | AgentField | REST API adapter, async execution preferred | HTTP sync for fast tasks | hosted or local | High | AgentField exposes REST execution APIs with async execution for long-running LLM workflows. Switchyard should treat it as a wrapper runtime. |
@@ -626,7 +626,7 @@ The first real provider slice is Codex exec-json. This validates Switchyard's lo
 
 Claude Code should not start with PTY. Use the TypeScript Agent SDK or streaming JSON CLI first, then keep PTY as an interactive fallback.
 
-Codex is integrated through a process adapter for non-interactive `codex exec --json` runs. Switchyard validates requested reasoning effort against the local Codex model catalog when available, maps JSONL into normalized events, marks input as unsupported for this mode, and persists raw stdout/stderr as transcript artifacts.
+Codex is integrated through a process adapter for non-interactive `codex exec --json` runs. Switchyard validates requested reasoning effort against the local Codex model catalog when available, maps JSONL into normalized events, marks input as unsupported for this mode, and persists raw stdout/stderr as transcript artifacts. Daemon-launched Codex runs default to `--ignore-user-config` to avoid inheriting local interactive config such as MCP servers; callers can opt back in with run metadata. The runner logs process lifecycle details and enforces `timeoutSeconds` so a child process that never emits JSONL does not stay `running` indefinitely.
 
 Hosted mode must avoid arbitrary PTY/subprocess execution by default. Process and PTY adapters should run locally or inside an explicitly sandboxed hosted worker class.
 

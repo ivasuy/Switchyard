@@ -49,6 +49,7 @@ describe("CodexExecJsonAdapter", () => {
     const artifacts = await adapter.artifacts({ ...session, runId: "run_codex" });
 
     expect(fake.cwd).toBe("/repo");
+    expect(fake.stdin.writableEnded).toBe(true);
     expect(fake.args).toEqual([
       "exec",
       "--json",
@@ -66,6 +67,7 @@ describe("CodexExecJsonAdapter", () => {
       "read-only",
       "--skip-git-repo-check",
       "--ephemeral",
+      "--ignore-user-config",
       "do work"
     ]);
     expect(events.map((event) => event.type)).toEqual(["runtime.status", "runtime.output", "run.completed"]);
@@ -159,6 +161,40 @@ describe("CodexExecJsonAdapter", () => {
 
     expect(fake.killed).toBe(true);
     expect(fake.lastSignal).toBe("SIGTERM");
+  });
+
+  it("allows user config loading when explicitly requested", async () => {
+    const fake = new FakeCodexProcess();
+    const adapter = new CodexExecJsonAdapter({
+      processFactory: (args) => {
+        fake.args = args;
+        queueMicrotask(() => {
+          fake.stdout.write("{\"type\":\"turn.completed\"}\n");
+          fake.stdout.end();
+          fake.stderr.end();
+          fake.emit("exit", 0, null);
+        });
+        return fake as never;
+      }
+    });
+
+    const session = await adapter.start({
+      runId: "run_codex",
+      model: "gpt-5.5",
+      cwd: "/repo",
+      task: "use config",
+      metadata: {
+        ignoreUserConfig: false,
+        ignoreRules: true
+      }
+    });
+
+    for await (const _event of adapter.events({ ...session, runId: "run_codex" })) {
+      // Drain events to let the fake process close.
+    }
+
+    expect(fake.args).not.toContain("--ignore-user-config");
+    expect(fake.args).toContain("--ignore-rules");
   });
 
   it("rejects send because exec-json is not interactive", async () => {

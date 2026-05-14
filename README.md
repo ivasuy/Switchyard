@@ -1,4 +1,10 @@
-# Switchyard
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-wordmark.svg">
+    <img alt="Switchyard" src="docs/assets/logo-wordmark.svg" width="520">
+  </picture>
+</p>
 
 Switchyard is a runtime gateway that exposes multiple agent runtimes and wrappers as one unified backend API.
 
@@ -204,154 +210,12 @@ cancel
 collect artifacts
 ```
 
-## Local Testing
+## Developer Documentation
 
-The current local MVP runs through the Switchyard daemon with local SQLite state and filesystem artifact storage by default.
+Local setup, test commands, prebuilt curl requests, PID checks, SQLite inspection, and Codex debugging live outside this product README:
 
-Supported local runtimes:
-
-- `fake`: deterministic in-process test runtime; safe for repeatable smoke tests.
-- `codex`: local Codex CLI runtime using `codex exec --json`; this can spend local Codex usage and can read the configured working directory according to the selected Codex sandbox.
-
-From the repo root:
-
-```bash
-cd /Users/vasuyadav/Downloads/Projects/switchyard
-pnpm install
-pnpm --filter @switchyard/daemon dev
-```
-
-The daemon starts on:
-
-```text
-http://127.0.0.1:4545
-```
-
-In another terminal, check health:
-
-```bash
-curl -s http://127.0.0.1:4545/health
-```
-
-Expected response:
-
-```json
-{"ok":true}
-```
-
-Create a fake run (deterministic completion):
-
-```bash
-curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
-  -H 'content-type: application/json' \
-  -d '{
-    "runtime": "fake",
-    "provider": "test",
-    "model": "test-model",
-    "adapterType": "process",
-    "cwd": "/repo",
-    "task": "Test Switchyard locally"
-  }'
-```
-
-The response is the completed run:
-
-```json
-{
-  "run": {
-    "id": "run_...",
-    "status": "completed"
-  }
-}
-```
-
-Fetch the run:
-
-```bash
-curl -s http://127.0.0.1:4545/runs/<RUN_ID>
-```
-
-Fetch the run events:
-
-```bash
-curl -s http://127.0.0.1:4545/runs/<RUN_ID>/events
-```
-
-Fetch artifacts for a completed run:
-
-```bash
-curl -s http://127.0.0.1:4545/runs/<RUN_ID>/artifacts
-```
-
-Expected event types:
-
-```text
-run.queued
-run.started
-runtime.status
-runtime.output
-run.completed
-```
-
-Without `wait=1`, `POST /runs` is asynchronous and returns `202` with a queued run; poll `GET /runs/<RUN_ID>` or stream `GET /runs/<RUN_ID>/events` to wait for completion.
-
-Check registered local provider/runtime records:
-
-```bash
-curl -s http://127.0.0.1:4545/providers/provider_openai
-curl -s http://127.0.0.1:4545/runtimes/runtime_codex
-curl -s http://127.0.0.1:4545/models/model_gpt_5_5
-```
-
-If local Codex is unavailable, the OpenAI provider and Codex runtime records return `status: "unavailable"`. Model records are seeded from `codex debug models` when the local Codex catalog can be read.
-
-Create a Codex exec-json run:
-
-```bash
-curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
-  -H 'content-type: application/json' \
-  -d '{
-    "runtime": "codex",
-    "provider": "openai",
-    "model": "gpt-5.5",
-    "adapterType": "process",
-    "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
-    "task": "Return one sentence describing this repository. Do not edit files.",
-    "metadata": {
-      "reasoningEffort": "low",
-      "reasoningSummary": "auto",
-      "verbosity": "low",
-      "sandbox": "read-only"
-    }
-  }'
-```
-
-Fetch Codex run events and transcript metadata the same way as fake runs:
-
-```bash
-curl -s http://127.0.0.1:4545/runs/<RUN_ID>/events
-curl -s http://127.0.0.1:4545/runs/<RUN_ID>/artifacts
-```
-
-Codex exec-json runs are non-interactive in this slice. Sending input to a Codex run returns `409`:
-
-```bash
-curl -s -X POST "http://127.0.0.1:4545/runs/<RUN_ID>/input" \
-  -H 'content-type: application/json' \
-  -d '{"text":"continue"}'
-```
-
-Run verification:
-
-```bash
-pnpm --filter @switchyard/adapters test
-pnpm --filter @switchyard/protocol-rest test
-pnpm --filter @switchyard/daemon test
-pnpm test
-pnpm typecheck
-pnpm build
-pnpm lint
-```
+- [Development docs](docs/development/)
+- [Adapter local debugging guides](docs/development/adapters/)
 
 ## Deployment Modes
 

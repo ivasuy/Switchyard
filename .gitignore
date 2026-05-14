@@ -1,7 +1,3 @@
-# Local planning and research docs
-docs/decisions/
-docs/superpowers/
-
 # Dependencies
 node_modules/
 **/node_modules/
@@ -40,5 +36,9 @@ Thumbs.db
 tmp/
 temp/
 .cache/
-.codex
+.codex/
 .cursor
+.entire/
+.skill-archive/
+.switchyard/
+**/.switchyard/

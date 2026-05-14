@@ -3,6 +3,7 @@ import type { ArtifactStore } from "../ports/artifact-store.js";
 import type { EventStore } from "../ports/event-store.js";
 import type { RunStore } from "../ports/run-store.js";
 import type { RuntimeAdapter } from "../ports/runtime-adapter.js";
+import type { RuntimeLogger } from "../ports/runtime-logger.js";
 import type { SessionStore } from "../ports/session-store.js";
 import type { EventBus } from "./event-bus.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -14,6 +15,7 @@ export interface RuntimeRunnerDependencies {
   adapters: Map<string, RuntimeAdapter>;
   artifacts?: ArtifactStore;
   eventBus?: EventBus;
+  logger?: RuntimeLogger | undefined;
   artifactContent?: {
     writeText(path: string, content: string): Promise<string>;
   };
@@ -36,10 +38,18 @@ export class RuntimeRunnerService {
     };
     await this.deps.runs.update(started);
     await this.appendAndPublish(this.eventForRun(started, "run.started", sequence++, {}));
+    this.log("info", "run.started", {
+      runId: started.id,
+      runtime: started.runtime,
+      provider: started.provider,
+      model: started.model,
+      timeoutSeconds: started.timeoutSeconds
+    });
 
     let latest = started;
     let session: RuntimeSession | undefined;
     let terminalized = false;
+    const deadlineMs = Date.now() + started.timeoutSeconds * 1000;
 
     try {
       const startResult = await adapter.start({
@@ -71,13 +81,41 @@ export class RuntimeRunnerService {
         session = { ...session, processId: startResult.processId };
       }
       await this.deps.sessions.create(session);
+      this.log("info", "runtime.session.started", {
+        runId: started.id,
+        sessionId: session.id,
+        runtime: started.runtime,
+        processId: session.processId
+      });
 
-      for await (const event of adapter.events({ ...startResult, runId: started.id })) {
+      const adapterSession = { ...startResult, runId: started.id };
+      const iterator = adapter.events(adapterSession)[Symbol.asyncIterator]();
+      while (true) {
+        const next = await this.nextAdapterEvent(iterator.next(), deadlineMs);
+        if (next === "timeout") {
+          void iterator.return?.();
+          latest = await this.timeoutRun(started, sequence++, session, adapter);
+          terminalized = true;
+          if (this.deps.artifacts && session) {
+            const artifactSequence = { value: sequence };
+            try {
+              await this.persistArtifacts(adapter, session, started, latest, artifactSequence);
+            } finally {
+              sequence = artifactSequence.value;
+            }
+          }
+          break;
+        }
+        if (next.done) {
+          break;
+        }
+        const event = next.value;
         if (await this.isCancelled(started.id)) {
           break;
         }
 
         const normalized = this.normalizeEvent(event, started.id, sequence++);
+        this.logEvent(normalized);
 
         if (normalized.type === "run.completed" || normalized.type === "run.failed") {
           const terminalSequence = sequence - 1;
@@ -224,8 +262,65 @@ export class RuntimeRunnerService {
         error: this.errorPayload(error)
       }
     ));
+    this.log("error", "run.failed", {
+      runId: failed.id,
+      error: this.errorPayload(error)
+    });
 
     return failed;
+  }
+
+  private async timeoutRun(
+    templateRun: Run,
+    sequence: number,
+    session: RuntimeSession,
+    adapter: RuntimeAdapter
+  ): Promise<Run> {
+    const currentRun = await this.deps.runs.get(templateRun.id);
+    if (!currentRun || this.isTerminal(currentRun.status)) {
+      return currentRun ?? templateRun;
+    }
+
+    try {
+      await adapter.cancel(this.adapterSession(session));
+    } catch (error) {
+      this.log("warn", "runtime.cancel_after_timeout_failed", {
+        runId: templateRun.id,
+        error: this.errorPayload(error)
+      });
+    }
+
+    const timedOutAt = new Date().toISOString();
+    const timedOut: Run = {
+      ...templateRun,
+      status: "timeout",
+      endedAt: timedOutAt
+    };
+    const timedOutSession: RuntimeSession = {
+      ...session,
+      status: "failed",
+      updatedAt: timedOutAt
+    };
+
+    await this.deps.runs.update(timedOut);
+    await this.deps.sessions.update(timedOutSession);
+    await this.appendAndPublish(this.eventForRun(
+      timedOut,
+      "run.failed",
+      sequence,
+      {
+        status: "timeout",
+        error: "runtime_timeout",
+        timeoutSeconds: templateRun.timeoutSeconds
+      }
+    ));
+    this.log("warn", "run.timeout", {
+      runId: timedOut.id,
+      runtime: timedOut.runtime,
+      timeoutSeconds: timedOut.timeoutSeconds
+    });
+
+    return timedOut;
   }
 
   private async persistArtifacts(
@@ -353,6 +448,55 @@ export class RuntimeRunnerService {
       return error.message;
     }
     return String(error);
+  }
+
+  private async nextAdapterEvent(
+    nextPromise: Promise<IteratorResult<SwitchyardEvent>>,
+    deadlineMs: number
+  ): Promise<IteratorResult<SwitchyardEvent> | "timeout"> {
+    const remainingMs = Math.max(0, deadlineMs - Date.now());
+    if (remainingMs === 0) {
+      return "timeout";
+    }
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<"timeout">((resolve) => {
+      timeout = setTimeout(() => resolve("timeout"), remainingMs);
+    });
+
+    try {
+      return await Promise.race([nextPromise, timeoutPromise]);
+    } finally {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
+  }
+
+  private logEvent(event: SwitchyardEvent): void {
+    if (event.type === "runtime.output") {
+      const text = typeof event.payload["text"] === "string" ? event.payload["text"] : undefined;
+      this.log("info", "runtime.output", {
+        runId: event.runId,
+        sequence: event.sequence,
+        text: text ? this.truncate(text, 120) : undefined
+      });
+      return;
+    }
+    this.log("info", event.type, {
+      runId: event.runId,
+      sequence: event.sequence,
+      status: event.payload["status"],
+      error: event.payload["error"]
+    });
+  }
+
+  private log(level: keyof RuntimeLogger, event: string, details?: Record<string, unknown>): void {
+    this.deps.logger?.[level](event, details);
+  }
+
+  private truncate(value: string, maxLength: number): string {
+    return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value;
   }
 
   private eventForRun(run: Run, type: SwitchyardEvent["type"], sequence: number, payload: Record<string, unknown>): SwitchyardEvent {

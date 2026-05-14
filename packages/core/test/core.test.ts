@@ -517,6 +517,35 @@ describe("core service shells", () => {
     expect((events.items.at(-1)?.payload as { error?: string }).error).toBe("startup failure");
   });
 
+  it("times out runs when an adapter never emits an event", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const adapter = new HangingAdapter();
+    const run = await createStoredRun(runs, { timeoutSeconds: 0.01 });
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    const timedOut = await runner.start(run);
+
+    expect(timedOut.status).toBe("timeout");
+    expect((await runs.get(run.id))?.status).toBe("timeout");
+    expect((await sessions.getByRunId(run.id))?.status).toBe("failed");
+    expect(adapter.cancelledSession?.["runId"]).toBe(run.id);
+    expect(events.items.at(-1)).toMatchObject({
+      type: "run.failed",
+      payload: {
+        status: "timeout",
+        error: "runtime_timeout",
+        timeoutSeconds: 0.01
+      }
+    });
+  });
+
   it("keeps launch fire-and-forget start calls from creating unhandled rejections", async () => {
     const run: Run = {
       id: "run_1",
@@ -1113,6 +1142,14 @@ class CancelBeforeCompleteAdapter extends EventfulAdapter {
   }
 }
 
+class HangingAdapter extends EventfulAdapter {
+  override events(): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      await new Promise(() => undefined);
+    })();
+  }
+}
+
 class TwoArtifactAdapter extends EventfulAdapter {
   readonly firstArtifactPath = `artifacts/${crypto.randomUUID()}/first.jsonl`;
   readonly secondArtifactPath = `artifacts/${crypto.randomUUID()}/second.jsonl`;
@@ -1153,7 +1190,7 @@ class ThrowingAfterFirstArtifactContentStore {
   }
 }
 
-async function createStoredRun(runs: RunStore): Promise<Run> {
+async function createStoredRun(runs: RunStore, overrides: Partial<Run> = {}): Promise<Run> {
   const run: Run = {
     id: `run_${crypto.randomUUID()}`,
     runtime: "fake",
@@ -1167,7 +1204,8 @@ async function createStoredRun(runs: RunStore): Promise<Run> {
     approvalPolicy: "default",
     timeoutSeconds: 60,
     metadata: {},
-    createdAt: "2026-05-11T00:00:00.000Z"
+    createdAt: "2026-05-11T00:00:00.000Z",
+    ...overrides
   };
   await runs.create(run);
   return run;

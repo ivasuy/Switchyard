@@ -8,7 +8,7 @@ This directory records runtime adapter facts before implementation. Switchyard s
 | --- | --- | --- | --- |
 | OpenCode | ACP/acpx | Verified candidate | `opencode acp` initialized successfully locally. |
 | Claude Code | SDK or stream-json CLI | Needs approved live probe | CLI is installed; model-running probe was deferred to avoid spend. |
-| Codex | `codex exec --json` | Implemented local slice | Non-interactive process adapter is implemented. Live model probe remains manual because it can spend usage. |
+| Codex | `codex exec --json` | Implemented local slice | Non-interactive process adapter is implemented and has a local debugging guide in `docs/development/adapters/CODEX.md`. |
 | Cursor Agent | stream-json CLI | Deferred | CLI is installed, but local status check hit credential/keychain failure. |
 | AgentField | async REST / CLI | Verified candidate | CLI and async REST docs were checked; good early wrapper adapter target. |
 | Generic HTTP | HTTP | Ready for contract design | Useful for custom agents and wrapper runtimes. |

@@ -2,6 +2,26 @@
 
 All notable changes to Switchyard will be documented in this file.
 
+## Unreleased
+
+### Added
+
+- Added local Codex `exec --json` run support with model/reasoning metadata mapping, model catalog validation, JSONL event normalization, transcript artifacts, and CI-safe adapter coverage.
+- Added daemon runtime logs for run start/completion, Codex child process PID, stderr snippets, first stdout detection, runtime output, timeout, and startup reconciliation.
+- Added `response.text` and `response.outputs` to `POST /runs?wait=1` responses so curl callers see the final model answer without a second request.
+- Added development documentation under `docs/development/`, including generic local startup/debugging commands and Codex-specific curls, PID checks, SQLite inspection, and stuck-run diagnosis.
+
+### Changed
+
+- Refocused the README as a product-facing overview and moved detailed local development commands into dedicated development docs.
+- Updated architecture and adapter docs to describe the implemented Codex non-interactive local adapter path.
+- Ignored local Switchyard data directories and local agent runtime state.
+
+### Fixed
+
+- Closed Codex child stdin immediately after spawning so `codex exec --json` does not wait indefinitely after printing `Reading additional input from stdin...`.
+- Terminalized timed-out and interrupted runs so daemon restarts do not leave persisted runs stuck in `running`.
+
 ## 0.1.0 - 2026-05-11
 
 ### Added

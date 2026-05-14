@@ -12,6 +12,8 @@ export interface CodexRunOptions {
   sandbox?: CodexSandbox;
   skipGitRepoCheck?: boolean;
   ephemeral?: boolean;
+  ignoreUserConfig?: boolean;
+  ignoreRules?: boolean;
 }
 
 export interface CodexModelCatalogEntry {

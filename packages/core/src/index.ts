@@ -15,6 +15,7 @@ export * from "./ports/queue.js";
 export * from "./ports/registry-store.js";
 export * from "./ports/run-store.js";
 export * from "./ports/runtime-adapter.js";
+export * from "./ports/runtime-logger.js";
 export * from "./ports/session-store.js";
 export * from "./ports/tool-adapter.js";
 export * from "./services/event-bus.js";

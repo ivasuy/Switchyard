@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { ArtifactStore, EventBus, EventStore, RunLauncherService, RunService, RunStore } from "@switchyard/core";
-import { adapterTypeSchema } from "@switchyard/contracts";
+import { adapterTypeSchema, type SwitchyardEvent } from "@switchyard/contracts";
 import { collectReplayAndLiveEvents, formatSseEvent } from "@switchyard/protocol-sse";
 
 export interface RunRouteDependencies {
@@ -30,7 +30,8 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     });
     if (wait) {
       const completed = await deps.runService.startRun(run.id);
-      return reply.code(201).send({ run: completed });
+      const events = await deps.events.listByRun(run.id);
+      return reply.code(201).send({ run: completed, response: collectRunResponse(events) });
     }
     if (deps.launcher) {
       deps.launcher.launch(run);
@@ -128,6 +129,32 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     const cancelled = await deps.runService.cancelRun(id);
     return reply.send({ run: cancelled });
   });
+}
+
+interface RunOutput {
+  sequence: number;
+  text: string;
+}
+
+interface RunResponseSummary {
+  text: string | null;
+  outputs: RunOutput[];
+}
+
+function collectRunResponse(events: SwitchyardEvent[]): RunResponseSummary {
+  const outputs = events.flatMap((event): RunOutput[] => {
+    if (event.type !== "runtime.output") {
+      return [];
+    }
+    const text = event.payload["text"];
+    return typeof text === "string" && text.length > 0
+      ? [{ sequence: event.sequence, text }]
+      : [];
+  });
+  return {
+    text: outputs.at(-1)?.text ?? null,
+    outputs
+  };
 }
 
 interface CreateRunBody {
