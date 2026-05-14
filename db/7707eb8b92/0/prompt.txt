@@ -1,0 +1,64 @@
+You are the implementation agent for Switchyard Task 3. You are not alone in the codebase; do not revert edits made by others. Work only on Task 3 and the files listed below.
+
+Repo: /Users/vasuyadav/Downloads/Projects/switchyard
+Spec: docs/superpowers/specs/2026-05-14-codex-exec-json-provider-design.md
+Plan: docs/superpowers/plans/2026-05-14-codex-exec-json-provider.md
+
+Current state:
+- @switchyard/adapters exists.
+- packages/adapters/src/index.ts exports types and codex-model-catalog.
+
+Task 3 goal: Parse Codex JSONL events and normalize them into Switchyard events.
+
+Files you own:
+- Create packages/adapters/src/codex/codex-jsonl-parser.ts
+- Create packages/adapters/test/codex-jsonl-parser.test.ts
+- Modify packages/adapters/src/index.ts to also export ./codex/codex-jsonl-parser.js
+
+Requirements:
+1. Implement `parseCodexJsonLine(line: string): Record<string, unknown>`.
+2. It must parse a JSON object line. Invalid JSON or non-object/array JSON must throw an error whose message starts with `Invalid Codex JSONL line:`.
+3. Implement `codexEventToSwitchyardEvent(event, context)` where context includes `{ runId, sequence, createdAt }`.
+4. Map `thread.started` and `turn.started` to `runtime.status`.
+5. Map text-bearing item events to `runtime.output` with payload including `{ text, codexType }`.
+6. Extract text from common shapes: top-level `text`, `message`, `delta`; nested `item`; `content` arrays containing text-bearing parts.
+7. Map `turn.completed` to `run.completed` with payload including `{ status: "completed", codexType, usage }`.
+8. Map `turn.failed` and top-level `error` to `run.failed` with payload including `{ status: "failed", codexType, error }`.
+9. Unknown non-text events should become `runtime.status` with payload including `status: "event"`, `codexType`, and any useful thread id when present.
+10. Add tests from Task 3 in the plan plus at least one test for nested content array extraction.
+11. Update index export.
+
+Run verification:
+- pnpm --filter @switchyard/adapters test -- codex-jsonl-parser
+- pnpm --filter @switchyard/adapters typecheck
+Expected: PASS.
+
+Do not commit. Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Verification run and result
+- Notes/concerns
+
+---
+
+Reviewer requested changes for Task 3. Please fix only Task 3 files you already own.
+
+Findings to address:
+1. In `codexEventToSwitchyardEvent`, restrict text-to-`runtime.output` promotion to `item.*` events only. Unknown non-item events, even if they include `text`, `message`, or `delta`, must map to `runtime.status` with original Codex type in payload.
+2. Replace the local `SwitchyardEvent` alias with `import type { SwitchyardEvent } from "@switchyard/contracts";`.
+3. Add deterministic tests for:
+   - top-level `text` on an `item.*` event
+   - top-level `message` on an `item.*` event
+   - top-level `delta` on an `item.*` event
+   - an unknown non-item event with a textual field that must still map to `runtime.status`
+   - scalar non-objects `null` and `1`, in addition to existing arrays and invalid JSON cases
+
+Run:
+- pnpm --filter @switchyard/adapters test -- codex-jsonl-parser
+- pnpm --filter @switchyard/adapters typecheck
+
+Do not commit. Final response format:
+- Status
+- Files changed
+- Verification result
+- Notes
