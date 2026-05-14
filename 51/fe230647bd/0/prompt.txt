@@ -137,3 +137,11 @@ but in curl also include the response
 ---
 
 is it properly giving the entire sequence ? {"run":{"id":"run_9cec8fb2-c1ca-467e-83f3-24d3b735f811","runtime":"codex","provider":"openai","model":"gpt-5.5","adapterType":"process","cwd":"/Users/vasuyadav/Downloads/Projects/switchyard","task":"Return one sentence describing this repository. Do not edit files.","status":"completed","placement":"local","approvalPolicy":"default","timeoutSeconds":120,"metadata":{"reasoningEffort":"low","reasoningSummary":"auto","verbosity":"low","sandbox":"read-only","ignoreUserConfig":true},"createdAt":"2026-05-14T15:53:28.542Z","startedAt":"2026-05-14T15:53:28.543Z","endedAt":"2026-05-14T15:53:49.249Z"},"response":{"text":"Switchyard is a TypeScript monorepo for a deploy-anywhere agent runtime gateway that exposes many agent runtimes and wrappers through one unified backend API.","outputs":[{"sequence":4,"text":"I’ll inspect the repository shape and any top-level docs/package metadata, then summarize it in one sentence without changing files."},{"sequence":9,"text":"I found a TypeScript monorepo with adapter, protocol, storage, contracts, and daemon packages; I’m checking the README and root package metadata for the exact positioning."},{"sequence":16,"text":"Switchyard is a TypeScript monorepo for a deploy-anywhere agent runtime gateway that exposes many agent runtimes and wrappers through one unified backend API."}]}}%   as after 9 i see directly 16
+
+---
+
+okay now create a branch add all the files and create a proper pr also update the CHANGELOG.md
+
+---
+
+continue creating pr
