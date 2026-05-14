@@ -102,7 +102,19 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       return reply.code(404).send({ error: { code: "run_not_found", message: `Run not found: ${id}` } });
     }
 
-    await deps.runService.sendInput(id, inputBody(request.body));
+    try {
+      await deps.runService.sendInput(id, inputBody(request.body));
+    } catch (error) {
+      if (error instanceof Error && error.name === "CodexInputUnsupportedError") {
+        return reply.code(409).send({
+          error: {
+            code: "adapter_protocol_failed",
+            message: "Codex exec-json does not support input after start"
+          }
+        });
+      }
+      throw error;
+    }
     return reply.code(202).send({ accepted: true });
   });
 

@@ -107,6 +107,31 @@ describe("run routes", () => {
     expect(getResponse.json().run.status).toBe("completed");
   });
 
+  it("preserves provider metadata on created and stored run", async () => {
+    const harness = createRouteHarness();
+    const metadata = {
+      reasoningEffort: "high",
+      reasoningSummary: "verbose",
+      verbosity: "low"
+    };
+
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: {
+        ...fakeRunPayload("Metadata preservation run"),
+        metadata
+      }
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+    expect(createResponse.json().run.metadata).toEqual(metadata);
+
+    const runId = createResponse.json().run.id;
+    const storedRun = await harness.runs.get(runId);
+    expect(storedRun?.metadata).toEqual(metadata);
+  });
+
   it("returns run events as an SSE-compatible stream", async () => {
     const harness = createRouteHarness();
 
@@ -281,6 +306,33 @@ describe("run routes", () => {
     expect(inputResponse.statusCode).toBe(202);
     expect(cancelResponse.statusCode).toBe(200);
     expect(cancelResponse.json().run.status).toBe("cancelled");
+  });
+
+  it("returns 409 when runtime input is unsupported after start", async () => {
+    const harness = createRouteHarness();
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Unsupported input run")
+    });
+    const runId = createResponse.json().run.id;
+    const unsupportedError = new Error("input unsupported");
+    unsupportedError.name = "CodexInputUnsupportedError";
+    vi.spyOn(harness.runService, "sendInput").mockRejectedValueOnce(unsupportedError);
+
+    const inputResponse = await harness.app.inject({
+      method: "POST",
+      url: `/runs/${runId}/input`,
+      payload: { text: "continue" }
+    });
+
+    expect(inputResponse.statusCode).toBe(409);
+    expect(inputResponse.json()).toEqual({
+      error: {
+        code: "adapter_protocol_failed",
+        message: "Codex exec-json does not support input after start"
+      }
+    });
   });
 });
 
