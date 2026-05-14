@@ -1,0 +1,29 @@
+You are the implementation agent for Switchyard Task 5. You are not alone in the codebase; do not revert edits made by others. Work only on Task 5 and the files listed below.
+
+Repo: /Users/vasuyadav/Downloads/Projects/switchyard
+Spec: docs/superpowers/specs/2026-05-14-codex-exec-json-provider-design.md
+Plan: docs/superpowers/plans/2026-05-14-codex-exec-json-provider.md
+
+Task 5 goal: Ensure REST run creation preserves provider-specific metadata and unsupported runtime input returns 409.
+
+Files you own:
+- Modify packages/protocol-rest/src/run-routes.ts
+- Modify packages/protocol-rest/test/run-routes.test.ts
+
+Requirements:
+1. Add/confirm test that creating a run with metadata like `{ reasoningEffort, reasoningSummary, verbosity }` preserves that metadata on the returned/stored run.
+2. Add test that if `runService.sendInput` rejects with an Error whose name is `CodexInputUnsupportedError`, `POST /runs/:id/input` returns HTTP 409 with body:
+   `{ error: { code: "adapter_protocol_failed", message: "Codex exec-json does not support input after start" } }`
+3. Implement route behavior by catching unsupported input errors in `/runs/:id/input` only. Do not add a protocol-rest dependency on @switchyard/adapters; detect by `error instanceof Error && error.name === "CodexInputUnsupportedError"`.
+4. Preserve existing 404 and successful 202 input behavior.
+
+Run verification:
+- pnpm --filter @switchyard/protocol-rest test -- run-routes
+- pnpm --filter @switchyard/protocol-rest typecheck
+Expected: PASS.
+
+Do not commit. Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Verification run and result
+- Notes/concerns

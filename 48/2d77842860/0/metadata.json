@@ -1,0 +1,50 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "482d77842860",
+  "session_id": "019e26e5-41e2-7860-a1ae-bbb5a56bd6fd",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-14T14:33:57.467575Z",
+  "branch": "publish-main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "packages/protocol-rest/src/run-routes.ts",
+    "packages/protocol-rest/test/run-routes.test.ts"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.3-codex",
+  "turn_id": "f909c40bcbcb",
+  "token_usage": {
+    "input_tokens": 9376,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 221824,
+    "output_tokens": 1758,
+    "api_call_count": 7
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-14T14:33:57.463132Z",
+    "agent_lines": 65,
+    "agent_removed": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 65,
+    "total_lines_changed": 66,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 16,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "pnpm-lock.yaml": 16
+      }
+    }
+  ]
+}
