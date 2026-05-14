@@ -1,0 +1,65 @@
+You are the implementation agent for Switchyard Task 6. You are not alone in the codebase; do not revert edits made by others. Work only on Task 6 and the files listed below.
+
+Repo: /Users/vasuyadav/Downloads/Projects/switchyard
+Spec: docs/superpowers/specs/2026-05-14-codex-exec-json-provider-design.md
+Plan: docs/superpowers/plans/2026-05-14-codex-exec-json-provider.md
+
+Task 6 goal: Wire Codex into the local daemon adapter map and registry records.
+
+Files you own:
+- Modify apps/daemon/package.json
+- Modify apps/daemon/src/app.ts
+- Modify apps/daemon/test/smoke.test.ts
+- If required by pnpm, modify pnpm-lock.yaml only via `pnpm install`; do not hand-edit lockfiles.
+
+Requirements:
+1. Add `@switchyard/adapters`: `workspace:*` as a daemon dependency.
+2. Import `CodexExecJsonAdapter` and `probeCodexCatalog` from `@switchyard/adapters` in daemon app.
+3. During createDaemonApp, call `probeCodexCatalog()` once and use its models to instantiate `new CodexExecJsonAdapter({ modelCatalog: codexProbe.models })`.
+4. Add adapter map entries for both fake and codex.
+5. Seed OpenAI/Codex registry records:
+   - provider: id `provider_openai`, name `OpenAI`, authMode `local`, status `available` if probe ok else `unavailable`
+   - runtime: id `runtime_codex`, name `Codex`, adapterType `process`, status `available` if probe ok else `unavailable`
+   - for each model in probe.models, create model id by replacing `.` and `-` in slug with `_` and prefixing `model_`; providerId `provider_openai`; modelName slug; supportsTools true; supportsStreaming true; supportsBrowser false; status available
+6. Existing fake registry records must remain.
+7. Add daemon smoke test for Codex provider/runtime records that does not require a live Codex run. It should pass whether local Codex is available or not; status may be available or unavailable.
+8. Avoid seeding duplicate records when storage is reused.
+
+Run verification:
+- pnpm --filter @switchyard/daemon test -- smoke
+- pnpm --filter @switchyard/daemon typecheck
+If module resolution fails because @switchyard/adapters is not linked, run `pnpm install` from repo root and then rerun checks.
+Expected: PASS.
+
+Do not commit. Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Verification run and result
+- Notes/concerns
+
+---
+
+Reviewer requested changes for Task 6. Please fix only Task 6 files and lockfile if needed.
+
+Issues to address:
+1. Daemon smoke tests currently call real `probeCodexCatalog()` through `createDaemonApp()`. Normal tests must not execute the real Codex CLI.
+2. Provider/runtime status can become stale in persistent storage because seed only creates if missing. Status should update from the current probe result on startup.
+3. Smoke test does not verify model registry seeding.
+
+Implementation direction:
+- Add an optional dependency injection path to `createDaemonApp`, e.g. second optional parameter or expanded config object, so tests can pass a deterministic `codexProbe` or `probeCodexCatalog` function. Keep production default using real `probeCodexCatalog()`.
+- Add registry update/upsert for provider_openai and runtime_codex: if records exist, update status/name/authMode/adapterType fields based on current probe result. Use existing RegistryStore update methods if available; if not, inspect port and implement with existing create/update pattern.
+- Expand smoke tests deterministically:
+  1. unavailable probe: provider/runtime status unavailable and known model id absent/404.
+  2. available probe with model slug `gpt-5.5`: provider/runtime status available and `GET /models/model_gpt_5_5` returns required fields.
+- Existing fake registry smoke tests must still pass.
+
+Run:
+- pnpm --filter @switchyard/daemon test -- smoke
+- pnpm --filter @switchyard/daemon typecheck
+
+Do not commit. Final response format:
+- Status
+- Files changed
+- Verification result
+- Notes
