@@ -1,4 +1,10 @@
-# Switchyard
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-wordmark.svg">
+    <img alt="Switchyard" src="docs/assets/logo-wordmark.svg" width="520">
+  </picture>
+</p>
 
 Switchyard is a runtime gateway that exposes multiple agent runtimes and wrappers as one unified backend API.
 
@@ -15,11 +21,14 @@ Instead of integrating separately with Claude Code, Codex, OpenCode, OpenClaw, P
 
 ```text
 POST /runs
+GET  /runs/:id
 GET  /runs/:id/events
 POST /debates
 POST /runs/:id/approve
-GET  /artifacts/:id
+GET  /runs/:id/artifacts (local MVP)
 ```
+
+`GET /artifacts/:id` and `/artifacts` are planned for future deployment modes and are not implemented in the local daemon MVP.
 
 Switchyard lets frontends, backends, CLIs, automations, bots, and internal systems treat every agent runtime like a backend service.
 
@@ -114,7 +123,7 @@ Switchyard exposes product-level endpoints:
 /providers
 /memory
 /tools
-/artifacts
+/artifacts (planned, not implemented in local MVP)
 /approvals
 ```
 
@@ -201,91 +210,12 @@ cancel
 collect artifacts
 ```
 
-## Local Testing
+## Developer Documentation
 
-The current local MVP runs a fake runtime through the Switchyard daemon. It does not call Claude, Codex, OpenCode, or any external model yet.
+Local setup, test commands, prebuilt curl requests, PID checks, SQLite inspection, and Codex debugging live outside this product README:
 
-From the repo root:
-
-```bash
-cd /Users/vasuyadav/Downloads/Projects/switchyard
-pnpm install
-pnpm --filter @switchyard/daemon dev
-```
-
-The daemon starts on:
-
-```text
-http://127.0.0.1:4545
-```
-
-In another terminal, check health:
-
-```bash
-curl -s http://127.0.0.1:4545/health
-```
-
-Expected response:
-
-```json
-{"ok":true}
-```
-
-Create a fake run:
-
-```bash
-curl -s -X POST http://127.0.0.1:4545/runs \
-  -H 'content-type: application/json' \
-  -d '{
-    "runtime": "fake",
-    "provider": "test",
-    "model": "test-model",
-    "adapterType": "process",
-    "cwd": "/repo",
-    "task": "Test Switchyard locally"
-  }'
-```
-
-The response includes a run id:
-
-```json
-{
-  "run": {
-    "id": "run_...",
-    "status": "completed"
-  }
-}
-```
-
-Fetch the run:
-
-```bash
-curl -s http://127.0.0.1:4545/runs/<RUN_ID>
-```
-
-Fetch the run events:
-
-```bash
-curl -s http://127.0.0.1:4545/runs/<RUN_ID>/events
-```
-
-Expected event types:
-
-```text
-run.queued
-run.started
-runtime.status
-runtime.output
-run.completed
-```
-
-Run verification:
-
-```bash
-pnpm test
-pnpm typecheck
-pnpm build
-```
+- [Development docs](docs/development/)
+- [Adapter local debugging guides](docs/development/adapters/)
 
 ## Deployment Modes
 

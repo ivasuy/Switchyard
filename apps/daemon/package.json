@@ -11,8 +11,10 @@
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@switchyard/adapters": "workspace:*",
     "@switchyard/core": "workspace:*",
     "@switchyard/protocol-rest": "workspace:*",
+    "@switchyard/storage": "workspace:*",
     "@switchyard/testkit": "workspace:*",
     "fastify": "^5.8.5"
   }

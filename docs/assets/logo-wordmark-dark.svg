@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" role="img" aria-label="Switchyard">
+  <title>Switchyard</title>
+  <rect width="720" height="180" fill="#0B0F14"/>
+  <g transform="translate(20,18)">
+    <rect width="144" height="144" rx="32" fill="#F5F7FA"/>
+    <g fill="none" stroke="#0B0F14" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M16 36 L63 72"/>
+      <path d="M16 72 L63 72"/>
+      <path d="M16 108 L63 72"/>
+      <path d="M81 72 L128 36"/>
+      <path d="M81 72 L128 72"/>
+      <path d="M81 72 L128 108"/>
+    </g>
+    <circle cx="72" cy="72" r="13" fill="#0B0F14"/>
+    <circle cx="72" cy="72" r="5" fill="#F5F7FA"/>
+  </g>
+  <text x="190" y="118"
+        font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="76" font-weight="700" letter-spacing="-2" fill="#F5F7FA">
+    Switchyard
+  </text>
+</svg>

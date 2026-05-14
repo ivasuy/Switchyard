@@ -1,15 +1,20 @@
 import type { FastifyInstance } from "fastify";
-import type { RunService, EventStore, RunStore } from "@switchyard/core";
-import { adapterTypeSchema } from "@switchyard/contracts";
+import type { ArtifactStore, EventBus, EventStore, RunLauncherService, RunService, RunStore } from "@switchyard/core";
+import { adapterTypeSchema, type SwitchyardEvent } from "@switchyard/contracts";
+import { collectReplayAndLiveEvents, formatSseEvent } from "@switchyard/protocol-sse";
 
 export interface RunRouteDependencies {
   runService: RunService;
   runs: RunStore;
   events: EventStore;
+  artifacts?: ArtifactStore;
+  eventBus?: EventBus;
+  launcher?: RunLauncherService;
 }
 
 export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependencies): void {
   app.post("/runs", async (request, reply) => {
+    const wait = shouldWaitForCompletion(request.query);
     const body = createRunBody(request.body);
     const run = await deps.runService.createRun({
       runtime: body.runtime,
@@ -23,9 +28,19 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       timeoutSeconds: body.timeoutSeconds ?? 600,
       metadata: body.metadata ?? {}
     });
-    const completed = await deps.runService.startRun(run.id);
-
-    return reply.code(201).send({ run: completed });
+    if (wait) {
+      const completed = await deps.runService.startRun(run.id);
+      const events = await deps.events.listByRun(run.id);
+      return reply.code(201).send({ run: completed, response: collectRunResponse(events) });
+    }
+    if (deps.launcher) {
+      deps.launcher.launch(run);
+    } else {
+      queueMicrotask(() => {
+        void deps.runService.startRun(run.id).catch(() => {});
+      });
+    }
+    return reply.code(202).send({ run });
   });
 
   app.get("/runs/:id", async (request, reply) => {
@@ -47,15 +62,99 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     }
 
     const events = await deps.events.listByRun(id);
-    const body = events.map((event) => {
-      return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n`;
-    }).join("\n");
+    const query = request.query as Record<string, unknown>;
+    const live = query["live"] === "1";
+    const rawStopAfter = typeof query["stopAfter"] === "string"
+      ? Number(query["stopAfter"])
+      : undefined;
+    const stopAfter = normalizeStopAfter(rawStopAfter, events.length);
+    const replayChunk = events.slice(0, stopAfter).map(formatSseEvent).join("");
+    const body = live && deps.eventBus
+      ? await collectReplayAndLiveEvents({
+          runId: id,
+          replay: events,
+          eventBus: deps.eventBus,
+          stopAfter
+        })
+      : replayChunk;
 
     return reply
       .header("content-type", "text/event-stream; charset=utf-8")
       .header("cache-control", "no-cache")
-      .send(`${body}\n`);
+      .send(body);
   });
+
+  app.get("/runs/:id/artifacts", async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const run = await deps.runs.get(id);
+    if (!run) {
+      return reply.code(404).send({ error: { code: "run_not_found", message: `Run not found: ${id}` } });
+    }
+    if (!deps.artifacts) {
+      return { artifacts: [] };
+    }
+    return { artifacts: await deps.artifacts.listByRun(id) };
+  });
+
+  app.post("/runs/:id/input", async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const run = await deps.runs.get(id);
+    if (!run) {
+      return reply.code(404).send({ error: { code: "run_not_found", message: `Run not found: ${id}` } });
+    }
+
+    try {
+      await deps.runService.sendInput(id, inputBody(request.body));
+    } catch (error) {
+      if (error instanceof Error && error.name === "CodexInputUnsupportedError") {
+        return reply.code(409).send({
+          error: {
+            code: "adapter_protocol_failed",
+            message: "Codex exec-json does not support input after start"
+          }
+        });
+      }
+      throw error;
+    }
+    return reply.code(202).send({ accepted: true });
+  });
+
+  app.post("/runs/:id/cancel", async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const run = await deps.runs.get(id);
+    if (!run) {
+      return reply.code(404).send({ error: { code: "run_not_found", message: `Run not found: ${id}` } });
+    }
+
+    const cancelled = await deps.runService.cancelRun(id);
+    return reply.send({ run: cancelled });
+  });
+}
+
+interface RunOutput {
+  sequence: number;
+  text: string;
+}
+
+interface RunResponseSummary {
+  text: string | null;
+  outputs: RunOutput[];
+}
+
+function collectRunResponse(events: SwitchyardEvent[]): RunResponseSummary {
+  const outputs = events.flatMap((event): RunOutput[] => {
+    if (event.type !== "runtime.output") {
+      return [];
+    }
+    const text = event.payload["text"];
+    return typeof text === "string" && text.length > 0
+      ? [{ sequence: event.sequence, text }]
+      : [];
+  });
+  return {
+    text: outputs.at(-1)?.text ?? null,
+    outputs
+  };
 }
 
 interface CreateRunBody {
@@ -100,4 +199,32 @@ function requiredString(body: Record<string, unknown>, key: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeStopAfter(stopAfter: number | undefined, replayLength: number): number {
+  if (stopAfter === undefined || !Number.isFinite(stopAfter) || stopAfter <= 0) {
+    return replayLength;
+  }
+  return Math.max(1, Math.floor(stopAfter));
+}
+
+function inputBody(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error("Input body must be an object");
+  }
+  return value;
+}
+
+function shouldWaitForCompletion(query: unknown): boolean {
+  if (!query || typeof query !== "object") {
+    return false;
+  }
+  const wait = (query as Record<string, unknown>)["wait"];
+  if (typeof wait === "string") {
+    return wait === "1";
+  }
+  if (Array.isArray(wait)) {
+    return wait.some((value) => value === "1");
+  }
+  return false;
 }
