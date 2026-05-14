@@ -28,6 +28,7 @@ All notable changes to Switchyard will be documented in this file.
 - Added `@switchyard/protocol-sse` for replay and live run event streams.
 - Added async run launch support for local daemon execution.
 - Added required-field negative contract coverage for public schemas.
+- Added `@switchyard/adapters` with a Codex `exec --json` runtime adapter, local model catalog discovery, JSONL event normalization, transcript artifact capture, and daemon registry wiring.
 
 ### Changed
 
