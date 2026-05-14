@@ -3,7 +3,7 @@
   "checkpoint_id": "482d77842860",
   "strategy": "manual-commit",
   "branch": "publish-main",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
     "packages/protocol-rest/src/run-routes.ts",
     "packages/protocol-rest/test/run-routes.test.ts"
@@ -14,13 +14,19 @@
       "transcript": "/48/2d77842860/0/full.jsonl",
       "content_hash": "/48/2d77842860/0/content_hash.txt",
       "prompt": "/48/2d77842860/0/prompt.txt"
+    },
+    {
+      "metadata": "/48/2d77842860/1/metadata.json",
+      "transcript": "/48/2d77842860/1/full.jsonl",
+      "content_hash": "/48/2d77842860/1/content_hash.txt",
+      "prompt": "/48/2d77842860/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 9376,
+    "input_tokens": 42284,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 221824,
-    "output_tokens": 1758,
-    "api_call_count": 7
+    "cache_read_tokens": 643968,
+    "output_tokens": 8417,
+    "api_call_count": 17
   }
 }
