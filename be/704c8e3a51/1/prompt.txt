@@ -1,0 +1,31 @@
+You are the implementation agent for Switchyard Task 1. You are not alone in the codebase; do not revert edits made by others. Work only on Task 1 and the files listed below.
+
+Repo: /Users/vasuyadav/Downloads/Projects/switchyard
+Plan: docs/superpowers/plans/2026-05-14-codex-exec-json-provider.md
+Spec: docs/superpowers/specs/2026-05-14-codex-exec-json-provider-design.md
+
+Task 1 goal: Create the @switchyard/adapters package scaffold and Codex shared types.
+
+Files you own:
+- Create packages/adapters/package.json
+- Create packages/adapters/tsconfig.json
+- Create packages/adapters/src/index.ts
+- Create packages/adapters/src/codex/types.ts
+
+Important adjustment to the written plan: do NOT export modules that do not exist yet. The plan's Task 1 index exports later modules, which would break per-task review. For Task 1, export only ./codex/types.js from packages/adapters/src/index.ts. Later tasks will add exports for their modules.
+
+Required content:
+1. packages/adapters/package.json should define @switchyard/adapters, private ESM package, exports . -> ./src/index.ts, scripts build/typecheck/test/lint, dependencies @switchyard/contracts and @switchyard/core, devDependencies TypeScript and Vitest matching repo style.
+2. packages/adapters/tsconfig.json should extend ../../tsconfig.base.json, rootDir '.', outDir dist, include src and test.
+3. packages/adapters/src/codex/types.ts should define CodexReasoningEffort, CodexReasoningSummary, CodexVerbosity, CodexSandbox, CodexRunOptions, CodexModelCatalogEntry, CodexCatalogProbe, CodexProcessFactory as described in Task 1. Use ChildProcessWithoutNullStreams from node:child_process.
+4. packages/adapters/src/index.ts should export only ./codex/types.js.
+
+Run verification:
+- pnpm --filter @switchyard/adapters typecheck
+Expected: PASS for this adjusted task.
+
+Do not commit. Final response format:
+- Status: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- Files changed
+- Verification run and result
+- Notes/concerns
