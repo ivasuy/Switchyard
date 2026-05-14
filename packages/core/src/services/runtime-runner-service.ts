@@ -81,45 +81,6 @@ export class RuntimeRunnerService {
 
         if (normalized.type === "run.completed" || normalized.type === "run.failed") {
           const terminalSequence = sequence - 1;
-          if (this.deps.artifacts && session) {
-            const artifactSequence = { value: sequence };
-            try {
-              await this.persistArtifacts(
-                this.deps.adapters.get(started.runtime),
-                session,
-                started,
-                latest,
-                artifactSequence
-              );
-              sequence = artifactSequence.value;
-            } catch (error) {
-              sequence = artifactSequence.value;
-              throw error;
-            }
-            // Preserve adapter sequence ordering; artifact persistence occurs before terminalization.
-            // If artifacts persist, terminal event should follow those events.
-            const terminal = await this.terminalizeRunFromAdapterEvent(started, normalized, sequence, session);
-            if (!terminal) {
-              break;
-            }
-            latest = terminal;
-            terminalized = true;
-            if (normalized.type === "run.completed") {
-              session = {
-                ...session,
-                status: "completed",
-                updatedAt: terminal.endedAt
-              };
-            } else {
-              session = {
-                ...session,
-                status: "failed",
-                updatedAt: terminal.endedAt
-              };
-            }
-            break;
-          }
-
           const terminal = await this.terminalizeRunFromAdapterEvent(started, normalized, terminalSequence, session);
           if (!terminal) {
             break;
@@ -138,6 +99,23 @@ export class RuntimeRunnerService {
               status: "failed",
               updatedAt: terminal.endedAt
             };
+          }
+
+          if (this.deps.artifacts && session) {
+            const artifactSequence = { value: sequence };
+            try {
+              await this.persistArtifacts(
+                this.deps.adapters.get(started.runtime),
+                session,
+                started,
+                latest,
+                artifactSequence
+              );
+              sequence = artifactSequence.value;
+            } catch (error) {
+              sequence = artifactSequence.value;
+              throw error;
+            }
           }
           break;
         } else {
