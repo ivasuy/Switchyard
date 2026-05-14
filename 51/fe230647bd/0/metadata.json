@@ -1,0 +1,199 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "51fe230647bd",
+  "session_id": "019e2698-7bf9-7151-84ff-0da57a093aa1",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-14T18:59:41.856273Z",
+  "branch": "codex/codex-exec-json-observability",
+  "checkpoints_count": 8,
+  "files_touched": [
+    ".gitignore",
+    "ARCHITECTURE.md",
+    "README.md",
+    "apps/daemon/src/app.ts",
+    "apps/daemon/src/main.ts",
+    "apps/daemon/test/smoke.test.ts",
+    "docs/adapters/README.md",
+    "docs/adapters/codex.md",
+    "docs/adapters/verification/codex-exec-json.md",
+    "docs/adapters/verification/codex.md",
+    "docs/development/DEVELOPMENT.md",
+    "docs/development/adapters/CODEX.md",
+    "packages/adapters/src/codex/codex-exec-json-adapter.ts",
+    "packages/adapters/src/codex/types.ts",
+    "packages/adapters/test/codex-exec-json-adapter.test.ts",
+    "packages/core/src/index.ts",
+    "packages/core/src/services/runtime-runner-service.ts",
+    "packages/core/test/core.test.ts",
+    "packages/protocol-rest/src/run-routes.ts",
+    "packages/protocol-rest/test/run-routes.test.ts"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "72f7bf0719e1",
+  "checkpoint_transcript_start": 774,
+  "transcript_lines_at_start": 774,
+  "token_usage": {
+    "input_tokens": 700770,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 18742912,
+    "output_tokens": 60040,
+    "api_call_count": 159
+  },
+  "session_metrics": {
+    "turn_count": 17
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-14T18:59:41.793163Z",
+    "agent_lines": 0,
+    "agent_removed": 195,
+    "human_added": 6664,
+    "human_modified": 27,
+    "human_removed": 0,
+    "total_committed": 6664,
+    "total_lines_changed": 6886,
+    "agent_percentage": 2.831832704037177,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 275,
+      "user_lines_removed": 9,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "apps/daemon/src/app.ts": 4,
+        "apps/daemon/src/logger.ts": 57,
+        "apps/daemon/src/main.ts": 4,
+        "packages/adapters/src/codex/codex-exec-json-adapter.ts": 57,
+        "packages/adapters/src/codex/types.ts": 2,
+        "packages/core/src/index.ts": 1,
+        "packages/core/src/ports/runtime-logger.ts": 5,
+        "packages/core/src/services/runtime-runner-service.ts": 145
+      },
+      "user_removed_per_file": {
+        "apps/daemon/src/app.ts": 1,
+        "apps/daemon/src/main.ts": 2,
+        "packages/adapters/src/codex/codex-exec-json-adapter.ts": 5,
+        "packages/core/src/services/runtime-runner-service.ts": 1
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 519,
+      "agent_lines_removed": 24
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 521,
+      "agent_lines_removed": 24
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 816,
+      "agent_lines_removed": 26
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 471,
+      "user_lines_removed": 4,
+      "agent_lines_added": 554,
+      "agent_lines_removed": 170,
+      "user_added_per_file": {
+        "README.md": 2,
+        "docs/adapters/README.md": 1,
+        "docs/adapters/codex.md": 1,
+        "docs/development/DEVELOPMENT.md": 171,
+        "docs/development/README.md": 6,
+        "docs/development/adapters/CODEX.md": 283,
+        "docs/development/adapters/README.md": 7
+      },
+      "user_removed_per_file": {
+        "README.md": 2,
+        "docs/adapters/README.md": 1,
+        "docs/adapters/codex.md": 1
+      }
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 467,
+      "user_lines_removed": 0,
+      "agent_lines_added": 550,
+      "agent_lines_removed": 213,
+      "user_added_per_file": {
+        "docs/development/DEVELOPMENT.md": 171,
+        "docs/development/README.md": 6,
+        "docs/development/adapters/CODEX.md": 283,
+        "docs/development/adapters/README.md": 7
+      }
+    },
+    {
+      "checkpoint_number": 7,
+      "user_lines_added": 467,
+      "user_lines_removed": 0,
+      "agent_lines_added": 550,
+      "agent_lines_removed": 213,
+      "user_added_per_file": {
+        "docs/development/DEVELOPMENT.md": 171,
+        "docs/development/README.md": 6,
+        "docs/development/adapters/CODEX.md": 283,
+        "docs/development/adapters/README.md": 7
+      }
+    },
+    {
+      "checkpoint_number": 8,
+      "user_lines_added": 13,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1064,
+      "agent_lines_removed": 215,
+      "user_added_per_file": {
+        "docs/development/README.md": 6,
+        "docs/development/adapters/README.md": 7
+      }
+    },
+    {
+      "checkpoint_number": 9,
+      "user_lines_added": 5420,
+      "user_lines_removed": 7,
+      "agent_lines_added": 1064,
+      "agent_lines_removed": 215,
+      "user_added_per_file": {
+        ".claude/settings.local.json": 7,
+        ".codex/agents/entire-search.toml": 23,
+        ".codex/config.toml": 3,
+        ".codex/hooks.json": 40,
+        ".skill-archive/logo-creator/2026-05-14-switchyard/logo-mark.svg": 17,
+        ".skill-archive/logo-creator/2026-05-14-switchyard/logo-wordmark.svg": 23,
+        ".skill-archive/logo-creator/2026-05-14-switchyard/preview.html": 45,
+        "README.md": 7,
+        "docs/assets/logo-banner.svg": 35,
+        "docs/assets/logo-mark-light.svg": 14,
+        "docs/assets/logo-mark-mono-dark.svg": 12,
+        "docs/assets/logo-mark-mono-light.svg": 12,
+        "docs/assets/logo-mark.svg": 17,
+        "docs/assets/logo-wordmark-dark.svg": 22,
+        "docs/assets/logo-wordmark.svg": 23,
+        "docs/decisions/2026-05-11-module-coverage-audit.md": 54,
+        "docs/decisions/2026-05-11-switchyard-phase-0-1-coverage-audit.md": 72,
+        "docs/development/README.md": 6,
+        "docs/development/adapters/README.md": 7,
+        "docs/superpowers/plans/2026-05-11-switchyard-phase-0-1-gap-implementation-plan.md": 2511,
+        "docs/superpowers/plans/2026-05-14-codex-exec-json-provider.md": 1214,
+        "docs/superpowers/specs/2026-05-11-switchyard-design.md": 1044,
+        "docs/superpowers/specs/2026-05-11-switchyard-phase-0-1-gap-spec.md": 125,
+        "docs/superpowers/specs/2026-05-14-codex-exec-json-provider-design.md": 87
+      },
+      "user_removed_per_file": {
+        ".gitignore": 6,
+        "README.md": 1
+      }
+    }
+  ]
+}

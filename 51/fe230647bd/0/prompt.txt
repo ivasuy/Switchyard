@@ -1,0 +1,139 @@
+update the readme and other architecture docs also list the commands on how to test it locally
+
+---
+
+vasuyadav@vyadav-C9NHX2LXMR switchyard % curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{
+    "runtime": "codex",
+    "provider": "openai",
+    "model": "gpt-5.5",
+    "adapterType": "process",
+    "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
+    "task": "Return one sentence describing this repository. Do not edit files.",
+    "metadata": {
+      "reasoningEffort": "low",
+      "reasoningSummary": "auto",
+      "verbosity": "low",
+      "sandbox": "read-only"
+    }
+  }'
+
+vasuyadav@vyadav-C9NHX2LXMR switchyard % pnpm --filter @switchyard/daemon dev
+
+> @switchyard/daemon@0.0.0 dev /Users/vasuyadav/Downloads/Projects/switchyard/apps/daemon
+> node --disable-warning=DEP0205 --import tsx src/main.ts
+
+Switchyard daemon listening on http://127.0.0.1:4545
+and here nothing what i would like to do see live logs is the agent processing what is it doing pid of the process etc etc so dev's can easily follow the logs should not be too clutterd but brief enough to debug or find the issue
+
+---
+
+also check why this got stuck
+
+---
+
+so currently other codex process are also running don't confuse those once
+
+---
+
+2026-05-14T15:21:50.969Z WARN run.reconciled_interrupted runId="run_015e2912-1ff5-4409-ab2b-addf3a0eb2be"
+2026-05-14T15:21:50.979Z INFO daemon.listening url="http://127.0.0.1:4545"
+2026-05-14T15:23:24.547Z INFO run.started runId="run_e921c95b-c9dd-4a9c-8d6a-20ebabaa2113" runtime="codex" provider="openai" model="gpt-5.5" timeoutSeconds=120
+2026-05-14T15:23:24.548Z INFO codex.spawned runId="run_e921c95b-c9dd-4a9c-8d6a-20ebabaa2113" pid=5337 model="gpt-5.5" cwd="/Users/vasuyadav/Downloads/Projects/switchyard" sandbox="read-only" ignoreUserConfig=true ignoreRules=false
+2026-05-14T15:23:24.549Z INFO runtime.session.started runId="run_e921c95b-c9dd-4a9c-8d6a-20ebabaa2113" sessionId="session_52e5d98b-79ff-4443-9593-41e4ceb6d550" runtime="codex" processId=5337
+2026-05-14T15:23:24.590Z WARN codex.stderr runId="run_e921c95b-c9dd-4a9c-8d6a-20ebabaa2113" pid=5337 text="Reading additional input from stdin..."
+
+vasuyadav@vyadav-C9NHX2LXMR switchyard % curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{
+    "runtime": "codex",
+    "provider": "openai",
+    "model": "gpt-5.5",
+    "adapterType": "process",
+    "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
+    "task": "Return one sentence describing this repository. Do not edit files.",
+    "metadata": {
+      "reasoningEffort": "low",
+      "reasoningSummary": "auto",
+      "verbosity": "low",
+      "sandbox": "read-only",
+      "ignoreUserConfig": true
+    },
+    "timeoutSeconds": 120
+  }'
+check is it stuckagain
+
+---
+
+so now you check it if it runs or not also create .md file for devs like exctract things from readme important commads and prebuilt curl so i can debug things locally check pid's see why and where ot is stuck etc
+
+---
+
+create a sperate doc for dev's don't add everything in readme readme is supposed to be product showcase and market facing so clean it and move all dev realted commands and degubbig in a .md file also when codex gives response is it also streamed in curl ?
+
+---
+
+in doc create a director called devlopment there add adapters and the a file called CODEX.md so for each adpater we'll have different curls and local testing commands then then a outside adapters just in root of development create a file DEVELOPMENT.md there we'll add the project starup commands curl that are generic for the app and there add a you link adaparters local debugging for readme just link developement foler adapters folder inside doc the dev and adapters docs should'nt holdback as even a newbie can easily surface and easily use it locally
+
+---
+
+and remoove the old and stale doc files
+
+---
+
+curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{
+    "runtime": "codex",
+    "provider": "openai",
+    "model": "gpt-5.5",
+    "adapterType": "process",
+    "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
+    "task": "Return one sentence describing this repository. Do not edit files.",
+    "metadata": {
+      "reasoningEffort": "low",
+      "reasoningSummary": "auto",
+      "verbosity": "low",
+      "sandbox": "read-only",
+      "ignoreUserConfig": true
+    },
+    "timeoutSeconds": 120
+  }'
+{"run":{"id":"run_9477c8fc-51ff-4376-bf42-01bb0f80f24c","runtime":"codex","provider":"openai","model":"gpt-5.5","adapterType":"process","cwd":"/Users/vasuyadav/Downloads/Projects/switchyard","task":"Return one sentence describing this repository. Do not edit files.","status":"completed","placement":"local","approvalPolicy":"default","timeoutSeconds":120,"metadata":{"reasoningEffort":"low","reasoningSummary":"auto","verbosity":"low","sandbox":"read-only","ignoreUserConfig":true},"createdAt":"2026-05-14T15:49:05.449Z","startedAt":"2026-05-14T15:49:05.450Z","endedAt":"2026-05-14T15:49:27.007Z"}}%2026-05-14T15:48:16.557Z INFO daemon.listening url="http://127.0.0.1:4545"
+2026-05-14T15:48:56.693Z INFO run.started runId="run_764c2f7e-1c0c-4a81-9cb1-cbd2bff3d512" runtime="fake" provider="test" model="test-model" timeoutSeconds=30
+2026-05-14T15:48:56.693Z INFO runtime.session.started runId="run_764c2f7e-1c0c-4a81-9cb1-cbd2bff3d512" sessionId="session_3de18adf-0437-4e6a-b24a-ca8fab265784" runtime="fake"
+2026-05-14T15:48:56.693Z INFO runtime.status runId="run_764c2f7e-1c0c-4a81-9cb1-cbd2bff3d512" sequence=2 status="running"
+2026-05-14T15:48:56.693Z INFO runtime.output runId="run_764c2f7e-1c0c-4a81-9cb1-cbd2bff3d512" sequence=3 text="fake runtime output"
+2026-05-14T15:48:56.694Z INFO run.completed runId="run_764c2f7e-1c0c-4a81-9cb1-cbd2bff3d512" sequence=4 status="completed"
+2026-05-14T15:49:05.450Z INFO run.started runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" runtime="codex" provider="openai" model="gpt-5.5" timeoutSeconds=120
+2026-05-14T15:49:05.452Z INFO codex.spawned runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" pid=16601 model="gpt-5.5" cwd="/Users/vasuyadav/Downloads/Projects/switchyard" sandbox="read-only" ignoreUserConfig=true ignoreRules=false
+2026-05-14T15:49:05.453Z INFO runtime.session.started runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sessionId="session_ade2b191-ac0d-411d-8177-18c2a2ce4294" runtime="codex" processId=16601
+2026-05-14T15:49:05.479Z WARN codex.stderr runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" pid=16601 text="Reading additional input from stdin..."
+2026-05-14T15:49:05.605Z INFO codex.stdout.first_line runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" pid=16601
+2026-05-14T15:49:05.606Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=2 status="thread_started"
+2026-05-14T15:49:05.607Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=3 status="turn_started"
+2026-05-14T15:49:15.437Z INFO runtime.output runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=4 text="**Assessing response readiness** I realize I need to inspect the answer and consider how to start any conversation eff..."
+2026-05-14T15:49:17.113Z INFO runtime.output runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=5 text="I’ll inspect the repo metadata and top-level files only, then summarize it in one sentence without making changes."
+2026-05-14T15:49:17.220Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=6 status="event"
+2026-05-14T15:49:17.221Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=7 status="event"
+2026-05-14T15:49:17.303Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=8 status="event"
+2026-05-14T15:49:17.304Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=9 status="event"
+2026-05-14T15:49:24.655Z INFO runtime.output runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=10 text="I found a TypeScript monorepo structure with multiple protocol, storage, adapter, contract, core, testkit, and daemon p..."
+2026-05-14T15:49:24.725Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=11 status="event"
+2026-05-14T15:49:24.725Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=12 status="event"
+2026-05-14T15:49:24.732Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=13 status="event"
+2026-05-14T15:49:24.732Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=14 status="event"
+2026-05-14T15:49:24.861Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=15 status="event"
+2026-05-14T15:49:24.861Z INFO runtime.status runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=16 status="event"
+2026-05-14T15:49:26.981Z INFO runtime.output runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=17 text="Switchyard is a TypeScript monorepo for a deploy-anywhere agent runtime gateway that exposes many agent runtimes throug..."
+2026-05-14T15:49:27.007Z INFO run.completed runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" sequence=18 status="completed"
+2026-05-14T15:49:28.252Z INFO codex.exit runId="run_9477c8fc-51ff-4376-bf42-01bb0f80f24c" pid=16601 code=0 what was the response and the pid close ?
+
+---
+
+but in curl also include the response
+
+---
+
+is it properly giving the entire sequence ? {"run":{"id":"run_9cec8fb2-c1ca-467e-83f3-24d3b735f811","runtime":"codex","provider":"openai","model":"gpt-5.5","adapterType":"process","cwd":"/Users/vasuyadav/Downloads/Projects/switchyard","task":"Return one sentence describing this repository. Do not edit files.","status":"completed","placement":"local","approvalPolicy":"default","timeoutSeconds":120,"metadata":{"reasoningEffort":"low","reasoningSummary":"auto","verbosity":"low","sandbox":"read-only","ignoreUserConfig":true},"createdAt":"2026-05-14T15:53:28.542Z","startedAt":"2026-05-14T15:53:28.543Z","endedAt":"2026-05-14T15:53:49.249Z"},"response":{"text":"Switchyard is a TypeScript monorepo for a deploy-anywhere agent runtime gateway that exposes many agent runtimes and wrappers through one unified backend API.","outputs":[{"sequence":4,"text":"I’ll inspect the repository shape and any top-level docs/package metadata, then summarize it in one sentence without changing files."},{"sequence":9,"text":"I found a TypeScript monorepo with adapter, protocol, storage, contracts, and daemon packages; I’m checking the README and root package metadata for the exact positioning."},{"sequence":16,"text":"Switchyard is a TypeScript monorepo for a deploy-anywhere agent runtime gateway that exposes many agent runtimes and wrappers through one unified backend API."}]}}%   as after 9 i see directly 16

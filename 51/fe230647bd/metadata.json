@@ -1,0 +1,44 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "51fe230647bd",
+  "strategy": "manual-commit",
+  "branch": "codex/codex-exec-json-observability",
+  "checkpoints_count": 8,
+  "files_touched": [
+    ".gitignore",
+    "ARCHITECTURE.md",
+    "README.md",
+    "apps/daemon/src/app.ts",
+    "apps/daemon/src/main.ts",
+    "apps/daemon/test/smoke.test.ts",
+    "docs/adapters/README.md",
+    "docs/adapters/codex.md",
+    "docs/adapters/verification/codex-exec-json.md",
+    "docs/adapters/verification/codex.md",
+    "docs/development/DEVELOPMENT.md",
+    "docs/development/adapters/CODEX.md",
+    "packages/adapters/src/codex/codex-exec-json-adapter.ts",
+    "packages/adapters/src/codex/types.ts",
+    "packages/adapters/test/codex-exec-json-adapter.test.ts",
+    "packages/core/src/index.ts",
+    "packages/core/src/services/runtime-runner-service.ts",
+    "packages/core/test/core.test.ts",
+    "packages/protocol-rest/src/run-routes.ts",
+    "packages/protocol-rest/test/run-routes.test.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/51/fe230647bd/0/metadata.json",
+      "transcript": "/51/fe230647bd/0/full.jsonl",
+      "content_hash": "/51/fe230647bd/0/content_hash.txt",
+      "prompt": "/51/fe230647bd/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 700770,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 18742912,
+    "output_tokens": 60040,
+    "api_call_count": 159
+  }
+}
