@@ -14,6 +14,7 @@ All notable changes to Switchyard will be documented in this file.
 ### Changed
 
 - Refocused the README as a product-facing overview and moved detailed local development commands into dedicated development docs.
+- Centralized local developer docs around an official API contract, a local operations guide, and a Codex-only debugging appendix.
 - Updated architecture and adapter docs to describe the implemented Codex non-interactive local adapter path.
 - Ignored local Switchyard data directories and local agent runtime state.
 
