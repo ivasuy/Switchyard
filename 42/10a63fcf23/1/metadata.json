@@ -1,0 +1,74 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "4210a63fcf23",
+  "session_id": "019e32be-b745-77c3-be8d-fc87eb4bde2d",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-16T21:52:14.134949Z",
+  "branch": "codex/docs-contract-cleanup",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitignore",
+    "CHANGELOG.md",
+    "docs/development/DEVELOPMENT.md",
+    "docs/development/README.md",
+    "docs/development/adapters/CODEX.md",
+    "docs/development/adapters/README.md"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "c0e4f99c0a4b",
+  "token_usage": {
+    "input_tokens": 168539,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1555584,
+    "output_tokens": 7683,
+    "api_call_count": 24
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-16T21:52:14.123846Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 266,
+    "total_committed": 0,
+    "total_lines_changed": 266,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 519,
+      "user_lines_removed": 266,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".gitignore": 12,
+        "CHANGELOG.md": 1,
+        "docs/development/API.md": 386,
+        "docs/development/DEVELOPMENT.md": 32,
+        "docs/development/README.md": 37,
+        "docs/development/adapters/CODEX.md": 50,
+        "docs/development/adapters/README.md": 1
+      },
+      "user_removed_per_file": {
+        ".gitignore": 4,
+        "docs/development/DEVELOPMENT.md": 45,
+        "docs/development/README.md": 3,
+        "docs/development/adapters/CODEX.md": 213,
+        "docs/development/adapters/README.md": 1
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 519,
+      "agent_lines_removed": 266
+    }
+  ]
+}

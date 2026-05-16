@@ -3,7 +3,7 @@
   "checkpoint_id": "4210a63fcf23",
   "strategy": "manual-commit",
   "branch": "codex/docs-contract-cleanup",
-  "checkpoints_count": 2,
+  "checkpoints_count": 3,
   "files_touched": [
     ".gitignore",
     "CHANGELOG.md",
@@ -18,13 +18,19 @@
       "transcript": "/42/10a63fcf23/0/full.jsonl",
       "content_hash": "/42/10a63fcf23/0/content_hash.txt",
       "prompt": "/42/10a63fcf23/0/prompt.txt"
+    },
+    {
+      "metadata": "/42/10a63fcf23/1/metadata.json",
+      "transcript": "/42/10a63fcf23/1/full.jsonl",
+      "content_hash": "/42/10a63fcf23/1/content_hash.txt",
+      "prompt": "/42/10a63fcf23/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 1383529,
+    "input_tokens": 1552068,
     "cache_creation_tokens": 0,
-    "cache_read_tokens": 45707008,
-    "output_tokens": 137756,
-    "api_call_count": 356
+    "cache_read_tokens": 47262592,
+    "output_tokens": 145439,
+    "api_call_count": 380
   }
 }
