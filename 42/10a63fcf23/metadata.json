@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "4210a63fcf23",
+  "strategy": "manual-commit",
+  "branch": "codex/docs-contract-cleanup",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".gitignore",
+    "CHANGELOG.md",
+    "docs/development/DEVELOPMENT.md",
+    "docs/development/README.md",
+    "docs/development/adapters/CODEX.md",
+    "docs/development/adapters/README.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/42/10a63fcf23/0/metadata.json",
+      "transcript": "/42/10a63fcf23/0/full.jsonl",
+      "content_hash": "/42/10a63fcf23/0/content_hash.txt",
+      "prompt": "/42/10a63fcf23/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1383529,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 45707008,
+    "output_tokens": 137756,
+    "api_call_count": 356
+  }
+}
