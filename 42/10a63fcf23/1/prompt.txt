@@ -1,1 +1,1 @@
-read all the current spec and implementation plans and changelogs against the current code and then report what is shipped as of today
+ok now the first commit the changes and raise a pr against main
