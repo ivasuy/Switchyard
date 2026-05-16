@@ -1,6 +1,6 @@
 # Adapter Local Development
 
-Each adapter gets one focused local development guide with the curls, runtime settings, process checks, and debugging notes needed to run it through Switchyard.
+Each adapter gets one focused local development guide with runtime settings, process checks, and debugging notes. Endpoint curls and response shapes live in the centralized [Official API Contract](../API.md).
 
 | Adapter | Guide | Status |
 | --- | --- | --- |

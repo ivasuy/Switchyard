@@ -1,12 +1,6 @@
-# Switchyard Local Development
+# Local Development
 
-This guide is for running and debugging Switchyard locally. The README is product-facing; keep operational commands here.
-
-## Guide Map
-
-- Use this file for project-wide setup, daemon startup, health checks, generic curls, database inspection, and verification.
-- Use [Codex Adapter Local Development](adapters/CODEX.md) for Codex-specific curls, model metadata, PID checks, and stuck-run debugging.
-- Add future adapter guides under `docs/development/adapters/` with one file per adapter.
+This guide is for running and debugging Switchyard locally. For endpoint request and response shapes, use the [Official API Contract](API.md).
 
 ## Install
 
@@ -17,7 +11,7 @@ pnpm install
 
 ## Start The Daemon
 
-Default daemon:
+Default local daemon:
 
 ```bash
 SWITCHYARD_LOG_LEVEL=info pnpm --filter @switchyard/daemon dev
@@ -32,9 +26,13 @@ SWITCHYARD_LOG_LEVEL=info \
 pnpm --filter @switchyard/daemon dev
 ```
 
-When started with `pnpm --filter @switchyard/daemon dev`, the default data directory is `apps/daemon/.switchyard`.
+Default local data directory when using the daemon package script:
 
-## Health
+```text
+apps/daemon/.switchyard
+```
+
+## Health Check
 
 ```bash
 curl -s http://127.0.0.1:4545/health
@@ -46,9 +44,9 @@ Expected:
 {"ok":true}
 ```
 
-## Fake Runtime Smoke Test
+## Quick Smoke
 
-This does not spend model usage:
+Use the fake runtime first when you only want to verify daemon routing:
 
 ```bash
 curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
@@ -64,10 +62,11 @@ curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
   }'
 ```
 
-Expected status: `completed`. With `wait=1`, the JSON response also includes a `response` object:
+Expected:
 
 ```json
 {
+  "run": {"status": "completed"},
   "response": {
     "text": "fake runtime output",
     "outputs": [
@@ -77,15 +76,9 @@ Expected status: `completed`. With `wait=1`, the JSON response also includes a `
 }
 ```
 
-## Registry Checks
+Use the [API contract](API.md#create-and-wait) for the real Codex request body.
 
-```bash
-curl -s http://127.0.0.1:4545/providers/provider_openai
-curl -s http://127.0.0.1:4545/runtimes/runtime_codex
-curl -s http://127.0.0.1:4545/models/model_gpt_5_5
-```
-
-## Run Inspection
+## Inspect A Run
 
 ```bash
 RUN_ID=run_replace_me
@@ -94,36 +87,25 @@ curl -s "http://127.0.0.1:4545/runs/$RUN_ID/events"
 curl -s "http://127.0.0.1:4545/runs/$RUN_ID/artifacts"
 ```
 
-Cancel a run:
+For the official response shapes, see [Get Run](API.md#get-run), [Get Run Events](API.md#get-run-events), and [Get Run Artifacts](API.md#get-run-artifacts).
 
-```bash
-RUN_ID=run_replace_me
-curl -s -X POST "http://127.0.0.1:4545/runs/$RUN_ID/cancel"
-```
+## Watch Events From Curl
 
-## Event Streaming Behavior
+`POST /runs?wait=1` returns one final JSON response; it does not stream.
 
-`POST /runs?wait=1` is not streamed. It waits for the run to finish and returns one final JSON response with `run` metadata and `response.text`.
-
-`response.text` is the last normalized `runtime.output` text. `response.outputs` contains every normalized output event in order with its event sequence.
-
-`GET /runs/:id/events` returns Server-Sent Events formatted output. Today it is primarily an SSE-compatible event replay. `live=1&stopAfter=N` can include bounded live events, but it is not yet an open-ended streaming connection.
-
-Bounded live event capture:
+For a bounded SSE-formatted event capture:
 
 ```bash
 RUN_ID=run_replace_me
 curl -N "http://127.0.0.1:4545/runs/$RUN_ID/events?live=1&stopAfter=20"
 ```
 
-For now, if you want to watch progress from curl, create the run asynchronously and poll/re-run the events request:
+For local polling:
 
 ```bash
 RUN_ID=run_replace_me
 watch -n 1 "curl -s http://127.0.0.1:4545/runs/$RUN_ID/events"
 ```
-
-Codex responses appear in the wait response under `response.text` and in the event log as `runtime.output` events. Completed runs also expose the raw transcript artifact through `/runs/:id/artifacts`.
 
 ## SQLite Inspection
 
@@ -162,23 +144,28 @@ sqlite3 "$DB" "select id,type,path,metadata_json,created_at from artifacts where
 
 ## Process Checks
 
+Find daemon and Codex child processes:
+
 ```bash
 ps -ax -o pid,ppid,stat,etime,command | rg 'codex exec --json|node --disable-warning=DEP0205 --import tsx src/main.ts'
 ```
 
-## Adapter Debugging
-
-Use adapter-specific guides for model-running curl requests, healthy log shape, stuck-state diagnosis, and runtime-specific notes:
-
-- [Codex Adapter Local Development](adapters/CODEX.md)
+Codex-specific stuck-state interpretation lives in [Codex Adapter Local Development](adapters/CODEX.md).
 
 ## Verification
 
+Focused docs-safe checks:
+
 ```bash
-pnpm --filter @switchyard/adapters test
+git diff --check
 pnpm --filter @switchyard/protocol-rest test
 pnpm --filter @switchyard/daemon test
-pnpm test
+```
+
+Full project checks:
+
+```bash
 pnpm typecheck
+pnpm test
 pnpm build
 ```
