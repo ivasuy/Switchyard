@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { AdapterProtocolError } from "@switchyard/core";
 import {
   FakeRuntimeAdapter,
   InMemoryArtifactStore,
   InMemoryEventStore,
   InMemoryPlacementStore,
   InMemoryRunStore,
-  createFixtureRun
+  createFixtureRun,
+  runRuntimeAdapterContract
 } from "../src/index.js";
 
 describe("testkit fake runtime adapter", () => {
@@ -26,7 +28,10 @@ describe("testkit fake runtime adapter", () => {
       events.push(event);
     }
 
-    await adapter.send(session, { text: "continue" });
+    await expect(adapter.send(session, { text: "continue" })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "fake_input_unsupported"
+    } satisfies Partial<AdapterProtocolError>);
     await adapter.cancel(session);
     const artifacts = await adapter.artifacts(session);
 
@@ -34,6 +39,16 @@ describe("testkit fake runtime adapter", () => {
     expect(session.sessionId).toMatch(/^session_/);
     expect(events.map((event) => event.type)).toEqual(["runtime.status", "runtime.output", "run.completed"]);
     expect(artifacts[0]?.type).toBe("transcript");
+  });
+
+  it("passes the reusable runtime adapter contract harness", async () => {
+    await runRuntimeAdapterContract({
+      adapter: new FakeRuntimeAdapter(),
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process"
+    });
   });
 
   it("provides in-memory stores for core service tests", async () => {

@@ -7,6 +7,7 @@ import type {
 import type { RegistryStore } from "../ports/registry-store.js";
 import type { RuntimeAdapter, RuntimeAdapterCheck } from "../ports/runtime-adapter.js";
 import type { RuntimeLogger } from "../ports/runtime-logger.js";
+import { TimeoutError, withTimeout } from "./runtime-timeout.js";
 
 export interface RuntimeDoctorServiceDependencies {
   registry: RegistryStore;
@@ -102,7 +103,8 @@ export class RuntimeDoctorService {
           timeoutMs: this.checkTimeoutMs,
           maxDiagnosticBytes: this.maxDiagnosticBytes
         }),
-        this.checkTimeoutMs
+        this.checkTimeoutMs,
+        "runtime check"
       );
     } catch (error) {
       if (error instanceof TimeoutError) {
@@ -155,6 +157,10 @@ export class RuntimeDoctorService {
         reasonCode: null,
         message: null
       }, []);
+    }
+
+    if (isHttpHealthMode(mode, details)) {
+      return mapHttpHealthCheck(mode, checkResult, details, checkedAt, this.maxDiagnosticBytes);
     }
 
     const version = typeof details["version"] === "string" && details["version"].length > 0
@@ -258,27 +264,6 @@ function unsupportedToAvailability(check: RuntimeDoctorCheck): RuntimeAvailabili
   };
 }
 
-class TimeoutError extends Error {}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  return new Promise<T>((resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new TimeoutError("check timeout"));
-    }, timeoutMs);
-    void promise.then(
-      (value) => {
-        if (timer) clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        if (timer) clearTimeout(timer);
-        reject(error);
-      }
-    );
-  });
-}
-
 function optionalFailureDiagnostics(
   optionalChecks: Record<string, unknown>,
   maxDiagnosticBytes: number
@@ -306,10 +291,130 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function sanitizeMessage(message: string, maxDiagnosticBytes: number): string {
   const budget = Math.max(16, maxDiagnosticBytes);
-  const bytes = Buffer.byteLength(message, "utf8");
+  const redacted = redactSecrets(message);
+  const bytes = Buffer.byteLength(redacted, "utf8");
   if (bytes <= budget) {
-    return message;
+    return redacted;
   }
-  const truncated = message.slice(0, Math.max(1, budget - 3));
+  const truncated = redacted.slice(0, Math.max(1, budget - 3));
   return `${truncated}...`;
+}
+
+function redactSecrets(input: string): string {
+  return input
+    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
+    .replace(/(authorization\s*[:=]\s*)([^\s,;]+)/gi, "$1[REDACTED]")
+    .replace(/([A-Za-z0-9_-]*token[A-Za-z0-9_-]*\s*[:=]\s*)([^\s,;]+)/gi, "$1[REDACTED]");
+}
+
+function isHttpHealthMode(mode: RuntimeMode, details: Record<string, unknown>): boolean {
+  if (mode.slug === "generic_http.async_rest") {
+    return true;
+  }
+  return isRecord(details["availability"]);
+}
+
+function mapHttpHealthCheck(
+  mode: RuntimeMode,
+  checkResult: RuntimeAdapterCheck,
+  details: Record<string, unknown>,
+  checkedAt: string,
+  maxDiagnosticBytes: number
+): RuntimeDoctorCheck {
+  const availability = isRecord(details["availability"]) ? details["availability"] : undefined;
+  const diagnostics = sanitizeDiagnostics(details["diagnostics"], maxDiagnosticBytes);
+
+  if (!availability) {
+    return {
+      runtimeModeId: mode.id,
+      runtimeMode: mode.slug,
+      providerId: mode.providerId,
+      runtimeId: mode.runtimeId,
+      state: "unknown",
+      canRun: false,
+      installed: false,
+      auth: "unknown",
+      version: null,
+      checkedAt,
+      reasonCode: "generic_http_health_invalid",
+      message: sanitizeMessage(checkResult.message ?? "Invalid Generic HTTP health response.", maxDiagnosticBytes),
+      capabilities: mode.capabilities,
+      limitations: mode.limitations,
+      diagnostics: diagnostics.length > 0
+        ? diagnostics
+        : [{ code: "generic_http_health_invalid", severity: "error", message: "Invalid Generic HTTP health response." }]
+    };
+  }
+
+  const state = parseAvailabilityState(availability["state"]);
+  const auth = parseAvailabilityAuth(availability["auth"]);
+  const reasonCode = typeof availability["reasonCode"] === "string" ? availability["reasonCode"] : null;
+  const message = typeof availability["message"] === "string"
+    ? sanitizeMessage(availability["message"], maxDiagnosticBytes)
+    : null;
+  const version = typeof availability["version"] === "string" && availability["version"].length > 0
+    ? sanitizeMessage(availability["version"], maxDiagnosticBytes)
+    : null;
+
+  return {
+    runtimeModeId: mode.id,
+    runtimeMode: mode.slug,
+    providerId: mode.providerId,
+    runtimeId: mode.runtimeId,
+    state,
+    canRun: availability["canRun"] === true,
+    installed: availability["installed"] === true,
+    auth,
+    version,
+    checkedAt,
+    reasonCode,
+    message,
+    capabilities: mode.capabilities,
+    limitations: mode.limitations,
+    diagnostics
+  };
+}
+
+function sanitizeDiagnostics(
+  diagnostics: unknown,
+  maxDiagnosticBytes: number
+): RuntimeDoctorCheck["diagnostics"] {
+  if (!Array.isArray(diagnostics)) {
+    return [];
+  }
+  const output: RuntimeDoctorCheck["diagnostics"] = [];
+  for (const entry of diagnostics) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const code = typeof entry["code"] === "string" ? entry["code"] : "check_diagnostic";
+    const severity = entry["severity"] === "warning" || entry["severity"] === "error" ? entry["severity"] : "info";
+    const message = sanitizeMessage(
+      typeof entry["message"] === "string" ? entry["message"] : "Runtime diagnostic.",
+      maxDiagnosticBytes
+    );
+    output.push({ code, severity, message });
+  }
+  return output;
+}
+
+function parseAvailabilityState(value: unknown): RuntimeAvailability["state"] {
+  if (
+    value === "available" ||
+    value === "installed" ||
+    value === "unavailable" ||
+    value === "unsupported" ||
+    value === "partial" ||
+    value === "unknown"
+  ) {
+    return value;
+  }
+  return "unknown";
+}
+
+function parseAvailabilityAuth(value: unknown): RuntimeAvailability["auth"] {
+  if (value === "not_required" || value === "configured" || value === "missing" || value === "unknown") {
+    return value;
+  }
+  return "unknown";
 }

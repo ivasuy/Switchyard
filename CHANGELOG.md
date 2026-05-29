@@ -17,6 +17,22 @@ All notable changes to Switchyard will be documented in this file.
 - Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.
 
+## 2026-05-30 - Roadmap Release Train R4 Shared Runtime Substrates And Generic HTTP
+
+### Added
+
+- Added shared runtime substrates in `@switchyard/adapters` for process execution, JSONL event parsing, transcript recording, and timeout helpers reused by Codex and Generic HTTP adapters.
+- Added `@switchyard/testkit` fake Generic HTTP runtime server plus a reusable runtime adapter contract harness.
+- Added `generic_http.async_rest` runtime mode and adapter implementation with bounded health/start/status/events/cancel/artifacts handling, transcript artifact capture, and daemon configuration/env wiring.
+- Added Generic HTTP development guide (`docs/development/adapters/GENERIC_HTTP.md`) and local smoke coverage for Generic HTTP runtime-mode and run lifecycle paths.
+
+### Changed
+
+- Updated runtime-mode contracts and registry inference to support `runtime: generic_http` + `adapterType: http` -> `runtimeMode: generic_http.async_rest`, with strict mismatch validation.
+- Updated core runtime doctor checks to support adapter-provided `http_health` availability mapping (including sanitized diagnostics) without requiring Codex-style version/model fields.
+- Updated run cancellation semantics to be verified-terminal for Generic HTTP and idempotent for already terminal runs, and to preserve run state when adapters return protocol failures.
+- Updated REST run routes to map generic adapter protocol failures (`AdapterProtocolError`) to `409 adapter_protocol_failed` for input/cancel protocol constraints.
+
 ## 2026-05-29 - Roadmap Release Train R0-R2 Reconciliation
 
 ### Added

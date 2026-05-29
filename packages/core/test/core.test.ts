@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  AdapterProtocolError,
   createNotImplementedError,
   EventBus,
   RegistryService,
@@ -7,7 +8,9 @@ import {
   RuntimeDoctorService,
   RuntimeRunnerService,
   RunLauncherService,
-  RunService
+  RunService,
+  TimeoutError,
+  withTimeout
 } from "../src/index.js";
 import type {
   ArtifactStore,
@@ -35,6 +38,20 @@ describe("core service shells", () => {
 
     expect(error.code).toBe("adapter_protocol_failed");
     expect(error.message).toContain("debate-service.startRound");
+  });
+
+  it("creates adapter protocol errors with stable code and optional reason code", () => {
+    const error = new AdapterProtocolError("unsupported input", {
+      reasonCode: "generic_http_input_unsupported"
+    });
+    expect(error.code).toBe("adapter_protocol_failed");
+    expect(error.reasonCode).toBe("generic_http_input_unsupported");
+    expect(error.message).toBe("unsupported input");
+  });
+
+  it("withTimeout resolves successful promises and rejects hung promises with TimeoutError", async () => {
+    await expect(withTimeout(Promise.resolve("ok"), 50)).resolves.toBe("ok");
+    await expect(withTimeout(new Promise(() => undefined), 10)).rejects.toBeInstanceOf(TimeoutError);
   });
 
   it("run service creates a queued run and emits an event through ports", async () => {
@@ -132,7 +149,7 @@ describe("core service shells", () => {
     const cancelled = await service.cancelRun(run.id);
 
     expect(adapter.sentInput).toEqual({ text: "continue" });
-    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.status).toBe("completed");
   });
 
   it("runtime runner stores adapter session details before streaming events", async () => {
@@ -727,7 +744,7 @@ describe("core service shells", () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();
     const sessions = new MemorySessionStore();
-    const adapter = new EventfulAdapter();
+    const adapter = new CancelBeforeCompleteAdapter();
     const run = await createStoredRun(runs);
     const runner = new RuntimeRunnerService({
       runs,
@@ -735,14 +752,85 @@ describe("core service shells", () => {
       sessions,
       adapters: new Map([["fake", adapter]])
     });
-    await runner.start(run);
-
+    const running = runner.start(run);
+    await waitFor(() => sessions.items.size > 0);
     const cancelled = await runner.cancel(run.id);
+    await running;
 
     expect(adapter.cancelledSession?.["runId"]).toBe(run.id);
     expect(cancelled.status).toBe("cancelled");
     expect((await sessions.getByRunId(run.id))?.status).toBe("cancelled");
-    expect(events.items.at(-1)?.type).toBe("run.cancelled");
+    expect(events.items.some((event) => event.type === "run.cancelled")).toBe(true);
+  });
+
+  it("terminalizes adapter-emitted run.cancelled events and persists transcript artifacts", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const artifactContent = new InMemoryArtifactContentStore();
+    const run = await createStoredRun(runs);
+    const adapter = new CancelledEventAdapter();
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      artifactContent,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    const terminal = await runner.start(run);
+
+    expect(terminal.status).toBe("cancelled");
+    expect((await sessions.getByRunId(run.id))?.status).toBe("cancelled");
+    const terminalEvents = events.items.filter((event) => event.type === "run.cancelled");
+    expect(terminalEvents).toHaveLength(1);
+    expect(await artifacts.listByRun(run.id)).toHaveLength(1);
+    expect(artifactContent.writes).toHaveLength(1);
+  });
+
+  it("keeps run state unchanged when adapter cancel throws AdapterProtocolError", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const adapter = new CancelFailureAdapter();
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]])
+    });
+    const running = runner.start(run);
+    await waitFor(() => sessions.items.size > 0);
+
+    await expect(runner.cancel(run.id)).rejects.toBeInstanceOf(AdapterProtocolError);
+    await running;
+
+    expect((await runs.get(run.id))?.status).toBe("completed");
+    expect((await sessions.getByRunId(run.id))?.status).toBe("completed");
+  });
+
+  it("treats cancel on already terminal runs as idempotent and skips adapter cancel", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const adapter = new EventfulAdapter();
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]])
+    });
+    await runner.start(run);
+    const callsBefore = adapter.cancelCalls;
+
+    const result = await runner.cancel(run.id);
+
+    expect(result.status).toBe("completed");
+    expect(adapter.cancelCalls).toBe(callsBefore);
   });
 
   it("event bus publishes events to subscribers", async () => {
@@ -884,6 +972,68 @@ describe("core service shells", () => {
     const unsupported = await unsupportedDoctor.checkRuntimeMode("runtime_mode_unregistered");
     expect(unsupported.state).toBe("unsupported");
     expect(unsupported.reasonCode).toBe("adapter_not_registered");
+  });
+
+  it("maps generic_http http_health checks from adapter-provided availability details", async () => {
+    const registry = new MemoryRegistryStore();
+    const capabilityService = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+    await capabilityService.seedManifests([genericHttpRuntimeManifest]);
+
+    const token = "secret-r4-token";
+    const adapter = new ManifestTestAdapter(genericHttpRuntimeManifest, async () => ({
+      ok: true,
+      details: {
+        availability: {
+          state: "available",
+          canRun: true,
+          installed: true,
+          auth: "configured",
+          reasonCode: null,
+          message: `Bearer ${token} should be redacted`,
+          version: "wrapper-v1"
+        },
+        diagnostics: [
+          {
+            code: "health_ok",
+            severity: "info",
+            message: `token=${token}`
+          }
+        ]
+      }
+    }));
+    const loggerEntries: Array<Record<string, unknown>> = [];
+    const doctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["generic_http", adapter]]),
+      clock: () => "2026-05-29T00:00:10.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 256,
+      logger: {
+        info: (_event: string, payload?: Record<string, unknown>) => {
+          if (payload) loggerEntries.push(payload);
+        },
+        warn: (_event: string, payload?: Record<string, unknown>) => {
+          if (payload) loggerEntries.push(payload);
+        },
+        error: (_event: string, payload?: Record<string, unknown>) => {
+          if (payload) loggerEntries.push(payload);
+        }
+      }
+    });
+
+    const check = await doctor.checkRuntimeMode("generic_http.async_rest");
+
+    expect(check.state).toBe("available");
+    expect(check.canRun).toBe(true);
+    expect(check.auth).toBe("configured");
+    expect(check.version).toBe("wrapper-v1");
+    expect(check.message).not.toContain(token);
+    expect(check.diagnostics[0]?.message ?? "").not.toContain(token);
+    expect(JSON.stringify(check)).not.toContain(token);
+    expect(JSON.stringify(loggerEntries)).not.toContain(token);
   });
 
   it("validates runtime mode inference and rejects runtime mode ids/mismatches", async () => {
@@ -1145,6 +1295,7 @@ class EventfulAdapter extends NoopAdapter {
   sentSession: Record<string, unknown> | undefined;
   sentInput: Record<string, unknown> | undefined;
   cancelledSession: Record<string, unknown> | undefined;
+  cancelCalls = 0;
 
   override async start(request: Record<string, unknown>) {
     this.startedWith = request;
@@ -1157,6 +1308,7 @@ class EventfulAdapter extends NoopAdapter {
   }
 
   override async cancel(session: Record<string, unknown>) {
+    this.cancelCalls += 1;
     this.cancelledSession = session;
   }
 
@@ -1514,6 +1666,98 @@ const codexRuntimeManifest: RuntimeAdapterManifest = {
     optional: ["sandbox_policy_probe"]
   }
 };
+
+const genericHttpRuntimeManifest: RuntimeAdapterManifest = {
+  adapterId: "generic_http",
+  providerId: "provider_generic_http",
+  runtimeId: "runtime_generic_http",
+  runtimeModeId: "runtime_mode_generic_http_async_rest",
+  runtimeModeSlug: "generic_http.async_rest",
+  name: "Generic HTTP async REST",
+  adapterType: "http",
+  kind: "async_rest",
+  capabilities: [
+    "run.start",
+    "run.cancel",
+    "run.timeout",
+    "event.normalized",
+    "event.streaming",
+    "artifact.transcript",
+    "auth.none",
+    "auth.api_key"
+  ],
+  limitations: [
+    { code: "no_post_start_input", message: "generic_http.async_rest does not support post-start input in R4." }
+  ],
+  placement: {
+    local: { support: "conditional", reason: "Requires configured base URL." },
+    hosted: { support: "future", reason: "Hosted execution is not shipped in R4." },
+    connectedLocalNode: { support: "future", reason: "Hybrid node execution is not shipped in R4." }
+  },
+  docsPath: "docs/development/adapters/GENERIC_HTTP.md",
+  check: {
+    strategy: "http_health",
+    required: ["base_url_configured", "http_health"],
+    optional: ["auth_token_present"]
+  }
+};
+
+class CancelledEventAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_adapter_cancelled",
+        type: "run.cancelled",
+        runId: String(session["runId"]),
+        sequence: 99,
+        payload: { status: "cancelled" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+
+  override async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
+    return [
+      {
+        id: `adapter_cancelled_${String(session["runId"])}`,
+        type: "transcript",
+        path: `artifacts/${String(session["runId"])}/cancelled-transcript.jsonl`,
+        metadata: {
+          content: "{\"type\":\"run.cancelled\"}\n"
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      }
+    ];
+  }
+}
+
+class CancelFailureAdapter extends EventfulAdapter {
+  override async cancel(): Promise<void> {
+    throw new AdapterProtocolError("cancel failed", { reasonCode: "generic_http_cancel_failed" });
+  }
+
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_cancel_failure_running",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 99,
+        payload: { status: "running" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      yield {
+        id: "event_cancel_failure_completed",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 100,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
 
 class ManifestTestAdapter extends NoopAdapter {
   override readonly id: string;

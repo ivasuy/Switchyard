@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { mkdirSync } from "node:fs";
-import { CodexExecJsonAdapter, probeCodexCatalog } from "@switchyard/adapters";
+import { CodexExecJsonAdapter, GenericHttpAsyncRestAdapter, probeCodexCatalog } from "@switchyard/adapters";
 import {
   type ArtifactStore,
   EventBus,
@@ -92,9 +92,15 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   const stores: DaemonStoreResult = config ? createStorageStores(config) : createInMemoryStores();
   const checkTimeoutMs = options.checkTimeoutMs ?? 5000;
   const maxDiagnosticBytes = options.maxDiagnosticBytes ?? 4096;
+  const genericHttpConfig = config?.genericHttp ?? {
+    requestTimeoutMs: 5000,
+    pollIntervalMs: 100,
+    maxResponseBytes: 1024 * 1024
+  };
   const codexProbe = await loadCodexProbe(options, checkTimeoutMs, maxDiagnosticBytes);
   const now = new Date().toISOString();
   const codexAvailability = availabilityFromProbe(codexProbe, now, maxDiagnosticBytes);
+  const genericHttpAvailability = initialGenericHttpAvailability(genericHttpConfig, now);
   const fakeAvailability: DaemonRuntimeAvailability = {
     state: "available",
     canRun: true,
@@ -115,9 +121,19 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   if (options.logger) {
     codexOptions.logger = options.logger;
   }
+  const genericHttpAdapterOptions: ConstructorParameters<typeof GenericHttpAsyncRestAdapter>[0] = {
+    ...(genericHttpConfig.baseUrl ? { baseUrl: genericHttpConfig.baseUrl } : {}),
+    ...(genericHttpConfig.authToken ? { authToken: genericHttpConfig.authToken } : {}),
+    requestTimeoutMs: genericHttpConfig.requestTimeoutMs,
+    pollIntervalMs: genericHttpConfig.pollIntervalMs,
+    maxResponseBytes: genericHttpConfig.maxResponseBytes,
+    ...(options.logger ? { logger: options.logger } : {})
+  };
+  const genericHttpAdapter = new GenericHttpAsyncRestAdapter(genericHttpAdapterOptions);
   const adapters = new Map<string, RuntimeAdapter>([
     ["fake", new FakeRuntimeAdapter()],
-    ["codex", new CodexExecJsonAdapter(codexOptions)]
+    ["codex", new CodexExecJsonAdapter(codexOptions)],
+    ["generic_http", genericHttpAdapter]
   ]);
   const eventBus = new EventBus();
   const runnerOptions: ConstructorParameters<typeof RuntimeRunnerService>[0] = {
@@ -150,11 +166,13 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   try {
     await seedFakeRegistry(stores.registry);
     await seedCodexRegistry(stores, codexProbe, codexAvailability);
+    await seedGenericHttpRegistry(stores, genericHttpAvailability);
     await capabilityService.seedManifests(
-      [adapters.get("fake")!.manifest, adapters.get("codex")!.manifest],
+      [adapters.get("fake")!.manifest, adapters.get("codex")!.manifest, adapters.get("generic_http")!.manifest],
       {
         "fake.deterministic": fakeAvailability,
-        "codex.exec_json": codexAvailability
+        "codex.exec_json": codexAvailability,
+        "generic_http.async_rest": genericHttpAvailability
       }
     );
     options.logger?.info("runtime_mode.seeded", {
@@ -166,6 +184,11 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
       runtimeMode: "codex.exec_json",
       adapterId: "codex",
       state: codexAvailability.state
+    });
+    options.logger?.info("runtime_mode.seeded", {
+      runtimeMode: "generic_http.async_rest",
+      adapterId: "generic_http",
+      state: genericHttpAvailability.state
     });
   } catch (error) {
     stores.close?.();
@@ -392,6 +415,62 @@ async function seedCodexRegistry(
   }
 }
 
+async function seedGenericHttpRegistry(
+  stores: DaemonStoreResult,
+  availability: DaemonRuntimeAvailability
+): Promise<void> {
+  const registry = stores.registry;
+  const status = availability.state === "available" ? "available" : availability.state === "unknown" ? "unknown" : "unavailable";
+
+  const existingProvider = await registry.getProvider("provider_generic_http");
+  if (!existingProvider) {
+    await registry.createProvider({
+      id: "provider_generic_http",
+      name: "Generic HTTP",
+      authMode: "custom",
+      status
+    });
+  } else {
+    await updateProviderRecord(stores, {
+      id: "provider_generic_http",
+      name: "Generic HTTP",
+      authMode: "custom",
+      status
+    });
+  }
+
+  const existingRuntime = await registry.getRuntime("runtime_generic_http");
+  if (!existingRuntime) {
+    await registry.createRuntime({
+      id: "runtime_generic_http",
+      name: "Generic HTTP",
+      adapterType: "http",
+      status,
+      providerId: "provider_generic_http"
+    });
+  } else {
+    await updateRuntimeRecord(stores, {
+      id: "runtime_generic_http",
+      name: "Generic HTTP",
+      adapterType: "http",
+      status,
+      providerId: "provider_generic_http"
+    });
+  }
+
+  if (!(await registry.getModel("model_generic_http_default"))) {
+    await registry.createModel({
+      id: "model_generic_http_default",
+      providerId: "provider_generic_http",
+      modelName: "generic-http-default",
+      supportsTools: false,
+      supportsStreaming: true,
+      supportsBrowser: false,
+      status: "available"
+    });
+  }
+}
+
 async function loadCodexProbe(
   options: CreateDaemonAppOptions,
   timeoutMs: number,
@@ -527,9 +606,61 @@ async function updateRuntimeRecord(
 ): Promise<void> {
   if (stores.sqlite) {
     stores.sqlite
-      .prepare("UPDATE runtimes SET name = ?, adapter_type = ?, status = ? WHERE id = ?")
-      .run(runtime.name, runtime.adapterType, runtime.status, runtime.id);
+      .prepare("UPDATE runtimes SET name = ?, adapter_type = ?, provider_id = ?, status = ? WHERE id = ?")
+      .run(runtime.name, runtime.adapterType, runtime.providerId ?? null, runtime.status, runtime.id);
     return;
   }
   await stores.registry.createRuntime(runtime);
+}
+
+function initialGenericHttpAvailability(
+  config: {
+    baseUrl?: string;
+    authToken?: string;
+  },
+  checkedAt: string
+): DaemonRuntimeAvailability {
+  if (!config.baseUrl) {
+    return {
+      state: "unavailable",
+      canRun: false,
+      installed: false,
+      auth: "unknown",
+      version: null,
+      checkedAt,
+      reasonCode: "generic_http_config_missing",
+      message: "SWITCHYARD_GENERIC_HTTP_BASE_URL is not configured."
+    };
+  }
+  if (!isValidHttpUrl(config.baseUrl)) {
+    return {
+      state: "unavailable",
+      canRun: false,
+      installed: false,
+      auth: "unknown",
+      version: null,
+      checkedAt,
+      reasonCode: "generic_http_config_invalid",
+      message: "SWITCHYARD_GENERIC_HTTP_BASE_URL must use http or https."
+    };
+  }
+  return {
+    state: "unknown",
+    canRun: false,
+    installed: true,
+    auth: config.authToken ? "configured" : "not_required",
+    version: null,
+    checkedAt,
+    reasonCode: null,
+    message: null
+  };
+}
+
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
 }

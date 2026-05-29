@@ -19,6 +19,7 @@ import {
   providerSchema,
   runSchema,
   runtimeAvailabilitySchema,
+  runtimeCapabilitySchema,
   runtimeDoctorCheckSchema,
   runtimeModeSchema,
   runtimeModeSlugSchema,
@@ -254,6 +255,73 @@ describe("Switchyard contracts", () => {
       }
     });
     expect(summary.summary.partial).toBe(1);
+  });
+
+  it("accepts auth.api_key capability and rejects unsupported future capabilities", () => {
+    expect(runtimeCapabilitySchema.parse("auth.api_key")).toBe("auth.api_key");
+
+    expect(() => runtimeCapabilitySchema.parse("run.input")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("session.resume")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("webhook.callback")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("tool.invoke")).toThrow();
+  });
+
+  it("parses generic_http.async_rest runtime mode record", () => {
+    const mode = runtimeModeSchema.parse({
+      id: "runtime_mode_generic_http_async_rest",
+      slug: "generic_http.async_rest",
+      name: "Generic HTTP async REST",
+      providerId: "provider_generic_http",
+      runtimeId: "runtime_generic_http",
+      adapterId: "generic_http",
+      adapterType: "http",
+      kind: "async_rest",
+      status: "unknown",
+      capabilities: [
+        "run.start",
+        "run.cancel",
+        "run.timeout",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "auth.none",
+        "auth.api_key"
+      ],
+      limitations: [
+        { code: "no_post_start_input", message: "generic_http.async_rest does not support post-start input in R4." },
+        {
+          code: "configured_endpoint_only",
+          message: "The HTTP wrapper base URL is configured by daemon environment, not per run."
+        },
+        { code: "no_webhooks", message: "Webhook callbacks are not shipped for Generic HTTP in R4." }
+      ],
+      placement: {
+        local: {
+          support: "conditional",
+          reason: "Requires SWITCHYARD_GENERIC_HTTP_BASE_URL to point at a reachable HTTP wrapper."
+        },
+        hosted: { support: "future", reason: "Hosted execution is not shipped in R4." },
+        connectedLocalNode: { support: "future", reason: "Hybrid node execution is not shipped in R4." }
+      },
+      availability: {
+        state: "unknown",
+        canRun: false,
+        installed: false,
+        auth: "unknown",
+        version: null,
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        reasonCode: "generic_http_config_missing",
+        message: "SWITCHYARD_GENERIC_HTTP_BASE_URL is not configured."
+      },
+      docsPath: "docs/development/adapters/GENERIC_HTTP.md",
+      createdAt: "2026-05-29T00:00:00.000Z",
+      updatedAt: "2026-05-29T00:00:00.000Z"
+    });
+
+    expect(mode.slug).toBe("generic_http.async_rest");
+    expect(mode.adapterType).toBe("http");
+    expect(mode.kind).toBe("async_rest");
+    expect(mode.capabilities).toContain("auth.api_key");
   });
 
   it("supports run and session runtimeMode compatibility and rejects runtime mode ids", () => {

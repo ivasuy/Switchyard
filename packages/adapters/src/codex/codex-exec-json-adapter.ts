@@ -1,15 +1,18 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 import type { Artifact, SwitchyardEvent } from "@switchyard/contracts";
-import type {
-  RuntimeAdapter,
-  RuntimeAdapterCheck,
-  RuntimeAdapterManifest,
-  RuntimeLogger,
-  RuntimeStartResult
+import {
+  AdapterProtocolError,
+  type RuntimeAdapter,
+  type RuntimeAdapterCheck,
+  type RuntimeAdapterManifest,
+  type RuntimeLogger,
+  type RuntimeStartResult
 } from "@switchyard/core";
 import { codexEventToSwitchyardEvent, parseCodexJsonLine } from "./codex-jsonl-parser.js";
 import { probeCodexCatalog, validateCodexRunOptions } from "./codex-model-catalog.js";
+import { parseJsonlEvents } from "../substrates/jsonl-event-parser.js";
+import { ProcessRunner, type ProcessRunnerSession } from "../substrates/process-runner.js";
+import { TranscriptRecorder } from "../substrates/transcript-recorder.js";
 import type {
   CodexModelCatalogEntry,
   CodexProcessFactory,
@@ -21,54 +24,10 @@ import type {
 } from "./types.js";
 
 interface CodexAdapterSession {
-  readonly process: ReturnType<CodexProcessFactory>;
+  readonly processSession: ProcessRunnerSession<ReturnType<CodexProcessFactory>>;
   readonly startedAt: string;
-  readonly rawLines: string[];
-  readonly stderrLines: string[];
-  readonly exitPromise: Promise<number | null>;
-  drainPromise: Promise<void>;
-  readonly stdoutQueue: AsyncLineQueue;
+  readonly transcript: TranscriptRecorder;
   terminalSeen: boolean;
-  exitCode?: number | null;
-}
-
-class AsyncLineQueue {
-  private readonly items: string[] = [];
-  private readonly waiters: Array<(value: IteratorResult<string>) => void> = [];
-  private closed = false;
-
-  push(line: string): void {
-    if (this.closed) {
-      return;
-    }
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter({ value: line, done: false });
-      return;
-    }
-    this.items.push(line);
-  }
-
-  close(): void {
-    this.closed = true;
-    while (this.waiters.length > 0) {
-      const waiter = this.waiters.shift();
-      waiter?.({ value: undefined, done: true });
-    }
-  }
-
-  next(): Promise<IteratorResult<string>> {
-    const item = this.items.shift();
-    if (item !== undefined) {
-      return Promise.resolve({ value: item, done: false });
-    }
-    if (this.closed) {
-      return Promise.resolve({ value: undefined, done: true });
-    }
-    return new Promise((resolve) => {
-      this.waiters.push(resolve);
-    });
-  }
 }
 
 interface CodexExecJsonAdapterOptions {
@@ -79,9 +38,11 @@ interface CodexExecJsonAdapterOptions {
   logger?: RuntimeLogger | undefined;
 }
 
-export class CodexInputUnsupportedError extends Error {
+export class CodexInputUnsupportedError extends AdapterProtocolError {
   constructor() {
-    super("Codex exec-json does not support input after start");
+    super("Codex exec-json does not support input after start", {
+      reasonCode: "codex_input_unsupported"
+    });
     this.name = "CodexInputUnsupportedError";
   }
 }
@@ -135,6 +96,7 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
   private readonly probeCatalog: typeof probeCodexCatalog;
   private readonly sessions = new Map<string, CodexAdapterSession>();
   private readonly logger: RuntimeLogger | undefined;
+  private readonly processRunner = new ProcessRunner<ReturnType<CodexProcessFactory>>();
 
   constructor(options: CodexExecJsonAdapterOptions = {}) {
     this.command = options.command ?? "codex";
@@ -181,90 +143,70 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
       models: this.modelCatalog
     });
     const args = buildCodexExecArgs({ model, cwd, task, options });
-    const child = this.processFactory(args, { cwd, env: process.env });
-    child.stdin.end();
-    const startedAt = new Date().toISOString();
+    const transcript = new TranscriptRecorder();
+    let processPid: number | undefined;
+    const processSession = this.processRunner.start({
+      processFactory: this.processFactory,
+      args,
+      cwd,
+      env: process.env,
+      stdin: "close",
+      onStdoutFirstLine: () => {
+        this.log("info", "codex.stdout.first_line", {
+          runId,
+          pid: processPid
+        });
+      },
+      onStderr: (text) => {
+        transcript.appendProcessStderr(text);
+        this.log("warn", "codex.stderr", {
+          runId,
+          pid: processPid,
+          text: truncate(text, 400)
+        });
+      },
+      onExit: (code) => {
+        this.log("info", "codex.exit", {
+          runId,
+          pid: processPid,
+          code
+        });
+      },
+      onError: (message) => {
+        this.log("error", "codex.process_error", {
+          runId,
+          pid: processPid,
+          error: message
+        });
+      }
+    });
+    processPid = typeof processSession.process.pid === "number" ? processSession.process.pid : undefined;
+    for (const line of processSession.rawLines) {
+      transcript.appendProcessStdout(line);
+    }
+    const startedAt = processSession.startedAt;
     this.log("info", "codex.spawned", {
       runId,
-      pid: child.pid,
+      pid: processSession.process.pid,
       model,
       cwd,
       sandbox: options.sandbox ?? "workspace-write",
       ignoreUserConfig: options.ignoreUserConfig,
       ignoreRules: options.ignoreRules
     });
-
-    let resolveExit: ((code: number | null) => void) | undefined;
-    const exitPromise = new Promise<number | null>((resolve) => {
-      resolveExit = resolve;
-    });
-
-    const stdoutQueue = new AsyncLineQueue();
     const session: CodexAdapterSession = {
-      process: child,
+      processSession,
       startedAt,
-      rawLines: [],
-      stderrLines: [],
+      transcript,
       terminalSeen: false,
-      exitPromise,
-      drainPromise: Promise.resolve(),
-      stdoutQueue
     };
-
-    let resolveStderrEnd: (() => void) | undefined;
-    const stderrEndPromise = new Promise<void>((resolve) => {
-      resolveStderrEnd = resolve;
-    });
-
-    child.stderr.on("data", (chunk: string | Buffer) => {
-      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      session.stderrLines.push(text);
-      this.log("warn", "codex.stderr", {
-        runId,
-        pid: child.pid,
-        text: truncate(text, 400)
-      });
-    });
-    child.stderr.once("end", () => {
-      resolveStderrEnd?.();
-    });
-    child.once("exit", (code) => {
-      session.exitCode = code;
-      resolveStderrEnd?.();
-      resolveExit?.(code);
-      this.log("info", "codex.exit", {
-        runId,
-        pid: child.pid,
-        code
-      });
-    });
-    child.once("error", (error) => {
-      session.stderrLines.push(error instanceof Error ? error.message : String(error));
-      if (session.exitCode === undefined) {
-        session.exitCode = 1;
-      }
-      resolveStderrEnd?.();
-      resolveExit?.(session.exitCode);
-      this.log("error", "codex.process_error", {
-        runId,
-        pid: child.pid,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    });
-
-    const stdoutCapturePromise = this.captureStdoutLines(
-      child,
-      session,
-      runId ? { runId } : {}
-    );
-    session.drainPromise = Promise.all([stdoutCapturePromise, stderrEndPromise, exitPromise]).then(() => undefined);
 
     const sessionId = `session_${crypto.randomUUID()}`;
     this.sessions.set(sessionId, session);
 
     const result: RuntimeStartResult = { sessionId };
-    if (typeof child.pid === "number") {
-      result.processId = child.pid;
+    if (processSession.processId !== undefined) {
+      result.processId = processSession.processId;
     }
     return result;
   }
@@ -275,63 +217,49 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
 
   async cancel(session: Record<string, unknown>): Promise<void> {
     const active = this.requireSession(session);
-    active.process.kill("SIGTERM");
+    active.processSession.cancel();
   }
 
   async *events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
     const active = this.requireSession(session);
     const runId = requireString(session["runId"], "runId");
-    let sequence = 0;
-    while (true) {
-      const next = await active.stdoutQueue.next();
-      if (next.done) {
-        break;
+    let lastSequence = 0;
+    for await (const event of parseJsonlEvents(
+      active.processSession.stdoutQueue,
+      (record, context) => {
+        const parsed = parseCodexJsonLine(JSON.stringify(record));
+        const mapped = codexEventToSwitchyardEvent(parsed, context);
+        lastSequence = mapped.sequence + 1;
+        return mapped;
+      },
+      {
+        runId,
+        sanitizeError: (message) => message
+          .startsWith("Invalid Codex JSONL line:")
+          ? message
+          : `Invalid Codex JSONL line: ${message}`
       }
-      const line = next.value;
-
-      try {
-        const parsed = parseCodexJsonLine(line);
-        const event = codexEventToSwitchyardEvent(parsed, {
-          runId,
-          sequence,
-          createdAt: new Date().toISOString()
-        });
-        sequence += 1;
-
-        if (event.type === "run.completed" || event.type === "run.failed") {
-          active.terminalSeen = true;
-          yield event;
-          return;
-        }
-        yield event;
-      } catch (error) {
+    )) {
+      if (event.type === "run.completed" || event.type === "run.failed") {
         active.terminalSeen = true;
-        yield {
-          id: `event_${crypto.randomUUID()}`,
-          type: "run.failed",
-          runId,
-          sequence,
-          payload: {
-            status: "failed",
-            error: error instanceof Error ? error.message : String(error)
-          },
-          createdAt: new Date().toISOString()
-        };
+      }
+      yield event;
+      if (event.type === "run.completed" || event.type === "run.failed") {
         return;
       }
     }
 
-    const exitCode = await active.exitPromise;
+    const exitCode = await active.processSession.exitPromise;
     if (!active.terminalSeen && exitCode !== null && exitCode !== 0) {
       yield {
         id: `event_${crypto.randomUUID()}`,
         type: "run.failed",
         runId,
-        sequence,
+        sequence: lastSequence,
         payload: {
           status: "failed",
           exitCode,
-          stderr: active.stderrLines.join("")
+          stderr: active.processSession.stderrLines.join("")
         },
         createdAt: new Date().toISOString()
       };
@@ -345,8 +273,11 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
   async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
     const active = this.requireSession(session);
     const runId = requireString(session["runId"], "runId");
-    await active.drainPromise;
-    const content = buildTranscriptContent(active.rawLines, active.stderrLines);
+    await active.processSession.drainPromise;
+    for (const line of active.processSession.rawLines) {
+      active.transcript.appendProcessStdout(line);
+    }
+    const content = active.transcript.content();
 
     return [
       {
@@ -355,8 +286,11 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
         path: `runs/${runId}/codex-transcript.jsonl`,
         metadata: {
           content,
-          runtime: "codex",
-          mode: "exec-json"
+          ...active.transcript.metadata({
+            runtime: "codex",
+            mode: "exec-json",
+            runtimeMode: "codex.exec_json"
+          })
         },
         createdAt: active.startedAt
       }
@@ -370,35 +304,6 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
       throw new Error(`Codex session not found: ${sessionId}`);
     }
     return active;
-  }
-
-  private async captureStdoutLines(
-    process: ReturnType<CodexProcessFactory>,
-    session: Pick<CodexAdapterSession, "rawLines" | "stdoutQueue">,
-    context: { runId?: string }
-  ): Promise<void> {
-    const lines = createInterface({
-      input: process.stdout,
-      crlfDelay: Infinity
-    });
-
-    try {
-      for await (const line of lines) {
-        if (line.length === 0) {
-          continue;
-        }
-        if (session.rawLines.length === 0) {
-          this.log("info", "codex.stdout.first_line", {
-            runId: context.runId,
-            pid: process.pid
-          });
-        }
-        session.rawLines.push(line);
-        session.stdoutQueue.push(line);
-      }
-    } finally {
-      session.stdoutQueue.close();
-    }
   }
 
   private log(level: keyof RuntimeLogger, event: string, details?: Record<string, unknown>): void {
@@ -437,14 +342,6 @@ export function buildCodexExecArgs(input: { model: string; cwd: string; task: st
 
   args.push(input.task);
   return args;
-}
-
-function buildTranscriptContent(rawLines: string[], stderrLines: string[]): string {
-  const lines = rawLines.map((line) => `${line}\n`);
-  if (stderrLines.length > 0) {
-    lines.push(`${JSON.stringify({ type: "stderr", text: stderrLines.join("") })}\n`);
-  }
-  return lines.join("");
 }
 
 function toCodexRunOptions(metadata: Record<string, unknown>): CodexRunOptions {

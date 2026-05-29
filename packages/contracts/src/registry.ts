@@ -60,6 +60,7 @@ export const runtimeCapabilitySchema = z.enum([
   "tool.fake_echo",
   "auth.none",
   "auth.local",
+  "auth.api_key",
   "sandbox.read_only",
   "sandbox.workspace_write",
   "sandbox.danger_full_access"

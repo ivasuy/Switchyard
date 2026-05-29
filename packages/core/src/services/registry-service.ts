@@ -75,6 +75,9 @@ function inferRuntimeMode(input: { runtime: string; adapterType: AdapterType }):
   if (input.runtime === "codex" && input.adapterType === "process") {
     return "codex.exec_json";
   }
+  if (input.runtime === "generic_http" && input.adapterType === "http") {
+    return "generic_http.async_rest";
+  }
   return undefined;
 }
 

@@ -1,5 +1,5 @@
 import type { Artifact, SwitchyardEvent } from "@switchyard/contracts";
-import type { RuntimeAdapter, RuntimeAdapterCheck, RuntimeAdapterManifest, RuntimeStartResult } from "@switchyard/core";
+import { AdapterProtocolError, type RuntimeAdapter, type RuntimeAdapterCheck, type RuntimeAdapterManifest, type RuntimeStartResult } from "@switchyard/core";
 
 export class FakeRuntimeAdapter implements RuntimeAdapter {
   readonly id = "fake";
@@ -41,7 +41,9 @@ export class FakeRuntimeAdapter implements RuntimeAdapter {
   }
 
   async send(): Promise<void> {
-    return undefined;
+    throw new AdapterProtocolError("Fake runtime does not support input after start", {
+      reasonCode: "fake_input_unsupported"
+    });
   }
 
   async cancel(): Promise<void> {

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { type FastifyInstance } from "fastify";
 import type { CodexCatalogProbe } from "@switchyard/adapters";
+import { startFakeHttpRuntimeServer } from "@switchyard/testkit";
 import { createDaemonApp } from "../src/app.js";
 import type { DaemonConfig } from "../src/config.js";
 import { openSqliteStorage } from "@switchyard/storage";
@@ -15,7 +16,12 @@ function tempDaemonConfig(prefix: string): DaemonConfig {
     port: 0,
     dataDir: dir,
     sqlitePath: join(dir, "switchyard.sqlite"),
-    artifactDir: join(dir, "artifacts")
+    artifactDir: join(dir, "artifacts"),
+    genericHttp: {
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 25,
+      maxResponseBytes: 1024 * 1024
+    }
   };
 }
 
@@ -80,7 +86,12 @@ describe("daemon app", () => {
       port: 0,
       dataDir: dir,
       sqlitePath: join(dir, "switchyard.sqlite"),
-      artifactDir: join(dir, "artifacts")
+      artifactDir: join(dir, "artifacts"),
+      genericHttp: {
+        requestTimeoutMs: 5000,
+        pollIntervalMs: 25,
+        maxResponseBytes: 1024 * 1024
+      }
     };
 
     const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
@@ -220,7 +231,8 @@ describe("daemon app", () => {
       expect(list.statusCode).toBe(200);
       expect(list.json().runtimeModes.map((mode: { slug: string }) => mode.slug).sort()).toEqual([
         "codex.exec_json",
-        "fake.deterministic"
+        "fake.deterministic",
+        "generic_http.async_rest"
       ]);
       expect(codex.statusCode).toBe(200);
       expect(codex.json().runtimeMode.availability.state).toBe("available");
@@ -228,6 +240,103 @@ describe("daemon app", () => {
       expect(doctor.json().summary.available).toBe(2);
     } finally {
       await app.close();
+    }
+  });
+
+  it("seeds generic http mode as unavailable when base URL is missing", async () => {
+    const app = await createDaemonApp(undefined, { codexProbe: unavailableCodexProbe });
+    try {
+      const mode = await app.inject({ method: "GET", url: "/runtime-modes/generic_http.async_rest" });
+      expect(mode.statusCode).toBe(200);
+      expect(mode.json().runtimeMode.availability.reasonCode).toBe("generic_http_config_missing");
+      expect(mode.json().runtimeMode.availability.state).toBe("unavailable");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("runs generic http checks and wait=1 lifecycle against fake wrapper", async () => {
+    const server = await startFakeHttpRuntimeServer({ scenario: "happy" });
+    const config = tempDaemonConfig("switchyard-daemon-generic-http-");
+    config.genericHttp.baseUrl = server.baseUrl;
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+    try {
+      const check = await app.inject({ method: "POST", url: "/runtime-modes/generic_http.async_rest/check" });
+      expect(check.statusCode).toBe(200);
+      expect(check.json().check.state).toBe("available");
+
+      const run = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "generic_http",
+          provider: "generic_http",
+          model: "generic-http-default",
+          adapterType: "http",
+          cwd: "/repo",
+          task: "generic http smoke"
+        }
+      });
+      expect(run.statusCode).toBe(201);
+      expect(run.json().run.runtimeMode).toBe("generic_http.async_rest");
+      expect(run.json().run.status).toBe("completed");
+      expect(run.json().response.text).toBe("generic-http output");
+
+      const runId = run.json().run.id;
+      const artifacts = await app.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
+      expect(artifacts.statusCode).toBe(200);
+      expect(artifacts.json().artifacts.some((artifact: { path: string }) => artifact.path.includes("generic-http-transcript"))).toBe(true);
+      const input = await app.inject({
+        method: "POST",
+        url: `/runs/${runId}/input`,
+        payload: { text: "continue" }
+      });
+      expect(input.statusCode).toBe(409);
+      expect(input.json().error.code).toBe("adapter_protocol_failed");
+    } finally {
+      await app.close();
+      await server.close();
+    }
+  });
+
+  it("maps generic http cancel protocol failures to 409 without silent cancellation", async () => {
+    const server = await startFakeHttpRuntimeServer({ scenario: "cancel_accepted_but_status_running" });
+    const config = tempDaemonConfig("switchyard-daemon-generic-cancel-");
+    config.genericHttp.baseUrl = server.baseUrl;
+    config.genericHttp.pollIntervalMs = 10;
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "generic_http",
+          provider: "generic_http",
+          model: "generic-http-default",
+          adapterType: "http",
+          cwd: "/repo",
+          task: "cancel protocol failure"
+        }
+      });
+      expect(created.statusCode).toBe(202);
+      const runId = created.json().run.id;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const read = await app.inject({ method: "GET", url: `/runs/${runId}` });
+        if (read.statusCode === 200 && read.json().run.status === "running") {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const cancel = await app.inject({ method: "POST", url: `/runs/${runId}/cancel` });
+      expect(cancel.statusCode).toBe(409);
+      expect(cancel.json().error.code).toBe("adapter_protocol_failed");
+      const read = await app.inject({ method: "GET", url: `/runs/${runId}` });
+      expect(read.statusCode).toBe(200);
+      expect(read.json().run.status).not.toBe("cancelled");
+    } finally {
+      await app.close();
+      await server.close();
     }
   });
 
@@ -339,7 +448,12 @@ describe("daemon app", () => {
       port: 0,
       dataDir: dir,
       sqlitePath: join(dir, "switchyard.sqlite"),
-      artifactDir: join(dir, "artifacts")
+      artifactDir: join(dir, "artifacts"),
+      genericHttp: {
+        requestTimeoutMs: 5000,
+        pollIntervalMs: 25,
+        maxResponseBytes: 1024 * 1024
+      }
     };
 
     let first: FastifyInstance | undefined;
@@ -472,7 +586,12 @@ describe("daemon app", () => {
       port: 0,
       dataDir: dir,
       sqlitePath: join(dir, "switchyard.sqlite"),
-      artifactDir: join(dir, "artifacts")
+      artifactDir: join(dir, "artifacts"),
+      genericHttp: {
+        requestTimeoutMs: 5000,
+        pollIntervalMs: 25,
+        maxResponseBytes: 1024 * 1024
+      }
     };
 
     let app: FastifyInstance | undefined;

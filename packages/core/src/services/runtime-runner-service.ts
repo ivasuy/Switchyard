@@ -119,7 +119,11 @@ export class RuntimeRunnerService {
         const normalized = this.normalizeEvent(event, started.id, sequence++);
         this.logEvent(normalized);
 
-        if (normalized.type === "run.completed" || normalized.type === "run.failed") {
+        if (
+          normalized.type === "run.completed" ||
+          normalized.type === "run.failed" ||
+          normalized.type === "run.cancelled"
+        ) {
           const terminalSequence = sequence - 1;
           const terminal = await this.terminalizeRunFromAdapterEvent(started, normalized, terminalSequence, session);
           if (!terminal) {
@@ -127,19 +131,17 @@ export class RuntimeRunnerService {
           }
           latest = terminal;
           terminalized = true;
-          if (normalized.type === "run.completed") {
-            session = {
-              ...session,
-              status: "completed",
-              updatedAt: terminal.endedAt
-            };
-          } else {
-            session = {
-              ...session,
-              status: "failed",
-              updatedAt: terminal.endedAt
-            };
-          }
+          const sessionStatus: RuntimeSession["status"] =
+            normalized.type === "run.completed"
+              ? "completed"
+              : normalized.type === "run.cancelled"
+                ? "cancelled"
+                : "failed";
+          session = {
+            ...session,
+            status: sessionStatus,
+            updatedAt: terminal.endedAt
+          };
 
           if (this.deps.artifacts && session) {
             const artifactSequence = { value: sequence };
@@ -149,7 +151,8 @@ export class RuntimeRunnerService {
                 session,
                 started,
                 latest,
-                artifactSequence
+                artifactSequence,
+                normalized.type === "run.cancelled"
               );
               sequence = artifactSequence.value;
             } catch (error) {
@@ -199,6 +202,9 @@ export class RuntimeRunnerService {
 
   async cancel(runId: string): Promise<Run> {
     const run = await this.requireRun(runId);
+    if (this.isTerminal(run.status)) {
+      return run;
+    }
     const adapter = this.requireAdapter(run.runtime);
     const session = await this.requireSession(runId);
 
@@ -330,7 +336,8 @@ export class RuntimeRunnerService {
     session: RuntimeSession,
     templateRun: Run,
     baseRun: Run,
-    sequence: { value: number }
+    sequence: { value: number },
+    allowCancelledRun = false
   ): Promise<void> {
     if (!this.deps.artifacts || !adapter) {
       return;
@@ -340,7 +347,7 @@ export class RuntimeRunnerService {
     const preparedArtifacts: Array<Artifact> = [];
 
     for (const artifact of adapterArtifacts) {
-      if (await this.isCancelled(baseRun.id)) {
+      if (!allowCancelledRun && await this.isCancelled(baseRun.id)) {
         return;
       }
 
@@ -373,7 +380,7 @@ export class RuntimeRunnerService {
     }
 
     for (const prepared of preparedArtifacts) {
-      if (await this.isCancelled(baseRun.id)) {
+      if (!allowCancelledRun && await this.isCancelled(baseRun.id)) {
         return;
       }
 
@@ -404,7 +411,12 @@ export class RuntimeRunnerService {
       return undefined;
     }
 
-    const terminalStatus: RunStatus = event.type === "run.completed" ? "completed" : "failed";
+    const terminalStatus: RunStatus =
+      event.type === "run.completed"
+        ? "completed"
+        : event.type === "run.cancelled"
+          ? "cancelled"
+          : "failed";
     const terminal: Run = {
       ...templateRun,
       status: terminalStatus,

@@ -49,7 +49,7 @@ When a release ships:
 
 Snapshot source: `agent/roadmap-base-20260529`, commit `461dea5`.
 
-Current product state: local daemon MVP with shipped runtime modes `fake.deterministic` and `codex.exec_json`.
+Current product state: local daemon MVP with shipped runtime modes `fake.deterministic`, `codex.exec_json`, and `generic_http.async_rest`.
 
 The product is usable locally for one-shot agent runs, event inspection, artifact listing, cancellation, and registry lookups. It is not yet a hosted gateway, debate system, approval system, SDK, dashboard, or multi-runtime production platform.
 
@@ -102,6 +102,7 @@ Shipped runtime modes:
 
 - `fake.deterministic`: deterministic test runtime mode for local smoke tests and contract coverage.
 - `codex.exec_json`: local non-interactive Codex CLI execution through `codex exec --json`.
+- `generic_http.async_rest`: daemon-configured async REST wrapper runtime with bounded health/start/status/events/cancel/artifacts, verified-terminal cancellation, and transcript artifact capture.
 
 Codex support includes:
 
@@ -114,6 +115,10 @@ Codex support includes:
 - JSONL stdout parsing into normalized Switchyard events.
 - Raw stdout/stderr transcript artifact capture.
 - `409` response for post-start input because Codex `exec --json` is one-shot and non-interactive.
+
+R4 shared substrate note:
+
+- Codex and Generic HTTP adapters now share extracted runtime substrates for process/session streaming, JSONL parsing, timeout helpers, and transcript recording while preserving existing public Codex behavior.
 
 ### REST API
 
@@ -200,7 +205,6 @@ These are planned or designed in docs, but not shipped product:
 - Claude Code adapter.
 - Cursor adapter.
 - AgentField adapter.
-- Generic HTTP adapter.
 - OpenClaw adapter.
 - Paperclip adapter.
 - Browser/search adapter.
@@ -258,7 +262,7 @@ Not included:
 - full Codex interactive runtime.
 - memory, tools, approval, debate, hosted, hybrid, SDK, or CLI product surfaces.
 
-Local verification:
+Local verification shipped:
 
 - full workspace checks pass.
 - fake runtime `POST /runs?wait=1` completes.
@@ -420,9 +424,9 @@ Promotion criteria:
 
 ### R4: Shared Runtime Substrates And Generic HTTP
 
-Status: planned.
+Status: shipped. Verified on 2026-05-30 in Phase 3 worktree branch `agent/phase-3-r4-shared-runtime-substrates-and-generic-http`.
 
-Goal: extract reusable runtime infrastructure from the proven Codex slice, then validate a second adapter shape through Generic HTTP.
+Goal: extract reusable runtime infrastructure from the proven Codex slice and validate a second adapter shape through Generic HTTP.
 
 Why this release exists:
 
@@ -435,7 +439,7 @@ Release scope:
 - stdout/stderr/event parser harness.
 - cancellation and timeout helpers.
 - stronger adapter contract tests that every adapter must satisfy.
-- Generic HTTP adapter for simple wrapper runtimes.
+- Generic HTTP async REST adapter for daemon-configured wrapper runtimes (`generic_http.async_rest`).
 - fake HTTP wrapper test server for deterministic CI coverage.
 - adapter docs template updated to match the capability model.
 
@@ -446,7 +450,7 @@ Usable after this release:
 - stdout/stderr/event parser harness.
 - cancellation and timeout helpers.
 - stronger adapter contract tests.
-- Generic HTTP adapter for simple wrapper runtimes.
+- Generic HTTP async REST adapter for daemon-configured wrapper runtimes (`generic_http.async_rest`).
 - Switchyard can run one process-backed provider mode and one HTTP-wrapper-backed provider mode through the same public run lifecycle.
 
 Not included:
@@ -462,7 +466,7 @@ Local verification:
 - Generic HTTP status, failure, cancellation, output, and artifact paths are normalized.
 - transcript artifacts are stored for both process and HTTP adapter paths.
 
-Promotion criteria:
+Promotion criteria met:
 
 - new adapter work no longer copies Codex-specific process code.
 - adapter contract tests are reusable by process and HTTP adapters.

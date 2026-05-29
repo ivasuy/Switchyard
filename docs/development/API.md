@@ -11,8 +11,8 @@ http://127.0.0.1:4545
 Current implementation status:
 
 - Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing).
-- Implemented runtime: local Codex through `codex exec --json`, plus the fake test runtime.
-- Not implemented yet: trace endpoint, OpenAPI generation, debates, approvals, memory, tools, hosted workers, hosted/hybrid placement, dashboards, TUI, generic HTTP adapter, authentication, rate limiting.
+- Implemented runtimes: fake test runtime (`fake.deterministic`), local Codex (`codex.exec_json`), and Generic HTTP async REST wrapper (`generic_http.async_rest`).
+- Not implemented yet: trace endpoint, OpenAPI generation, debates, approvals, memory, tools, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, ACP, PTY, interactive Codex sessions, webhooks, per-run HTTP base URL overrides, and remote artifact URL fetching.
 
 ## Error Contract
 
@@ -150,8 +150,25 @@ curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
 
 - `runtime: "fake"` -> `runtimeMode: "fake.deterministic"`
 - `runtime: "codex"` and `adapterType: "process"` -> `runtimeMode: "codex.exec_json"`
+- `runtime: "generic_http"` and `adapterType: "http"` -> `runtimeMode: "generic_http.async_rest"`
 
 When provided, `runtimeMode` must be a runtime-mode slug (for example `codex.exec_json`), not an internal id like `runtime_mode_codex_exec_json`.
+
+Generic HTTP create payload example:
+
+```bash
+curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{
+    "runtime": "generic_http",
+    "provider": "generic_http",
+    "model": "generic-http-default",
+    "adapterType": "http",
+    "cwd": "/repo",
+    "task": "generic http smoke",
+    "timeoutSeconds": 30
+  }'
+```
 
 ## Get Run
 
@@ -513,7 +530,7 @@ curl -s -X POST "http://127.0.0.1:4545/runs/$RUN_ID/input" \
   -d '{"text":"continue"}'
 ```
 
-Success returns `{"accepted":true}`. Codex `exec --json` returns `409 adapter_protocol_failed` for any post-start input.
+Success returns `{"accepted":true}`. `codex.exec_json` and `generic_http.async_rest` both return `409 adapter_protocol_failed` for post-start input in R4.
 
 ## Cancel Run
 
@@ -521,6 +538,19 @@ Success returns `{"accepted":true}`. Codex `exec --json` returns `409 adapter_pr
 RUN_ID=run_replace_me
 curl -s -X POST "http://127.0.0.1:4545/runs/$RUN_ID/cancel"
 ```
+
+Cancellation semantics:
+
+- Cancel is idempotent for terminal runs.
+- For `generic_http.async_rest`, an upstream 2xx cancel acknowledgement alone is not terminal.
+- Switchyard reports `cancelled` only after the adapter verifies terminal `cancelled` state.
+- Unverified or failed Generic HTTP cancellation returns `409 adapter_protocol_failed` and keeps the previous run state.
+
+Generic HTTP transcripts are exposed through the existing artifact APIs:
+
+- `GET /runs/:id/artifacts`
+- `GET /artifacts/:id`
+- `GET /artifacts/:id/content`
 
 ## Codex Metadata
 

@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import {
+  AdapterProtocolError,
   type ArtifactStore,
   EventBus,
   RegistryService,
@@ -308,9 +309,9 @@ describe("run routes", () => {
       url: `/runs/${runId}/cancel`
     });
 
-    expect(inputResponse.statusCode).toBe(202);
+    expect(inputResponse.statusCode).toBe(409);
     expect(cancelResponse.statusCode).toBe(200);
-    expect(cancelResponse.json().run.status).toBe("cancelled");
+    expect(cancelResponse.json().run.status).toBe("completed");
   });
 
   it("returns 409 when runtime input is unsupported after start", async () => {
@@ -321,8 +322,7 @@ describe("run routes", () => {
       payload: fakeRunPayload("Unsupported input run")
     });
     const runId = createResponse.json().run.id;
-    const unsupportedError = new Error("input unsupported");
-    unsupportedError.name = "CodexInputUnsupportedError";
+    const unsupportedError = new AdapterProtocolError("Codex exec-json does not support input after start");
     vi.spyOn(harness.runService, "sendInput").mockRejectedValueOnce(unsupportedError);
 
     const inputResponse = await harness.app.inject({
@@ -349,6 +349,68 @@ describe("run routes", () => {
     });
     expect(response.statusCode).toBe(201);
     expect(response.json().run.runtimeMode).toBe("fake.deterministic");
+  });
+
+  it("infers generic http runtime mode and validates explicit generic runtime mode", async () => {
+    const harness = createRouteHarness();
+    const inferred = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: {
+        runtime: "generic_http",
+        provider: "generic_http",
+        model: "generic-http-default",
+        adapterType: "http",
+        cwd: "/repo",
+        task: "infer generic mode"
+      }
+    });
+    const explicit = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: {
+        runtime: "generic_http",
+        provider: "generic_http",
+        model: "generic-http-default",
+        adapterType: "http",
+        runtimeMode: "generic_http.async_rest",
+        cwd: "/repo",
+        task: "explicit generic mode"
+      }
+    });
+    const rejectedId = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: {
+        runtime: "generic_http",
+        provider: "generic_http",
+        model: "generic-http-default",
+        adapterType: "http",
+        runtimeMode: "runtime_mode_generic_http_async_rest",
+        cwd: "/repo",
+        task: "generic id"
+      }
+    });
+    const rejectedMismatch = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: {
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        runtimeMode: "generic_http.async_rest",
+        cwd: "/repo",
+        task: "generic mismatch"
+      }
+    });
+
+    expect(inferred.statusCode).toBe(202);
+    expect(inferred.json().run.runtimeMode).toBe("generic_http.async_rest");
+    expect(explicit.statusCode).toBe(202);
+    expect(explicit.json().run.runtimeMode).toBe("generic_http.async_rest");
+    expect(rejectedId.statusCode).toBe(400);
+    expect(rejectedMismatch.statusCode).toBe(400);
   });
 
   it("accepts runtimeMode slug and rejects runtimeMode ids or mismatches", async () => {
@@ -452,6 +514,36 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
       checkedAt: "2026-05-29T00:00:00.000Z",
       reasonCode: null,
       message: null
+    },
+    createdAt: "2026-05-29T00:00:00.000Z",
+    updatedAt: "2026-05-29T00:00:00.000Z"
+  });
+  seedRuntimeMode(registry, {
+    id: "runtime_mode_generic_http_async_rest",
+    slug: "generic_http.async_rest",
+    name: "Generic HTTP async REST",
+    providerId: "provider_generic_http",
+    runtimeId: "runtime_generic_http",
+    adapterId: "generic_http",
+    adapterType: "http",
+    kind: "async_rest",
+    status: "unknown",
+    capabilities: ["run.start", "run.cancel", "run.timeout", "event.normalized", "event.streaming", "artifact.transcript", "auth.none", "auth.api_key"],
+    limitations: [{ code: "no_post_start_input", message: "generic_http.async_rest does not support post-start input in R4." }],
+    placement: {
+      local: { support: "conditional", reason: "Configured endpoint required." },
+      hosted: { support: "future", reason: "Not hosted." },
+      connectedLocalNode: { support: "future", reason: "Future." }
+    },
+    availability: {
+      state: "unknown",
+      canRun: false,
+      installed: false,
+      auth: "unknown",
+      version: null,
+      checkedAt: "2026-05-29T00:00:00.000Z",
+      reasonCode: "generic_http_config_missing",
+      message: "missing"
     },
     createdAt: "2026-05-29T00:00:00.000Z",
     updatedAt: "2026-05-29T00:00:00.000Z"
@@ -562,25 +654,25 @@ function seedRuntimeMode(registry: InMemoryRegistryStore, mode: {
   providerId: string;
   runtimeId: string;
   adapterId: string;
-  adapterType: "process";
-  kind: "deterministic_fake" | "one_shot_process";
-  status: "available";
+  adapterType: "process" | "http";
+  kind: "deterministic_fake" | "one_shot_process" | "async_rest";
+  status: "available" | "unknown";
   capabilities: string[];
   limitations: Array<{ code: string; message: string }>;
   placement: {
-    local: { support: "supported"; reason: string };
-    hosted: { support: "unsupported"; reason: string };
+    local: { support: "supported" | "conditional"; reason: string };
+    hosted: { support: "unsupported" | "future"; reason: string };
     connectedLocalNode: { support: "future"; reason: string };
   };
   availability: {
-    state: "available";
-    canRun: true;
-    installed: true;
-    auth: "not_required" | "configured";
+    state: "available" | "unknown";
+    canRun: boolean;
+    installed: boolean;
+    auth: "not_required" | "configured" | "unknown";
     version: string | null;
     checkedAt: string;
-    reasonCode: null;
-    message: null;
+    reasonCode: string | null;
+    message: string | null;
   };
   createdAt: string;
   updatedAt: string;

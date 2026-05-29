@@ -9,6 +9,7 @@ import type {
   RunService,
   RunStore
 } from "@switchyard/core";
+import { AdapterProtocolError } from "@switchyard/core";
 import {
   adapterTypeSchema,
   decodeCursor,
@@ -152,11 +153,11 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     try {
       await deps.runService.sendInput(id, parseInputBody(request.body));
     } catch (error) {
-      if (error instanceof Error && error.name === "CodexInputUnsupportedError") {
+      if (error instanceof AdapterProtocolError) {
         return sendHttpError(
           reply,
           "adapter_protocol_failed",
-          "Codex exec-json does not support input after start"
+          error.message
         );
       }
       throw error;
@@ -171,8 +172,15 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
     }
 
-    const cancelled = await deps.runService.cancelRun(id);
-    return reply.send({ run: cancelled });
+    try {
+      const cancelled = await deps.runService.cancelRun(id);
+      return reply.send({ run: cancelled });
+    } catch (error) {
+      if (error instanceof AdapterProtocolError) {
+        return sendHttpError(reply, "adapter_protocol_failed", error.message);
+      }
+      throw error;
+    }
   });
 }
 

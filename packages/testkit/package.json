@@ -9,11 +9,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "fake-http-runtime": "node --disable-warning=DEP0205 --import tsx ./src/fake-http-runtime-cli.ts"
   },
   "dependencies": {
     "@switchyard/contracts": "workspace:*",
-    "@switchyard/core": "workspace:*"
+    "@switchyard/core": "workspace:*",
+    "fastify": "^5.8.5"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

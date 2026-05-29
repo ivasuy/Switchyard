@@ -8,8 +8,9 @@ Manual smoke in this file depends on a locally installed `codex` CLI on your mac
 Implemented:
 
 - Local non-interactive `codex exec --json`.
-- Runtime mode slug: `codex.exec_json` (one-shot, local-only, not hosted-safe in R3).
+- Runtime mode slug: `codex.exec_json` (one-shot, local-only, not hosted-safe in R4).
 - Process adapter mode through `adapterType: "process"`.
+- Shared process substrate usage (`ProcessRunner`, JSONL parser harness, transcript recorder, adapter timeout wrapper) with unchanged public Codex behavior.
 - JSONL stdout parsing into Switchyard events.
 - Raw stdout/stderr transcript artifact capture.
 - Model and reasoning metadata mapping.
@@ -31,6 +32,11 @@ R3 check behavior:
 - model catalog unavailable/empty: reported as `unavailable` (`model_catalog_unavailable`).
 - optional check failure with required checks passing: reported as `partial` (`optional_check_failed`).
 - hung/slow/oversized checks: bounded and sanitized as `unknown`/`unavailable` with stable reason codes.
+
+R4 Codex compatibility note:
+
+- Shared process substrate extraction is internal-only.
+- Public Codex adapter behavior is preserved: `codex exec --json`, `shell: false`, immediate stdin close, log names (`codex.spawned`, `codex.stderr`, `codex.stdout.first_line`, `codex.exit`, `codex.process_error`), and transcript path `runs/<runId>/codex-transcript.jsonl`.
 
 ## Request Metadata
 

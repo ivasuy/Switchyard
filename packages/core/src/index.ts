@@ -35,5 +35,6 @@ export * from "./services/placement-service.js";
 export * from "./services/registry-service.js";
 export * from "./services/runtime-capability-service.js";
 export * from "./services/runtime-doctor-service.js";
+export * from "./services/runtime-timeout.js";
 export * from "./services/session-service.js";
 export * from "./services/tool-router.js";

@@ -61,6 +61,48 @@ Notes:
 - `codex.exec_json` is `available` only when both `codex --version` and `codex debug models` succeed with at least one model.
 - missing/slow/oversized Codex checks are bounded and reported as sanitized `unavailable`/`unknown`; daemon startup remains up.
 
+Generic HTTP runtime checks:
+
+- `generic_http.async_rest` is seeded on startup.
+- With no `SWITCHYARD_GENERIC_HTTP_BASE_URL`, availability is `unavailable` with reason `generic_http_config_missing`.
+- Active checks (`POST /runtime-modes/generic_http.async_rest/check`) use bounded HTTP health probes.
+
+## Generic HTTP Local Smoke
+
+Terminal 1 (fake wrapper):
+
+```bash
+pnpm --filter @switchyard/testkit fake-http-runtime -- --host 127.0.0.1 --port 5055
+```
+
+Terminal 2 (daemon):
+
+```bash
+SWITCHYARD_PORT=4546 \
+SWITCHYARD_DATA_DIR=/private/tmp/switchyard-r4-generic-http \
+SWITCHYARD_GENERIC_HTTP_BASE_URL=http://127.0.0.1:5055 \
+SWITCHYARD_LOG_LEVEL=info \
+pnpm --filter @switchyard/daemon dev
+```
+
+Smoke calls:
+
+```bash
+BASE=http://127.0.0.1:4546
+curl -s "$BASE/runtime-modes/generic_http.async_rest" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/generic_http.async_rest/check" | python3 -m json.tool
+curl -s -X POST "$BASE/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"runtime":"generic_http","provider":"generic_http","model":"generic-http-default","adapterType":"http","cwd":"/repo","task":"r4 http smoke","timeoutSeconds":30}' \
+  | python3 -m json.tool
+```
+
+R4 Generic HTTP boundaries:
+
+- No post-start input (`POST /runs/:id/input` returns `409 adapter_protocol_failed`).
+- No per-run base URL override; endpoint config is daemon env only.
+- No webhooks and no remote artifact URL fetching.
+
 ## Quick Smoke
 
 Use the fake runtime first when you only want to verify daemon routing:
@@ -224,4 +266,5 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm lint
+git diff --check
 ```
