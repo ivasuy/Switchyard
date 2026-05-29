@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS runtimes (
   id TEXT PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
   adapter_type TEXT NOT NULL,
-  status TEXT NOT NULL
+  status TEXT NOT NULL,
+  provider_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS models (
@@ -139,10 +140,38 @@ CREATE INDEX IF NOT EXISTS artifacts_run_id_idx
 
 CREATE INDEX IF NOT EXISTS placement_decisions_run_id_idx
   ON placement_decisions (run_id);
+
+CREATE INDEX IF NOT EXISTS runs_created_at_idx
+  ON runs (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS runtimes_provider_id_idx
+  ON runtimes (provider_id);
+
+CREATE INDEX IF NOT EXISTS models_provider_id_idx
+  ON models (provider_id);
 `;
+
+const additiveMigrations: Array<{ column: string; statement: string }> = [
+  {
+    column: "provider_id",
+    statement: "ALTER TABLE runtimes ADD COLUMN provider_id TEXT"
+  }
+];
+
+function applyAdditiveMigrations(sqlite: Database.Database): void {
+  const columnInfo = sqlite.prepare("PRAGMA table_info(runtimes)").all() as Array<{ name: string }>;
+  const existing = new Set(columnInfo.map((row) => row.name));
+  for (const migration of additiveMigrations) {
+    if (existing.has(migration.column)) {
+      continue;
+    }
+    sqlite.exec(migration.statement);
+  }
+}
 
 function migrate(sqlite: Database.Database): void {
   sqlite.exec(migrationSql);
+  applyAdditiveMigrations(sqlite);
 }
 
 export function openSqliteStorage(path: string): OpenSqliteStorageResult {

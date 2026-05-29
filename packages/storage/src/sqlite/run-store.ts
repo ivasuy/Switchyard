@@ -1,8 +1,8 @@
 import type { Run } from "@switchyard/contracts";
-import type { RunStore } from "@switchyard/core";
+import type { ListRunsFilter, ListRunsResult, RunStore } from "@switchyard/core";
 import type { SwitchyardSqliteDatabase } from "./database.js";
 import { runs } from "./schema.js";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm";
 
 type RunRow = typeof runs.$inferSelect;
 type RunInsertRow = Omit<typeof runs.$inferInsert, "startedAt" | "endedAt"> & {
@@ -104,5 +104,61 @@ export class SqliteRunStore implements RunStore {
   async update(run: Run): Promise<Run> {
     await this.db.update(runs).set(toUpdateRow(run)).where(eq(runs.id, run.id));
     return run;
+  }
+
+  async list(filter: ListRunsFilter): Promise<ListRunsResult> {
+    const conditions: ReturnType<typeof eq>[] = [];
+
+    if (filter.status && filter.status.length > 0) {
+      conditions.push(inArray(runs.status, [...filter.status]));
+    }
+    if (filter.runtime && filter.runtime.length > 0) {
+      conditions.push(inArray(runs.runtime, [...filter.runtime]));
+    }
+    if (filter.provider && filter.provider.length > 0) {
+      conditions.push(inArray(runs.provider, [...filter.provider]));
+    }
+    if (filter.model && filter.model.length > 0) {
+      conditions.push(inArray(runs.model, [...filter.model]));
+    }
+    if (filter.placement && filter.placement.length > 0) {
+      conditions.push(inArray(runs.placement, [...filter.placement]));
+    }
+    if (filter.adapterType && filter.adapterType.length > 0) {
+      conditions.push(inArray(runs.adapterType, [...filter.adapterType]));
+    }
+    if (filter.since !== undefined) {
+      conditions.push(gte(runs.createdAt, filter.since));
+    }
+    if (filter.until !== undefined) {
+      conditions.push(lt(runs.createdAt, filter.until));
+    }
+    if (filter.before) {
+      const cursorCreated = filter.before.createdAt;
+      const cursorId = filter.before.id;
+      const tupleCondition = or(
+        lt(runs.createdAt, cursorCreated),
+        and(eq(runs.createdAt, cursorCreated), lt(runs.id, cursorId))
+      );
+      if (tupleCondition) {
+        conditions.push(tupleCondition);
+      }
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const overFetch = filter.limit + 1;
+    const baseQuery = this.db
+      .select()
+      .from(runs)
+      .orderBy(desc(runs.createdAt), desc(sql`${runs.id}`))
+      .limit(overFetch);
+    const query = whereClause ? baseQuery.where(whereClause) : baseQuery;
+    const rows = await query;
+    const records = rows.slice(0, filter.limit).map(fromRow);
+    const hasMore = rows.length > filter.limit;
+    const last = records.at(-1);
+    const nextCursor = hasMore && last ? { createdAt: last.createdAt, id: last.id } : null;
+    return { runs: records, nextCursor };
   }
 }

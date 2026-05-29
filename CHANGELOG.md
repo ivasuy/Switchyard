@@ -6,6 +6,11 @@ All notable changes to Switchyard will be documented in this file.
 
 ### Added
 
+- Added `GET /runs` list endpoint with `status`, `runtime`, `provider`, `model`, `placement`, `adapterType`, `since`, `until`, `limit`, and opaque `before` cursor filters. Newest-first, cursor-paginated.
+- Added registry list endpoints `GET /providers`, `GET /runtimes`, and `GET /models` with cursor pagination plus provider/adapter filters.
+- Added global artifact lookup endpoints `GET /artifacts/:id` (metadata) and `GET /artifacts/:id/content` (raw bytes; `transcript` artifacts are served as `application/x-ndjson`).
+- Added open-ended local SSE streaming on `GET /runs/:id/events?live=1`: 15-second heartbeat, 5-minute idle close with a `stream.idle` marker, and `Last-Event-ID` resumption across replay-only, bounded, and live modes. The bounded `live=1&stopAfter=N` mode is preserved for deterministic tests.
+- Added an SSE connection-cleanup leak test in `apps/daemon` to verify per-connection unsubscribe and FD release.
 - Added local Codex `exec --json` run support with model/reasoning metadata mapping, model catalog validation, JSONL event normalization, transcript artifacts, and CI-safe adapter coverage.
 - Added daemon runtime logs for run start/completion, Codex child process PID, stderr snippets, first stdout detection, runtime output, timeout, and startup reconciliation.
 - Added `response.text` and `response.outputs` to `POST /runs?wait=1` responses so curl callers see the final model answer without a second request.
@@ -13,6 +18,7 @@ All notable changes to Switchyard will be documented in this file.
 
 ### Changed
 
+- **BREAKING:** Standardized the daemon error contract. Every 4xx and 5xx response now uses the envelope `{ error: { code, message, details? } }` with a closed code set (`run_not_found`, `artifact_not_found`, `missing_artifact_content`, `provider_not_found`, `runtime_not_found`, `model_not_found`, `invalid_input`, `invalid_query`, `adapter_protocol_failed`, `internal_error`). Callers that relied on the previous default Fastify `{message, error, statusCode}` shape on any 4xx/5xx response must be updated.
 - Refocused the README as a product-facing overview and moved detailed local development commands into dedicated development docs.
 - Centralized local developer docs around an official API contract, a local operations guide, and a Codex-only debugging appendix.
 - Updated architecture and adapter docs to describe the implemented Codex non-interactive local adapter path.

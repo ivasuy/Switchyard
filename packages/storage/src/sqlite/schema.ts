@@ -91,7 +91,8 @@ export const runtimes = sqliteTable("runtimes", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   adapterType: text("adapter_type").notNull(),
-  status: text("status").notNull()
+  status: text("status").notNull(),
+  providerId: text("provider_id")
 });
 
 export const models = sqliteTable("models", {

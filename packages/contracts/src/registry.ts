@@ -16,7 +16,8 @@ export const runtimeSchema = z.object({
   id: runtimeIdSchema,
   name: z.string().min(1),
   adapterType: adapterTypeSchema,
-  status: registryStatusSchema
+  status: registryStatusSchema,
+  providerId: providerIdSchema.optional()
 });
 
 export const modelSchema = z.object({

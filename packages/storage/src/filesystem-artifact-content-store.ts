@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export class FilesystemArtifactContentStore {
@@ -6,6 +6,10 @@ export class FilesystemArtifactContentStore {
 
   constructor(root: string) {
     this.normalizedRoot = resolve(root);
+  }
+
+  get root(): string {
+    return this.normalizedRoot;
   }
 
   async writeText(logicalPath: string, content: string): Promise<string> {
@@ -17,6 +21,11 @@ export class FilesystemArtifactContentStore {
     const relativePath = relative(this.normalizedRoot, safePath).replaceAll("\\", "/");
 
     return relativePath;
+  }
+
+  async readBuffer(logicalPath: string): Promise<Buffer> {
+    const safePath = this.safePath(logicalPath);
+    return readFile(safePath);
   }
 
   private safePath(logicalPath: string): string {

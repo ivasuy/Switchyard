@@ -269,7 +269,7 @@ describe("run routes", () => {
     expect(streamResponse.body.match(/^event: .*$/gm)?.length).toBe(allEvents.length);
   });
 
-  it("treats invalid stopAfter as replay-length fallback", async () => {
+  it("treats invalid stopAfter as full replay for non-live requests", async () => {
     const harness = createRouteHarness({ withEventBus: true });
 
     const createResponse = await harness.app.inject({
@@ -281,7 +281,7 @@ describe("run routes", () => {
 
     const streamResponse = await harness.app.inject({
       method: "GET",
-      url: `/runs/${runId}/events?live=1&stopAfter=not-a-number`
+      url: `/runs/${runId}/events?stopAfter=not-a-number`
     });
 
     expect(streamResponse.statusCode).toBe(200);

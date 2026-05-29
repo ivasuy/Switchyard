@@ -16,7 +16,8 @@
     "@switchyard/contracts": "workspace:*",
     "@switchyard/core": "workspace:*",
     "@switchyard/protocol-sse": "workspace:*",
-    "fastify": "^5.8.5"
+    "fastify": "^5.8.5",
+    "zod": "^4.1.13"
   },
   "devDependencies": {
     "@switchyard/testkit": "workspace:*"

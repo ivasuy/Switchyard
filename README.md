@@ -214,6 +214,7 @@ collect artifacts
 
 Local setup, test commands, prebuilt curl requests, PID checks, SQLite inspection, and Codex debugging live outside this product README:
 
+- [Product truth and release roadmap](PRODUCT.md)
 - [Development docs](docs/development/)
 - [Adapter local debugging guides](docs/development/adapters/)
 
