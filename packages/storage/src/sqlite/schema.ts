@@ -13,6 +13,7 @@ export const runs = sqliteTable("runs", {
   approvalPolicy: text("approval_policy").notNull(),
   timeoutSeconds: integer("timeout_seconds").notNull(),
   metadataJson: text("metadata_json").notNull(),
+  runtimeMode: text("runtime_mode"),
   createdAt: text("created_at").notNull(),
   startedAt: text("started_at"),
   endedAt: text("ended_at")
@@ -41,6 +42,7 @@ export const runtimeSessions = sqliteTable("runtime_sessions", {
   status: text("status").notNull(),
   externalSessionKey: text("external_session_key"),
   processId: integer("process_id"),
+  runtimeMode: text("runtime_mode"),
   stateJson: text("state_json").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at")
@@ -105,6 +107,25 @@ export const models = sqliteTable("models", {
   status: text("status").notNull()
 });
 
+export const runtimeModes = sqliteTable("runtime_modes", {
+  id: text("id").primaryKey(),
+  slug: text("slug").notNull(),
+  name: text("name").notNull(),
+  providerId: text("provider_id").notNull(),
+  runtimeId: text("runtime_id").notNull(),
+  adapterId: text("adapter_id").notNull(),
+  adapterType: text("adapter_type").notNull(),
+  kind: text("kind").notNull(),
+  status: text("status").notNull(),
+  capabilitiesJson: text("capabilities_json").notNull(),
+  limitationsJson: text("limitations_json").notNull(),
+  placementJson: text("placement_json").notNull(),
+  availabilityJson: text("availability_json").notNull(),
+  docsPath: text("docs_path"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
 export const placementDecisions = sqliteTable("placement_decisions", {
   id: text("id").primaryKey(),
   runId: text("run_id"),
@@ -129,5 +150,6 @@ export const schema = {
   providers,
   runtimes,
   models,
+  runtimeModes,
   placementDecisions
 };

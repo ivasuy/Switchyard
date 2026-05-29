@@ -44,6 +44,23 @@ Expected:
 {"ok":true}
 ```
 
+## Runtime Capability Smoke
+
+```bash
+BASE=http://127.0.0.1:4545
+curl -s "$BASE/runtime-modes" | python3 -m json.tool
+curl -s "$BASE/runtime-modes/fake.deterministic" | python3 -m json.tool
+curl -s "$BASE/runtime-modes/codex.exec_json" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/codex.exec_json/check" | python3 -m json.tool
+curl -s "$BASE/doctor" | python3 -m json.tool
+```
+
+Notes:
+
+- `fake.deterministic` is always locally available.
+- `codex.exec_json` is `available` only when both `codex --version` and `codex debug models` succeed with at least one model.
+- missing/slow/oversized Codex checks are bounded and reported as sanitized `unavailable`/`unknown`; daemon startup remains up.
+
 ## Quick Smoke
 
 Use the fake runtime first when you only want to verify daemon routing:
@@ -206,4 +223,5 @@ Full project checks:
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm lint
 ```

@@ -4,7 +4,10 @@ import { CodexExecJsonAdapter, probeCodexCatalog } from "@switchyard/adapters";
 import {
   type ArtifactStore,
   EventBus,
+  RegistryService,
+  RuntimeCapabilityService,
   type RuntimeAdapter,
+  RuntimeDoctorService,
   type RuntimeLogger,
   RunLauncherService,
   RunService,
@@ -65,21 +68,50 @@ type DaemonStoreResult = DaemonStores & {
 };
 
 type CodexCatalogProbe = Awaited<ReturnType<typeof probeCodexCatalog>>;
+type DaemonRuntimeAvailability = {
+  state: "available" | "partial" | "unavailable" | "unknown" | "unsupported" | "installed";
+  canRun: boolean;
+  installed: boolean;
+  auth: "configured" | "missing" | "not_required" | "unknown";
+  version: string | null;
+  checkedAt: string;
+  reasonCode: string | null;
+  message: string | null;
+};
 
 interface CreateDaemonAppOptions {
   codexProbe?: CodexCatalogProbe;
   probeCodexCatalog?: () => Promise<CodexCatalogProbe>;
   logger?: RuntimeLogger | undefined;
+  checkTimeoutMs?: number;
+  maxDiagnosticBytes?: number;
 }
 
 export async function createDaemonApp(config?: DaemonConfig, options: CreateDaemonAppOptions = {}) {
   const app = Fastify({ logger: false });
   const stores: DaemonStoreResult = config ? createStorageStores(config) : createInMemoryStores();
-  const codexProbe = options.codexProbe ?? (await (options.probeCodexCatalog ?? probeCodexCatalog)());
+  const checkTimeoutMs = options.checkTimeoutMs ?? 5000;
+  const maxDiagnosticBytes = options.maxDiagnosticBytes ?? 4096;
+  const codexProbe = await loadCodexProbe(options, checkTimeoutMs, maxDiagnosticBytes);
+  const now = new Date().toISOString();
+  const codexAvailability = availabilityFromProbe(codexProbe, now, maxDiagnosticBytes);
+  const fakeAvailability: DaemonRuntimeAvailability = {
+    state: "available",
+    canRun: true,
+    installed: true,
+    auth: "not_required",
+    version: null,
+    checkedAt: now,
+    reasonCode: null,
+    message: null
+  };
   reconcileInterruptedRuns(stores, options.logger);
   const codexOptions: ConstructorParameters<typeof CodexExecJsonAdapter>[0] = {
     modelCatalog: codexProbe.models
   };
+  if (options.probeCodexCatalog) {
+    codexOptions.probeCatalog = options.probeCodexCatalog;
+  }
   if (options.logger) {
     codexOptions.logger = options.logger;
   }
@@ -103,10 +135,38 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     runner
   });
   const launcher = new RunLauncherService(runService);
+  const registryService = new RegistryService({ registry: stores.registry });
+  const capabilityService = new RuntimeCapabilityService({
+    registry: stores.registry
+  });
+  const doctorService = new RuntimeDoctorService({
+    registry: stores.registry,
+    adapters,
+    logger: options.logger,
+    checkTimeoutMs,
+    maxDiagnosticBytes
+  });
 
   try {
     await seedFakeRegistry(stores.registry);
-    await seedCodexRegistry(stores, codexProbe);
+    await seedCodexRegistry(stores, codexProbe, codexAvailability);
+    await capabilityService.seedManifests(
+      [adapters.get("fake")!.manifest, adapters.get("codex")!.manifest],
+      {
+        "fake.deterministic": fakeAvailability,
+        "codex.exec_json": codexAvailability
+      }
+    );
+    options.logger?.info("runtime_mode.seeded", {
+      runtimeMode: "fake.deterministic",
+      adapterId: "fake",
+      state: fakeAvailability.state
+    });
+    options.logger?.info("runtime_mode.seeded", {
+      runtimeMode: "codex.exec_json",
+      adapterId: "codex",
+      state: codexAvailability.state
+    });
   } catch (error) {
     stores.close?.();
     throw error;
@@ -125,9 +185,15 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     ...stores,
     eventBus,
     launcher,
-    runService
+    runService,
+    registry: stores.registry,
+    registryService
   });
-  registerRegistryRoutes(app, { registry: stores.registry });
+  registerRegistryRoutes(app, {
+    registry: stores.registry,
+    doctor: doctorService,
+    registryService
+  });
   const reader = buildArtifactContentReader(stores.artifactContent);
   registerArtifactRoutes(app, {
     artifacts: stores.artifacts,
@@ -265,10 +331,15 @@ function reconcileInterruptedRuns(stores: DaemonStoreResult, logger?: RuntimeLog
 
 async function seedCodexRegistry(
   stores: DaemonStoreResult,
-  codexProbe: CodexCatalogProbe
+  codexProbe: CodexCatalogProbe,
+  codexAvailability: DaemonRuntimeAvailability
 ): Promise<void> {
   const registry = stores.registry;
-  const status = codexProbe.ok ? "available" : "unavailable";
+  const status = codexAvailability.state === "unknown"
+    ? "unknown"
+    : codexAvailability.canRun
+      ? "available"
+      : "unavailable";
 
   const existingProvider = await registry.getProvider("provider_openai");
   if (!existingProvider) {
@@ -321,6 +392,118 @@ async function seedCodexRegistry(
   }
 }
 
+async function loadCodexProbe(
+  options: CreateDaemonAppOptions,
+  timeoutMs: number,
+  maxDiagnosticBytes: number
+): Promise<CodexCatalogProbe> {
+  if (options.codexProbe) {
+    return options.codexProbe;
+  }
+  const probe = options.probeCodexCatalog ?? (() => probeCodexCatalog("codex", { timeoutMs, maxBufferBytes: maxDiagnosticBytes }));
+  try {
+    return await runWithTimeout(probe(), timeoutMs);
+  } catch (error) {
+    const reasonCode = error instanceof ProbeTimeoutError ? "check_timeout" : "binary_unavailable";
+    return {
+      ok: false,
+      models: [],
+      reasonCode,
+      message: sanitizeMessage(error instanceof Error ? error.message : String(error), maxDiagnosticBytes)
+    };
+  }
+}
+
+function availabilityFromProbe(
+  probe: CodexCatalogProbe,
+  checkedAt: string,
+  maxDiagnosticBytes: number
+): DaemonRuntimeAvailability {
+  if (!probe.ok) {
+    const reasonCode = probe.reasonCode === "check_timeout" || probe.reasonCode === "check_output_too_large"
+      ? probe.reasonCode
+      : "binary_unavailable";
+    return {
+      state: reasonCode === "check_timeout" || reasonCode === "check_output_too_large" ? "unknown" : "unavailable",
+      canRun: false,
+      installed: false,
+      auth: "unknown",
+      version: probe.version ?? null,
+      checkedAt,
+      reasonCode,
+      message: probe.message ? sanitizeMessage(probe.message, maxDiagnosticBytes) : null
+    };
+  }
+
+  const version = probe.version ?? null;
+  if (probe.models.length === 0) {
+    return {
+      state: "unavailable",
+      canRun: false,
+      installed: true,
+      auth: "configured",
+      version,
+      checkedAt,
+      reasonCode: "model_catalog_unavailable",
+      message: probe.message ? sanitizeMessage(probe.message, maxDiagnosticBytes) : "No model catalog entries were returned."
+    };
+  }
+
+  const optionalFailure = Object.values(probe.optionalChecks ?? {}).find((check) => check.ok === false);
+  if (optionalFailure) {
+    return {
+      state: "partial",
+      canRun: true,
+      installed: true,
+      auth: "configured",
+      version,
+      checkedAt,
+      reasonCode: "optional_check_failed",
+      message: optionalFailure.message
+        ? sanitizeMessage(optionalFailure.message, maxDiagnosticBytes)
+        : "Optional runtime checks failed."
+    };
+  }
+
+  return {
+    state: "available",
+    canRun: true,
+    installed: true,
+    auth: "configured",
+    version,
+    checkedAt,
+    reasonCode: null,
+    message: null
+  };
+}
+
+class ProbeTimeoutError extends Error {}
+
+async function runWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new ProbeTimeoutError("codex probe timed out"));
+    }, timeoutMs);
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+function sanitizeMessage(message: string, maxBytes: number): string {
+  if (Buffer.byteLength(message, "utf8") <= maxBytes) {
+    return message;
+  }
+  return `${message.slice(0, Math.max(1, maxBytes - 3))}...`;
+}
+
 function toCodexModelId(slug: string): string {
   return `model_${slug.replace(/[.-]/g, "_")}`;
 }
@@ -350,4 +533,3 @@ async function updateRuntimeRecord(
   }
   await stores.registry.createRuntime(runtime);
 }
-

@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { type FastifyInstance } from "fastify";
+import type { CodexCatalogProbe } from "@switchyard/adapters";
 import { createDaemonApp } from "../src/app.js";
 import type { DaemonConfig } from "../src/config.js";
 import { openSqliteStorage } from "@switchyard/storage";
@@ -18,7 +19,7 @@ function tempDaemonConfig(prefix: string): DaemonConfig {
   };
 }
 
-type CodexProbe = NonNullable<Parameters<typeof createDaemonApp>[1]>["codexProbe"];
+type CodexProbe = CodexCatalogProbe;
 
 const unavailableCodexProbe = {
   ok: false,
@@ -30,6 +31,18 @@ const availableCodexProbe = {
   ok: true,
   version: "codex 0.0.0-test",
   models: [{ slug: "gpt-5.5", supportedReasoningLevels: ["low", "medium", "high"] }]
+} satisfies CodexProbe;
+
+const partialCodexProbe = {
+  ok: true,
+  version: "codex 0.0.0-test",
+  models: [{ slug: "gpt-5.5", supportedReasoningLevels: ["low", "medium", "high"] }],
+  optionalChecks: {
+    sandbox_policy_probe: {
+      ok: false,
+      message: "optional sandbox probe failed"
+    }
+  }
 } satisfies CodexProbe;
 
 describe("daemon app", () => {
@@ -195,6 +208,83 @@ describe("daemon app", () => {
       } catch {
         // Keep test cleanup resilient if close throws.
       }
+    }
+  });
+
+  it("exposes runtime mode and doctor routes with seeded runtime mode availability", async () => {
+    const app = await createDaemonApp(undefined, { codexProbe: availableCodexProbe });
+    try {
+      const list = await app.inject({ method: "GET", url: "/runtime-modes" });
+      const codex = await app.inject({ method: "GET", url: "/runtime-modes/codex.exec_json" });
+      const doctor = await app.inject({ method: "GET", url: "/doctor" });
+      expect(list.statusCode).toBe(200);
+      expect(list.json().runtimeModes.map((mode: { slug: string }) => mode.slug).sort()).toEqual([
+        "codex.exec_json",
+        "fake.deterministic"
+      ]);
+      expect(codex.statusCode).toBe(200);
+      expect(codex.json().runtimeMode.availability.state).toBe("available");
+      expect(doctor.statusCode).toBe(200);
+      expect(doctor.json().summary.available).toBe(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("records partial codex availability during startup and in /doctor summary", async () => {
+    const app = await createDaemonApp(undefined, { codexProbe: partialCodexProbe });
+    try {
+      const codex = await app.inject({ method: "GET", url: "/runtime-modes/codex.exec_json" });
+      const doctor = await app.inject({ method: "GET", url: "/doctor" });
+      expect(codex.statusCode).toBe(200);
+      expect(codex.json().runtimeMode.availability.state).toBe("partial");
+      expect(codex.json().runtimeMode.availability.reasonCode).toBe("optional_check_failed");
+      expect(doctor.statusCode).toBe(200);
+      expect(doctor.json().summary.partial).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("runs bounded active checks and updates stored codex availability", async () => {
+    const checkProbe = async () => ({
+      ok: true,
+      version: "codex 0.0.0-test",
+      models: [{ slug: "gpt-5.5", supportedReasoningLevels: ["low", "medium", "high"] }]
+    });
+    const app = await createDaemonApp(undefined, {
+      codexProbe: unavailableCodexProbe,
+      probeCodexCatalog: checkProbe,
+      checkTimeoutMs: 50,
+      maxDiagnosticBytes: 128
+    });
+    try {
+      const check = await app.inject({ method: "POST", url: "/runtime-modes/codex.exec_json/check" });
+      const doctor = await app.inject({ method: "GET", url: "/doctor" });
+      expect(check.statusCode).toBe(200);
+      expect(check.json().check.state).toBe("available");
+      expect(doctor.statusCode).toBe(200);
+      expect(doctor.json().summary.available).toBe(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("bounds hung active checks and returns sanitized timeout state", async () => {
+    const hungProbe = (): Promise<CodexProbe> => new Promise<CodexProbe>(() => {});
+    const app = await createDaemonApp(undefined, {
+      codexProbe: unavailableCodexProbe,
+      probeCodexCatalog: hungProbe,
+      checkTimeoutMs: 25,
+      maxDiagnosticBytes: 128
+    });
+    try {
+      const check = await app.inject({ method: "POST", url: "/runtime-modes/codex.exec_json/check" });
+      expect(check.statusCode).toBe(200);
+      expect(["unknown", "unavailable"]).toContain(check.json().check.state);
+      expect(check.json().check.reasonCode).toBe("check_timeout");
+    } finally {
+      await app.close();
     }
   });
 

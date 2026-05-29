@@ -1,4 +1,14 @@
-import type { Artifact, Model, Provider, Run, RuntimeSession, RuntimeTarget, SwitchyardEvent } from "@switchyard/contracts";
+import type {
+  Artifact,
+  Model,
+  Provider,
+  Run,
+  RuntimeAvailability,
+  RuntimeMode,
+  RuntimeSession,
+  RuntimeTarget,
+  SwitchyardEvent
+} from "@switchyard/contracts";
 import type {
   ArtifactStore,
   EventStore,
@@ -6,6 +16,8 @@ import type {
   ListModelsResult,
   ListProvidersFilter,
   ListProvidersResult,
+  ListRuntimeModesFilter,
+  ListRuntimeModesResult,
   ListRunsFilter,
   ListRunsResult,
   ListRuntimesFilter,
@@ -180,6 +192,8 @@ export class InMemoryRegistryStore implements RegistryStore {
   readonly providers = new Map<string, Provider>();
   readonly runtimes = new Map<string, RuntimeTarget>();
   readonly models = new Map<string, Model>();
+  readonly runtimeModes = new Map<string, RuntimeMode>();
+  readonly runtimeModesBySlug = new Map<string, string>();
 
   async createProvider(provider: Provider): Promise<Provider> {
     this.providers.set(provider.id, provider);
@@ -258,5 +272,89 @@ export class InMemoryRegistryStore implements RegistryStore {
     const hasMore = filtered.length > filter.limit;
     const last = page.at(-1);
     return { models: page, nextCursor: hasMore && last ? { id: last.id } : null };
+  }
+
+  async upsertRuntimeMode(mode: RuntimeMode): Promise<RuntimeMode> {
+    this.runtimeModes.set(mode.id, mode);
+    this.runtimeModesBySlug.set(mode.slug, mode.id);
+    return mode;
+  }
+
+  async getRuntimeMode(idOrSlug: string): Promise<RuntimeMode | undefined> {
+    if (idOrSlug.startsWith("runtime_mode_")) {
+      return this.runtimeModes.get(idOrSlug);
+    }
+    const id = this.runtimeModesBySlug.get(idOrSlug);
+    return id ? this.runtimeModes.get(id) : undefined;
+  }
+
+  async listRuntimeModes(filter: ListRuntimeModesFilter): Promise<ListRuntimeModesResult> {
+    const sorted = [...this.runtimeModes.values()].sort((left, right) => left.id.localeCompare(right.id));
+    const filtered = sorted.filter((mode) => {
+      if (filter.providerIds && filter.providerIds.length > 0 && !filter.providerIds.includes(mode.providerId)) {
+        return false;
+      }
+      if (filter.runtimeIds && filter.runtimeIds.length > 0 && !filter.runtimeIds.includes(mode.runtimeId)) {
+        return false;
+      }
+      if (filter.adapterType && filter.adapterType.length > 0 && !filter.adapterType.includes(mode.adapterType)) {
+        return false;
+      }
+      if (filter.kind && filter.kind.length > 0 && !filter.kind.includes(mode.kind)) {
+        return false;
+      }
+      if (filter.availability && filter.availability.length > 0 && !filter.availability.includes(mode.availability.state)) {
+        return false;
+      }
+      if (filter.placement && filter.placement.length > 0) {
+        const matchesPlacement = filter.placement.some((placement) => {
+          if (placement === "local") {
+            return mode.placement.local.support === "supported" || mode.placement.local.support === "conditional";
+          }
+          if (placement === "hosted") {
+            return mode.placement.hosted.support === "supported" || mode.placement.hosted.support === "conditional";
+          }
+          if (placement === "connected_local_node") {
+            return (
+              mode.placement.connectedLocalNode.support === "supported" ||
+              mode.placement.connectedLocalNode.support === "conditional"
+            );
+          }
+          return false;
+        });
+        if (!matchesPlacement) {
+          return false;
+        }
+      }
+      if (filter.capability && filter.capability.length > 0) {
+        const set = new Set<string>(mode.capabilities);
+        if (!filter.capability.every((capability) => set.has(capability))) {
+          return false;
+        }
+      }
+      if (filter.before && mode.id <= filter.before.id) {
+        return false;
+      }
+      return true;
+    });
+    const page = filtered.slice(0, filter.limit);
+    const hasMore = filtered.length > filter.limit;
+    const last = page.at(-1);
+    return { runtimeModes: page, nextCursor: hasMore && last ? { id: last.id } : null };
+  }
+
+  async updateRuntimeModeAvailability(idOrSlug: string, availability: RuntimeAvailability): Promise<RuntimeMode | undefined> {
+    const mode = await this.getRuntimeMode(idOrSlug);
+    if (!mode) {
+      return undefined;
+    }
+    const updated: RuntimeMode = {
+      ...mode,
+      availability,
+      status: availability.state,
+      updatedAt: availability.checkedAt
+    };
+    await this.upsertRuntimeMode(updated);
+    return updated;
   }
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import {
+  doctorSummaryResponseSchema,
   approvalSchema,
   artifactSchema,
   budgetSchema,
@@ -17,10 +18,16 @@ import {
   placementDecisionSchema,
   providerSchema,
   runSchema,
+  runtimeAvailabilitySchema,
+  runtimeDoctorCheckSchema,
+  runtimeModeSchema,
+  runtimeModeSlugSchema,
   runtimeSchema,
   runtimeSessionSchema,
   toolInvocationSchema,
-  userSchema
+  userSchema,
+  httpErrorCodeSchema,
+  httpErrorEnvelopeSchema
 } from "../src/index.js";
 
 function expectRequiredFields(schema: z.ZodType, valid: Record<string, unknown>, requiredKeys: string[]): void {
@@ -90,6 +97,259 @@ describe("Switchyard contracts", () => {
     });
 
     expect(session.externalSessionKey).toBe("ses_abc");
+  });
+
+  it("parses runtime mode slug, record, doctor payloads, and doctor summary", () => {
+    expect(runtimeModeSlugSchema.parse("fake.deterministic")).toBe("fake.deterministic");
+    expect(runtimeModeSlugSchema.parse("codex.exec_json")).toBe("codex.exec_json");
+    expect(() => runtimeModeSlugSchema.parse("codex")).toThrow();
+    expect(() => runtimeModeSlugSchema.parse("Codex.exec_json")).toThrow();
+    expect(() => runtimeModeSlugSchema.parse(".codex")).toThrow();
+    expect(() => runtimeModeSlugSchema.parse("codex..exec_json")).toThrow();
+
+    const fakeMode = runtimeModeSchema.parse({
+      id: "runtime_mode_fake_deterministic",
+      slug: "fake.deterministic",
+      name: "Fake deterministic runtime",
+      providerId: "provider_test",
+      runtimeId: "runtime_fake",
+      adapterId: "fake",
+      adapterType: "process",
+      kind: "deterministic_fake",
+      status: "available",
+      capabilities: ["run.start", "run.cancel", "event.normalized", "event.streaming", "artifact.transcript", "tool.fake_echo", "auth.none"],
+      limitations: [{ code: "deterministic_only", message: "Outputs are fixed for local smoke and contract tests." }],
+      placement: {
+        local: { support: "supported", reason: "In-process deterministic test adapter." },
+        hosted: { support: "unsupported", reason: "Hosted worker execution is not shipped in R3." },
+        connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+      },
+      availability: {
+        state: "available",
+        canRun: true,
+        installed: true,
+        auth: "not_required",
+        version: null,
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        reasonCode: null,
+        message: null
+      },
+      createdAt: "2026-05-29T00:00:00.000Z",
+      updatedAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(fakeMode.slug).toBe("fake.deterministic");
+
+    const codexMode = runtimeModeSchema.parse({
+      id: "runtime_mode_codex_exec_json",
+      slug: "codex.exec_json",
+      name: "Codex exec JSON",
+      providerId: "provider_openai",
+      runtimeId: "runtime_codex",
+      adapterId: "codex",
+      adapterType: "process",
+      kind: "one_shot_process",
+      status: "available",
+      capabilities: [
+        "run.start",
+        "run.cancel",
+        "run.timeout",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "artifact.raw_transcript",
+        "model.catalog",
+        "auth.local",
+        "sandbox.read_only",
+        "sandbox.workspace_write",
+        "sandbox.danger_full_access"
+      ],
+      limitations: [
+        { code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." },
+        { code: "local_only", message: "This mode runs a local Codex CLI process and is not hosted-safe in R3." }
+      ],
+      placement: {
+        local: { support: "supported", reason: "Requires a PATH-reachable local codex binary and local workspace." },
+        hosted: { support: "unsupported", reason: "Hosted subprocess execution is not shipped in R3." },
+        connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+      },
+      availability: {
+        state: "available",
+        canRun: true,
+        installed: true,
+        auth: "configured",
+        version: "codex-cli 0.130.0",
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        reasonCode: null,
+        message: null
+      },
+      docsPath: "docs/development/adapters/CODEX.md",
+      createdAt: "2026-05-29T00:00:00.000Z",
+      updatedAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(codexMode.id).toBe("runtime_mode_codex_exec_json");
+
+    const availableCheck = runtimeDoctorCheckSchema.parse({
+      runtimeModeId: "runtime_mode_codex_exec_json",
+      runtimeMode: "codex.exec_json",
+      providerId: "provider_openai",
+      runtimeId: "runtime_codex",
+      state: "available",
+      canRun: true,
+      installed: true,
+      auth: "configured",
+      version: "codex-cli 0.130.0",
+      checkedAt: "2026-05-29T00:00:00.000Z",
+      reasonCode: null,
+      message: null,
+      capabilities: ["run.start", "run.cancel", "model.catalog", "auth.local"],
+      limitations: [{ code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." }],
+      diagnostics: [{ code: "binary_version_ok", severity: "info", message: "codex --version succeeded." }]
+    });
+    expect(availableCheck.state).toBe("available");
+
+    const unavailableCheck = runtimeDoctorCheckSchema.parse({
+      runtimeModeId: "runtime_mode_codex_exec_json",
+      runtimeMode: "codex.exec_json",
+      providerId: "provider_openai",
+      runtimeId: "runtime_codex",
+      state: "unavailable",
+      canRun: false,
+      installed: true,
+      auth: "unknown",
+      version: null,
+      checkedAt: "2026-05-29T00:00:00.000Z",
+      reasonCode: "model_catalog_unavailable",
+      message: "No model catalog entries were returned.",
+      capabilities: ["run.start", "run.cancel", "model.catalog", "auth.local"],
+      limitations: [{ code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." }],
+      diagnostics: [{ code: "model_catalog_unavailable", severity: "error", message: "codex debug models returned no usable models." }]
+    });
+    expect(unavailableCheck.installed).toBe(true);
+
+    expect(() =>
+      runtimeAvailabilitySchema.parse({
+        state: "degraded",
+        canRun: false,
+        installed: false,
+        auth: "unknown",
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        version: null,
+        reasonCode: "bad_state",
+        message: null
+      })
+    ).toThrow();
+
+    const summary = doctorSummaryResponseSchema.parse({
+      runtimeModes: [
+        { runtimeModeId: "runtime_mode_fake_deterministic", runtimeMode: "fake.deterministic", state: "available", canRun: true, checkedAt: "2026-05-29T00:00:00.000Z" },
+        { runtimeModeId: "runtime_mode_codex_exec_json", runtimeMode: "codex.exec_json", state: "partial", canRun: true, checkedAt: "2026-05-29T00:00:00.000Z" }
+      ],
+      summary: {
+        available: 1,
+        installed: 0,
+        partial: 1,
+        unavailable: 0,
+        unsupported: 0,
+        unknown: 0
+      }
+    });
+    expect(summary.summary.partial).toBe(1);
+  });
+
+  it("supports run and session runtimeMode compatibility and rejects runtime mode ids", () => {
+    const runWithMode = runSchema.parse({
+      id: "run_runtime_mode_new",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "Inspect runtime mode support",
+      status: "queued",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic",
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(runWithMode.runtimeMode).toBe("fake.deterministic");
+
+    const oldRun = runSchema.parse({
+      id: "run_runtime_mode_old",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "Legacy run",
+      status: "queued",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(oldRun.runtimeMode).toBeUndefined();
+    expect(() =>
+      runSchema.parse({
+        ...oldRun,
+        runtimeMode: "runtime_mode_fake_deterministic"
+      })
+    ).toThrow();
+
+    const sessionWithMode = runtimeSessionSchema.parse({
+      id: "session_mode_new",
+      runId: "run_runtime_mode_new",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5.5",
+      protocol: "process",
+      status: "active",
+      runtimeMode: "codex.exec_json",
+      state: {},
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(sessionWithMode.runtimeMode).toBe("codex.exec_json");
+
+    const legacySession = runtimeSessionSchema.parse({
+      id: "session_mode_legacy",
+      runId: "run_runtime_mode_old",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      protocol: "process",
+      status: "created",
+      state: {},
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(legacySession.runtimeMode).toBeUndefined();
+
+    const nullSession = runtimeSessionSchema.parse({
+      id: "session_mode_null",
+      runId: "run_runtime_mode_old",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      protocol: "process",
+      status: "created",
+      runtimeMode: null,
+      state: {},
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(nullSession.runtimeMode).toBeNull();
+  });
+
+  it("includes runtime_mode_not_found in HTTP error schemas", () => {
+    expect(httpErrorCodeSchema.parse("runtime_mode_not_found")).toBe("runtime_mode_not_found");
+    expect(
+      httpErrorEnvelopeSchema.parse({
+        error: {
+          code: "runtime_mode_not_found",
+          message: "Runtime mode not found: codex.exec_json"
+        }
+      }).error.code
+    ).toBe("runtime_mode_not_found");
   });
 
   it("parses debate participant and limits", () => {

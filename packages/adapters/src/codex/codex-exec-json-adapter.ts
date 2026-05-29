@@ -1,7 +1,13 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Artifact, SwitchyardEvent } from "@switchyard/contracts";
-import type { RuntimeAdapter, RuntimeAdapterCheck, RuntimeLogger, RuntimeStartResult } from "@switchyard/core";
+import type {
+  RuntimeAdapter,
+  RuntimeAdapterCheck,
+  RuntimeAdapterManifest,
+  RuntimeLogger,
+  RuntimeStartResult
+} from "@switchyard/core";
 import { codexEventToSwitchyardEvent, parseCodexJsonLine } from "./codex-jsonl-parser.js";
 import { probeCodexCatalog, validateCodexRunOptions } from "./codex-model-catalog.js";
 import type {
@@ -69,6 +75,7 @@ interface CodexExecJsonAdapterOptions {
   command?: string;
   processFactory?: CodexProcessFactory;
   modelCatalog?: CodexModelCatalogEntry[];
+  probeCatalog?: typeof probeCodexCatalog;
   logger?: RuntimeLogger | undefined;
 }
 
@@ -81,9 +88,51 @@ export class CodexInputUnsupportedError extends Error {
 
 export class CodexExecJsonAdapter implements RuntimeAdapter {
   readonly id = "codex";
+  readonly manifest: RuntimeAdapterManifest = {
+    adapterId: "codex",
+    providerId: "provider_openai",
+    runtimeId: "runtime_codex",
+    runtimeModeId: "runtime_mode_codex_exec_json",
+    runtimeModeSlug: "codex.exec_json",
+    name: "Codex exec JSON",
+    adapterType: "process",
+    kind: "one_shot_process",
+    capabilities: [
+      "run.start",
+      "run.cancel",
+      "run.timeout",
+      "event.normalized",
+      "event.streaming",
+      "artifact.transcript",
+      "artifact.raw_transcript",
+      "model.catalog",
+      "auth.local",
+      "sandbox.read_only",
+      "sandbox.workspace_write",
+      "sandbox.danger_full_access"
+    ],
+    limitations: [
+      { code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." },
+      { code: "local_only", message: "This mode runs a local Codex CLI process and is not hosted-safe in R3." },
+      { code: "no_approval_bridge", message: "Approval bridge integration is not shipped for codex.exec_json in R3." },
+      { code: "no_session_resume", message: "Session resume is not shipped for codex.exec_json in R3." }
+    ],
+    placement: {
+      local: { support: "supported", reason: "Requires a PATH-reachable local codex binary and local workspace." },
+      hosted: { support: "unsupported", reason: "Hosted subprocess execution is not shipped in R3." },
+      connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+    },
+    docsPath: "docs/development/adapters/CODEX.md",
+    check: {
+      strategy: "binary_version_and_model_catalog",
+      required: ["binary_version", "model_catalog"],
+      optional: ["sandbox_policy_probe"]
+    }
+  };
   private readonly command: string;
   private readonly processFactory: CodexProcessFactory;
   private readonly modelCatalog: CodexModelCatalogEntry[];
+  private readonly probeCatalog: typeof probeCodexCatalog;
   private readonly sessions = new Map<string, CodexAdapterSession>();
   private readonly logger: RuntimeLogger | undefined;
 
@@ -93,16 +142,24 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
       options.processFactory ??
       ((args, processOptions) => spawn(this.command, args, { ...processOptions, shell: false }));
     this.modelCatalog = options.modelCatalog ?? [];
+    this.probeCatalog = options.probeCatalog ?? probeCodexCatalog;
     this.logger = options.logger;
   }
 
-  async check(): Promise<RuntimeAdapterCheck> {
-    const probe = await probeCodexCatalog(this.command);
+  async check(config?: Record<string, unknown>): Promise<RuntimeAdapterCheck> {
+    const timeoutMs = typeof config?.["timeoutMs"] === "number" ? config["timeoutMs"] : undefined;
+    const maxBufferBytes = typeof config?.["maxDiagnosticBytes"] === "number" ? config["maxDiagnosticBytes"] : undefined;
+    const probeOptions: { timeoutMs?: number; maxBufferBytes?: number } = {};
+    if (timeoutMs !== undefined) probeOptions.timeoutMs = timeoutMs;
+    if (maxBufferBytes !== undefined) probeOptions.maxBufferBytes = maxBufferBytes;
+    const probe = await this.probeCatalog(this.command, probeOptions);
     const response: RuntimeAdapterCheck = {
       ok: probe.ok,
       details: {
         version: probe.version,
-        models: probe.models
+        models: probe.models,
+        reasonCode: probe.reasonCode,
+        outputBytes: probe.outputBytes
       }
     };
     if (probe.message) {

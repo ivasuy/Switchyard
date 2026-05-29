@@ -33,5 +33,7 @@ export * from "./services/message-router.js";
 export * from "./services/run-launcher-service.js";
 export * from "./services/placement-service.js";
 export * from "./services/registry-service.js";
+export * from "./services/runtime-capability-service.js";
+export * from "./services/runtime-doctor-service.js";
 export * from "./services/session-service.js";
 export * from "./services/tool-router.js";

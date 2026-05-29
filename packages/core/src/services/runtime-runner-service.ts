@@ -55,6 +55,7 @@ export class RuntimeRunnerService {
       const startResult = await adapter.start({
         runId: started.id,
         runtime: started.runtime,
+        runtimeMode: started.runtimeMode,
         provider: started.provider,
         model: started.model,
         cwd: started.cwd,
@@ -69,6 +70,7 @@ export class RuntimeRunnerService {
         runtime: started.runtime,
         provider: started.provider,
         model: started.model,
+        runtimeMode: started.runtimeMode,
         protocol: started.adapterType,
         status: "active",
         state: {},

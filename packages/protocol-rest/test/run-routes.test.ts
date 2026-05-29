@@ -3,12 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   type ArtifactStore,
   EventBus,
+  RegistryService,
   RunLauncherService,
   RunService,
   RuntimeRunnerService
 } from "@switchyard/core";
 import type { Artifact } from "@switchyard/contracts";
-import { FakeRuntimeAdapter, InMemoryEventStore, InMemoryRunStore, InMemorySessionStore } from "@switchyard/testkit";
+import { FakeRuntimeAdapter, InMemoryEventStore, InMemoryRegistryStore, InMemoryRunStore, InMemorySessionStore } from "@switchyard/testkit";
 import { registerRunRoutes } from "../src/index.js";
 
 describe("run routes", () => {
@@ -338,6 +339,54 @@ describe("run routes", () => {
       }
     });
   });
+
+  it("infers runtimeMode for fake runs when omitted", async () => {
+    const harness = createRouteHarness();
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Infer mode run")
+    });
+    expect(response.statusCode).toBe(201);
+    expect(response.json().run.runtimeMode).toBe("fake.deterministic");
+  });
+
+  it("accepts runtimeMode slug and rejects runtimeMode ids or mismatches", async () => {
+    const harness = createRouteHarness();
+    const accepted = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: {
+        ...fakeRunPayload("Explicit runtimeMode slug"),
+        runtimeMode: "fake.deterministic"
+      }
+    });
+    const rejectedId = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: {
+        ...fakeRunPayload("Explicit runtimeMode id"),
+        runtimeMode: "runtime_mode_fake_deterministic"
+      }
+    });
+    const rejectedMismatch = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: {
+        ...fakeRunPayload("Explicit mismatch"),
+        runtimeMode: "codex.exec_json"
+      }
+    });
+
+    expect(accepted.statusCode).toBe(201);
+    expect(accepted.json().run.runtimeMode).toBe("fake.deterministic");
+    expect(rejectedId.statusCode).toBe(400);
+    expect(rejectedId.json().error.code).toBe("invalid_input");
+    expect(rejectedId.json().error.details?.[0]?.path).toBe("runtimeMode");
+    expect(rejectedMismatch.statusCode).toBe(400);
+    expect(rejectedMismatch.json().error.code).toBe("invalid_input");
+    expect(rejectedMismatch.json().error.details?.[0]?.path).toBe("runtimeMode");
+  });
 });
 
 interface RouteHarness {
@@ -346,6 +395,7 @@ interface RouteHarness {
   runs: InMemoryRunStore;
   events: InMemoryEventStore;
   sessions: InMemorySessionStore;
+  registry: InMemoryRegistryStore;
   eventBus?: EventBus;
   artifacts?: InMemoryArtifactStore;
 }
@@ -360,6 +410,7 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
   const runs = new InMemoryRunStore();
   const events = new InMemoryEventStore();
   const sessions = new InMemorySessionStore();
+  const registry = new InMemoryRegistryStore();
   const eventBus = options.withEventBus ? new EventBus() : undefined;
   const artifacts = options.withArtifacts ? new InMemoryArtifactStore() : undefined;
   const adapters = new Map([["fake", new FakeRuntimeAdapter()]]);
@@ -375,13 +426,76 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
   const withLauncher = options.withLauncher !== false;
   const launcher = withLauncher ? new RunLauncherService(runService) : undefined;
   const app = Fastify();
+  seedRuntimeMode(registry, {
+    id: "runtime_mode_fake_deterministic",
+    slug: "fake.deterministic",
+    name: "Fake deterministic runtime",
+    providerId: "provider_test",
+    runtimeId: "runtime_fake",
+    adapterId: "fake",
+    adapterType: "process",
+    kind: "deterministic_fake",
+    status: "available",
+    capabilities: ["run.start", "run.cancel", "event.normalized", "artifact.transcript", "tool.fake_echo", "auth.none"],
+    limitations: [{ code: "deterministic_only", message: "Outputs are fixed for local smoke and contract tests." }],
+    placement: {
+      local: { support: "supported", reason: "In-process deterministic test adapter." },
+      hosted: { support: "unsupported", reason: "Hosted worker execution is not shipped in R3." },
+      connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+    },
+    availability: {
+      state: "available",
+      canRun: true,
+      installed: true,
+      auth: "not_required",
+      version: null,
+      checkedAt: "2026-05-29T00:00:00.000Z",
+      reasonCode: null,
+      message: null
+    },
+    createdAt: "2026-05-29T00:00:00.000Z",
+    updatedAt: "2026-05-29T00:00:00.000Z"
+  });
+  seedRuntimeMode(registry, {
+    id: "runtime_mode_codex_exec_json",
+    slug: "codex.exec_json",
+    name: "Codex exec JSON",
+    providerId: "provider_openai",
+    runtimeId: "runtime_codex",
+    adapterId: "codex",
+    adapterType: "process",
+    kind: "one_shot_process",
+    status: "available",
+    capabilities: ["run.start", "run.cancel", "model.catalog", "auth.local"],
+    limitations: [{ code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." }],
+    placement: {
+      local: { support: "supported", reason: "Local only." },
+      hosted: { support: "unsupported", reason: "Not hosted." },
+      connectedLocalNode: { support: "future", reason: "Future." }
+    },
+    availability: {
+      state: "available",
+      canRun: true,
+      installed: true,
+      auth: "configured",
+      version: "codex 0.130.0",
+      checkedAt: "2026-05-29T00:00:00.000Z",
+      reasonCode: null,
+      message: null
+    },
+    createdAt: "2026-05-29T00:00:00.000Z",
+    updatedAt: "2026-05-29T00:00:00.000Z"
+  });
+  const registryService = new RegistryService({ registry });
   registerRunRoutes(app, {
     runService,
     runs,
     events,
     ...(artifacts ? { artifacts } : {}),
     ...(eventBus ? { eventBus } : {}),
-    ...(launcher ? { launcher } : {})
+    ...(launcher ? { launcher } : {}),
+    registry,
+    registryService
   });
 
   return {
@@ -390,6 +504,7 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
     runs,
     events,
     sessions,
+    registry,
     ...(eventBus ? { eventBus } : {}),
     ...(artifacts ? { artifacts } : {})
   };
@@ -438,4 +553,38 @@ class InMemoryArtifactStore implements ArtifactStore {
   async listByRun(runId: string): Promise<Artifact[]> {
     return this.items.filter((artifact) => artifact.runId === runId);
   }
+}
+
+function seedRuntimeMode(registry: InMemoryRegistryStore, mode: {
+  id: string;
+  slug: string;
+  name: string;
+  providerId: string;
+  runtimeId: string;
+  adapterId: string;
+  adapterType: "process";
+  kind: "deterministic_fake" | "one_shot_process";
+  status: "available";
+  capabilities: string[];
+  limitations: Array<{ code: string; message: string }>;
+  placement: {
+    local: { support: "supported"; reason: string };
+    hosted: { support: "unsupported"; reason: string };
+    connectedLocalNode: { support: "future"; reason: string };
+  };
+  availability: {
+    state: "available";
+    canRun: true;
+    installed: true;
+    auth: "not_required" | "configured";
+    version: string | null;
+    checkedAt: string;
+    reasonCode: null;
+    message: null;
+  };
+  createdAt: string;
+  updatedAt: string;
+}): void {
+  registry.runtimeModes.set(mode.id, mode as never);
+  registry.runtimeModesBySlug.set(mode.slug, mode.id);
 }

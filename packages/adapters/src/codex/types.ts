@@ -32,6 +32,9 @@ export interface CodexCatalogProbe {
   version?: string;
   models: CodexModelCatalogEntry[];
   message?: string;
+  reasonCode?: "binary_unavailable" | "model_catalog_unavailable" | "check_timeout" | "check_output_too_large";
+  outputBytes?: number;
+  optionalChecks?: Record<string, { ok: boolean; message?: string }>;
 }
 
 export type CodexProcessFactory = (

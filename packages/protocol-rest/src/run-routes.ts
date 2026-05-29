@@ -3,6 +3,7 @@ import type {
   ArtifactStore,
   EventBus,
   EventStore,
+  RegistryService,
   RegistryStore,
   RunLauncherService,
   RunService,
@@ -34,37 +35,50 @@ export interface RunRouteDependencies {
   eventBus?: EventBus;
   launcher?: RunLauncherService;
   registry?: RegistryStore;
+  registryService?: RegistryService;
 }
 
 export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependencies): void {
   app.post("/runs", async (request, reply) => {
-    const wait = shouldWaitForCompletion(request.query);
-    const body = parseCreateRunBody(request.body);
-    const run = await deps.runService.createRun({
-      runtime: body.runtime,
-      provider: body.provider,
-      model: body.model,
-      adapterType: body.adapterType,
-      cwd: body.cwd,
-      task: body.task,
-      placement: body.placement ?? "local",
-      approvalPolicy: body.approvalPolicy ?? "default",
-      timeoutSeconds: body.timeoutSeconds ?? 600,
-      metadata: body.metadata ?? {}
-    });
-    if (wait) {
-      const completed = await deps.runService.startRun(run.id);
-      const events = await deps.events.listByRun(run.id);
-      return reply.code(201).send({ run: completed, response: collectRunResponse(events) });
+    try {
+      const wait = shouldWaitForCompletion(request.query);
+      const body = parseCreateRunBody(request.body);
+      const runtimeMode = await inferRuntimeMode(body, deps.registryService);
+      const createInput: Parameters<RunService["createRun"]>[0] = {
+        runtime: body.runtime,
+        provider: body.provider,
+        model: body.model,
+        adapterType: body.adapterType,
+        cwd: body.cwd,
+        task: body.task,
+        placement: body.placement ?? "local",
+        approvalPolicy: body.approvalPolicy ?? "default",
+        timeoutSeconds: body.timeoutSeconds ?? 600,
+        metadata: body.metadata ?? {}
+      };
+      if (runtimeMode !== undefined) {
+        createInput.runtimeMode = runtimeMode;
+      }
+      const run = await deps.runService.createRun(createInput);
+      if (wait) {
+        const completed = await deps.runService.startRun(run.id);
+        const events = await deps.events.listByRun(run.id);
+        return reply.code(201).send({ run: completed, response: collectRunResponse(events) });
+      }
+      if (deps.launcher) {
+        deps.launcher.launch(run);
+      } else {
+        queueMicrotask(() => {
+          void deps.runService.startRun(run.id).catch(() => {});
+        });
+      }
+      return reply.code(202).send({ run });
+    } catch (error) {
+      if (error instanceof HttpProblem) {
+        return sendHttpError(reply, error.code, error.message, error.details);
+      }
+      throw error;
     }
-    if (deps.launcher) {
-      deps.launcher.launch(run);
-    } else {
-      queueMicrotask(() => {
-        void deps.runService.startRun(run.id).catch(() => {});
-      });
-    }
-    return reply.code(202).send({ run });
   });
 
   app.get("/runs", async (request, reply) => {
@@ -352,6 +366,7 @@ interface CreateRunBody {
   approvalPolicy?: string | undefined;
   timeoutSeconds?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
+  runtimeMode?: string | undefined;
 }
 
 function parseCreateRunBody(value: unknown): CreateRunBody {
@@ -381,7 +396,8 @@ function parseCreateRunBody(value: unknown): CreateRunBody {
     placement: typeof body["placement"] === "string" ? body["placement"] as CreateRunBody["placement"] : undefined,
     approvalPolicy: typeof body["approvalPolicy"] === "string" ? body["approvalPolicy"] : undefined,
     timeoutSeconds: typeof body["timeoutSeconds"] === "number" ? body["timeoutSeconds"] : undefined,
-    metadata: isRecord(body["metadata"]) ? body["metadata"] : undefined
+    metadata: isRecord(body["metadata"]) ? body["metadata"] : undefined,
+    runtimeMode: typeof body["runtimeMode"] === "string" ? body["runtimeMode"] : undefined
   };
 }
 
@@ -420,3 +436,35 @@ function shouldWaitForCompletion(query: unknown): boolean {
   return false;
 }
 
+async function inferRuntimeMode(
+  body: CreateRunBody,
+  registryService: RegistryService | undefined
+): Promise<string | undefined> {
+  if (!registryService) {
+    return undefined;
+  }
+  try {
+    const input: Parameters<RegistryService["inferAndValidateRuntimeMode"]>[0] = {
+      runtime: body.runtime,
+      provider: body.provider,
+      adapterType: body.adapterType
+    };
+    if (body.runtimeMode !== undefined) {
+      input.runtimeMode = body.runtimeMode;
+    }
+    return await registryService.inferAndValidateRuntimeMode(input);
+  } catch (error) {
+    if (isValidationError(error)) {
+      throw new HttpProblem("invalid_input", error.message, error.details);
+    }
+    throw error;
+  }
+}
+
+function isValidationError(error: unknown): error is { code: string; message: string; details: Array<{ path: string; issue: string }> } {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const record = error as Record<string, unknown>;
+  return record["code"] === "invalid_input" && Array.isArray(record["details"]) && typeof record["message"] === "string";
+}

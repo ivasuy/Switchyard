@@ -1,6 +1,13 @@
 import { z } from "zod";
 import { adapterTypeSchema, executionPlacementSchema, runSchema, runStatusSchema } from "./run.js";
-import { modelSchema, providerSchema, runtimeSchema } from "./registry.js";
+import {
+  modelSchema,
+  providerSchema,
+  runtimeAvailabilityStateSchema,
+  runtimeModeKindSchema,
+  runtimeModeSchema,
+  runtimeSchema
+} from "./registry.js";
 
 export const LIST_LIMIT_DEFAULT = 50;
 export const LIST_LIMIT_MAX = 200;
@@ -77,6 +84,18 @@ export const listModelsQuerySchema = z.object({
   before: cursorStringSchema
 });
 
+export const listRuntimeModesQuerySchema = z.object({
+  provider: csv(slugSchema),
+  runtime: csv(slugSchema),
+  adapterType: csv(adapterTypeSchema),
+  kind: csv(runtimeModeKindSchema),
+  availability: csv(runtimeAvailabilityStateSchema),
+  placement: csv(executionPlacementSchema),
+  capability: csv(z.string().min(1)),
+  limit: limitSchema,
+  before: cursorStringSchema
+});
+
 export const listRunsResponseSchema = z.object({
   runs: z.array(runSchema),
   nextCursor: z.string().nullable()
@@ -97,11 +116,39 @@ export const listModelsResponseSchema = z.object({
   nextCursor: z.string().nullable()
 });
 
+export const listRuntimeModesResponseSchema = z.object({
+  runtimeModes: z.array(runtimeModeSchema),
+  nextCursor: z.string().nullable()
+});
+
+const doctorRuntimeModeSummaryEntrySchema = z.object({
+  runtimeModeId: z.string().min(1),
+  runtimeMode: z.string().min(1),
+  state: runtimeAvailabilityStateSchema,
+  canRun: z.boolean(),
+  checkedAt: z.string().datetime({ offset: true })
+});
+
+export const doctorSummaryResponseSchema = z.object({
+  runtimeModes: z.array(doctorRuntimeModeSummaryEntrySchema),
+  summary: z.object({
+    available: z.number().int().nonnegative(),
+    installed: z.number().int().nonnegative(),
+    partial: z.number().int().nonnegative(),
+    unavailable: z.number().int().nonnegative(),
+    unsupported: z.number().int().nonnegative(),
+    unknown: z.number().int().nonnegative()
+  })
+});
+
 export type ListRunsQuery = z.infer<typeof listRunsQuerySchema>;
 export type ListProvidersQuery = z.infer<typeof listProvidersQuerySchema>;
 export type ListRuntimesQuery = z.infer<typeof listRuntimesQuerySchema>;
 export type ListModelsQuery = z.infer<typeof listModelsQuerySchema>;
+export type ListRuntimeModesQuery = z.infer<typeof listRuntimeModesQuerySchema>;
 export type ListRunsResponse = z.infer<typeof listRunsResponseSchema>;
 export type ListProvidersResponse = z.infer<typeof listProvidersResponseSchema>;
 export type ListRuntimesResponse = z.infer<typeof listRuntimesResponseSchema>;
 export type ListModelsResponse = z.infer<typeof listModelsResponseSchema>;
+export type ListRuntimeModesResponse = z.infer<typeof listRuntimeModesResponseSchema>;
+export type DoctorSummaryResponse = z.infer<typeof doctorSummaryResponseSchema>;

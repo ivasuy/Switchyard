@@ -19,10 +19,12 @@ No unreleased changes.
 - Added daemon runtime logs for run start/completion, Codex child process PID, stderr snippets, first stdout detection, runtime output, timeout, and startup reconciliation.
 - Added `response.text` and `response.outputs` to `POST /runs?wait=1` responses so curl callers see the final model answer without a second request.
 - Added development documentation under `docs/development/`, including generic local startup/debugging commands and Codex-specific curls, PID checks, SQLite inspection, and stuck-run diagnosis.
+- Added runtime capability infrastructure: runtime-mode contracts/records, runtime manifests, bounded runtime doctor checks, and local runtime capability inspection APIs (`GET /runtime-modes`, `GET /runtime-modes/:id`, `POST /runtime-modes/:id/check`, `GET /doctor`).
+- Added persisted runtime-mode storage (`runtime_modes` table) plus nullable `runtime_mode` compatibility columns on runs and runtime sessions.
 
 ### Changed
 
-- **BREAKING:** Standardized the daemon error contract. Every 4xx and 5xx response now uses the envelope `{ error: { code, message, details? } }` with a closed code set (`run_not_found`, `artifact_not_found`, `missing_artifact_content`, `provider_not_found`, `runtime_not_found`, `model_not_found`, `invalid_input`, `invalid_query`, `adapter_protocol_failed`, `internal_error`). Callers that relied on the previous default Fastify `{message, error, statusCode}` shape on any 4xx/5xx response must be updated.
+- **BREAKING:** Standardized the daemon error contract. Every 4xx and 5xx response now uses the envelope `{ error: { code, message, details? } }` with a closed code set (`run_not_found`, `artifact_not_found`, `missing_artifact_content`, `provider_not_found`, `runtime_not_found`, `runtime_mode_not_found`, `model_not_found`, `invalid_input`, `invalid_query`, `adapter_protocol_failed`, `internal_error`). Callers that relied on the previous default Fastify `{message, error, statusCode}` shape on any 4xx/5xx response must be updated.
 - Refocused the README as a product-facing overview and moved detailed local development commands into dedicated development docs.
 - Centralized local developer docs around an official API contract, a local operations guide, and a Codex-only debugging appendix.
 - Updated architecture and adapter docs to describe the implemented Codex non-interactive local adapter path.

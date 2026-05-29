@@ -369,7 +369,7 @@ Promotion criteria:
 
 ### R3: Runtime Capability Infrastructure
 
-Status: planned.
+Status: shipped.
 
 Goal: model runtimes, runtime modes, provider capabilities, and adapter health before adding more adapters.
 
@@ -387,24 +387,25 @@ Release scope:
 - clear distinction between provider, runtime, runtime mode, model, and adapter.
 - update Codex exec-json registration to use the new vocabulary.
 
-Usable after this release:
+Shipped now:
 
-- runtime mode vocabulary such as `codex.exec_json` versus future `codex.interactive`.
+- runtime mode vocabulary with shipped `fake.deterministic` and `codex.exec_json`, versus future `codex.interactive`.
 - adapter manifest shape.
 - doctor/check service.
 - capability records in registry.
 - placement facts for local, hosted, and future hybrid execution.
-- runtime availability API that distinguishes installed, unavailable, unsupported, and partially supported runtimes.
+- runtime availability API that distinguishes `available`, `installed`, `partial`, `unavailable`, `unsupported`, and `unknown`.
 - owners and clients can ask what this Switchyard instance can actually run.
 
-Not included:
+Not included in R3:
 
 - full interactive Codex runtime.
 - broad adapter expansion.
 
-Local verification:
+Local verification shipped:
 
-- registry and/or doctor API shows `codex.exec_json` as available when Codex is installed.
+- `GET /runtime-modes`, `GET /runtime-modes/:id`, `POST /runtime-modes/:id/check`, and `GET /doctor` expose local runtime capability state.
+- registry/doctor APIs show `codex.exec_json` as available when Codex is installed.
 - the same API marks Codex unavailable without crashing when Codex is missing or model probing fails.
 - fake runtime reports deterministic capabilities.
 - existing run creation still works after registry/capability changes.

@@ -4,6 +4,38 @@ import { describe, expect, it } from "vitest";
 import { CodexExecJsonAdapter, CodexInputUnsupportedError } from "../src/index.js";
 
 describe("CodexExecJsonAdapter", () => {
+  it("exposes a local one-shot runtime manifest", () => {
+    const adapter = new CodexExecJsonAdapter();
+    expect(adapter.manifest).toMatchObject({
+      runtimeModeId: "runtime_mode_codex_exec_json",
+      runtimeModeSlug: "codex.exec_json",
+      kind: "one_shot_process",
+      adapterType: "process"
+    });
+    expect(adapter.manifest.capabilities).toEqual(
+      expect.arrayContaining([
+        "run.start",
+        "run.cancel",
+        "run.timeout",
+        "event.normalized",
+        "artifact.transcript",
+        "artifact.raw_transcript",
+        "model.catalog",
+        "auth.local"
+      ])
+    );
+    expect(adapter.manifest.capabilities).not.toEqual(expect.arrayContaining(["run.input", "session.resume", "interactive"]));
+    expect(adapter.manifest.placement.hosted.support).toBe("unsupported");
+    expect(adapter.manifest.limitations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "one_shot_no_input" }),
+        expect.objectContaining({ code: "local_only" }),
+        expect.objectContaining({ code: "no_approval_bridge" }),
+        expect.objectContaining({ code: "no_session_resume" })
+      ])
+    );
+  });
+
   it("builds args, streams events, and returns transcript artifacts", async () => {
     const fake = new FakeCodexProcess();
     const adapter = new CodexExecJsonAdapter({

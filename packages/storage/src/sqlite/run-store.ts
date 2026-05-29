@@ -5,11 +5,13 @@ import { runs } from "./schema.js";
 import { and, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm";
 
 type RunRow = typeof runs.$inferSelect;
-type RunInsertRow = Omit<typeof runs.$inferInsert, "startedAt" | "endedAt"> & {
+type RunInsertRow = Omit<typeof runs.$inferInsert, "startedAt" | "endedAt" | "runtimeMode"> & {
+  runtimeMode?: string;
   startedAt?: string;
   endedAt?: string;
 };
-type RunUpdateRow = Omit<typeof runs.$inferInsert, "id" | "startedAt" | "endedAt"> & {
+type RunUpdateRow = Omit<typeof runs.$inferInsert, "id" | "startedAt" | "endedAt" | "runtimeMode"> & {
+  runtimeMode: string | null;
   startedAt: string | null;
   endedAt: string | null;
 };
@@ -30,6 +32,9 @@ function toCreateRow(run: Run): RunInsertRow {
     metadataJson: JSON.stringify(run.metadata),
     createdAt: run.createdAt
   };
+  if (run.runtimeMode !== undefined) {
+    row.runtimeMode = run.runtimeMode;
+  }
   if (run.startedAt !== undefined) {
     row.startedAt = run.startedAt;
   }
@@ -52,6 +57,7 @@ function toUpdateRow(run: Run): RunUpdateRow {
     approvalPolicy: run.approvalPolicy,
     timeoutSeconds: run.timeoutSeconds,
     metadataJson: JSON.stringify(run.metadata),
+    runtimeMode: run.runtimeMode ?? null,
     createdAt: run.createdAt,
     startedAt: run.startedAt ?? null,
     endedAt: run.endedAt ?? null
@@ -74,6 +80,9 @@ function fromRow(row: RunRow): Run {
     metadata: JSON.parse(row.metadataJson),
     createdAt: row.createdAt
   };
+  if (row.runtimeMode !== null) {
+    run.runtimeMode = row.runtimeMode;
+  }
 
   if (row.startedAt !== null) {
     run.startedAt = row.startedAt;

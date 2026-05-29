@@ -78,33 +78,48 @@ export function validateCodexRunOptions(input: {
   return input.options;
 }
 
-export async function probeCodexCatalog(command = "codex"): Promise<CodexCatalogProbe> {
+export async function probeCodexCatalog(
+  command = "codex",
+  options: { timeoutMs?: number; maxBufferBytes?: number } = {}
+): Promise<CodexCatalogProbe> {
+  const timeoutMs = options.timeoutMs ?? 5000;
+  const maxBufferBytes = options.maxBufferBytes ?? 1024 * 1024;
+  const execOptions = { encoding: "utf8" as const, timeout: timeoutMs, maxBuffer: maxBufferBytes };
+
   let version: string;
   try {
-    const versionResult = await execFileAsync(command, ["--version"], { encoding: "utf8" });
+    const versionResult = await execFileAsync(command, ["--version"], execOptions);
     version = readStdout(versionResult).trim();
   } catch (error) {
-    return {
+    const classified = classifyProbeError(error, maxBufferBytes, "binary_unavailable");
+    const result: CodexCatalogProbe = {
       ok: false,
       models: [],
-      message: error instanceof Error ? error.message : String(error)
+      message: classified.message,
     };
+    if (classified.reasonCode) result.reasonCode = classified.reasonCode;
+    if (classified.outputBytes !== undefined) result.outputBytes = classified.outputBytes;
+    return result;
   }
 
   try {
-    const modelResult = await execFileAsync(command, ["debug", "models"], { encoding: "utf8" });
+    const modelResult = await execFileAsync(command, ["debug", "models"], execOptions);
     return {
       ok: true,
       version,
       models: parseCodexModelCatalog(readStdout(modelResult))
     };
   } catch (error) {
-    return {
+    const classified = classifyProbeError(error, maxBufferBytes, "model_catalog_unavailable");
+    const result: CodexCatalogProbe = {
       ok: true,
       version,
       models: [],
-      message: error instanceof Error ? error.message : String(error)
+      message: classified.message,
     };
+    if (classified.reasonCode) result.reasonCode = classified.reasonCode;
+    if (classified.outputBytes !== undefined) result.outputBytes = classified.outputBytes;
+    return result;
   }
 }
 
@@ -119,4 +134,63 @@ function readStdout(result: unknown): string {
     }
   }
   return "";
+}
+
+function classifyProbeError(
+  error: unknown,
+  maxBufferBytes: number,
+  fallbackReasonCode: "binary_unavailable" | "model_catalog_unavailable"
+): { reasonCode: "binary_unavailable" | "model_catalog_unavailable" | "check_timeout" | "check_output_too_large"; message: string; outputBytes?: number } {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = isRecord(error) && typeof error["code"] === "string" ? error["code"] : "";
+  const output = `${readMaybeText(error, "stdout")}${readMaybeText(error, "stderr")}`;
+  const outputBytes = output.length > 0 ? Buffer.byteLength(output, "utf8") : undefined;
+  const sanitizedMessage = sanitizeMessage(message, maxBufferBytes);
+
+  if (code === "ETIMEDOUT" || message.toLowerCase().includes("timed out")) {
+    return probeError("check_timeout", sanitizedMessage, outputBytes);
+  }
+
+  if (code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || message.toLowerCase().includes("maxbuffer")) {
+    return probeError("check_output_too_large", sanitizedMessage, outputBytes);
+  }
+
+  return probeError(fallbackReasonCode, sanitizedMessage, outputBytes);
+}
+
+function sanitizeMessage(message: string, maxBytes: number): string {
+  const max = Math.max(32, maxBytes);
+  if (Buffer.byteLength(message, "utf8") <= max) {
+    return message;
+  }
+  return `${message.slice(0, Math.max(1, max - 3))}...`;
+}
+
+function readMaybeText(value: unknown, key: "stdout" | "stderr"): string {
+  if (!isRecord(value)) {
+    return "";
+  }
+  const raw = value[key];
+  if (typeof raw === "string") {
+    return raw;
+  }
+  if (Buffer.isBuffer(raw)) {
+    return raw.toString("utf8");
+  }
+  return "";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function probeError(
+  reasonCode: "binary_unavailable" | "model_catalog_unavailable" | "check_timeout" | "check_output_too_large",
+  message: string,
+  outputBytes: number | undefined
+): { reasonCode: "binary_unavailable" | "model_catalog_unavailable" | "check_timeout" | "check_output_too_large"; message: string; outputBytes?: number } {
+  if (outputBytes === undefined) {
+    return { reasonCode, message };
+  }
+  return { reasonCode, message, outputBytes };
 }

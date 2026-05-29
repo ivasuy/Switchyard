@@ -41,6 +41,7 @@ Closed code set:
 | `missing_artifact_content` | 404 | Artifact exists, content unavailable. |
 | `provider_not_found` | 404 | Unknown provider id or slug. |
 | `runtime_not_found` | 404 | Unknown runtime id or slug. |
+| `runtime_mode_not_found` | 404 | Unknown runtime mode id or slug. |
 | `model_not_found` | 404 | Unknown model id or slug. |
 | `invalid_input` | 400 | Malformed body. |
 | `invalid_query` | 400 | Malformed or out-of-range query parameter. |
@@ -70,6 +71,7 @@ All success bodies (`{run, events}`, `{accepted: true}`, etc.) are unchanged.
   "provider": "openai",
   "model": "gpt-5.5",
   "adapterType": "process",
+  "runtimeMode": "codex.exec_json",
   "cwd": "/Users/example/project",
   "task": "Return one sentence describing this repository.",
   "status": "completed",
@@ -127,6 +129,7 @@ curl -s -X POST "http://127.0.0.1:4545/runs" \
     "provider": "openai",
     "model": "gpt-5.5",
     "adapterType": "process",
+    "runtimeMode": "codex.exec_json",
     "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
     "task": "Return one sentence describing this repository. Do not edit files.",
     "timeoutSeconds": 120
@@ -142,6 +145,13 @@ curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
 ```
 
 `POST /runs?wait=1` returns `{run, response}` where `response.text` is the last normalized `runtime.output`. Async create returns `{run}` and the daemon launches the run in the background.
+
+`runtimeMode` is optional. If omitted, the daemon infers shipped runtime modes:
+
+- `runtime: "fake"` -> `runtimeMode: "fake.deterministic"`
+- `runtime: "codex"` and `adapterType: "process"` -> `runtimeMode: "codex.exec_json"`
+
+When provided, `runtimeMode` must be a runtime-mode slug (for example `codex.exec_json`), not an internal id like `runtime_mode_codex_exec_json`.
 
 ## Get Run
 
@@ -282,6 +292,37 @@ Responses:
 ```
 
 R2 returns registry records as stored. Health, capability, and partial-support reporting are R3+.
+
+## Runtime Mode APIs
+
+```bash
+curl -s "http://127.0.0.1:4545/runtime-modes?provider=openai&availability=available"
+curl -s "http://127.0.0.1:4545/runtime-modes/runtime_mode_codex_exec_json"
+curl -s "http://127.0.0.1:4545/runtime-modes/codex.exec_json"
+curl -s -X POST "http://127.0.0.1:4545/runtime-modes/codex.exec_json/check"
+curl -s "http://127.0.0.1:4545/doctor"
+```
+
+Runtime mode list filters:
+
+| Endpoint | Filters |
+| --- | --- |
+| `GET /runtime-modes` | `provider`, `runtime`, `adapterType`, `kind`, `availability`, `placement`, `capability`, `limit`, `before` |
+
+`GET /doctor` is read-only and returns the latest stored snapshots. `POST /runtime-modes/:id/check` runs a fresh bounded check and updates stored availability.
+
+Availability states:
+
+```text
+available
+installed
+partial
+unavailable
+unsupported
+unknown
+```
+
+`partial` means required checks passed and at least one optional check failed. Timeout/oversized-output failures are bounded and return sanitized `unknown` or `unavailable` responses instead of hanging.
 
 ## Single-Record Registry Lookups
 

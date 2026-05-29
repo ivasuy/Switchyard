@@ -19,6 +19,7 @@ This directory records runtime adapter facts before implementation. Switchyard s
 
 Each adapter must ship with:
 
+- A runtime-mode manifest (provider/runtime/runtime-mode/model distinctions must be explicit).
 - Doctor check.
 - Adapter contract test.
 - Raw transcript capture.
@@ -26,3 +27,8 @@ Each adapter must ship with:
 - Cancellation behavior.
 - Artifact extraction behavior.
 - Placement-policy facts for local, hosted, and hybrid execution.
+
+Current shipped runtime modes in R3 are only:
+
+- `fake.deterministic`
+- `codex.exec_json`

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS runs (
   approval_policy TEXT NOT NULL,
   timeout_seconds INTEGER NOT NULL,
   metadata_json TEXT NOT NULL,
+  runtime_mode TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
   ended_at TEXT
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS runtime_sessions (
   status TEXT NOT NULL,
   external_session_key TEXT,
   process_id INTEGER,
+  runtime_mode TEXT,
   state_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT
@@ -115,6 +117,25 @@ CREATE TABLE IF NOT EXISTS models (
   status TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS runtime_modes (
+  id TEXT PRIMARY KEY NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  runtime_id TEXT NOT NULL,
+  adapter_id TEXT NOT NULL,
+  adapter_type TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  capabilities_json TEXT NOT NULL,
+  limitations_json TEXT NOT NULL,
+  placement_json TEXT NOT NULL,
+  availability_json TEXT NOT NULL,
+  docs_path TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS placement_decisions (
   id TEXT PRIMARY KEY NOT NULL,
   run_id TEXT,
@@ -149,19 +170,39 @@ CREATE INDEX IF NOT EXISTS runtimes_provider_id_idx
 
 CREATE INDEX IF NOT EXISTS models_provider_id_idx
   ON models (provider_id);
+
+CREATE INDEX IF NOT EXISTS runtime_modes_provider_id_idx
+  ON runtime_modes (provider_id);
+
+CREATE INDEX IF NOT EXISTS runtime_modes_runtime_id_idx
+  ON runtime_modes (runtime_id);
+
+CREATE INDEX IF NOT EXISTS runtime_modes_status_idx
+  ON runtime_modes (status);
 `;
 
-const additiveMigrations: Array<{ column: string; statement: string }> = [
+const additiveMigrations: Array<{ table: string; column: string; statement: string }> = [
   {
+    table: "runtimes",
     column: "provider_id",
     statement: "ALTER TABLE runtimes ADD COLUMN provider_id TEXT"
+  },
+  {
+    table: "runs",
+    column: "runtime_mode",
+    statement: "ALTER TABLE runs ADD COLUMN runtime_mode TEXT"
+  },
+  {
+    table: "runtime_sessions",
+    column: "runtime_mode",
+    statement: "ALTER TABLE runtime_sessions ADD COLUMN runtime_mode TEXT"
   }
 ];
 
 function applyAdditiveMigrations(sqlite: Database.Database): void {
-  const columnInfo = sqlite.prepare("PRAGMA table_info(runtimes)").all() as Array<{ name: string }>;
-  const existing = new Set(columnInfo.map((row) => row.name));
   for (const migration of additiveMigrations) {
+    const columnInfo = sqlite.prepare(`PRAGMA table_info(${migration.table})`).all() as Array<{ name: string }>;
+    const existing = new Set(columnInfo.map((row) => row.name));
     if (existing.has(migration.column)) {
       continue;
     }

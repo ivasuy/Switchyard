@@ -14,6 +14,7 @@ export const approvalIdSchema = idSchema("approval");
 export const providerIdSchema = idSchema("provider");
 export const modelIdSchema = idSchema("model");
 export const runtimeIdSchema = idSchema("runtime");
+export const runtimeModeIdSchema = idSchema("runtime_mode");
 export const nodeIdSchema = idSchema("node");
 export const memoryIdSchema = idSchema("memory");
 export const evidenceIdSchema = idSchema("evidence");
@@ -24,3 +25,9 @@ export const contextPacketIdSchema = idSchema("context");
 
 export const isoDateSchema = z.string().datetime({ offset: true });
 export const metadataSchema = z.record(z.string(), z.unknown());
+export const runtimeModeSlugSchema = z
+  .string()
+  .regex(
+    /^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)+$/,
+    "must be a dot-separated lowercase runtime mode slug"
+  );

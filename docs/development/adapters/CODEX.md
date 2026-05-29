@@ -8,12 +8,14 @@ Manual smoke in this file depends on a locally installed `codex` CLI on your mac
 Implemented:
 
 - Local non-interactive `codex exec --json`.
+- Runtime mode slug: `codex.exec_json` (one-shot, local-only, not hosted-safe in R3).
 - Process adapter mode through `adapterType: "process"`.
 - JSONL stdout parsing into Switchyard events.
 - Raw stdout/stderr transcript artifact capture.
 - Model and reasoning metadata mapping.
 - Child process PID logging.
 - Timeout and daemon-restart terminalization.
+- Runtime doctor checks that never run model tasks (`POST /runtime-modes/:id/check`) and are bounded by timeout/output limits.
 
 Not implemented yet:
 
@@ -22,6 +24,13 @@ Not implemented yet:
 - PTY fallback.
 - Approval bridging.
 - Hosted Codex process execution.
+
+R3 check behavior:
+
+- missing Codex binary: reported as `unavailable` (`binary_unavailable`).
+- model catalog unavailable/empty: reported as `unavailable` (`model_catalog_unavailable`).
+- optional check failure with required checks passing: reported as `partial` (`optional_check_failed`).
+- hung/slow/oversized checks: bounded and sanitized as `unknown`/`unavailable` with stable reason codes.
 
 ## Request Metadata
 

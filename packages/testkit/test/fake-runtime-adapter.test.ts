@@ -11,6 +11,13 @@ import {
 describe("testkit fake runtime adapter", () => {
   it("satisfies the runtime adapter lifecycle contract", async () => {
     const adapter = new FakeRuntimeAdapter();
+    expect(adapter.manifest).toMatchObject({
+      runtimeModeId: "runtime_mode_fake_deterministic",
+      runtimeModeSlug: "fake.deterministic",
+      kind: "deterministic_fake",
+      adapterType: "process",
+      capabilities: expect.arrayContaining(["run.start", "tool.fake_echo", "auth.none"])
+    });
     const check = await adapter.check();
     const session = await adapter.start({ runId: "run_123" });
     const events = [];

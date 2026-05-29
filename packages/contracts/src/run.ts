@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isoDateSchema, metadataSchema, runIdSchema } from "./ids.js";
+import { isoDateSchema, metadataSchema, runIdSchema, runtimeModeSlugSchema } from "./ids.js";
 
 export const adapterTypeSchema = z.enum(["native", "acpx", "http", "webhook", "process", "pty", "browser"]);
 export const runStatusSchema = z.enum([
@@ -28,6 +28,7 @@ export const runSchema = z.object({
   approvalPolicy: z.string().min(1),
   timeoutSeconds: z.number().int().positive(),
   metadata: metadataSchema.default({}),
+  runtimeMode: runtimeModeSlugSchema.optional(),
   createdAt: isoDateSchema,
   startedAt: isoDateSchema.optional(),
   endedAt: isoDateSchema.optional()

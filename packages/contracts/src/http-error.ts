@@ -6,6 +6,7 @@ export const httpErrorCodeSchema = z.enum([
   "missing_artifact_content",
   "provider_not_found",
   "runtime_not_found",
+  "runtime_mode_not_found",
   "model_not_found",
   "invalid_input",
   "invalid_query",

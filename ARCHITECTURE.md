@@ -807,7 +807,7 @@ switchyard/
 
 ### Runtime and Integration Packages
 
-- `packages/adapters`: runtime and tool integrations. The current implemented adapter is `codex` for non-interactive local `codex exec --json` runs. Planned adapter folders include `opencode`, `claude-code`, `cursor`, `openclaw`, `paperclip`, `agentfield`, `browser-search`, `generic-http`, `process`, and `pty`.
+- `packages/adapters`: runtime and tool integrations. The current implemented adapter is `codex` for non-interactive local `codex exec --json` runs (`runtimeMode: codex.exec_json`) plus the fake deterministic runtime mode (`fake.deterministic`). Planned adapter folders include `opencode`, `claude-code`, `cursor`, `openclaw`, `paperclip`, `agentfield`, `browser-search`, `generic-http`, `process`, and `pty`.
 - `packages/storage`: persistence implementations for in-memory tests, SQLite local mode, Postgres hosted mode, filesystem artifacts, and S3/R2-compatible object storage.
 - `packages/queue`: local in-process queue and hosted Redis/BullMQ queue implementations.
 - `packages/sdk`: typed client for frontend, backend, CLI, automation, and third-party consumers.

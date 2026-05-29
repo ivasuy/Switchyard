@@ -5,17 +5,19 @@ import { runtimeSessions } from "./schema.js";
 import { asc, eq } from "drizzle-orm";
 
 type SessionRow = typeof runtimeSessions.$inferSelect;
-type SessionInsertRow = Omit<typeof runtimeSessions.$inferInsert, "externalSessionKey" | "processId" | "updatedAt"> & {
+type SessionInsertRow = Omit<typeof runtimeSessions.$inferInsert, "externalSessionKey" | "processId" | "updatedAt" | "runtimeMode"> & {
   externalSessionKey?: string;
   processId?: number;
+  runtimeMode?: string | null;
   updatedAt?: string;
 };
 type SessionUpdateRow = Omit<
   typeof runtimeSessions.$inferInsert,
-  "externalSessionKey" | "processId" | "updatedAt"
+  "externalSessionKey" | "processId" | "updatedAt" | "runtimeMode"
 > & {
   externalSessionKey: string | null;
   processId: number | null;
+  runtimeMode: string | null;
   updatedAt: string | null;
 };
 
@@ -28,6 +30,7 @@ function toRow(session: RuntimeSession): SessionInsertRow {
     model: session.model,
     protocol: session.protocol,
     status: session.status,
+    runtimeMode: session.runtimeMode ?? null,
     stateJson: JSON.stringify(session.state),
     createdAt: session.createdAt
   };
@@ -52,6 +55,7 @@ function toUpdateRow(session: RuntimeSession): SessionUpdateRow {
     model: session.model,
     protocol: session.protocol,
     status: session.status,
+    runtimeMode: session.runtimeMode ?? null,
     stateJson: JSON.stringify(session.state),
     createdAt: session.createdAt,
     externalSessionKey: session.externalSessionKey ?? null,
@@ -69,6 +73,7 @@ function fromRow(row: SessionRow): RuntimeSession {
     model: row.model,
     protocol: row.protocol as RuntimeSession["protocol"],
     status: row.status as RuntimeSession["status"],
+    runtimeMode: row.runtimeMode,
     state: JSON.parse(row.stateJson),
     createdAt: row.createdAt
   };

@@ -2,12 +2,32 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createNotImplementedError,
   EventBus,
+  RegistryService,
+  RuntimeCapabilityService,
+  RuntimeDoctorService,
   RuntimeRunnerService,
   RunLauncherService,
   RunService
 } from "../src/index.js";
-import type { ArtifactStore, EventStore, RunStore, RuntimeAdapter, SessionStore } from "../src/index.js";
-import type { Artifact, Run, RuntimeSession, SwitchyardEvent } from "@switchyard/contracts";
+import type {
+  ArtifactStore,
+  EventStore,
+  RegistryStore,
+  RunStore,
+  RuntimeAdapter,
+  RuntimeAdapterManifest,
+  SessionStore
+} from "../src/index.js";
+import type {
+  Artifact,
+  Run,
+  RuntimeAvailability,
+  RuntimeDoctorCheck,
+  RuntimeMode,
+  RuntimeSession,
+  RuntimeTarget,
+  SwitchyardEvent
+} from "@switchyard/contracts";
 
 describe("core service shells", () => {
   it("creates domain not-implemented errors with stable codes", () => {
@@ -745,6 +765,210 @@ describe("core service shells", () => {
     expect(received).toHaveLength(1);
     expect(received[0]?.payload).toEqual({ text: "hello" });
   });
+
+  it("seeds runtime modes from manifests and supports docsPath omissions", async () => {
+    const registry = new MemoryRegistryStore();
+    const service = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+
+    await service.seedManifests([fakeRuntimeManifest, { ...codexRuntimeManifest, docsPath: undefined }], {
+      "fake.deterministic": {
+        state: "available",
+        canRun: true,
+        installed: true,
+        auth: "not_required",
+        version: null,
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        reasonCode: null,
+        message: null
+      }
+    });
+
+    const fake = await registry.getRuntimeMode("fake.deterministic");
+    const codex = await registry.getRuntimeMode("runtime_mode_codex_exec_json");
+    expect(fake?.slug).toBe("fake.deterministic");
+    expect(fake?.availability.state).toBe("available");
+    expect(codex?.slug).toBe("codex.exec_json");
+    expect(codex?.docsPath).toBeUndefined();
+    expect(codex?.status).toBe("unknown");
+  });
+
+  it("maps codex checks to unavailable, partial, timeout, output bounds, and unsupported states", async () => {
+    const registry = new MemoryRegistryStore();
+    const capabilityService = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+    await capabilityService.seedManifests([codexRuntimeManifest, fakeRuntimeManifest]);
+
+    const emptyModelsAdapter = new ManifestTestAdapter(codexRuntimeManifest, async () => ({
+      ok: true,
+      details: { version: "codex 0.130.0", models: [] }
+    }));
+    const partialAdapter = new ManifestTestAdapter(codexRuntimeManifest, async () => ({
+      ok: true,
+      details: {
+        version: "codex 0.130.0",
+        models: [{ slug: "gpt-5.5" }],
+        optionalChecks: {
+          sandbox_policy_probe: { ok: false, message: "optional probe failed" }
+        }
+      }
+    }));
+    const hugeOutputAdapter = new ManifestTestAdapter(codexRuntimeManifest, async () => ({
+      ok: false,
+      message: "x".repeat(256),
+      details: { reasonCode: "binary_unavailable", outputBytes: 256 }
+    }));
+    const hangingAdapter = new ManifestTestAdapter(codexRuntimeManifest, async () => await new Promise(() => undefined));
+
+    const unavailableDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", emptyModelsAdapter], ["fake", new ManifestTestAdapter(fakeRuntimeManifest, async () => ({ ok: true }))]]),
+      clock: () => "2026-05-29T00:00:00.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 64
+    });
+    const unavailable = await unavailableDoctor.checkRuntimeMode("codex.exec_json");
+    expect(unavailable.state).toBe("unavailable");
+    expect(unavailable.reasonCode).toBe("model_catalog_unavailable");
+    expect(unavailable.installed).toBe(true);
+
+    const partialDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", partialAdapter], ["fake", new ManifestTestAdapter(fakeRuntimeManifest, async () => ({ ok: true }))]]),
+      clock: () => "2026-05-29T00:00:01.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 64
+    });
+    const partial = await partialDoctor.checkRuntimeMode("runtime_mode_codex_exec_json");
+    expect(partial.state).toBe("partial");
+    expect(partial.canRun).toBe(true);
+    expect(partial.reasonCode).toBe("optional_check_failed");
+
+    const boundedDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", hugeOutputAdapter]]),
+      clock: () => "2026-05-29T00:00:02.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 64
+    });
+    const bounded = await boundedDoctor.checkRuntimeMode("codex.exec_json");
+    expect(bounded.reasonCode).toBe("check_output_too_large");
+    expect(bounded.diagnostics[0]?.message.length ?? 0).toBeLessThanOrEqual(70);
+
+    const timeoutDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", hangingAdapter]]),
+      clock: () => "2026-05-29T00:00:03.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 64
+    });
+    const timedOut = await timeoutDoctor.checkRuntimeMode("codex.exec_json");
+    expect(timedOut.state).toBe("unknown");
+    expect(timedOut.reasonCode).toBe("check_timeout");
+
+    await registry.upsertRuntimeMode({
+      ...(await registry.getRuntimeMode("runtime_mode_codex_exec_json"))!,
+      id: "runtime_mode_unregistered",
+      slug: "codex.unregistered",
+      adapterId: "missing"
+    });
+    const unsupportedDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", partialAdapter]]),
+      clock: () => "2026-05-29T00:00:04.000Z"
+    });
+    const unsupported = await unsupportedDoctor.checkRuntimeMode("runtime_mode_unregistered");
+    expect(unsupported.state).toBe("unsupported");
+    expect(unsupported.reasonCode).toBe("adapter_not_registered");
+  });
+
+  it("validates runtime mode inference and rejects runtime mode ids/mismatches", async () => {
+    const registry = new MemoryRegistryStore();
+    const capabilityService = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+    await capabilityService.seedManifests([fakeRuntimeManifest, codexRuntimeManifest]);
+
+    const service = new RegistryService({ registry });
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "fake",
+        provider: "test",
+        adapterType: "process"
+      })
+    ).resolves.toBe("fake.deterministic");
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "codex",
+        provider: "openai",
+        adapterType: "process"
+      })
+    ).resolves.toBe("codex.exec_json");
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "fake",
+        provider: "test",
+        adapterType: "process",
+        runtimeMode: "runtime_mode_codex_exec_json"
+      })
+    ).rejects.toMatchObject({ code: "invalid_input", details: [{ path: "runtimeMode", issue: expect.any(String) }] });
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "fake",
+        provider: "test",
+        adapterType: "process",
+        runtimeMode: "codex.exec_json"
+      })
+    ).rejects.toMatchObject({ code: "invalid_input", details: [{ path: "runtimeMode", issue: expect.any(String) }] });
+  });
+
+  it("stores runtimeMode on runs when provided and preserves old behavior when absent", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new ManifestTestAdapter(fakeRuntimeManifest, async () => ({ ok: true }))]])
+    });
+    const service = new RunService({ runs, events, runner });
+
+    const withMode = await service.createRun({
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "run with mode",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic"
+    });
+    const withoutMode = await service.createRun({
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "run without mode",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {}
+    });
+
+    expect(withMode.runtimeMode).toBe("fake.deterministic");
+    expect(withoutMode.runtimeMode).toBeUndefined();
+    expect((await runs.get(withMode.id))?.runtimeMode).toBe("fake.deterministic");
+  });
 });
 
 class MemoryRunStore implements RunStore {
@@ -864,6 +1088,28 @@ class ThrowingArtifactContentStore {
 
 class NoopAdapter implements RuntimeAdapter {
   readonly id = "fake";
+  readonly manifest: RuntimeAdapterManifest = {
+    adapterId: "fake",
+    providerId: "provider_test",
+    runtimeId: "runtime_fake",
+    runtimeModeId: "runtime_mode_fake_deterministic",
+    runtimeModeSlug: "fake.deterministic",
+    name: "Fake deterministic runtime",
+    adapterType: "process",
+    kind: "deterministic_fake",
+    capabilities: ["run.start", "run.cancel", "event.normalized", "event.streaming", "artifact.transcript", "tool.fake_echo", "auth.none"],
+    limitations: [{ code: "deterministic_only", message: "Deterministic test adapter." }],
+    placement: {
+      local: { support: "supported", reason: "In-memory tests." },
+      hosted: { support: "unsupported", reason: "Not implemented in tests." },
+      connectedLocalNode: { support: "future", reason: "Not implemented in tests." }
+    },
+    check: {
+      strategy: "none",
+      required: [],
+      optional: []
+    }
+  };
 
   async check() {
     return { ok: true };
@@ -1187,6 +1433,198 @@ class ThrowingAfterFirstArtifactContentStore {
       throw new Error("artifact write failed");
     }
     return `stored/${path}`;
+  }
+}
+
+const unknownAvailability: RuntimeAvailability = {
+  state: "unknown",
+  canRun: false,
+  installed: false,
+  auth: "unknown",
+  version: null,
+  checkedAt: "2026-05-29T00:00:00.000Z",
+  reasonCode: null,
+  message: null
+};
+
+const fakeRuntimeManifest: RuntimeAdapterManifest = {
+  adapterId: "fake",
+  providerId: "provider_test",
+  runtimeId: "runtime_fake",
+  runtimeModeId: "runtime_mode_fake_deterministic",
+  runtimeModeSlug: "fake.deterministic",
+  name: "Fake deterministic runtime",
+  adapterType: "process",
+  kind: "deterministic_fake",
+  capabilities: ["run.start", "run.cancel", "event.normalized", "event.streaming", "artifact.transcript", "tool.fake_echo", "auth.none"],
+  limitations: [
+    {
+      code: "deterministic_only",
+      message: "Outputs are fixed for local smoke and contract tests."
+    }
+  ],
+  placement: {
+    local: { support: "supported", reason: "In-process deterministic test adapter." },
+    hosted: { support: "unsupported", reason: "Hosted worker execution is not shipped in R3." },
+    connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+  },
+  check: {
+    strategy: "none",
+    required: [],
+    optional: []
+  }
+};
+
+const codexRuntimeManifest: RuntimeAdapterManifest = {
+  adapterId: "codex",
+  providerId: "provider_openai",
+  runtimeId: "runtime_codex",
+  runtimeModeId: "runtime_mode_codex_exec_json",
+  runtimeModeSlug: "codex.exec_json",
+  name: "Codex exec JSON",
+  adapterType: "process",
+  kind: "one_shot_process",
+  capabilities: [
+    "run.start",
+    "run.cancel",
+    "run.timeout",
+    "event.normalized",
+    "event.streaming",
+    "artifact.transcript",
+    "artifact.raw_transcript",
+    "model.catalog",
+    "auth.local",
+    "sandbox.read_only",
+    "sandbox.workspace_write",
+    "sandbox.danger_full_access"
+  ],
+  limitations: [
+    { code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." },
+    { code: "local_only", message: "This mode runs a local Codex CLI process and is not hosted-safe in R3." }
+  ],
+  placement: {
+    local: { support: "supported", reason: "Requires a PATH-reachable local codex binary and local workspace." },
+    hosted: { support: "unsupported", reason: "Hosted subprocess execution is not shipped in R3." },
+    connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+  },
+  docsPath: "docs/development/adapters/CODEX.md",
+  check: {
+    strategy: "binary_version_and_model_catalog",
+    required: ["binary_version", "model_catalog"],
+    optional: ["sandbox_policy_probe"]
+  }
+};
+
+class ManifestTestAdapter extends NoopAdapter {
+  override readonly id: string;
+  readonly manifest: RuntimeAdapterManifest;
+  private readonly impl: () => Promise<{ ok: boolean; message?: string; details?: Record<string, unknown> }>;
+
+  constructor(
+    manifest: RuntimeAdapterManifest,
+    checkImpl: () => Promise<{ ok: boolean; message?: string; details?: Record<string, unknown> }>
+  ) {
+    super();
+    this.manifest = manifest;
+    this.id = manifest.adapterId;
+    this.impl = checkImpl;
+  }
+
+  override async check(): Promise<{ ok: boolean; message?: string; details?: Record<string, unknown> }> {
+    return this.impl();
+  }
+}
+
+class MemoryRegistryStore implements RegistryStore {
+  readonly providers = new Map<string, { id: string; name: string; authMode: "none" | "local" | "api_key" | "oauth" | "custom"; status: "available" | "unavailable" | "degraded" | "unknown" }>();
+  readonly runtimes = new Map<string, RuntimeTarget>();
+  readonly models = new Map<string, { id: string; providerId: string; modelName: string; supportsTools: boolean; supportsStreaming: boolean; supportsBrowser: boolean; status: "available" | "unavailable" | "degraded" | "unknown" }>();
+  readonly runtimeModes = new Map<string, RuntimeMode>();
+  readonly runtimeModesBySlug = new Map<string, string>();
+
+  async createProvider(provider: { id: string; name: string; authMode: "none" | "local" | "api_key" | "oauth" | "custom"; status: "available" | "unavailable" | "degraded" | "unknown" }) {
+    this.providers.set(provider.id, provider);
+    return provider;
+  }
+
+  async createRuntime(runtime: RuntimeTarget): Promise<RuntimeTarget> {
+    this.runtimes.set(runtime.id, runtime);
+    return runtime;
+  }
+
+  async createModel(model: { id: string; providerId: string; modelName: string; supportsTools: boolean; supportsStreaming: boolean; supportsBrowser: boolean; status: "available" | "unavailable" | "degraded" | "unknown" }) {
+    this.models.set(model.id, model);
+    return model;
+  }
+
+  async getProvider(id: string) {
+    return this.providers.get(id);
+  }
+
+  async getRuntime(id: string): Promise<RuntimeTarget | undefined> {
+    return this.runtimes.get(id);
+  }
+
+  async getModel(id: string) {
+    return this.models.get(id);
+  }
+
+  async listProviders(_filter: { limit: number; before?: { id: string } | undefined }) {
+    return { providers: [...this.providers.values()], nextCursor: null };
+  }
+
+  async listRuntimes(_filter: { providerIds?: readonly string[]; adapterType?: readonly string[]; limit: number; before?: { id: string } | undefined }) {
+    return { runtimes: [...this.runtimes.values()], nextCursor: null };
+  }
+
+  async listModels(_filter: { providerIds?: readonly string[]; limit: number; before?: { id: string } | undefined }) {
+    return { models: [...this.models.values()], nextCursor: null };
+  }
+
+  async upsertRuntimeMode(mode: RuntimeMode): Promise<RuntimeMode> {
+    this.runtimeModes.set(mode.id, mode);
+    this.runtimeModesBySlug.set(mode.slug, mode.id);
+    return mode;
+  }
+
+  async getRuntimeMode(idOrSlug: string): Promise<RuntimeMode | undefined> {
+    if (idOrSlug.startsWith("runtime_mode_")) {
+      return this.runtimeModes.get(idOrSlug);
+    }
+    const id = this.runtimeModesBySlug.get(idOrSlug);
+    return id ? this.runtimeModes.get(id) : undefined;
+  }
+
+  async listRuntimeModes(_filter: {
+    providerIds?: readonly string[];
+    runtimeIds?: readonly string[];
+    adapterType?: readonly string[];
+    kind?: readonly string[];
+    availability?: readonly string[];
+    placement?: readonly string[];
+    capability?: readonly string[];
+    limit: number;
+    before?: { id: string } | undefined;
+  }): Promise<{ runtimeModes: RuntimeMode[]; nextCursor: { id: string } | null }> {
+    return {
+      runtimeModes: [...this.runtimeModes.values()],
+      nextCursor: null
+    };
+  }
+
+  async updateRuntimeModeAvailability(idOrSlug: string, availability: RuntimeAvailability): Promise<RuntimeMode | undefined> {
+    const mode = await this.getRuntimeMode(idOrSlug);
+    if (!mode) {
+      return undefined;
+    }
+    const updated: RuntimeMode = {
+      ...mode,
+      availability,
+      status: availability.state,
+      updatedAt: availability.checkedAt
+    };
+    await this.upsertRuntimeMode(updated);
+    return updated;
   }
 }
 

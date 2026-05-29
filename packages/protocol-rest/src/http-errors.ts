@@ -8,6 +8,7 @@ const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   missing_artifact_content: 404,
   provider_not_found: 404,
   runtime_not_found: 404,
+  runtime_mode_not_found: 404,
   model_not_found: 404,
   invalid_input: 400,
   invalid_query: 400,
