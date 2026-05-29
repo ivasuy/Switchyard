@@ -37,3 +37,28 @@
 
 **Notes:**
 - `docs/development/DEVELOPMENT.md`, `docs/development/adapters/CODEX.md`, and `docs/adapters/README.md` are generally aligned with the shipped R3 scope.
+
+## 2026-05-29T19:21:56Z — Pass 2 (re-audit)
+
+**Verdict:** NEEDS_REVISION
+
+**Checks run:**
+- `git diff --check` ✅
+- `pnpm --filter @switchyard/protocol-rest test` ✅
+- `pnpm --filter @switchyard/daemon test` ✅
+- `pnpm typecheck` ✅
+- `pnpm test` ✅
+- `pnpm build` ✅
+- `pnpm lint` ✅
+
+**Findings:**
+- [high] `docs/development/API.md:344` and `docs/development/API.md:409` — the new runtime-mode examples are present, but they still do not match the shipped response shape because `limitations` entries use `summary` instead of the actual public `message` field. The lookup example at `docs/development/API.md:374` is also still a truncated partial object rather than a full response-shape example.
+  - Required change: make the runtime-mode and check examples use the real `limitations[].message` field and align the `GET /runtime-modes/:id` example with the shipped response shape.
+
+**Required changes (if NEEDS_REVISION):**
+1. Replace `limitations[].summary` with `limitations[].message` in the runtime-mode and check examples.
+2. Expand the single-runtime-mode example so it reflects the shipped response shape instead of a truncated partial object.
+
+**Notes:**
+- The changelog placeholder is fixed.
+- `PRODUCT.md` now uses the shipped runtime-mode vocabulary and includes the capability/doctor endpoints.

@@ -33,3 +33,22 @@
 **Notes:**
 - Fake and Codex manifests otherwise stay within the R3 scope: `fake.deterministic` and `codex.exec_json` only, with no interactive/PTY/hosted claims.
 - This omission causes the active-check redflag recorded in `P2-T6`.
+
+## 2026-05-29T19:21:56Z — Pass 2 (re-audit)
+
+**Verdict:** GREEN
+
+**Checks run:**
+- `pnpm --filter @switchyard/adapters test` ✅
+- `pnpm --filter @switchyard/core test` ✅
+- `pnpm typecheck` ✅
+- `pnpm test` ✅
+- `pnpm build` ✅
+- `pnpm lint` ✅
+
+**Findings:**
+- None. Prior required changes resolved.
+
+**Notes:**
+- `CodexExecJsonAdapter.check()` now forwards `optionalChecks` in `RuntimeAdapterCheck.details`.
+- Regression coverage exists in `packages/adapters/test/codex-exec-json-adapter.test.ts` for the optional-check forwarding path.
