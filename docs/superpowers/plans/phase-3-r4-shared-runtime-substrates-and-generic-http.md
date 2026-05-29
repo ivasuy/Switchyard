@@ -62,6 +62,10 @@ SWITCHYARD_GENERIC_HTTP_MAX_RESPONSE_BYTES
 
 The Generic HTTP adapter must never read base URL, auth token, request timeout, poll interval, or max response bytes from run metadata.
 
+Runtime doctor checks must stop assuming every non-fake mode is Codex-shaped. `RuntimeDoctorService` must branch on `mode.check.strategy` or `mode.slug`: `binary_version` and `binary_version_and_model_catalog` keep the existing Codex mapping, `none` keeps fake deterministic mapping, and `http_health` consumes sanitized adapter-provided availability/check details from `adapter.check()` for `generic_http.async_rest`. The doctor must not require `version` or `models` for HTTP health modes, and it must never surface auth tokens through `details`, diagnostics, logs, doctor responses, or persisted availability.
+
+Generic HTTP cancellation is verified-terminal, not acknowledgement-terminal. A 2xx cancel response, an empty cancel body, or `{}` only means the wrapper accepted the cancel request. `GenericHttpAsyncRestAdapter.cancel()` must return only after it verifies terminal `cancelled` through the status endpoint or through adapter-owned in-memory session state that was already set from an observed cancelled wrapper event; otherwise it throws `AdapterProtocolError` and `RuntimeRunnerService.cancel()` leaves the run in its previous state. `RuntimeRunnerService` marks a non-terminal run `cancelled` only after `adapter.cancel()` returns, and cancel against an already terminal run is idempotent without a second adapter call.
+
 ## File Structure
 
 - `packages/contracts/src/registry.ts` - adds the `auth.api_key` capability and parses the full Generic HTTP runtime-mode record.
@@ -102,6 +106,10 @@ export interface RuntimeAdapter {
 `packages/core/src/services/registry-service.ts` currently infers only `fake.deterministic` and `codex.exec_json`. R4 adds `runtime: "generic_http"` with `adapterType: "http"` -> `generic_http.async_rest`.
 
 `apps/daemon/src/app.ts` currently registers fake and Codex adapters, seeds fake and Codex provider/runtime/model records, seeds runtime manifests, and wires registry/doctor/run REST routes. Generic HTTP should follow that pattern.
+
+`packages/core/src/services/runtime-doctor-service.ts` is currently Codex-shaped after the fake branch: it expects binary-style `version`, `models`, and optional checks for non-fake modes. R4 must add an explicit `http_health` mapping path for adapter-provided availability.
+
+`packages/testkit/src/fake-runtime-adapter.ts` currently lets `send()` return success even though the manifest does not declare an approved post-start input capability. R4 must change that behavior to throw `AdapterProtocolError` instead of adding a forbidden `run.input` capability.
 
 ## Task Graph
 
@@ -165,7 +173,7 @@ export interface RuntimeAdapter {
 
 `integration_contracts`:
 - `exports`:
-  - `{ name: "runtimeCapabilitySchema", kind: "constant", signature: "z.enum([...,'auth.api_key'])" }`
+  - `{ name: "runtimeCapabilitySchema", kind: "constant", signature: "z.enum(['run.start','run.cancel','run.timeout','event.normalized','event.streaming','artifact.transcript','artifact.raw_transcript','model.catalog','tool.fake_echo','auth.none','auth.local','auth.api_key','sandbox.read_only','sandbox.workspace_write','sandbox.danger_full_access'])" }`
   - `{ name: "RegistryService.inferAndValidateRuntimeMode", kind: "function", signature: "(input: { runtime: string; provider: string; adapterType: AdapterType; runtimeMode?: string }) => Promise<string | undefined>" }`
 - `imports_from_other_tasks`: []
 - `file_paths_consumed_by_other_tasks`:
@@ -194,12 +202,15 @@ export interface RuntimeAdapter {
 - `packages/core/test/core.test.ts` - existing lifecycle, timeout, cancellation, artifact, and doctor tests.
 - `packages/core/src/ports/runtime-adapter.ts` - adapter shape used by runner and test fakes.
 
-`instructions`: Add `AdapterProtocolError` or an equivalent named core error carrying code `adapter_protocol_failed`, a public message, optional reason code, and sanitized details. Keep `createNotImplementedError` source-compatible. Move the inline doctor timeout logic into `runtime-timeout.ts` with `TimeoutError`, `withTimeout`, and an abort helper that clears timers in success and failure paths. Update `RuntimeDoctorService` to use the shared helper. Update `RuntimeRunnerService` so adapter-emitted `run.cancelled` terminalizes the run and session as `cancelled`, appends exactly one `run.cancelled` event, and persists transcript artifacts just like completed/failed terminal events. Keep timeout behavior unchanged: status `timeout`, session `failed`, a normalized `run.failed` payload with `status: "timeout"` and `error: "runtime_timeout"`, and best-effort upstream cancel. Keep artifact persistence failure after terminalization from rewriting completed/cancelled/failed runs.
+`instructions`: Add `AdapterProtocolError` or an equivalent named core error carrying code `adapter_protocol_failed`, a public message, optional reason code, and sanitized details. Keep `createNotImplementedError` source-compatible. Move the inline doctor timeout logic into `runtime-timeout.ts` with `TimeoutError`, `withTimeout`, and an abort helper that clears timers in success and failure paths. Update `RuntimeDoctorService` to use the shared helper and to branch availability mapping by `mode.check.strategy` and mode slug. `none` keeps the existing fake deterministic result. `binary_version` and `binary_version_and_model_catalog` keep the existing Codex-shaped `version`/`models` mapping. `http_health` consumes only sanitized adapter-provided `details.availability` and `details.diagnostics` from `adapter.check()` and must not require `version` or `models`; this is the path for `generic_http.async_rest`. The accepted `details.availability` shape is `{ state, canRun, installed, auth, reasonCode, message, version? }` with the same enum values as `RuntimeAvailability`, and the doctor must sanitize the message and diagnostics through `maxDiagnosticBytes` before persisting. Update `RuntimeRunnerService` so adapter-emitted `run.cancelled` terminalizes the run and session as `cancelled`, appends exactly one `run.cancelled` event, and persists transcript artifacts just like completed/failed terminal events. Change `RuntimeRunnerService.cancel()` to be idempotent for already terminal runs and to update a non-terminal run to `cancelled` only after `adapter.cancel()` returns; if `adapter.cancel()` throws `AdapterProtocolError`, the run and session remain in their previous state. Keep timeout behavior unchanged: status `timeout`, session `failed`, a normalized `run.failed` payload with `status: "timeout"` and `error: "runtime_timeout"`, and best-effort upstream cancel. Keep artifact persistence failure after terminalization from rewriting completed/cancelled/failed runs.
 
 `acceptance`:
 - `AdapterProtocolError` is exported from `@switchyard/core`, has code `adapter_protocol_failed`, and can be detected by REST without checking adapter-specific class names.
 - `RuntimeDoctorService` uses the shared timeout helper and existing doctor timeout/output-bound tests still pass.
+- `RuntimeDoctorService` maps `generic_http.async_rest` through `http_health` adapter-provided availability details instead of Codex binary/version/model logic.
+- Generic HTTP doctor mapping covers missing config, invalid config, check timeout, health non-2xx, invalid health JSON, oversized health body, success without auth token, success with auth token, and proves no token appears in doctor output, stored availability, diagnostics, or logs.
 - Adapter-emitted `run.cancelled` terminalizes the run as `cancelled`, marks the session `cancelled`, appends one terminal event, and persists transcript artifacts.
+- `RuntimeRunnerService.cancel()` does not mark a run cancelled when adapter cancel fails and returns already terminal runs without calling adapter cancel again.
 - Completed and failed terminal events keep existing behavior and sequence ordering.
 - Runner timeout behavior still emits `run.failed` with `runtime_timeout`, marks run `timeout`, and calls adapter cancel best-effort.
 - Artifact persistence errors after terminalization do not rewrite a completed, failed, cancelled, or timeout run to a different terminal status.
@@ -215,7 +226,10 @@ export interface RuntimeAdapter {
 | --- | --- | --- | --- | --- |
 | `AdapterProtocolError` | REST cannot distinguish expected adapter action failures | Generic `Error` bubbles to 500 | Use a named exported class with code `adapter_protocol_failed` | Unsupported input and cancel failure return `409 adapter_protocol_failed` |
 | `withTimeout` | Timer leaks or timeout fires after success | Tests observe unresolved timers or late rejection | Clear timer in both promise branches and expose `TimeoutError` | Doctor checks remain bounded without noisy late failures |
+| `RuntimeDoctorService` `http_health` mapping | Generic HTTP check is interpreted as Codex and becomes `binary_unavailable` | Adapter returns no `version` or `models` | Branch on `mode.check.strategy === "http_health"` or `mode.slug === "generic_http.async_rest"` and consume adapter-provided availability | Doctor reports exact Generic HTTP reason codes instead of a false binary error |
+| `RuntimeDoctorService` output sanitization | Auth token leaks through check details, diagnostics, logs, or persisted availability | Adapter details include bearer token in message by mistake | Truncate and redact `Authorization`, `Bearer`, and configured token substrings before buildCheck/update/log | Doctor and runtime-mode APIs are safe to expose |
 | `RuntimeRunnerService` terminal event handling | `run.cancelled` from adapter is ignored or converted to failed | Generic HTTP cancellation test leaves run running or failed | Include `run.cancelled` in terminal event branch and map terminal status by event type | `POST /runs/:id/cancel` can persist cancellation through adapter events |
+| `RuntimeRunnerService.cancel` | 2xx upstream cancel acknowledgement silently marks run cancelled even though wrapper still runs | Adapter returns before terminal verification or throws after partial cancel | Require adapter success before state update; return terminal runs unchanged; leave state unchanged on `AdapterProtocolError` | Public cancel returns failure without lying about run state |
 | `timeoutRun` | Upstream cancel failure hides timeout terminalization | Adapter cancel throws during timeout path | Keep best-effort catch, log warning, and continue timeout terminalization | Run becomes `timeout` instead of hanging |
 | `persistArtifacts` after terminal | Artifact failure rewrites a successful terminal run | Unsafe path or content-store throw changes run to failed | Existing terminal guard remains; extend tests for cancelled terminal state | Run state stays terminal while artifact failure is visible in logs/tests |
 
@@ -229,7 +243,16 @@ export interface RuntimeAdapter {
 - `{ name: "withTimeout success clears timer", lens: "happy", given: "withTimeout(Promise.resolve('ok'), 50)", expect: "resolves ok and does not later reject" }`
 - `{ name: "withTimeout timeout rejects with TimeoutError", lens: "error_path", given: "never-resolving promise and 5ms timeout", expect: "rejects TimeoutError" }`
 - `{ name: "doctor uses shared timeout", lens: "integration", given: "hung adapter check and short checkTimeoutMs", expect: "doctor reasonCode check_timeout" }`
+- `{ name: "doctor http health missing config", lens: "happy_shadow_nil", given: "generic_http.async_rest mode with http_health and adapter details availability reason generic_http_config_missing", expect: "state unavailable, canRun false, installed false, auth unknown" }`
+- `{ name: "doctor http health invalid config", lens: "error_path", given: "adapter details availability reason generic_http_config_invalid", expect: "state unavailable, canRun false, installed false, auth unknown" }`
+- `{ name: "doctor http health non 2xx", lens: "error_path", given: "adapter details availability reason generic_http_health_unavailable", expect: "state unavailable, canRun false, installed true" }`
+- `{ name: "doctor http health invalid json", lens: "error_path", given: "adapter details availability reason generic_http_health_invalid", expect: "state unknown, canRun false, installed true" }`
+- `{ name: "doctor http health oversized body", lens: "error_path", given: "adapter details outputBytes above maxDiagnosticBytes or reason check_output_too_large", expect: "state unknown and reasonCode check_output_too_large" }`
+- `{ name: "doctor http health success no auth", lens: "happy", given: "adapter details availability available auth not_required", expect: "state available, canRun true, installed true, auth not_required" }`
+- `{ name: "doctor http health success with auth redacts token", lens: "edge_auth", given: "adapter details availability available auth configured and messages containing a fake bearer token", expect: "state available, auth configured, token absent from returned check, stored availability, diagnostics, and logger payloads" }`
 - `{ name: "adapter emitted run.cancelled terminalizes", lens: "happy", given: "adapter.events yields runtime.status then run.cancelled", expect: "run status cancelled, session cancelled, events include one run.cancelled" }`
+- `{ name: "cancel adapter protocol failure preserves state", lens: "error_path", given: "active run and adapter.cancel throws AdapterProtocolError", expect: "runner.cancel rejects and stored run remains running" }`
+- `{ name: "cancel already terminal idempotent", lens: "edge_cancel", given: "completed, failed, timeout, and cancelled runs with sessions", expect: "runner.cancel returns current run and adapter.cancel is not called" }`
 - `{ name: "cancelled run persists transcript artifact", lens: "integration", given: "adapter emits run.cancelled and returns transcript artifact content", expect: "artifact.created follows terminal event and contentStored is set when content store is configured" }`
 - `{ name: "timeout path unchanged", lens: "error_path", given: "adapter never yields terminal before timeoutSeconds", expect: "run timeout, session failed, run.failed payload runtime_timeout, adapter.cancel called" }`
 
@@ -339,6 +362,7 @@ export interface RuntimeAdapter {
 - Create: `packages/testkit/src/fake-http-runtime-server.ts`
 - Create: `packages/testkit/src/fake-http-runtime-cli.ts`
 - Create: `packages/testkit/src/runtime-adapter-contract-harness.ts`
+- Modify: `packages/testkit/src/fake-runtime-adapter.ts`
 - Modify: `packages/testkit/src/index.ts`
 - Create: `packages/testkit/test/fake-http-runtime-server.test.ts`
 - Modify: `packages/testkit/test/fake-runtime-adapter.test.ts`
@@ -355,13 +379,15 @@ export interface RuntimeAdapter {
 - `packages/testkit/package.json` - package scripts and dependency declaration.
 - `packages/core/src/ports/runtime-adapter.ts` - adapter interface the contract harness validates.
 
-`instructions`: Add a Fastify-backed loopback fake HTTP runtime server that binds to an ephemeral port by default, never calls external services, and stores run state in memory. Expose `startFakeHttpRuntimeServer(options)` returning `{ baseUrl, close, url(path) }`. Implement exactly the wrapper endpoints from the spec: `GET /health`, `POST /v1/runs`, `GET /v1/runs/:externalRunId`, `GET /v1/runs/:externalRunId/events?cursor=...`, `POST /v1/runs/:externalRunId/cancel`, and `GET /v1/runs/:externalRunId/artifacts`. Support deterministic scenarios through helper options: `happy`, `empty_events`, `upstream_failed`, `start_http_500`, `invalid_start_json`, `invalid_events_json`, `cancellation`, `cancel_failure`, `timeout_no_terminal`, `unsafe_artifact_name`, and `missing_base_url` where missing base URL is represented by not starting the server. Add optional bearer auth assertion when an expected token is configured. Add a dev-only CLI script `fake-http-runtime` in testkit package scripts. Add a reusable adapter contract harness that verifies manifest parseability, bounded check, start session id, exactly one terminal event, unsupported input protocol error when no input capability exists, idempotent cancel, safe transcript artifact paths, and transcript content handoff. Use the harness for `FakeRuntimeAdapter` in testkit tests.
+`instructions`: Add a Fastify-backed loopback fake HTTP runtime server that binds to an ephemeral port by default, never calls external services, and stores run state in memory. Expose `startFakeHttpRuntimeServer(options)` returning `{ baseUrl, close, url(path) }`. Implement exactly the wrapper endpoints from the spec: `GET /health`, `POST /v1/runs`, `GET /v1/runs/:externalRunId`, `GET /v1/runs/:externalRunId/events?cursor=...`, `POST /v1/runs/:externalRunId/cancel`, and `GET /v1/runs/:externalRunId/artifacts`. Support deterministic scenarios through helper options: `happy`, `empty_events`, `upstream_failed`, `start_http_500`, `invalid_start_json`, `invalid_events_json`, `invalid_status_json`, `invalid_artifacts_json`, `cancellation`, `cancel_failure`, `cancel_false`, `cancel_404_nonterminal`, `cancel_accepted_but_status_running`, `timeout_no_terminal`, `unsafe_artifact_name`, `terminal_flag_without_terminal_event`, `events_without_ids`, `health_http_500`, `invalid_health_json`, `oversized_health_response`, `oversized_start_response`, `oversized_status_response`, `oversized_events_response`, `oversized_cancel_response`, `oversized_artifacts_response`, and `missing_base_url` where missing base URL is represented by not starting the server. Add optional bearer auth assertion when an expected token is configured. Change `FakeRuntimeAdapter.send()` to throw `AdapterProtocolError` with reason `fake_input_unsupported` because its manifest has no approved post-start input capability; do not add `run.input` or reinterpret `tool.fake_echo` as post-start input. Add a dev-only CLI script `fake-http-runtime` in testkit package scripts. Add a reusable async adapter contract harness that verifies manifest parseability, bounded check, start session id, exactly one terminal event, unsupported input protocol error when no approved input capability exists, idempotent cancel, safe transcript artifact paths, and transcript content handoff. Use the harness for `FakeRuntimeAdapter` in testkit tests.
 
 `acceptance`:
 - Fake server starts on loopback with an ephemeral port and closes cleanly in tests.
 - Each required endpoint returns the shape and status semantics in the spec.
 - Expected bearer auth is enforced without logging or returning the token.
 - All required scenarios are deterministic and selectable through helper options rather than public Switchyard API changes.
+- Oversized-body scenarios exist for health, start, status, events, cancel, and artifacts endpoints.
+- `FakeRuntimeAdapter.send()` throws `AdapterProtocolError` when called because R4 has no approved post-start input capability.
 - `pnpm --filter @switchyard/testkit fake-http-runtime -- --host 127.0.0.1 --port 5055` starts the fake wrapper for manual smoke.
 - Contract harness runs against `FakeRuntimeAdapter` and remains reusable by the adapters package.
 
@@ -378,7 +404,10 @@ export interface RuntimeAdapter {
 | fake auth middleware | Token leaks into response or assertion message | Test body contains expected token | Compare Authorization header but return generic 401 message | Auth smoke can verify behavior without secret exposure |
 | `/v1/runs` start | Invalid scenario state creates nondeterministic external ids | Two test runs collide unexpectedly | Generate stable per-server incrementing ids with run state map | Adapter tests are repeatable |
 | `/events` cursor handling | Duplicate events are emitted incorrectly by fake server | Cursor after `evt_1` returns `evt_1` again | Use event id index to return only events after cursor | Adapter duplicate-handling tests are meaningful |
+| oversized response scenarios | Adapter cannot prove per-endpoint body bounds | Fake only covers health body overflow | Return deterministic payloads above configured byte limits for health, start, status, events, cancel, and artifacts | Adapter tests prove every endpoint is bounded |
+| `FakeRuntimeAdapter.send` | Contract harness passes unsupported input for an adapter without input support | Fake `send()` silently resolves | Throw `AdapterProtocolError` reason `fake_input_unsupported` unless a future approved input capability exists | Public input behavior is honest for fake and Generic HTTP |
 | contract harness terminal check | Harness accepts duplicate terminal events | Adapter emits completed and failed but test passes | Count terminal events and assert exactly one | Adapter contract catches lifecycle bugs |
+| contract harness input check | Harness requires send success for every adapter | Generic HTTP and fake have no input capability | Check manifest capabilities and require `AdapterProtocolError` when no approved input capability is present | Harness matches R4 capability surface |
 | CLI script | Script keeps process alive after test close or ignores SIGINT | Manual smoke cannot stop cleanly | Register SIGINT/SIGTERM handlers that close Fastify before exit | Developer can stop fake wrapper predictably |
 
 `observability`:
@@ -393,18 +422,26 @@ export interface RuntimeAdapter {
 - `{ name: "empty events scenario", lens: "happy_shadow_empty", given: "events endpoint before status terminal", expect: "events [] and status later completed" }`
 - `{ name: "invalid start json scenario", lens: "error_path", given: "invalid_start_json", expect: "malformed or missing externalRunId response" }`
 - `{ name: "invalid events shape scenario", lens: "error_path", given: "invalid_events_json", expect: "events endpoint returns malformed body for adapter validation" }`
+- `{ name: "invalid status json scenario", lens: "error_path", given: "invalid_status_json", expect: "status endpoint returns malformed body for adapter validation" }`
+- `{ name: "oversized endpoint scenarios", lens: "error_path", given: "oversized_health_response, oversized_start_response, oversized_status_response, oversized_events_response, oversized_cancel_response, oversized_artifacts_response", expect: "each endpoint returns a body larger than a small test maxResponseBytes" }`
 - `{ name: "cancel failure scenario", lens: "error_path", given: "cancel_failure", expect: "cancel endpoint returns failure and status remains non-terminal" }`
+- `{ name: "cancel accepted but status running scenario", lens: "error_path", given: "cancel_accepted_but_status_running", expect: "cancel endpoint 2xx empty and subsequent status remains running" }`
+- `{ name: "cancel false scenario", lens: "error_path", given: "cancel_false", expect: "cancel endpoint returns cancelled false and subsequent status remains running" }`
+- `{ name: "cancel 404 nonterminal scenario", lens: "error_path", given: "cancel_404_nonterminal", expect: "cancel endpoint 404 and subsequent status remains running" }`
 - `{ name: "timeout no terminal scenario", lens: "edge_timeout", given: "timeout_no_terminal", expect: "events [] and status running across polls" }`
+- `{ name: "terminal flag without terminal event scenario", lens: "edge_events", given: "terminal_flag_without_terminal_event", expect: "events response has terminal true without completed, failed, or cancelled event" }`
+- `{ name: "events without ids scenario", lens: "edge_events", given: "events_without_ids", expect: "events omit id fields and may omit nextCursor for cursor fallback tests" }`
 - `{ name: "unsafe artifact name scenario", lens: "edge_artifact_safety", given: "unsafe_artifact_name", expect: "artifact name includes path traversal for adapter sanitization test" }`
+- `{ name: "fake adapter send unsupported", lens: "error_path", given: "FakeRuntimeAdapter.send(session,{text:'continue'})", expect: "throws AdapterProtocolError reason fake_input_unsupported" }`
 - `{ name: "fake adapter contract harness", lens: "integration", given: "FakeRuntimeAdapter and contract harness", expect: "manifest, check, start, events, cancel, and transcript artifact checks pass" }`
 
 `integration_contracts`:
 - `exports`:
   - `{ name: "startFakeHttpRuntimeServer", kind: "function", signature: "(options?: FakeHttpRuntimeServerOptions) => Promise<{ baseUrl: string; url(path: string): string; close(): Promise<void> }>" }`
-  - `{ name: "FakeHttpRuntimeScenario", kind: "type", signature: "'happy' | 'empty_events' | 'upstream_failed' | 'start_http_500' | 'invalid_start_json' | 'invalid_events_json' | 'cancellation' | 'cancel_failure' | 'timeout_no_terminal' | 'unsafe_artifact_name'" }`
-  - `{ name: "runRuntimeAdapterContract", kind: "function", signature: "(input: RuntimeAdapterContractInput) => void" }`
+  - `{ name: "FakeHttpRuntimeScenario", kind: "type", signature: "'happy' | 'empty_events' | 'upstream_failed' | 'start_http_500' | 'invalid_start_json' | 'invalid_status_json' | 'invalid_events_json' | 'invalid_artifacts_json' | 'cancellation' | 'cancel_failure' | 'cancel_false' | 'cancel_404_nonterminal' | 'cancel_accepted_but_status_running' | 'timeout_no_terminal' | 'unsafe_artifact_name' | 'terminal_flag_without_terminal_event' | 'events_without_ids' | 'health_http_500' | 'invalid_health_json' | 'oversized_health_response' | 'oversized_start_response' | 'oversized_status_response' | 'oversized_events_response' | 'oversized_cancel_response' | 'oversized_artifacts_response'" }`
+  - `{ name: "runRuntimeAdapterContract", kind: "function", signature: "(input: RuntimeAdapterContractInput) => Promise<void>" }`
 - `imports_from_other_tasks`:
-  - `{ from_task: "P3-T2-core-runner-protocol-timeout", name: "AdapterProtocolError", signature: "class with code adapter_protocol_failed" }`
+  - `{ from_task: "P3-T2-core-runner-protocol-timeout", name: "AdapterProtocolError", signature: "new AdapterProtocolError(message: string, options?: { reasonCode?: string; details?: Record<string, unknown> })" }`
 - `file_paths_consumed_by_other_tasks`:
   - `packages/testkit/src/fake-http-runtime-server.ts`
   - `packages/testkit/src/runtime-adapter-contract-harness.ts`
@@ -438,20 +475,26 @@ export interface RuntimeAdapter {
 - `packages/contracts/src/artifact.ts` - supported artifact types and metadata rules.
 - `packages/adapters/src/codex/codex-exec-json-adapter.ts` - current adapter implementation pattern for sessions, artifacts, logging, and defensive validation.
 - `packages/testkit/src/index.ts` - exported fake HTTP server and contract harness from Task P3-T4.
-- `packages/adapters/src/codex/codex-exec-json-adapter.ts` - current transcript construction behavior that Task P3-T3 extracts into a shared helper.
+- `packages/adapters/test/codex-exec-json-adapter.test.ts` - current transcript and lifecycle regression behavior that Generic HTTP contract tests should not weaken.
 
-`instructions`: Implement `GenericHttpAsyncRestAdapter` with id `generic_http`, manifest slug `generic_http.async_rest`, adapter type `http`, kind `async_rest`, spec capability and limitation lists, docs path `docs/development/adapters/GENERIC_HTTP.md`, and check strategy `http_health`. The constructor must accept daemon-supplied config: `baseUrl`, optional `authToken`, `requestTimeoutMs`, `pollIntervalMs`, `maxResponseBytes`, optional logger, and optional fetch implementation for tests. Validate base URL with `URL` and require `http:` or `https:`. Health check maps missing, invalid, timeout, non-2xx, invalid JSON, oversized, and success states exactly as the spec describes through `RuntimeAdapterCheck.details` reason codes. Start sends the exact request body from the spec, with empty metadata as `{}` and no config overrides from run metadata. Poll events with cursor, dedupe wrapper event ids, fallback to status when events are empty, normalize supported wrapper event types, turn unknown wrapper event types into `runtime.status` with `status: "unknown_event"`, and yield at most one terminal Switchyard event. Cancel posts wrapper cancel, treats 2xx empty or `{}` as accepted, handles 404 by checking status once, and throws `AdapterProtocolError` for timeout, connection error, invalid cancel JSON, or non-terminal failure. Artifacts fetch inline string content only, sanitize unsafe file names, convert unknown types to `raw_log`, return wrapper artifacts under `runs/<runId>/generic-http/`, and always include adapter transcript at `runs/<runId>/generic-http-transcript.jsonl`. `send` must throw `AdapterProtocolError` with reason `generic_http_input_unsupported`.
+`instructions`: Implement `GenericHttpAsyncRestAdapter` with id `generic_http`, manifest slug `generic_http.async_rest`, adapter type `http`, kind `async_rest`, spec capability and limitation lists, docs path `docs/development/adapters/GENERIC_HTTP.md`, and check strategy `http_health`. The constructor must accept daemon-supplied config: `baseUrl`, optional `authToken`, `requestTimeoutMs`, `pollIntervalMs`, `maxResponseBytes`, optional logger, and optional fetch implementation for tests. Validate base URL with `URL` and require `http:` or `https:`. Health check maps missing, invalid, timeout, non-2xx, invalid JSON, oversized, and success states through sanitized `RuntimeAdapterCheck.details.availability` using the shape consumed by Task P3-T2: `{ state, canRun, installed, auth, reasonCode, message, version? }`. Start sends the exact request body from the spec, with empty metadata as `{}` and no config overrides from run metadata. The shared HTTP reader must enforce `maxResponseBytes` for health, start, status, events, cancel, and artifacts. Oversized health maps to `check_output_too_large`; oversized run endpoints map to endpoint-specific reasons `generic_http_start_response_too_large`, `generic_http_status_response_too_large`, `generic_http_events_response_too_large`, `generic_http_cancel_response_too_large`, and `generic_http_artifacts_response_too_large`. Logs and transcripts for oversized failures record method, path, status when known, byte count, max bytes, and reason code, never full response bodies.
+
+Poll events with cursor, dedupe wrapper event ids, fallback to status when events are empty, normalize supported wrapper event types, turn unknown wrapper event types into `runtime.status` with `status: "unknown_event"`, and yield at most one terminal Switchyard event. If event ids are absent, use a per-session dedupe key built from canonical event summary fields and omit `payload.sourceEventId`; if `nextCursor` is absent, use the last seen wrapper event id when present and otherwise continue with local dedupe without inventing a public wrapper cursor. If an events response says `terminal: true` without a terminal wrapper event, call status once: terminal status produces the matching terminal Switchyard event, and non-terminal or invalid status yields one `run.failed` with `generic_http_invalid_events_response`. Cancel posts wrapper cancel but treats 2xx empty, `{}`, or `{ cancelled: true }` as acknowledgement only. `GenericHttpAsyncRestAdapter.cancel()` must verify terminal cancelled status through status or existing adapter session state before it returns; `{ cancelled: false }`, timeout, connection error, oversized cancel body, invalid cancel JSON, non-terminal 4xx/5xx, and 404 followed by non-terminal status all throw `AdapterProtocolError` reason `generic_http_cancel_failed`. If adapter session state already records terminal `completed`, `failed`, `cancelled`, or `timeout`, cancel returns without another HTTP request. Artifacts fetch inline string content only, sanitize unsafe file names, convert unknown types to `raw_log`, return wrapper artifacts under `runs/<runId>/generic-http/`, and always include adapter transcript at `runs/<runId>/generic-http-transcript.jsonl`. `send` must throw `AdapterProtocolError` with reason `generic_http_input_unsupported`.
 
 `acceptance`:
 - Manifest matches the spec and parses through runtime-mode contracts.
 - `check()` covers missing config, invalid config, health success, health non-2xx, health timeout, invalid health JSON, oversized health response, and optional auth token.
 - Happy path against the fake HTTP server yields normalized `runtime.status`, `runtime.output`, and `run.completed`, stores `externalSessionKey`, and returns transcript artifacts.
 - Upstream failed path yields one `run.failed` with sanitized wrapper error.
-- Cancellation path yields or enables `run.cancelled` and cancel is idempotent after terminal state.
+- Cancellation verifies terminal cancelled state before adapter `cancel()` returns; 2xx acknowledgement alone, `{ cancelled: false }`, timeout, oversized cancel response, and 404 plus non-terminal status all fail visibly without marking the run cancelled.
+- Cancel is idempotent after adapter session state is already terminal.
 - Timeout path continues polling until the runner timeout and adapter cancel is attempted.
-- Invalid start/events/status/artifacts responses fail with named Generic HTTP reason codes.
+- Invalid and oversized start/events/status/cancel/artifacts responses fail with named Generic HTTP reason codes and bounded transcript/log summaries.
+- Events handling covers `terminal: true` with no terminal event, absent event ids, duplicate ids, absent cursors, and cursor fallback.
 - Unsupported post-start input throws `AdapterProtocolError`.
 - Adapter contract harness passes for Codex with fake process, fake runtime, and Generic HTTP with fake server.
+
+`reviewer_auditor_focus`: This task stays intact because it owns one adapter package boundary and exactly eight files, but it is dense. Reviewer and auditor must explicitly check: every HTTP endpoint enforces `maxResponseBytes`; every failure reason is endpoint-specific; cancel does not terminalize on 2xx acknowledgement alone; absent ids/cursors do not duplicate events; `terminal: true` without a terminal event is status-verified; `send()` rejects without `run.input`; and no auth token appears in thrown errors, logs, doctor details, or transcript artifacts.
 
 `checks`:
 - `pnpm --filter @switchyard/adapters test -- generic-http-adapter`
@@ -467,13 +510,15 @@ export interface RuntimeAdapter {
 | constructor/config parse | Base URL missing, empty, invalid, or non-http | `URL` parse throws or protocol check fails | Store unavailable check details with `generic_http_config_missing` or `generic_http_config_invalid`; do not throw from manifest access | Runtime mode exists but doctor reports unavailable |
 | HTTP client response reader | Wrapper sends oversized body | Byte count exceeds `maxResponseBytes` | Abort read and return/throw reason `check_output_too_large` or endpoint-specific invalid response code | Public check/run failure is bounded |
 | health check | Health timeout or non-2xx | `TimeoutError` or HTTP status outside 2xx | Map timeout to `check_timeout`, non-2xx to `generic_http_health_unavailable` | Doctor reports unavailable or unknown without 500 |
-| start | Missing task or invalid start response | Defensive validation fails or JSON missing `externalRunId` | Throw named error `generic_http_invalid_start_response`; non-2xx uses `generic_http_start_failed` | Run fails visibly instead of staying queued/running |
-| events poll | Malformed events response or required field missing | Shape validation fails | Yield one `run.failed` with `generic_http_invalid_events_response` and record transcript summary | Run terminalizes failed with named reason |
-| events dedupe | Duplicate wrapper event ids create duplicate Switchyard events | Same source id appears twice | Keep a per-session seen id set, skip duplicate, append duplicate transcript note | Event stream has one normalized event per wrapper event id |
+| start | Missing task, invalid start response, or oversized start body | Defensive validation fails, JSON missing `externalRunId`, or body exceeds limit | Throw named error `generic_http_invalid_start_response`, `generic_http_start_failed`, or `generic_http_start_response_too_large` | Run fails visibly instead of staying queued/running |
+| events poll | Malformed events response, required field missing, oversized body, or `terminal: true` without terminal event | Shape validation fails or body exceeds limit | Yield one `run.failed` with `generic_http_invalid_events_response` or `generic_http_events_response_too_large` and record transcript summary | Run terminalizes failed with named reason |
+| events dedupe | Duplicate or absent wrapper event ids create duplicate Switchyard events | Same source id appears twice or no ids/cursor exist | Keep a per-session seen set keyed by wrapper id or canonical event summary, skip duplicates, append duplicate transcript note | Event stream has one normalized event per logical wrapper event |
+| events cursor fallback | Wrapper omits `nextCursor` and event ids | Adapter repeats the same response forever | Use last wrapper id when present; otherwise rely on local dedupe and status fallback to avoid duplicate output | Poll loop remains bounded by timeout and does not duplicate visible events |
 | status fallback | External cancellation without Switchyard cancel request | Status `cancelled` arrives before adapter cancel flag | Emit `run.failed` with `generic_http_upstream_cancelled` | Unexpected upstream state is visible |
-| cancel | Wrapper cancel fails or times out | Non-terminal 4xx/5xx, timeout, connection error, invalid JSON | Throw `AdapterProtocolError` reason `generic_http_cancel_failed`; for 404 check status once | Public cancel returns `409` and run is not silently cancelled |
-| artifacts | Unsafe name or unknown type | Name has slash/path traversal, type not supported | Replace name with `artifact-<index>.jsonl`, preserve sanitized original name, convert unknown type to `raw_log` | Artifact paths stay under run root |
-| transcript | Auth token leaks | Transcript includes Authorization value | Record method/path/status/duration only and never accept raw headers | Artifact content is safe to inspect |
+| cancel | Wrapper cancel acknowledgement is not terminal | 2xx empty, `{}`, or `{ cancelled: true }` arrives while status remains running | Treat response as acknowledgement only and verify terminal cancelled status before returning | Public cancel does not lie about cancellation |
+| cancel | Wrapper cancel fails or times out | `{ cancelled: false }`, non-terminal 4xx/5xx, timeout, connection error, invalid JSON, oversized body | Throw `AdapterProtocolError` reason `generic_http_cancel_failed`, except oversized body uses `generic_http_cancel_response_too_large`; for 404 check status once | Public cancel returns `409` and run is not silently cancelled |
+| artifacts | Unsafe name, unknown type, malformed response, or oversized artifacts body | Name has slash/path traversal, type not supported, shape invalid, or body exceeds limit | Replace unsafe name, convert unknown type to `raw_log`, fail malformed or oversized with named reason | Artifact paths stay under run root and failures are bounded |
+| transcript and errors | Auth token leaks | Transcript, thrown error, logger payload, or check details includes Authorization value | Record method/path/status/duration/reason only, redact bearer-token patterns, and never accept raw headers | Artifact content, logs, doctor, and error responses are safe to inspect |
 
 `observability`:
 - `logs`: `generic_http.check`, `generic_http.request`, `generic_http.start`, `generic_http.events`, `generic_http.status`, `generic_http.cancel`, `generic_http.artifacts`, each with run id when available, method, URL pathname, status, duration, external run id, and reason code. No auth token, full response body, or raw stack trace.
@@ -488,15 +533,33 @@ export interface RuntimeAdapter {
 - `{ name: "health success no auth", lens: "happy", given: "fake server happy without token", expect: "check ok true auth not_required or equivalent details" }`
 - `{ name: "health success with auth", lens: "edge_auth", given: "fake server expected token and adapter authToken", expect: "Authorization sent, check ok true, token absent from logs/details/transcript" }`
 - `{ name: "health non-2xx", lens: "error_path", given: "fake health non-2xx", expect: "reasonCode generic_http_health_unavailable" }`
+- `{ name: "health timeout", lens: "error_path", given: "fake fetch that never resolves and requestTimeoutMs 5", expect: "reasonCode check_timeout and no token in message" }`
+- `{ name: "health invalid json", lens: "error_path", given: "invalid_health_json scenario", expect: "reasonCode generic_http_health_invalid" }`
+- `{ name: "health oversized body", lens: "error_path", given: "oversized_health_response and maxResponseBytes 32", expect: "reasonCode check_output_too_large with no body text in details/logs" }`
 - `{ name: "happy run completes", lens: "integration", given: "POST /runs request through adapter against happy fake server", expect: "runtime.status, runtime.output, run.completed and transcript artifact" }`
 - `{ name: "empty events fallback status completes", lens: "happy_shadow_empty", given: "empty_events scenario", expect: "adapter polls status and yields run.completed" }`
 - `{ name: "upstream failed emits run failed", lens: "error_path", given: "upstream_failed scenario", expect: "one run.failed with sanitized error" }`
 - `{ name: "invalid start response fails", lens: "error_path", given: "invalid_start_json scenario", expect: "generic_http_invalid_start_response" }`
+- `{ name: "oversized start response fails", lens: "error_path", given: "oversized_start_response and maxResponseBytes 32", expect: "generic_http_start_response_too_large and transcript has bounded summary only" }`
 - `{ name: "invalid events response fails", lens: "error_path", given: "invalid_events_json scenario", expect: "generic_http_invalid_events_response" }`
-- `{ name: "cancel success", lens: "happy", given: "cancellation scenario and adapter.cancel", expect: "cancel accepted and later run.cancelled when events/status observed" }`
+- `{ name: "invalid status response fails", lens: "error_path", given: "invalid_status_json scenario after empty events", expect: "generic_http_invalid_status_response" }`
+- `{ name: "oversized status response fails", lens: "error_path", given: "oversized_status_response and maxResponseBytes 32", expect: "generic_http_status_response_too_large" }`
+- `{ name: "oversized events response fails", lens: "error_path", given: "oversized_events_response and maxResponseBytes 32", expect: "generic_http_events_response_too_large" }`
+- `{ name: "terminal true without terminal event status verifies", lens: "edge_events", given: "terminal_flag_without_terminal_event with status completed", expect: "adapter emits run.completed once after status verification" }`
+- `{ name: "terminal true without terminal event nonterminal fails", lens: "error_path", given: "terminal_flag_without_terminal_event with status running", expect: "one run.failed with generic_http_invalid_events_response" }`
+- `{ name: "absent event ids and cursor dedupe", lens: "edge_events", given: "events_without_ids repeated across polls", expect: "no duplicate Switchyard events and payload.sourceEventId omitted" }`
+- `{ name: "cancel success after verified status", lens: "happy", given: "cancellation scenario and adapter.cancel", expect: "cancel request accepted, status verified cancelled, adapter.cancel returns" }`
+- `{ name: "cancel 2xx empty with status still running fails", lens: "error_path", given: "cancel_accepted_but_status_running scenario", expect: "AdapterProtocolError reason generic_http_cancel_failed" }`
+- `{ name: "cancel false fails", lens: "error_path", given: "cancel_false scenario", expect: "AdapterProtocolError reason generic_http_cancel_failed" }`
+- `{ name: "cancel timeout fails", lens: "error_path", given: "cancel request timeout", expect: "AdapterProtocolError reason generic_http_cancel_failed and no token in error" }`
+- `{ name: "cancel 404 nonterminal fails", lens: "error_path", given: "cancel_404_nonterminal scenario", expect: "status checked once, AdapterProtocolError reason generic_http_cancel_failed" }`
+- `{ name: "cancel oversized body fails", lens: "error_path", given: "oversized_cancel_response and maxResponseBytes 32", expect: "AdapterProtocolError reason generic_http_cancel_response_too_large" }`
+- `{ name: "cancel already terminal idempotent", lens: "edge_cancel", given: "adapter session state already completed, failed, timeout, or cancelled", expect: "adapter.cancel returns without HTTP cancel call" }`
 - `{ name: "cancel failure protocol error", lens: "error_path", given: "cancel_failure scenario", expect: "AdapterProtocolError reason generic_http_cancel_failed" }`
 - `{ name: "unsupported input", lens: "error_path", given: "adapter.send(session,{text:'continue'})", expect: "AdapterProtocolError reason generic_http_input_unsupported" }`
 - `{ name: "unsafe artifact sanitized", lens: "edge_artifact_safety", given: "unsafe_artifact_name scenario", expect: "artifact path under runs/<runId>/generic-http/ and metadata.originalName stored" }`
+- `{ name: "oversized artifacts response fails bounded", lens: "error_path", given: "oversized_artifacts_response and maxResponseBytes 32", expect: "generic_http_artifacts_response_too_large and transcript/log summary omits body" }`
+- `{ name: "token never leaks across adapter surfaces", lens: "edge_security", given: "authToken secret-r4-token and wrapper failures for health, start, events, status, cancel, artifacts", expect: "secret absent from thrown errors, logs, check details, and transcript content" }`
 - `{ name: "adapter contract suite", lens: "integration", given: "contract harness for Codex fake process and Generic HTTP fake server", expect: "exactly one terminal event and transcript artifact for each adapter shape" }`
 
 `integration_contracts`:
@@ -505,11 +568,11 @@ export interface RuntimeAdapter {
   - `{ name: "GenericHttpAsyncRestAdapterOptions", kind: "type", signature: "{ baseUrl?: string; authToken?: string; requestTimeoutMs?: number; pollIntervalMs?: number; maxResponseBytes?: number; logger?: RuntimeLogger; fetch?: typeof fetch }" }`
   - `{ name: "GENERIC_HTTP_RUNTIME_MODE_SLUG", kind: "constant", signature: "'generic_http.async_rest'" }`
 - `imports_from_other_tasks`:
-  - `{ from_task: "P3-T1-contracts-runtime-mode-and-inference", name: "auth.api_key capability support", signature: "runtimeCapabilitySchema accepts auth.api_key" }`
-  - `{ from_task: "P3-T2-core-runner-protocol-timeout", name: "AdapterProtocolError", signature: "class with code adapter_protocol_failed" }`
-  - `{ from_task: "P3-T3-process-substrates-and-codex-regression", name: "TranscriptRecorder", signature: "HTTP request/event transcript helper" }`
-  - `{ from_task: "P3-T4-testkit-fake-http-and-contract-harness", name: "startFakeHttpRuntimeServer", signature: "fake wrapper test server helper" }`
-  - `{ from_task: "P3-T4-testkit-fake-http-and-contract-harness", name: "runRuntimeAdapterContract", signature: "adapter contract harness" }`
+  - `{ from_task: "P3-T1-contracts-runtime-mode-and-inference", name: "runtimeCapabilitySchema", signature: "z.enum(['run.start','run.cancel','run.timeout','event.normalized','event.streaming','artifact.transcript','artifact.raw_transcript','model.catalog','tool.fake_echo','auth.none','auth.local','auth.api_key','sandbox.read_only','sandbox.workspace_write','sandbox.danger_full_access'])" }`
+  - `{ from_task: "P3-T2-core-runner-protocol-timeout", name: "AdapterProtocolError", signature: "new AdapterProtocolError(message: string, options?: { reasonCode?: string; details?: Record<string, unknown> })" }`
+  - `{ from_task: "P3-T3-process-substrates-and-codex-regression", name: "TranscriptRecorder", signature: "appendProcessStdout(line: string): void; appendProcessStderr(text: string): void; appendHttpRequest(entry): void; appendHttpEvent(entry): void; content(): string; metadata(input): Record<string, unknown>" }`
+  - `{ from_task: "P3-T4-testkit-fake-http-and-contract-harness", name: "startFakeHttpRuntimeServer", signature: "(options?: FakeHttpRuntimeServerOptions) => Promise<{ baseUrl: string; url(path: string): string; close(): Promise<void> }>" }`
+  - `{ from_task: "P3-T4-testkit-fake-http-and-contract-harness", name: "runRuntimeAdapterContract", signature: "(input: RuntimeAdapterContractInput) => Promise<void>" }`
 - `file_paths_consumed_by_other_tasks`:
   - `packages/adapters/src/generic-http/generic-http-adapter.ts`
   - `packages/adapters/src/index.ts`
@@ -542,17 +605,18 @@ export interface RuntimeAdapter {
 - `apps/daemon/test/smoke.test.ts` - current local smoke, registry, doctor, and artifact content tests.
 - `packages/testkit/src/index.ts` - fake HTTP server helper for daemon tests.
 
-`instructions`: Extend daemon config with Generic HTTP env fields and defaults: base URL optional, auth token optional, request timeout `5000`, poll interval `100`, max response bytes `1048576`. Instantiate `GenericHttpAsyncRestAdapter` with config and logger, register it under adapter id/runtime key `generic_http`, and seed provider/runtime/model records for `provider_generic_http`, `runtime_generic_http`, and `model_generic_http_default`. Seed the Generic HTTP manifest through `RuntimeCapabilityService` with initial availability: missing base URL is `unavailable`, `canRun: false`, `installed: false`, `auth: "unknown"`, reason `generic_http_config_missing`; valid configured base URL can start as `unknown` or active-check-derived when tests call `POST /runtime-modes/generic_http.async_rest/check`. REST create already asks `RegistryService` for runtime mode inference; add route tests for Generic HTTP inference and mismatch. Replace Codex-specific unsupported-input mapping in `run-routes.ts` with generic `AdapterProtocolError` mapping for input and cancel. Wrap `POST /runs/:id/cancel` adapter protocol failures into `409 adapter_protocol_failed`; do not mark the run cancelled when adapter cancel fails. Add daemon smoke tests using fake HTTP server config for runtime mode lookup, check availability, `GET /doctor`, `POST /runs?wait=1`, events, artifacts, artifact content, cancellation, failure, timeout, and missing config.
+`instructions`: Extend daemon config with Generic HTTP env fields and defaults: base URL optional, auth token optional, request timeout `5000`, poll interval `100`, max response bytes `1048576`. Instantiate `GenericHttpAsyncRestAdapter` with config and logger, register it under adapter id/runtime key `generic_http`, and seed provider/runtime/model records for `provider_generic_http`, `runtime_generic_http`, and `model_generic_http_default`. Seed the Generic HTTP manifest through `RuntimeCapabilityService` with initial availability: missing base URL is `unavailable`, `canRun: false`, `installed: false`, `auth: "unknown"`, reason `generic_http_config_missing`; valid configured base URL can start as `unknown` or active-check-derived when tests call `POST /runtime-modes/generic_http.async_rest/check`. Active check and `GET /doctor` must exercise the Task P3-T2 `http_health` doctor path, so missing config, invalid config, fake health success, fake health non-2xx, invalid health JSON, timeout, oversized health response, auth-token configured, and no-token cases report Generic HTTP reason codes rather than Codex binary reason codes. REST create already asks `RegistryService` for runtime mode inference; add route tests for Generic HTTP inference and mismatch. Replace Codex-specific unsupported-input mapping in `run-routes.ts` with generic `AdapterProtocolError` mapping for input and cancel. Wrap `POST /runs/:id/cancel` adapter protocol failures into `409 adapter_protocol_failed`; because Task P3-T5 verifies terminal cancellation before `adapter.cancel()` returns, this route must never mark the run cancelled for 2xx-only upstream acknowledgements, `{ cancelled: false }`, timeout, 404 plus non-terminal status, or oversized cancel responses. Add daemon smoke tests using fake HTTP server config for runtime mode lookup, check availability, `GET /doctor`, `POST /runs?wait=1`, events, artifacts, artifact content, cancellation, failure, timeout, cancel failure, and missing config.
 
 `acceptance`:
 - Daemon startup seeds Generic HTTP provider/runtime/model/runtime-mode records even when base URL is missing.
 - `GET /runtime-modes/generic_http.async_rest` works by slug and returns the Generic HTTP manifest.
-- `POST /runtime-modes/generic_http.async_rest/check` returns unavailable for missing config and available for fake-server config.
-- `GET /doctor` includes Generic HTTP in summary counts and never leaks auth token.
+- `POST /runtime-modes/generic_http.async_rest/check` returns exact Generic HTTP availability for missing config, invalid config, fake-server success, non-2xx, invalid JSON, timeout, oversized health body, success without auth, and success with auth.
+- `GET /doctor` includes Generic HTTP in summary counts and never leaks auth token in response bodies or captured logger payloads.
 - `POST /runs?wait=1` with `runtime: "generic_http"`, `provider: "generic_http"`, `model: "generic-http-default"`, and `adapterType: "http"` completes against the fake server and returns `response.text`.
 - Async `POST /runs` launches Generic HTTP in the background and run events are retrievable through existing SSE endpoint.
 - `POST /runs/:id/input` returns `409 adapter_protocol_failed` for Generic HTTP.
-- `POST /runs/:id/cancel` persists `cancelled` only when adapter cancel succeeds; cancel failure returns `409 adapter_protocol_failed`.
+- `POST /runs/:id/cancel` persists `cancelled` only after verified terminal cancellation; 2xx-only acknowledgement with status still running, `{ cancelled: false }`, timeout, 404 plus non-terminal status, oversized cancel body, and cancel failure return `409 adapter_protocol_failed`.
+- `POST /runs/:id/cancel` against an already terminal run is idempotent and does not call the wrapper cancel endpoint again.
 - `GET /runs/:id/artifacts`, `GET /artifacts/:id`, and `GET /artifacts/:id/content` expose Generic HTTP transcript content.
 - Existing fake and Codex daemon smoke tests keep passing.
 
@@ -571,7 +635,8 @@ export interface RuntimeAdapter {
 | `createDaemonApp` adapter map | Adapter registered under wrong key | Runner says `Runtime adapter not found: generic_http` | Register map key `generic_http` matching public run runtime | Generic HTTP runs launch |
 | registry seeding | Provider/runtime/model missing or wrong ids | Runtime-mode route returns dangling provider/runtime ids | Seed exact ids before manifest upsert | Registry APIs show coherent Generic HTTP records |
 | `POST /runs/:id/input` | Adapter-specific error name check misses Generic HTTP | Generic unsupported input returns 500 | Map exported `AdapterProtocolError` to `409 adapter_protocol_failed` | Caller sees stable error envelope |
-| `POST /runs/:id/cancel` | Cancel failure marks run cancelled | Adapter throws but route already updated run | Let runner update only after adapter cancel succeeds and map protocol error to 409 | Failed cancellation is visible and run state remains previous state |
+| `POST /runs/:id/cancel` | Cancel acknowledgement marks run cancelled before wrapper terminal state | Upstream returns 2xx empty while status remains running | Let runner update only after adapter verifies terminal cancellation and map protocol error to 409 | Failed or unverified cancellation is visible and run state remains previous state |
+| `POST /runs/:id/cancel` idempotency | Already terminal run triggers another wrapper cancel | User retries cancel after completion or timeout | Runner returns current terminal run without adapter call | Retry is safe and does not create misleading upstream traffic |
 | daemon doctor | Auth token leaks through config/details/logs | Test finds token in response or logs | Pass token only to adapter constructor; adapter details/logs omit token | Doctor output is safe |
 | artifact content | Generic HTTP transcript inline content not written out | Artifact metadata still includes `content` or content endpoint 404 | Reuse runner artifact content store and assert `contentStored: true` | Artifact content endpoint returns transcript bytes |
 
@@ -582,13 +647,23 @@ export interface RuntimeAdapter {
 
 `test_cases`:
 - `{ name: "missing config seeded unavailable", lens: "happy_shadow_nil", given: "createDaemonApp with no Generic HTTP env", expect: "runtime mode exists with reason generic_http_config_missing" }`
+- `{ name: "invalid config active check unavailable", lens: "error_path", given: "Generic HTTP env base URL ftp://example.test", expect: "POST check returns generic_http_config_invalid without startup 500" }`
 - `{ name: "generic http active check available", lens: "happy", given: "fake server baseUrl in config", expect: "POST /runtime-modes/generic_http.async_rest/check returns available canRun true" }`
+- `{ name: "generic http active check health non 2xx", lens: "error_path", given: "health_http_500 fake server", expect: "POST check returns generic_http_health_unavailable" }`
+- `{ name: "generic http active check invalid json", lens: "error_path", given: "invalid_health_json fake server", expect: "POST check returns generic_http_health_invalid" }`
+- `{ name: "generic http active check timeout", lens: "error_path", given: "fake server delayed beyond request timeout", expect: "POST check returns check_timeout" }`
+- `{ name: "generic http active check oversized", lens: "error_path", given: "oversized_health_response with low max bytes", expect: "POST check returns check_output_too_large" }`
+- `{ name: "generic http active check auth redaction", lens: "edge_auth", given: "auth token configured and failing fake health", expect: "token absent from response body and captured logs" }`
 - `{ name: "doctor counts generic http", lens: "integration", given: "daemon with fake server config", expect: "doctor summary includes Generic HTTP state" }`
 - `{ name: "run wait completes", lens: "integration", given: "POST /runs?wait=1 Generic HTTP payload", expect: "201, run completed, response.text fake http output" }`
 - `{ name: "async run events retrievable", lens: "integration", given: "POST /runs then GET /runs/:id/events", expect: "SSE contains runtime.output and run.completed" }`
 - `{ name: "input unsupported maps 409", lens: "error_path", given: "POST /runs/:id/input for Generic HTTP", expect: "409 adapter_protocol_failed" }`
 - `{ name: "cancel success persists cancelled", lens: "happy", given: "active Generic HTTP run and POST cancel", expect: "200 run.status cancelled and event run.cancelled" }`
 - `{ name: "cancel failure maps 409", lens: "error_path", given: "cancel_failure fake scenario", expect: "409 adapter_protocol_failed and run not silently cancelled" }`
+- `{ name: "cancel 2xx running maps 409", lens: "error_path", given: "cancel_accepted_but_status_running fake scenario", expect: "409 adapter_protocol_failed and stored run is not cancelled" }`
+- `{ name: "cancel false maps 409", lens: "error_path", given: "cancel_false fake scenario", expect: "409 adapter_protocol_failed and stored run is not cancelled" }`
+- `{ name: "cancel 404 nonterminal maps 409", lens: "error_path", given: "cancel_404_nonterminal fake scenario", expect: "409 adapter_protocol_failed and stored run is not cancelled" }`
+- `{ name: "cancel already terminal idempotent", lens: "edge_cancel", given: "completed Generic HTTP run and POST cancel", expect: "200 current terminal run and fake server cancel count unchanged" }`
 - `{ name: "artifact content endpoint returns transcript", lens: "integration", given: "completed Generic HTTP run", expect: "artifact metadata contentStored true and content contains generic-http transcript line" }`
 - `{ name: "explicit generic http runtime mode accepted", lens: "happy", given: "POST /runs with runtimeMode generic_http.async_rest and matching fields", expect: "run.runtimeMode generic_http.async_rest" }`
 - `{ name: "generic http explicit id rejected", lens: "error_path", given: "runtimeMode runtime_mode_generic_http_async_rest", expect: "400 invalid_input path runtimeMode" }`
@@ -598,10 +673,10 @@ export interface RuntimeAdapter {
   - `{ name: "DaemonConfig.genericHttp", kind: "type", signature: "{ baseUrl?: string; authToken?: string; requestTimeoutMs: number; pollIntervalMs: number; maxResponseBytes: number }" }`
   - `{ name: "registerRunRoutes AdapterProtocolError mapping", kind: "route behavior", signature: "AdapterProtocolError => HTTP 409 adapter_protocol_failed for input and cancel" }`
 - `imports_from_other_tasks`:
-  - `{ from_task: "P3-T1-contracts-runtime-mode-and-inference", name: "RegistryService generic_http inference", signature: "generic_http/http => generic_http.async_rest" }`
-  - `{ from_task: "P3-T2-core-runner-protocol-timeout", name: "AdapterProtocolError", signature: "class with code adapter_protocol_failed" }`
-  - `{ from_task: "P3-T4-testkit-fake-http-and-contract-harness", name: "startFakeHttpRuntimeServer", signature: "fake wrapper helper for daemon tests" }`
-  - `{ from_task: "P3-T5-generic-http-adapter", name: "GenericHttpAsyncRestAdapter", signature: "RuntimeAdapter implementation" }`
+  - `{ from_task: "P3-T1-contracts-runtime-mode-and-inference", name: "RegistryService.inferAndValidateRuntimeMode", signature: "(input: { runtime: string; provider: string; adapterType: AdapterType; runtimeMode?: string }) => Promise<string | undefined>" }`
+  - `{ from_task: "P3-T2-core-runner-protocol-timeout", name: "AdapterProtocolError", signature: "new AdapterProtocolError(message: string, options?: { reasonCode?: string; details?: Record<string, unknown> })" }`
+  - `{ from_task: "P3-T4-testkit-fake-http-and-contract-harness", name: "startFakeHttpRuntimeServer", signature: "(options?: FakeHttpRuntimeServerOptions) => Promise<{ baseUrl: string; url(path: string): string; close(): Promise<void> }>" }`
+  - `{ from_task: "P3-T5-generic-http-adapter", name: "GenericHttpAsyncRestAdapter", signature: "constructor(options?: GenericHttpAsyncRestAdapterOptions); implements RuntimeAdapter" }`
 - `file_paths_consumed_by_other_tasks`:
   - `apps/daemon/src/config.ts`
   - `apps/daemon/src/app.ts`
@@ -629,7 +704,7 @@ export interface RuntimeAdapter {
 - `docs/development/adapters/CODEX.md` - Codex debugging guide that must acknowledge shared process substrate without changing public behavior.
 - `docs/adapters/generic-http.md` - prior Generic HTTP research note to convert into shipped local development guidance.
 
-`instructions`: Update shipped-tense development docs to include Generic HTTP while keeping ACP, PTY, interactive Codex, hosted worker execution, SDK, CLI, tools, memory, debate, webhooks, per-run base URL overrides, and remote artifact URL fetching explicitly unshipped. In `API.md`, add Generic HTTP run-create example, runtime-mode inference bullet, runtime-mode/doctor example snippets, unsupported input and cancel failure behavior, and artifact transcript content behavior. In `DEVELOPMENT.md`, add the two-terminal fake wrapper plus daemon smoke from the spec, including `SWITCHYARD_GENERIC_HTTP_BASE_URL`. In adapter docs index, add Generic HTTP as implemented. In `CODEX.md`, mention that R4 moved common process plumbing into shared substrates while preserving Codex `exec --json` behavior, logs, and transcript path. Create `GENERIC_HTTP.md` with config variables, wrapper API contract, fake wrapper manual smoke, expected logs, common stuck states, secret-safety rules, and focused verification commands.
+`instructions`: Update shipped-tense development docs to include Generic HTTP while keeping ACP, PTY, interactive Codex, hosted worker execution, SDK, CLI, tools, memory, debate, webhooks, per-run base URL overrides, and remote artifact URL fetching explicitly unshipped. In `API.md`, add Generic HTTP run-create example, runtime-mode inference bullet, runtime-mode/doctor example snippets, unsupported input behavior, verified-terminal cancel behavior, cancel failure behavior, and artifact transcript content behavior. In `DEVELOPMENT.md`, add the two-terminal fake wrapper plus daemon smoke from the spec, including `SWITCHYARD_GENERIC_HTTP_BASE_URL`. In adapter docs index, add Generic HTTP as implemented. In `CODEX.md`, mention that R4 moved common process plumbing into shared substrates while preserving Codex `exec --json` behavior, logs, and transcript path. Create `GENERIC_HTTP.md` with config variables, wrapper API contract, fake wrapper manual smoke, expected logs, common stuck states, secret-safety rules, bounded response rules, and focused verification commands.
 
 `acceptance`:
 - Docs show `generic_http.async_rest` as shipped and locally verifiable.
@@ -662,15 +737,17 @@ export interface RuntimeAdapter {
 - `{ name: "development docs include fake wrapper smoke", lens: "integration", given: "read DEVELOPMENT.md", expect: "contains testkit fake-http-runtime command and SWITCHYARD_GENERIC_HTTP_BASE_URL" }`
 - `{ name: "generic guide lists env vars", lens: "happy", given: "read GENERIC_HTTP.md", expect: "all five Generic HTTP env vars and defaults are documented" }`
 - `{ name: "docs state unsupported input", lens: "error_path", given: "read API and GENERIC_HTTP docs", expect: "POST input returns 409 adapter_protocol_failed for Generic HTTP" }`
+- `{ name: "docs state verified cancel", lens: "edge_cancel", given: "read API and GENERIC_HTTP docs", expect: "2xx wrapper cancel acknowledgement alone is not enough; Switchyard reports cancelled only after verified terminal cancellation" }`
 - `{ name: "docs state no per-run base url", lens: "edge_security", given: "read Generic HTTP guide", expect: "base URL comes only from daemon env and metadata cannot override it" }`
 
 `integration_contracts`:
 - `exports`:
   - `{ name: "Generic HTTP local docs", kind: "document", signature: "docs/development/adapters/GENERIC_HTTP.md describes R4 Generic HTTP setup, API, logs, smoke, and limits" }`
-- `imports_from_other_tasks`:
-  - `{ from_task: "P3-T5-generic-http-adapter", name: "GenericHttpAsyncRestAdapter manifest and behavior", signature: "docs reflect shipped adapter contract" }`
-  - `{ from_task: "P3-T6-rest-daemon-generic-http-wiring", name: "daemon env and REST behavior", signature: "docs reflect actual env names and API responses" }`
+- `imports_from_other_tasks`: []
 - `file_paths_consumed_by_other_tasks`: []
+- `document_dependencies`:
+  - `{ from_task: "P3-T5-generic-http-adapter", subject: "GenericHttpAsyncRestAdapter manifest, verified cancel behavior, bounded HTTP responses, and token redaction" }`
+  - `{ from_task: "P3-T6-rest-daemon-generic-http-wiring", subject: "daemon env names, REST behavior, doctor output, and smoke command behavior" }`
 
 ### Task P3-T8-product-architecture-release-docs
 
@@ -735,10 +812,11 @@ export interface RuntimeAdapter {
 `integration_contracts`:
 - `exports`:
   - `{ name: "R4 product truth", kind: "document", signature: "PRODUCT.md and CHANGELOG.md describe R4 shipped surface and boundaries" }`
-- `imports_from_other_tasks`:
-  - `{ from_task: "P3-T5-generic-http-adapter", name: "Generic HTTP runtime behavior", signature: "docs reflect implemented adapter" }`
-  - `{ from_task: "P3-T6-rest-daemon-generic-http-wiring", name: "daemon and REST behavior", signature: "docs reflect shipped runtime mode and smoke" }`
+- `imports_from_other_tasks`: []
 - `file_paths_consumed_by_other_tasks`: []
+- `document_dependencies`:
+  - `{ from_task: "P3-T5-generic-http-adapter", subject: "implemented Generic HTTP runtime behavior and strict R4 boundaries" }`
+  - `{ from_task: "P3-T6-rest-daemon-generic-http-wiring", subject: "daemon, REST, runtime-mode, doctor, and smoke behavior" }`
 
 ## Integration Points
 
@@ -746,6 +824,9 @@ export interface RuntimeAdapter {
 - Runtime dispatch remains keyed by public run `runtime`, so daemon must register the Generic HTTP adapter under map key `generic_http`.
 - Generic HTTP manifests and registry records must use exact ids from the spec. Run payloads use slugs: provider `generic_http`, runtime `generic_http`, model `generic-http-default`, adapter type `http`, runtime mode `generic_http.async_rest`.
 - `AdapterProtocolError` is the cross-task bridge from adapters/core to REST. Adapter-specific error-name checks should not remain as the only mapping path.
+- `RuntimeDoctorService` must route `http_health` checks through adapter-provided availability details; Generic HTTP must not pass through the Codex binary/version/model branch.
+- Generic HTTP cancel must be verified-terminal before `RuntimeRunnerService` marks the run cancelled. A 2xx wrapper acknowledgement alone is not an integration contract.
+- Task `P3-T5` remains one task because it owns one adapter package boundary and eight files, but review and audit must use its `reviewer_auditor_focus` checklist before GREEN.
 - The fake HTTP wrapper is only in testkit and docs. It is not a Switchyard product daemon, public REST route, hosted worker, or adapter dependency at runtime.
 - No storage migration is required unless implementation changes persisted shapes beyond existing R3 nullable `runtimeMode` and artifact metadata. R4 transcript metadata additions are additive JSON metadata only.
 
@@ -754,9 +835,14 @@ export interface RuntimeAdapter {
 - `codex.exec_json` still passes existing tests and smoke checks after process substrate extraction.
 - Process-backed adapter code no longer owns generic queue, drain, transcript, timeout, and JSONL harness logic inline.
 - Generic HTTP is registered as `generic_http.async_rest` and appears in runtime mode and doctor APIs.
-- Generic HTTP can complete, fail, cancel, timeout, output events, and produce artifacts against the fake HTTP wrapper server.
+- Generic HTTP doctor/check maps missing config, invalid config, timeout, non-2xx, invalid JSON, oversized health body, success without auth, and success with auth through `http_health` without token leakage.
+- Generic HTTP can complete, fail, verified-cancel, timeout, output events, and produce artifacts against the fake HTTP wrapper server.
+- Generic HTTP rejects 2xx-only cancel acknowledgement with non-terminal status, `{ cancelled: false }`, timeout, 404 plus non-terminal status, and oversized cancel response without silently marking the run cancelled.
+- Generic HTTP enforces oversized-body bounds on health, start, status, events, cancel, and artifacts with endpoint-specific reason codes and bounded logs/transcripts.
+- Generic HTTP event polling handles `terminal: true` without a terminal event, absent event ids, duplicate event ids, absent cursors, and cursor fallback without duplicate visible events.
 - Transcript artifacts are stored for both Codex and Generic HTTP runs through the existing artifact content store path.
 - Adapter contract tests are reusable and run against fake, Codex with fake process, and Generic HTTP with fake server.
+- Fake and Generic HTTP post-start input fail with `AdapterProtocolError`; R4 does not add `run.input`.
 - Product/API/development docs say Generic HTTP is shipped and ACP, PTY, full Codex interactive, hosted execution, SDK/CLI, debate, tools, memory, and approval remain unshipped.
 
 ## Final Verification
@@ -814,13 +900,16 @@ curl -s "$BASE/runs/$RUN_ID/artifacts" | python3 -m json.tool
 - Codex process extraction can regress subtle behavior: stdin closure, fake process ordering, late stderr capture, invalid JSONL failure ordering, and transcript path. Task `P3-T3` is deliberately regression-heavy.
 - Generic HTTP can sprawl into a general integration framework. This plan keeps one strict wrapper contract, daemon-level config only, inline artifacts only, no webhooks, and no dynamic endpoint/auth maps.
 - Core timeout helper placement is constrained by package dependency direction. Core owns the timeout primitive; adapters expose an adapter substrate wrapper so core never imports from adapters.
+- Runtime doctor checks are currently Codex-biased for non-fake modes. Task `P3-T2` explicitly adds `http_health` availability mapping so Generic HTTP does not report false binary failures.
+- Cancel semantics can lie if upstream acknowledgement is treated as terminal state. Tasks `P3-T2`, `P3-T5`, and `P3-T6` pin verified-terminal cancellation and failure-preserves-state tests.
+- Generic HTTP token leakage can cross several surfaces at once. Tasks `P3-T2`, `P3-T4`, `P3-T5`, `P3-T6`, and `P3-T7` include log, doctor, error, transcript, and docs redaction coverage.
 - The phase is large. The task split keeps ownership disjoint, but integration sequencing matters and auditor should run full workspace checks after merge.
 
 ## Self-Review
 
-- Spec coverage: every promotion criterion maps to at least one task: contracts/inference `P3-T1`, core lifecycle `P3-T2`, Codex substrates `P3-T3`, fake server/contracts `P3-T4`, Generic HTTP adapter `P3-T5`, REST/daemon `P3-T6`, docs `P3-T7` and `P3-T8`.
-- Placeholder scan: no unresolved placeholders are intentionally present.
-- Type consistency: Generic HTTP slug, ids, adapter id, provider id, runtime id, model id, and `AdapterProtocolError` signatures are consistent across tasks.
+- Spec coverage: every promotion criterion maps to at least one task: contracts/inference `P3-T1`, core doctor and runner lifecycle `P3-T2`, Codex substrates `P3-T3`, fake server/contracts `P3-T4`, Generic HTTP adapter `P3-T5`, REST/daemon `P3-T6`, docs `P3-T7` and `P3-T8`.
+- Placeholder scan: no unresolved placeholders remain.
+- Type consistency: Generic HTTP slug, ids, adapter id, provider id, runtime id, model id, `AdapterProtocolError`, `runtimeCapabilitySchema`, `TranscriptRecorder`, `startFakeHttpRuntimeServer`, and `runRuntimeAdapterContract` signatures are consistent across tasks.
 - Ownership disjoint: no file is owned by more than one task.
 - Context files real: all context paths listed above exist in this worktree before implementation starts.
 - Acceptance testable: each task has objective checks and enumerated test cases.
@@ -828,7 +917,7 @@ curl -s "$BASE/runs/$RUN_ID/artifacts" | python3 -m json.tool
 - Checks runnable: commands use existing pnpm package scripts and final workspace scripts.
 - Error/rescue maps present: every runtime task has failure-specific rescue rows and user-visible behavior.
 - Observability present: runtime tasks name logs and success/failure metrics; docs-only tasks explain log documentation.
-- Test cases enumerate happy, nil, empty, error, edge, and integration paths required by the spec.
+- Test cases enumerate happy, nil, empty, error, edge, and integration paths required by the spec, including doctor HTTP availability mapping, verified cancel failure modes, oversized endpoint bodies, absent event ids/cursors, and token redaction.
 - Integration contracts walk: every `imports_from_other_tasks` entry resolves to an export in the named task.
 - Contract types match: task import signatures match exporter signatures in this plan.
 
@@ -842,4 +931,4 @@ curl -s "$BASE/runs/$RUN_ID/artifacts" | python3 -m json.tool
 - [x] Every context file path exists in the project.
 - [x] No task edits a file owned by another task.
 - [x] No placeholder text remains.
-- [x] Complexity is L and the phase remains one release because the spec explicitly defines R4 as the substrate plus Generic HTTP wrapper validation slice; risk is mitigated by package-bounded tasks and final full-workspace checks.
+- [x] Complexity is L and the phase remains one release because the spec explicitly defines R4 as the substrate plus Generic HTTP wrapper validation slice; `P3-T5` stays single because it owns one adapter boundary and eight files, with reviewer/auditor focus called out.
