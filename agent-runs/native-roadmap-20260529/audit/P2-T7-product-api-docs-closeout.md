@@ -62,3 +62,22 @@
 **Notes:**
 - The changelog placeholder is fixed.
 - `PRODUCT.md` now uses the shipped runtime-mode vocabulary and includes the capability/doctor endpoints.
+
+## 2026-05-29T19:27:41Z — Pass 3 (re-audit)
+
+**Verdict:** GREEN
+
+**Checks run:**
+- `git status --short --branch` ✅
+- `git diff --check` ✅
+- Focused API doc sanity for runtime-mode/doctor examples ✅
+- `pnpm --filter @switchyard/protocol-rest test` ✅
+- `pnpm typecheck` ✅
+
+**Findings:**
+- None. Prior required changes resolved.
+
+**Notes:**
+- `docs/development/API.md` now uses `limitations[].message` in runtime-mode/check examples.
+- The single-runtime-mode lookup example now includes the full `{ "runtimeMode": { ... } }` wrapper and record shape.
+- No R4+ support is overclaimed in the corrected API docs.
