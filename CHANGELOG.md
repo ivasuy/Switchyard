@@ -4,6 +4,10 @@ All notable changes to Switchyard will be documented in this file.
 
 ## Unreleased
 
+No unreleased changes.
+
+## 2026-05-29 - Roadmap Release Train R0-R2 Reconciliation
+
 ### Added
 
 - Added `GET /runs` list endpoint with `status`, `runtime`, `provider`, `model`, `placement`, `adapterType`, `since`, `until`, `limit`, and opaque `before` cursor filters. Newest-first, cursor-paginated.
