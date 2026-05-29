@@ -607,7 +607,7 @@ Adapter details are time-sensitive. Switchyard should treat every real adapter a
 | AgentField | REST API adapter, async execution preferred | HTTP sync for fast tasks | hosted or local | High | AgentField exposes REST execution APIs with async execution for long-running LLM workflows. Switchyard should treat it as a wrapper runtime. |
 | Paperclip | HTTP adapter | none until API verified | hosted or local | Low | Needs source verification before implementation. Keep as planned adapter, not first implementation target. |
 | Browser/Search | Native library/API adapter | process | hosted-safe with policy | High | Should be implemented as a Switchyard tool/runtime adapter with strict network and evidence policy. |
-| Generic HTTP | HTTP adapter | none | hosted-safe | High | Easiest wrapper adapter. Useful for tests and third-party integrations. |
+| Generic HTTP | HTTP adapter | none | local configured wrapper | High | Easiest wrapper adapter. Useful for tests and third-party integrations; hosted safety is not shipped in R4. |
 | Process | Node child process | none | local or sandboxed hosted worker | High | Useful fallback for non-interactive CLIs. |
 | PTY | Node PTY package | process when non-interactive | local first | High | Required for interactive runtimes but should be fallback because parsing terminal state is brittle. |
 
