@@ -47,7 +47,7 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `main` after PR #2, commit `94b6f32`.
+Snapshot source: `agent/roadmap-base-20260529`, commit `461dea5`.
 
 Current product state: local daemon MVP with a fake runtime and a real local Codex `exec --json` runtime mode.
 
@@ -224,7 +224,7 @@ Every release below should eventually get one active spec and one active impleme
 
 ### R0: Current Baseline
 
-Status: shipped.
+Status: shipped. Verified on 2026-05-29 (`codex-org-47c4739e`) against `agent/roadmap-base-20260529` commit `461dea5`.
 
 Goal: freeze what exists today as the baseline for future releases.
 
@@ -270,7 +270,7 @@ Promotion criteria:
 
 ### R1: Product Truth And Release Discipline
 
-Status: in progress on `codex/product-truth-cleanup`.
+Status: shipped. Verified on 2026-05-29 (`codex-org-47c4739e`) against `agent/roadmap-base-20260529` commit `461dea5`.
 
 Goal: make release planning and product truth reliable before adding more features.
 
@@ -317,7 +317,7 @@ Promotion criteria:
 
 ### R2: Local Gateway Completeness
 
-Status: planned.
+Status: shipped. Verified on 2026-05-29 (`codex-org-47c4739e`) against `agent/roadmap-base-20260529` commit `461dea5`.
 
 Goal: make the current local daemon complete enough to inspect and verify without database spelunking or known seeded IDs.
 
@@ -879,9 +879,9 @@ Current release readiness:
 Known release risks:
 
 - Codex event shape depends on the local Codex CLI version.
-- Live SSE is bounded and test-oriented, not a production open stream.
-- Registry support is lookup-only.
-- Artifact content is stored locally, but there is no artifact-by-id HTTP endpoint.
+- Local open-ended SSE (`GET /runs/:id/events?live=1`) is shipped for daemon use, but hosted production streaming remains unshipped.
+- Registry listing is shipped (`GET /providers`, `GET /runtimes`, `GET /models`), but runtime capability/doctor reporting remains an R3 item.
+- Artifact metadata/content endpoints are shipped (`GET /artifacts/:id`, `GET /artifacts/:id/content`), but HTTP `HEAD` and `Range` support is not implemented.
 - There is no hosted deployment path yet.
 
 ## Source Map
