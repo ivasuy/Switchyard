@@ -341,7 +341,7 @@ Example `GET /runtime-modes?provider=openai` response:
         "sandbox.danger_full_access"
       ],
       "limitations": [
-        { "code": "one_shot_no_input", "summary": "No post-start interactive input support in R3." }
+        { "code": "one_shot_no_input", "message": "No post-start interactive input support in R3." }
       ],
       "placement": {
         "local": { "support": "supported", "reason": "Requires a PATH-reachable local codex binary and local workspace." },
@@ -374,6 +374,35 @@ Example `GET /runtime-modes/codex.exec_json` response:
   "runtimeMode": {
     "id": "runtime_mode_codex_exec_json",
     "slug": "codex.exec_json",
+    "name": "Codex exec JSON",
+    "providerId": "provider_openai",
+    "runtimeId": "runtime_codex",
+    "adapterId": "codex",
+    "adapterType": "process",
+    "kind": "one_shot_process",
+    "status": "partial",
+    "capabilities": [
+      "run.start",
+      "run.cancel",
+      "run.timeout",
+      "event.normalized",
+      "event.streaming",
+      "artifact.transcript",
+      "artifact.raw_transcript",
+      "model.catalog",
+      "auth.local",
+      "sandbox.read_only",
+      "sandbox.workspace_write",
+      "sandbox.danger_full_access"
+    ],
+    "limitations": [
+      { "code": "one_shot_no_input", "message": "No post-start interactive input support in R3." }
+    ],
+    "placement": {
+      "local": { "support": "supported", "reason": "Requires a PATH-reachable local codex binary and local workspace." },
+      "hosted": { "support": "unsupported", "reason": "Hosted subprocess execution is not shipped in R3." },
+      "connectedLocalNode": { "support": "future", "reason": "Hybrid node execution is planned for R10." }
+    },
     "availability": {
       "state": "partial",
       "canRun": true,
@@ -383,7 +412,10 @@ Example `GET /runtime-modes/codex.exec_json` response:
       "checkedAt": "2026-05-30T00:00:00.000Z",
       "reasonCode": "optional_check_failed",
       "message": "Optional runtime checks failed."
-    }
+    },
+    "docsPath": "docs/development/adapters/CODEX.md",
+    "createdAt": "2026-05-30T00:00:00.000Z",
+    "updatedAt": "2026-05-30T00:00:00.000Z"
   }
 }
 ```
@@ -406,7 +438,7 @@ Example `POST /runtime-modes/codex.exec_json/check` response:
     "reasonCode": "optional_check_failed",
     "message": "Optional runtime checks failed.",
     "capabilities": ["run.start", "run.cancel", "run.timeout", "event.normalized", "model.catalog", "auth.local"],
-    "limitations": [{ "code": "one_shot_no_input", "summary": "No post-start interactive input support in R3." }],
+    "limitations": [{ "code": "one_shot_no_input", "message": "No post-start interactive input support in R3." }],
     "diagnostics": [
       {
         "code": "sandbox_policy_probe",
