@@ -76,7 +76,7 @@ Expected:
 }
 ```
 
-Use the [API contract](API.md#create-and-wait) for the real Codex request body.
+Use the [API contract](API.md#create-run) for the real Codex request body.
 
 ## Inspect A Run
 

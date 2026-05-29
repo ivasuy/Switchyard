@@ -1,6 +1,7 @@
 # Codex Adapter Local Development
 
 This guide is only for Codex-specific local debugging. Use the [Official API Contract](../API.md) for endpoint shapes and [Local Development](../DEVELOPMENT.md) for daemon startup, SQLite, process, and verification commands.
+Manual smoke in this file depends on a locally installed `codex` CLI on your machine (`PATH`-reachable). It does not cover hosted Codex execution or interactive sessions.
 
 ## Current Codex Scope
 
@@ -56,7 +57,7 @@ Recommended local smoke payload:
 }
 ```
 
-Use it with [Create And Wait](../API.md#create-and-wait) when you want the final answer in `response.text`.
+Use it with [Create Run](../API.md#create-run) when you want the final answer in `response.text`.
 
 ## Healthy Log Shape
 
