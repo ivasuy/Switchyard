@@ -357,7 +357,14 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
       }
 
       if (wrapperEvents.length === 0 || (response.body["terminal"] === true && !terminalInBatch)) {
-        const status = await this.fetchStatus(stored);
+        let status: "running" | "completed" | "failed" | "cancelled";
+        try {
+          status = await this.fetchStatus(stored);
+        } catch (error) {
+          yield failureEvent(runId, sequence++, eventErrorReason(error), this.authToken);
+          return;
+        }
+
         if (status === "completed" || status === "failed" || status === "cancelled") {
           const eventType = status === "completed" ? "run.completed" : status === "cancelled" ? "run.cancelled" : "run.failed";
           yield {
@@ -448,23 +455,19 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
   }
 
   private async fetchStatus(stored: StoredSession): Promise<"running" | "completed" | "failed" | "cancelled"> {
-    try {
-      const response = await this.request(`/v1/runs/${stored.state.externalRunId}`, {
-        method: "GET",
-        tooLargeReasonCode: "generic_http_status_response_too_large",
-        invalidJsonReasonCode: "generic_http_invalid_status_response"
-      }, stored.transcript);
-      if (!response.ok || !isRecord(response.body) || typeof response.body["status"] !== "string") {
-        throw new Error("generic_http_invalid_status_response");
-      }
-      const status = response.body["status"];
-      if (status === "running" || status === "completed" || status === "failed" || status === "cancelled") {
-        return status;
-      }
+    const response = await this.request(`/v1/runs/${stored.state.externalRunId}`, {
+      method: "GET",
+      tooLargeReasonCode: "generic_http_status_response_too_large",
+      invalidJsonReasonCode: "generic_http_invalid_status_response"
+    }, stored.transcript);
+    if (!response.ok || !isRecord(response.body) || typeof response.body["status"] !== "string") {
       throw new Error("generic_http_invalid_status_response");
-    } catch {
-      return "running";
     }
+    const status = response.body["status"];
+    if (status === "running" || status === "completed" || status === "failed" || status === "cancelled") {
+      return status;
+    }
+    throw new Error("generic_http_invalid_status_response");
   }
 
   private async request(

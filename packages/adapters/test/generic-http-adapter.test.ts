@@ -288,6 +288,143 @@ describe("GenericHttpAsyncRestAdapter", () => {
     }
   });
 
+  it("fails fast when status fallback returns invalid JSON after empty events", async () => {
+    const fetchCalls = {
+      events: 0,
+      status: 0
+    };
+    const fetchStub: typeof fetch = async (input, _init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        return new Response(JSON.stringify({ externalRunId: "ext_invalid_status" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (url.includes("/v1/runs/ext_invalid_status/events")) {
+        fetchCalls.events += 1;
+        return new Response(JSON.stringify({ events: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (url.endsWith("/v1/runs/ext_invalid_status")) {
+        fetchCalls.status += 1;
+        return new Response("not-json", {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ artifacts: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    };
+
+    const adapter = new GenericHttpAsyncRestAdapter({
+      baseUrl: "http://generic-http.example.test",
+      fetch: fetchStub,
+      pollIntervalMs: 5,
+      requestTimeoutMs: 100
+    });
+
+    const session = await adapter.start({
+      runId: "run_status_invalid",
+      runtime: "generic_http",
+      runtimeMode: "generic_http.async_rest",
+      provider: "generic_http",
+      model: "generic-http-default",
+      cwd: "/repo",
+      task: "status fallback invalid json",
+      metadata: {}
+    });
+
+    const iterator = adapter.events({ ...session, runId: "run_status_invalid" })[Symbol.asyncIterator]();
+    const first = await Promise.race([
+      iterator.next(),
+      new Promise<IteratorResult<unknown>>((_, reject) => {
+        setTimeout(() => reject(new Error("timed out waiting for terminal failure")), 250);
+      })
+    ]);
+
+    expect(first.done).toBe(false);
+    expect(first.value).toMatchObject({
+      type: "run.failed",
+      payload: { error: "generic_http_invalid_status_response" }
+    });
+    expect(fetchCalls.events).toBe(1);
+    expect(fetchCalls.status).toBe(1);
+  });
+
+  it("fails fast when status fallback response is oversized after empty events", async () => {
+    const fetchCalls = {
+      events: 0,
+      status: 0
+    };
+    const fetchStub: typeof fetch = async (input, _init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) {
+        return new Response(JSON.stringify({ externalRunId: "ext_oversized_status" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (url.includes("/v1/runs/ext_oversized_status/events")) {
+        fetchCalls.events += 1;
+        return new Response(JSON.stringify({ events: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (url.endsWith("/v1/runs/ext_oversized_status")) {
+        fetchCalls.status += 1;
+        return new Response(JSON.stringify({ status: "running", payload: "x".repeat(4096) }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ artifacts: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    };
+
+    const adapter = new GenericHttpAsyncRestAdapter({
+      baseUrl: "http://generic-http.example.test",
+      fetch: fetchStub,
+      pollIntervalMs: 5,
+      requestTimeoutMs: 100,
+      maxResponseBytes: 64
+    });
+
+    const session = await adapter.start({
+      runId: "run_status_oversized",
+      runtime: "generic_http",
+      runtimeMode: "generic_http.async_rest",
+      provider: "generic_http",
+      model: "generic-http-default",
+      cwd: "/repo",
+      task: "status fallback oversized",
+      metadata: {}
+    });
+
+    const iterator = adapter.events({ ...session, runId: "run_status_oversized" })[Symbol.asyncIterator]();
+    const first = await Promise.race([
+      iterator.next(),
+      new Promise<IteratorResult<unknown>>((_, reject) => {
+        setTimeout(() => reject(new Error("timed out waiting for terminal failure")), 250);
+      })
+    ]);
+
+    expect(first.done).toBe(false);
+    expect(first.value).toMatchObject({
+      type: "run.failed",
+      payload: { error: "generic_http_status_response_too_large" }
+    });
+    expect(fetchCalls.events).toBe(1);
+    expect(fetchCalls.status).toBe(1);
+  });
+
   it("never leaks auth tokens in check details, errors, or transcript artifacts", async () => {
     const token = "secret-r4-token";
     const server = await startFakeHttpRuntimeServer({
