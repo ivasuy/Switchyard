@@ -291,7 +291,7 @@ Responses:
 { "models":    [ /* records */ ], "nextCursor": "...|null" }
 ```
 
-R2 returns registry records as stored. Health, capability, and partial-support reporting are R3+.
+Registry list endpoints are shipped and return records as stored. Runtime capability and health reporting are also shipped through runtime-mode and doctor endpoints.
 
 ## Runtime Mode APIs
 
@@ -310,6 +310,144 @@ Runtime mode list filters:
 | `GET /runtime-modes` | `provider`, `runtime`, `adapterType`, `kind`, `availability`, `placement`, `capability`, `limit`, `before` |
 
 `GET /doctor` is read-only and returns the latest stored snapshots. `POST /runtime-modes/:id/check` runs a fresh bounded check and updates stored availability.
+
+Example `GET /runtime-modes?provider=openai` response:
+
+```json
+{
+  "runtimeModes": [
+    {
+      "id": "runtime_mode_codex_exec_json",
+      "slug": "codex.exec_json",
+      "name": "Codex exec JSON",
+      "providerId": "provider_openai",
+      "runtimeId": "runtime_codex",
+      "adapterId": "codex",
+      "adapterType": "process",
+      "kind": "one_shot_process",
+      "status": "partial",
+      "capabilities": [
+        "run.start",
+        "run.cancel",
+        "run.timeout",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "artifact.raw_transcript",
+        "model.catalog",
+        "auth.local",
+        "sandbox.read_only",
+        "sandbox.workspace_write",
+        "sandbox.danger_full_access"
+      ],
+      "limitations": [
+        { "code": "one_shot_no_input", "summary": "No post-start interactive input support in R3." }
+      ],
+      "placement": {
+        "local": { "support": "supported", "reason": "Requires a PATH-reachable local codex binary and local workspace." },
+        "hosted": { "support": "unsupported", "reason": "Hosted subprocess execution is not shipped in R3." },
+        "connectedLocalNode": { "support": "future", "reason": "Hybrid node execution is planned for R10." }
+      },
+      "availability": {
+        "state": "partial",
+        "canRun": true,
+        "installed": true,
+        "auth": "configured",
+        "version": "codex 0.0.0-test",
+        "checkedAt": "2026-05-30T00:00:00.000Z",
+        "reasonCode": "optional_check_failed",
+        "message": "Optional runtime checks failed."
+      },
+      "docsPath": "docs/development/adapters/CODEX.md",
+      "createdAt": "2026-05-30T00:00:00.000Z",
+      "updatedAt": "2026-05-30T00:00:00.000Z"
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+Example `GET /runtime-modes/codex.exec_json` response:
+
+```json
+{
+  "runtimeMode": {
+    "id": "runtime_mode_codex_exec_json",
+    "slug": "codex.exec_json",
+    "availability": {
+      "state": "partial",
+      "canRun": true,
+      "installed": true,
+      "auth": "configured",
+      "version": "codex 0.0.0-test",
+      "checkedAt": "2026-05-30T00:00:00.000Z",
+      "reasonCode": "optional_check_failed",
+      "message": "Optional runtime checks failed."
+    }
+  }
+}
+```
+
+Example `POST /runtime-modes/codex.exec_json/check` response:
+
+```json
+{
+  "check": {
+    "runtimeModeId": "runtime_mode_codex_exec_json",
+    "runtimeMode": "codex.exec_json",
+    "providerId": "provider_openai",
+    "runtimeId": "runtime_codex",
+    "state": "partial",
+    "canRun": true,
+    "installed": true,
+    "auth": "configured",
+    "version": "codex 0.0.0-test",
+    "checkedAt": "2026-05-30T00:00:00.000Z",
+    "reasonCode": "optional_check_failed",
+    "message": "Optional runtime checks failed.",
+    "capabilities": ["run.start", "run.cancel", "run.timeout", "event.normalized", "model.catalog", "auth.local"],
+    "limitations": [{ "code": "one_shot_no_input", "summary": "No post-start interactive input support in R3." }],
+    "diagnostics": [
+      {
+        "code": "sandbox_policy_probe",
+        "severity": "warning",
+        "message": "optional sandbox probe failed"
+      }
+    ]
+  }
+}
+```
+
+Example `GET /doctor` response:
+
+```json
+{
+  "runtimeModes": [
+    {
+      "runtimeModeId": "runtime_mode_fake_deterministic",
+      "runtimeMode": "fake.deterministic",
+      "state": "available",
+      "canRun": true,
+      "checkedAt": "2026-05-30T00:00:00.000Z"
+    },
+    {
+      "runtimeModeId": "runtime_mode_codex_exec_json",
+      "runtimeMode": "codex.exec_json",
+      "state": "partial",
+      "canRun": true,
+      "checkedAt": "2026-05-30T00:00:00.000Z"
+    }
+  ],
+  "summary": {
+    "available": 1,
+    "installed": 0,
+    "partial": 1,
+    "unavailable": 0,
+    "unsupported": 0,
+    "unknown": 0
+  }
+}
+```
 
 Availability states:
 

@@ -270,6 +270,50 @@ describe("daemon app", () => {
     }
   });
 
+  it("maps required-pass plus optional-fail active checks to partial and updates /doctor", async () => {
+    const partialCheckProbe = async () => ({
+      ok: true,
+      version: "codex 0.0.0-test",
+      models: [{ slug: "gpt-5.5", supportedReasoningLevels: ["low", "medium", "high"] }],
+      optionalChecks: {
+        sandbox_policy_probe: {
+          ok: false,
+          message: "optional sandbox probe failed"
+        }
+      }
+    });
+    const app = await createDaemonApp(undefined, {
+      codexProbe: unavailableCodexProbe,
+      probeCodexCatalog: partialCheckProbe,
+      checkTimeoutMs: 50,
+      maxDiagnosticBytes: 128
+    });
+    try {
+      const check = await app.inject({ method: "POST", url: "/runtime-modes/codex.exec_json/check" });
+      const doctor = await app.inject({ method: "GET", url: "/doctor" });
+      const mode = await app.inject({ method: "GET", url: "/runtime-modes/codex.exec_json" });
+      expect(check.statusCode).toBe(200);
+      expect(check.json().check.state).toBe("partial");
+      expect(check.json().check.reasonCode).toBe("optional_check_failed");
+      expect(check.json().check.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: "sandbox_policy_probe",
+            severity: "warning"
+          })
+        ])
+      );
+      expect(mode.statusCode).toBe(200);
+      expect(mode.json().runtimeMode.availability.state).toBe("partial");
+      expect(mode.json().runtimeMode.availability.reasonCode).toBe("optional_check_failed");
+      expect(doctor.statusCode).toBe(200);
+      expect(doctor.json().summary.partial).toBe(1);
+      expect(doctor.json().summary.available).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("bounds hung active checks and returns sanitized timeout state", async () => {
     const hungProbe = (): Promise<CodexProbe> => new Promise<CodexProbe>(() => {});
     const app = await createDaemonApp(undefined, {

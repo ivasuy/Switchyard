@@ -4,7 +4,18 @@ All notable changes to Switchyard will be documented in this file.
 
 ## Unreleased
 
-No unreleased changes.
+### Added
+
+- Added shipped runtime-mode endpoints: `GET /runtime-modes`, `GET /runtime-modes/:id`, and `POST /runtime-modes/:id/check`.
+- Added shipped runtime doctor summary endpoint: `GET /doctor`.
+- Added runtime-mode capability and availability contracts for shipped R3 runtime modes `fake.deterministic` and `codex.exec_json`.
+- Added persisted runtime-mode records and run/session `runtimeMode` compatibility fields for local SQLite storage.
+
+### Changed
+
+- Updated Codex active runtime checks to forward optional-check probe diagnostics so required-pass plus optional-fail checks surface as `partial` with warning diagnostics.
+- Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
+- Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.
 
 ## 2026-05-29 - Roadmap Release Train R0-R2 Reconciliation
 

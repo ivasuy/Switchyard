@@ -36,6 +36,34 @@ describe("CodexExecJsonAdapter", () => {
     );
   });
 
+  it("forwards optional check diagnostics from probe results", async () => {
+    const adapter = new CodexExecJsonAdapter({
+      probeCatalog: async () => ({
+        ok: true,
+        version: "codex 0.0.0-test",
+        models: [{ slug: "gpt-5.5", supportedReasoningLevels: ["low", "medium", "high"] }],
+        optionalChecks: {
+          sandbox_policy_probe: {
+            ok: false,
+            message: "optional sandbox probe failed"
+          }
+        }
+      })
+    });
+
+    const check = await adapter.check();
+    expect(check.ok).toBe(true);
+    expect(check.details).toMatchObject({
+      version: "codex 0.0.0-test",
+      optionalChecks: {
+        sandbox_policy_probe: {
+          ok: false,
+          message: "optional sandbox probe failed"
+        }
+      }
+    });
+  });
+
   it("builds args, streams events, and returns transcript artifacts", async () => {
     const fake = new FakeCodexProcess();
     const adapter = new CodexExecJsonAdapter({

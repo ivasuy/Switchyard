@@ -159,7 +159,8 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
         version: probe.version,
         models: probe.models,
         reasonCode: probe.reasonCode,
-        outputBytes: probe.outputBytes
+        outputBytes: probe.outputBytes,
+        optionalChecks: probe.optionalChecks
       }
     };
     if (probe.message) {

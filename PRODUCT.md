@@ -49,7 +49,7 @@ When a release ships:
 
 Snapshot source: `agent/roadmap-base-20260529`, commit `461dea5`.
 
-Current product state: local daemon MVP with a fake runtime and a real local Codex `exec --json` runtime mode.
+Current product state: local daemon MVP with shipped runtime modes `fake.deterministic` and `codex.exec_json`.
 
 The product is usable locally for one-shot agent runs, event inspection, artifact listing, cancellation, and registry lookups. It is not yet a hosted gateway, debate system, approval system, SDK, dashboard, or multi-runtime production platform.
 
@@ -100,7 +100,7 @@ The run lifecycle supports:
 
 Shipped runtime modes:
 
-- `fake`: deterministic test runtime for local smoke tests and contract coverage.
+- `fake.deterministic`: deterministic test runtime mode for local smoke tests and contract coverage.
 - `codex.exec_json`: local non-interactive Codex CLI execution through `codex exec --json`.
 
 Codex support includes:
@@ -131,6 +131,9 @@ Implemented local endpoints:
 - `GET /providers`, `GET /providers/:id`
 - `GET /runtimes`, `GET /runtimes/:id`
 - `GET /models`, `GET /models/:id`
+- `GET /runtime-modes`, `GET /runtime-modes/:id`
+- `POST /runtime-modes/:id/check`
+- `GET /doctor`
 - `GET /artifacts/:id`
 - `GET /artifacts/:id/content`
 
@@ -163,7 +166,7 @@ The daemon seeds local registry records for:
 - OpenAI provider and Codex runtime records.
 - Codex model records when `codex debug models` is available.
 
-Both single-record registry lookups and registry list endpoints (`GET /providers`, `GET /runtimes`, `GET /models` with cursor pagination and provider/adapter filters) are shipped.
+Both single-record registry lookups and registry list endpoints (`GET /providers`, `GET /runtimes`, `GET /models` with cursor pagination and provider/adapter filters) are shipped. Runtime capability endpoints (`GET /runtime-modes`, `GET /runtime-modes/:id`, `POST /runtime-modes/:id/check`) and runtime doctor summaries (`GET /doctor`) are also shipped.
 
 ### Tests And Verification
 
@@ -881,7 +884,7 @@ Known release risks:
 
 - Codex event shape depends on the local Codex CLI version.
 - Local open-ended SSE (`GET /runs/:id/events?live=1`) is shipped for daemon use, but hosted production streaming remains unshipped.
-- Registry listing is shipped (`GET /providers`, `GET /runtimes`, `GET /models`), but runtime capability/doctor reporting remains an R3 item.
+- Runtime capability and doctor reporting are shipped for `fake.deterministic` and `codex.exec_json`, but only these two runtime modes are currently implemented.
 - Artifact metadata/content endpoints are shipped (`GET /artifacts/:id`, `GET /artifacts/:id/content`), but HTTP `HEAD` and `Range` support is not implemented.
 - There is no hosted deployment path yet.
 
