@@ -1,296 +1,249 @@
-# Phase 10: R11 SDK, CLI, And Hardening - Implementation Plan
+# Phase 10: R11 SDK, CLI, And Hardening — Implementation Plan
 
 **Spec:** `docs/superpowers/specs/2026-05-30-phase-10-r11-sdk-cli-and-hardening.md`
 **Branch:** `agent/phase-10-r11-sdk-cli-and-hardening`
-**Worktree:** `/Users/vasuyadav/Downloads/Projects/switchyard/.worktrees/native-roadmap-20260529/phase-10-r11-sdk-cli-and-hardening`
-**Plan target:** `docs/superpowers/plans/2026-05-30-phase-10-r11-sdk-cli-and-hardening.md`
 **Complexity:** L
 
 ## Goal
 
-Ship R11 as a consumable and hardened local daemon product surface: TypeScript SDK, CLI, deterministic contract output, migration protection, adapter compatibility automation, clean local release packaging, and request/error/log/metric/recovery hardening.
-
-## Scope Challenge
-
-1. Existing code already covers most primitives: `packages/contracts` Zod schemas, `packages/protocol-rest` route groups, `packages/protocol-sse` SSE helpers, `apps/daemon` local wiring, `packages/storage` additive SQLite migrations, runtime adapter manifests, fake runtime/testkit harnesses, and current daemon/storage/adapter tests. R11 must package and harden these seams rather than create a second API.
-2. Minimum scope is SDK, CLI, endpoint descriptors/OpenAPI, storage migration policy/version tests, adapter compatibility matrix, release smoke packaging, request ids, typed errors, metrics, structured logs, startup recovery, and docs. UI/dashboard/TUI, new adapters, hosted expansion, enterprise auth/billing, and live model/API spend remain out of scope.
-3. Complexity check: this phase necessarily touches more than eight files and introduces more than two public components. A multi-task split would create contention in root/package manifests, contracts, daemon routes, storage migration surfaces, release scripts, and docs. Per the user's status update, this plan uses one implementer/reviewer task for the whole phase.
-4. Built-in check: use Node 20 built-ins (`fetch`, `URL`, `AbortController`, `ReadableStream`, `node:util.parseArgs`, child process primitives), Fastify hooks/injection, Zod schemas and Zod 4 JSON Schema conversion, existing SSE helpers, existing adapter manifests, Vitest, and pnpm/Turbo. Do not add a CLI framework, custom URL/JSON parser, second SSE formatter, or second daemon protocol.
-5. Distribution check: release packaging is explicit scope. The clean temp smoke must prove installed users consume built `dist` files, `.d.ts` types, and bins without workspace symlinks or `src/*.ts` exports.
+Ship the consumable local Switchyard surface: TypeScript SDK, CLI workflows, deterministic contract output, migration protection, no-spend adapter compatibility automation, local packaging smoke coverage, and operational hardening without expanding hosted/runtime scope.
 
 ## Architecture
 
-`packages/contracts` becomes the local daemon contract inventory source. Endpoint descriptors define method, path template, query/body schema, success schema or raw/SSE marker, content type, error envelope, operation id, and surface tag. The OpenAPI generator emits deterministic OpenAPI 3.1 JSON, and `openapi:check` compares generated output to committed output and descriptor routes to real Fastify routes registered by `createDaemonApp`.
+R11 packages the existing local daemon contract rather than creating a second API. The SDK imports `@switchyard/contracts` schemas and performs fetch/decode/error normalization at the boundary. The CLI imports the SDK for user-facing commands and imports daemon helpers only for local launch/test flows. Contract output is generated from a route inventory shared by tests so drift is caught deterministically.
 
-```text
-contracts schemas
-  -> endpoint descriptors
-  -> OpenAPI 3.1 JSON and typed endpoint map
-  -> SDK response decoding
-  -> CLI contract export
-  -> route drift check against createDaemonApp()
+```
+CLI command ──▶ SDK client ──▶ local daemon REST/SSE/raw content
+    │              │                    │
+    │              ├── Zod decode       ├── request id/error envelope
+    │              ├── typed errors     ├── metrics endpoint
+    │              └── artifact bytes   └── recovery logs
+    │
+    ├── contract export ──▶ route inventory ──▶ OpenAPI 3.1 JSON
+    ├── compatibility ───▶ adapter manifests + fake harnesses
+    └── package smoke ───▶ clean temp pnpm install/run
 ```
 
-`@switchyard/sdk` is the only programmatic client. It talks to the local daemon over HTTP, validates successful JSON through contract schemas, preserves raw artifact bytes, parses replay/live SSE into `SwitchyardEvent` values, and exposes typed HTTP, network, decode, validation, and stream errors. It must not import daemon, storage, or protocol-rest internals.
-
-`@switchyard/cli` is a thin operator surface over the SDK plus the packaged daemon binary. `doctor`, `run fake`, `runtimes test`, `debug run`, and `contract export` prove the public contract path. `daemon start` spawns `switchyard-daemon`, waits for `/health`, and reports named startup failures.
-
-Operational hardening stays in the local daemon. Fastify hooks add bounded request ids, response headers, structured request logs, and request metrics. Protocol errors preserve the current envelope and add only optional `error.requestId`. `GET /metrics` returns deterministic local JSON. Startup recovery reconciles active persisted runs exactly once, appends `daemon_restarted` failure events, and records log/metric evidence.
-
-## Existing Context
-
-`package.json` confirms the repo is a pnpm/Turbo ESM TypeScript monorepo with `build`, `test`, `typecheck`, and `lint` scripts.
-
-`packages/protocol-rest/src/run-routes.ts` is the real run route implementation SDK/CLI/contract output must describe. It already implements `POST /runs`, `GET /runs`, `GET /runs/:id`, `GET /runs/:id/events`, `GET /runs/:id/artifacts`, `POST /runs/:id/input`, and `POST /runs/:id/cancel`.
-
-`packages/protocol-rest/src/artifact-routes.ts` separates `GET /artifacts/:id` metadata from `GET /artifacts/:id/content` raw content.
-
-`packages/contracts/src/http-error.ts` has the existing closed error envelope. R11 may only add backward-compatible optional `requestId`.
-
-`packages/storage/src/sqlite/database.ts` currently applies additive migrations without version records. R11 adds policy, schema versioning, fixtures, and corrupt/empty DB guards.
-
-`apps/daemon/src/app.ts` registers the local Fastify app, seeds all shipped runtime manifests, creates stores, and contains the current narrow recovery hook.
-
-`packages/testkit/src/runtime-adapter-contract-harness.ts` and `packages/adapters/test/runtime-adapter-contracts.test.ts` already provide no-spend fake process/server/client patterns for shipped runtime adapters.
+SQLite schema protection stays in `packages/storage`: additive migrations remain the only allowed local policy, schema versioning becomes explicit, and fixture tests verify old local data opens and preserves rows. Operational hardening stays at protocol/daemon boundaries: request ids are attached to error envelopes, local metrics are exposed, startup recovery logs interrupted runs, and all new CLI/debug output avoids secrets and avoids live model/API spend.
 
 ## File Structure
 
-- `package.json`, `pnpm-lock.yaml` - root scripts and lockfile updates for new packages, contract checks, compatibility checks, and release smoke.
-- `packages/sdk/**` - new SDK package, typed client, errors, SSE parser, artifact content helpers, and tests.
-- `packages/cli/**` - new CLI package, command parser, command helpers, daemon process launcher, formatters, typed CLI errors, and tests.
-- `packages/contracts/package.json`, `packages/contracts/src/**`, `packages/contracts/openapi/**`, `packages/contracts/test/**` - endpoint descriptors, OpenAPI generation, metrics schema, HTTP request/response schemas, optional request id envelope, generated output, and tests.
-- `tools/contract-check/**` - route drift and generated-output check entrypoint.
-- `apps/daemon/package.json`, `apps/daemon/src/**`, `apps/daemon/test/**` - daemon bin metadata, request ids, metrics, structured logs, startup recovery, storage error surfacing, and tests.
-- `packages/protocol-rest/src/**`, `packages/protocol-rest/test/**` - error envelope request ids, route hooks for metrics/logs, and route tests.
-- `packages/storage/src/sqlite/**`, `packages/storage/test/**` - migration policy, schema versioning, SQL fixtures, corrupt/empty DB handling, and migration tests.
-- `packages/adapters/package.json`, `packages/adapters/src/**`, `packages/adapters/test/**`, `packages/adapters/compatibility-matrix.*` - compatibility generator, no-spend matrix coverage, scripts, generated artifacts, and tests.
-- `packages/testkit/src/**`, `packages/testkit/test/**` - reusable no-spend harness helpers only where required by compatibility/package smoke.
-- `tools/release/**` - local release pack and clean-environment smoke automation.
-- `PRODUCT.md`, `CHANGELOG.md`, `ARCHITECTURE.md`, `docs/development/**` - R11 product truth, API/operations docs, adapter docs, and verification commands.
+- `packages/contracts/src/http-error.ts` — add optional `requestId` typing to the public error envelope.
+- `packages/protocol-rest/src/http-errors.ts` — include request ids in all structured HTTP errors.
+- `packages/protocol-rest/src/route-inventory.ts` — canonical local daemon route inventory used by contracts and drift tests.
+- `packages/protocol-rest/src/openapi.ts` — deterministic OpenAPI 3.1 generation from route inventory and contract schemas.
+- `packages/protocol-rest/src/*test.ts` — route inventory, request id, metrics, and OpenAPI drift tests.
+- `apps/daemon/src/app.ts` — expose `/metrics`, attach request ids, preserve startup recovery behavior, and keep `createDaemonApp` testable.
+- `apps/daemon/src/main.ts` — export a reusable daemon start helper for the CLI while preserving the current executable entry.
+- `apps/daemon/src/*test.ts` — daemon hardening and startup recovery tests.
+- `packages/storage/src/sqlite/database.ts` — explicit schema metadata/version helpers and additive migration policy surface.
+- `packages/storage/src/sqlite/*test.ts` — fixture migration tests proving old data survives open/reopen.
+- `packages/sdk/*` — new `@switchyard/sdk` package with typed client, errors, SSE replay helper, artifact content helper, and tests against `createDaemonApp`.
+- `packages/cli/*` — new `@switchyard/cli` package with `switchyard` binary, command parser, SDK-backed commands, contract export, packaging smoke script/tests.
+- `packages/adapters/src/compatibility-matrix.ts` — CI-safe adapter manifest matrix using real manifests and fake/no-spend harnesses.
+- `packages/adapters/src/*test.ts` — compatibility matrix tests.
+- `package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `turbo.json`, relevant `tsconfig.json` files — workspace/package wiring only.
+- `README.md`, `ARCHITECTURE.md`, `PROJECT.md` — user-facing truth updates after implementation/audit.
+
+## Existing Context
+
+- `packages/contracts/src/run.ts` and `packages/contracts/src/artifact.ts` already define the public run/artifact schemas. SDK response parsing must import these schemas.
+- `packages/contracts/src/http-error.ts` already defines the public error envelope and should only gain backward-compatible optional fields.
+- `packages/protocol-rest/src/run-routes.ts` registers `POST /runs`, list/get/events/artifacts/input/cancel. Contract inventory must match these real routes.
+- `packages/protocol-rest/src/artifact-routes.ts` separates artifact metadata at `GET /artifacts/:id` from raw content at `GET /artifacts/:id/content`; SDK must keep those separate.
+- `apps/daemon/src/app.ts` exports `createDaemonApp(config?, options?)`, which tests and CLI local launch can reuse without shelling out.
+- `apps/daemon/src/main.ts` currently starts the daemon directly with `loadDaemonConfig()` and `createConsoleLogger()`.
+- `packages/storage/src/sqlite/database.ts` owns current additive SQLite DDL and additive migrations.
+- `packages/testkit/src/runtime-adapter-contract-harness.ts` already provides the no-spend runtime adapter contract harness.
+- `packages/adapters/src/index.ts` exports shipped adapters and is the correct place to anchor the compatibility matrix.
 
 ## Task Graph
 
-### Task P10-T1: Ship R11 SDK, CLI, Contracts, Packaging, And Hardening
-
-**id:** `P10-T1-r11-sdk-cli-contracts-hardening`
-**title:** Ship R11 SDK, CLI, contracts, packaging, and hardening
+### Task P10-T1-r11-sdk-cli-hardening: Ship SDK, CLI, Contracts, Packaging, And Hardening
 
 **Files (owned):**
-- `package.json`
-- `pnpm-lock.yaml`
-- `apps/daemon/package.json`
-- `apps/daemon/src/**`
-- `apps/daemon/test/**`
-- `packages/sdk/**`
-- `packages/cli/**`
-- `packages/contracts/package.json`
-- `packages/contracts/src/**`
-- `packages/contracts/openapi/**`
-- `packages/contracts/test/**`
-- `packages/protocol-rest/src/**`
-- `packages/protocol-rest/test/**`
-- `packages/storage/src/sqlite/**`
-- `packages/storage/test/**`
-- `packages/adapters/package.json`
-- `packages/adapters/src/**`
-- `packages/adapters/test/**`
-- `packages/adapters/compatibility-matrix.json`
-- `packages/adapters/compatibility-matrix.md`
-- `packages/testkit/src/**`
-- `packages/testkit/test/**`
-- `tools/contract-check/**`
-- `tools/release/**`
-- `PRODUCT.md`
-- `CHANGELOG.md`
-- `ARCHITECTURE.md`
-- `docs/development/**`
+
+- Create/modify `packages/sdk/**`
+- Create/modify `packages/cli/**`
+- Create/modify `packages/protocol-rest/src/route-inventory.ts`
+- Create/modify `packages/protocol-rest/src/openapi.ts`
+- Modify `packages/protocol-rest/src/http-errors.ts`
+- Modify `packages/protocol-rest/src/index.ts`
+- Modify `packages/contracts/src/http-error.ts`
+- Modify `apps/daemon/src/app.ts`
+- Modify `apps/daemon/src/main.ts`
+- Create/modify `apps/daemon/src/*.test.ts`
+- Modify `packages/storage/src/sqlite/database.ts`
+- Create/modify `packages/storage/src/sqlite/*.test.ts`
+- Create/modify `packages/adapters/src/compatibility-matrix.ts`
+- Create/modify `packages/adapters/src/*.test.ts`
+- Modify workspace/package wiring files only as required: `package.json`, `pnpm-lock.yaml`, `turbo.json`, package `tsconfig.json`
+- Modify user-facing docs only after implementation truth is known: `README.md`, `ARCHITECTURE.md`
 
 **Dependencies:** none
 
-**Context files (must read before coding):**
-- `docs/superpowers/specs/2026-05-30-phase-10-r11-sdk-cli-and-hardening.md` - source of all R11 acceptance and non-goals.
-- `package.json` - root package scripts, package manager, dependency constraints, and pnpm/Turbo shape.
-- `packages/contracts/src/index.ts` - current public schema export surface.
-- `packages/contracts/src/http-error.ts` - current HTTP error envelope to extend compatibly.
-- `packages/protocol-rest/src/run-routes.ts` - real run/event/artifact-list/input/cancel route behavior.
-- `packages/protocol-rest/src/artifact-routes.ts` - real artifact metadata/content split.
-- `apps/daemon/src/app.ts` - local daemon route registration, adapter wiring, storage creation, and current recovery hook.
-- `packages/storage/src/sqlite/database.ts` - current SQLite schema SQL and additive migration list.
-- `packages/testkit/src/runtime-adapter-contract-harness.ts` - existing no-spend adapter contract harness.
-- `packages/adapters/test/runtime-adapter-contracts.test.ts` - existing fake process/server/client coverage for adapter modes.
+**Context files (MUST read before coding):**
+
+- `docs/superpowers/specs/2026-05-30-phase-10-r11-sdk-cli-and-hardening.md`
+- `PRODUCT.md`
+- `PROJECT.md`
+- `package.json`
+- `pnpm-workspace.yaml`
+- `apps/daemon/src/app.ts`
+- `apps/daemon/src/main.ts`
+- `apps/daemon/src/config.ts`
+- `packages/contracts/src/index.ts`
+- `packages/contracts/src/run.ts`
+- `packages/contracts/src/event.ts`
+- `packages/contracts/src/artifact.ts`
+- `packages/contracts/src/http-error.ts`
+- `packages/protocol-rest/src/run-routes.ts`
+- `packages/protocol-rest/src/artifact-routes.ts`
+- `packages/protocol-rest/src/registry-routes.ts`
+- `packages/protocol-rest/src/middleware-routes.ts`
+- `packages/protocol-rest/src/debate-routes.ts`
+- `packages/protocol-rest/src/http-errors.ts`
+- `packages/storage/src/sqlite/database.ts`
+- `packages/storage/src/sqlite/schema.ts`
+- `packages/testkit/src/runtime-adapter-contract-harness.ts`
+- `packages/adapters/src/index.ts`
 
 **Instructions:**
-1. Add `@switchyard/sdk` and `@switchyard/cli` package scaffolds in the existing ESM TypeScript style. Add `switchyard` and `switchyard-daemon` bin metadata without breaking daemon dev behavior.
-2. Add local release pack and smoke scripts. The smoke must build required packages, install from disk in a temp directory outside the repo, start the daemon on an ephemeral port, run CLI doctor, run fake run, replay events through SDK or CLI, fetch artifact content, shut down, and preserve a report on failure.
-3. Add contract request/response schemas, `metricsResponseSchema`, endpoint descriptors for every local daemon route in the spec plus `GET /metrics`, deterministic OpenAPI 3.1 generation, committed output, and `openapi:generate`/`openapi:check`. Represent SSE and raw artifact content accurately with content types and `x-switchyard-*` extensions where needed.
-4. Make `openapi:check` compare generated output to committed output and compare descriptor method/path set against real Fastify routes from `createDaemonApp` using no-spend fake probes. Fail closed on unreadable route inventory.
-5. Implement `SwitchyardClient` with default `http://127.0.0.1:4545`, native fetch, built-in `URL`, optional headers, typed response decoding, raw artifact bytes, replay SSE parsing, abortable live SSE iteration, and typed errors: `SwitchyardHttpError`, `SwitchyardNetworkError`, `SwitchyardDecodeError`, `SwitchyardValidationError`, and `SwitchyardStreamError`.
-6. Implement CLI parsing with `node:util.parseArgs`. Required commands are `doctor`, `daemon start`, `run fake`, `runtimes test`, `debug run`, and `contract export`. Human output must be concise; `--json` output must be valid JSON.
-7. Add SQLite migration policy, schema version tracking, SQL text fixtures for pre-R3/pre-R7/pre-R9/pre-R11, idempotent reopen tests, and zero-byte/corrupt DB rejection without overwrite. Destructive migration statements must fail tests.
-8. Harden daemon request ids, error envelopes, structured logs, local metrics, and startup recovery. Recovery must cover `starting`, `running`, `waiting_for_input`, and `waiting_for_approval` runs with no terminal event, append exactly one `run.failed` event with `daemon_restarted`, and record log/metric evidence.
-9. Add adapter compatibility matrix automation from real manifests and no-spend fake harnesses for `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`. Generate deterministic JSON and markdown; fail on missing manifests, missing harnesses, live calls in CI-safe mode, uncovered capabilities, and output drift.
-10. Update `PRODUCT.md`, `CHANGELOG.md`, `ARCHITECTURE.md`, `docs/development/API.md`, `docs/development/DEVELOPMENT.md`, and adapter docs. Keep non-goals explicit and do not claim live non-fake execution as required coverage.
+
+Implement the full R11 release in the Phase 10 worktree only. Keep all required checks local and no-spend. Do not add UI, dashboard, TUI, new runtime adapters, hosted runtime expansion, or live model/API checks.
+
+SDK:
+
+- Add a workspace package named `@switchyard/sdk`.
+- Export a `SwitchyardClient` that accepts `{ baseUrl, fetch?, headers?, timeoutMs? }`.
+- Implement typed methods for local daemon acceptance: `health()`, `doctor()`, `createRun()`, `getRun()`, `listRuns()`, `listRunEvents()`, `replayRunEvents()` or equivalent event replay helper, `listRunArtifacts()`, `getArtifact()`, `getArtifactContent()`, provider/runtime/model/runtime-mode discovery, and runtime mode checks.
+- Preserve artifact metadata/content separation. `getArtifact()` returns decoded metadata. `getArtifactContent()` returns raw bytes/text plus content type.
+- Decode JSON responses with existing `@switchyard/contracts` schemas where schemas already exist. If a response has no pre-existing schema, create the smallest local SDK parser or add a contract schema only if it is genuinely part of the public contract.
+- Export typed errors: `SwitchyardHttpError`, `SwitchyardNetworkError`, `SwitchyardDecodeError`, and `SwitchyardTimeoutError`. HTTP errors must preserve `status`, `code`, `message`, `details`, and optional `requestId`.
+
+CLI:
+
+- Add a workspace package named `@switchyard/cli` with a `switchyard` bin.
+- Use boring Node APIs and the SDK; do not introduce a command framework unless already installed or strongly justified.
+- Commands required: `doctor`, `daemon start`, `run fake`, `runtime test`, `debug run`, and `contract export`.
+- `doctor` calls local daemon `/doctor` when available and prints deterministic JSON by default or a concise human format if a flag is added.
+- `daemon start` starts the local daemon through exported daemon helpers and exits cleanly on `SIGINT`/`SIGTERM`.
+- `run fake` creates a deterministic fake run and can wait for completion using existing daemon semantics.
+- `runtime test` runs a CI-safe no-spend runtime mode check or adapter compatibility matrix entry. It must not call live external providers.
+- `debug run <id>` prints run metadata, recent events, artifacts, and typed error/request-id details.
+- `contract export` writes deterministic OpenAPI 3.1 JSON to stdout or a provided path.
+
+Contract output:
+
+- Add a route inventory for the local daemon routes listed in the spec.
+- Generate deterministic OpenAPI 3.1 JSON from that inventory. Use stable key ordering.
+- Represent SSE and raw artifact content correctly with content types and `x-switchyard-*` extensions when OpenAPI cannot express behavior fully.
+- Add a drift test that compares inventory paths/methods to routes registered by `createDaemonApp()`.
+- If hosted/node R10 routes are included, tag them as a separate surface and do not expand SDK/CLI required acceptance to cover hosted execution.
+
+Migration policy:
+
+- Add explicit local schema metadata/versioning in SQLite. Keep the current migration style additive.
+- Provide a programmatic migration policy export that blocks destructive operations by policy.
+- Add fixture migration tests that create an old-style SQLite database, open it with R11 code, preserve pre-existing rows, and record the expected schema version.
+
+Adapter compatibility matrix:
+
+- Add a CI-safe matrix generated from real adapter manifests and fake harness inputs.
+- Cover at least fake native, Codex exec-json in fake/no-spend mode where possible, OpenCode fake ACP, generic HTTP fake server, AgentField fake server, and Claude Code fake client. If a real adapter cannot be run without external dependencies, mark the matrix row as `skipped` with a deterministic reason instead of failing silently.
+
+Packaging and smoke:
+
+- Ensure the SDK and CLI packages typecheck/build in the workspace.
+- Add a clean temporary smoke test that packs or links the local packages, installs them into a temp project, imports the SDK, invokes the CLI help/contract export, and proves no hand-written curl workflow is required.
+- Keep the test deterministic and local. Avoid global installs and external network requirements.
+
+Operational hardening:
+
+- Add request ids to error envelopes as a backward-compatible optional field.
+- Expose local metrics sufficient for acceptance: request count/error count and run status counts are enough.
+- Ensure startup recovery of interrupted runs is logged and covered by a focused test.
+- Use structured logs for new CLI/daemon hardening paths without leaking credentials.
 
 **Acceptance criteria:**
-- [ ] SDK creates a fake run, inspects it, replays events, lists artifacts, fetches transcript content, cancel/send input where supported, and exposes typed HTTP/network/decode/validation/stream errors.
-- [ ] SDK tests cover happy, nil, empty, and error paths for run creation, event replay/streaming, artifact metadata/content, and typed errors.
-- [ ] CLI `doctor`, `daemon start`, `run fake`, `runtimes test`, `debug run`, and `contract export` exist with deterministic human and JSON behavior where requested.
-- [ ] OpenAPI or equivalent typed contract output is deterministic and checked against real local daemon route registrations.
-- [ ] Generated contract output includes local daemon success, SSE, raw artifact content, metrics, and error-envelope behavior.
-- [ ] Migration tests open representative older SQLite schemas, preserve local data, and reject corrupt/empty DB files without overwrite.
-- [ ] Adapter compatibility matrix covers all shipped runtime modes in CI-safe/no-spend mode and fails on missing manifests, missing harnesses, unsupported live calls, uncovered capabilities, or output drift.
-- [ ] Local release packaging installs from disk in a clean temp environment and smoke-tests doctor, fake run, event replay, artifact content fetch, and shutdown.
-- [ ] Logs include request ids and named operational events without leaking secrets or stack traces to users.
-- [ ] Error envelopes preserve current behavior and add only optional request id metadata.
-- [ ] `GET /metrics` returns deterministic local JSON counters/gauges and is covered by tests.
-- [ ] Startup recovery reconciles interrupted local runs exactly once and records visible event/log/metric evidence.
-- [ ] Required R11 product, API, development, architecture, changelog, and adapter docs are updated.
+
+- [ ] `@switchyard/sdk` can create a fake local run, inspect it, replay/list events, fetch artifact metadata/content, and raise typed HTTP/network/decode errors against an in-process local daemon.
+- [ ] `@switchyard/cli` supports `doctor`, `daemon start`, `run fake`, `runtime test`, `debug run`, and `contract export`.
+- [ ] Contract output is deterministic OpenAPI 3.1 or equivalent typed contract JSON and drift-tested against actual local daemon routes.
+- [ ] SQLite migration policy/schema versioning is explicit and fixture migration tests preserve old local data.
+- [ ] Adapter compatibility matrix runs in CI-safe/no-spend mode and reports deterministic pass/skip/fail rows.
+- [ ] Local release packaging smoke installs/uses SDK and CLI from a clean temp environment.
+- [ ] Request ids, hardened error envelopes, metrics, structured logs, and startup recovery tests are present.
+- [ ] No UI/TUI/dashboard, no live external model/API spend, and no hosted runtime expansion is introduced.
 
 **Checks (must pass before GREEN):**
-- `pnpm typecheck`
-- `pnpm test`
-- `pnpm build`
-- `pnpm lint`
-- `pnpm --filter @switchyard/contracts openapi:check`
-- `pnpm --filter @switchyard/adapters compatibility:check`
-- `pnpm --filter @switchyard/storage test`
-- `pnpm --filter @switchyard/cli test`
+
+- `pnpm install --lockfile-only`
 - `pnpm --filter @switchyard/sdk test`
-- `pnpm release:smoke-local`
+- `pnpm --filter @switchyard/cli test`
+- `pnpm --filter @switchyard/protocol-rest test`
+- `pnpm --filter @switchyard/storage test`
+- `pnpm --filter @switchyard/adapters test`
+- `pnpm --filter @switchyard/daemon test`
+- `pnpm test`
+- `pnpm typecheck`
 - `git diff --check`
 
 **Error rescue map:**
 
-| Codepath | Failure | Exception shape | Rescue | User sees |
+| Method / codepath | What can go wrong | Exception / condition | Rescue action | User sees |
 | --- | --- | --- | --- | --- |
-| `SwitchyardClient.requestJson` | fetch rejects | native fetch error | throw `SwitchyardNetworkError` with method/url/cause | typed network error |
-| `SwitchyardClient.requestJson` | HTTP error with valid envelope | parsed `HttpErrorEnvelope` | throw `SwitchyardHttpError` | status, code, message, details, requestId |
-| `SwitchyardClient.requestJson` | HTTP error non-JSON body | body text | throw `SwitchyardDecodeError` with status and 4 KiB excerpt | typed decode error |
-| `SwitchyardClient.requestJson` | success shape invalid | Zod error | throw `SwitchyardDecodeError` | endpoint and schema issue summary |
-| SDK id validation | missing or empty id | client validation | throw `SwitchyardValidationError` before HTTP | field name and method |
-| SDK SSE replay/live | empty replay response | no throw | return empty event list | empty event array |
-| SDK SSE replay/live | malformed frame JSON | `SyntaxError` | throw `SwitchyardStreamError` with last event id | stream error |
-| SDK live stream | abort signal fires | `AbortError` | cancel reader and release resources | iterator terminates or throws typed abort based on option |
-| SDK artifact content | zero-byte content | no throw | return empty `Uint8Array` | empty content is not missing |
-| CLI parser | invalid command/flag | `CliUsageError` | print command usage | stderr usage, exit 2 |
-| `switchyard doctor` | daemon unreachable | `SwitchyardNetworkError` | fail non-zero with remediation | base URL and daemon start hint |
-| `switchyard doctor` | invalid health/doctor payload | `SwitchyardDecodeError` | fail non-zero | invalid payload summary |
-| `switchyard daemon start` | port occupied | child exit or bind error | report `daemon_port_in_use` | port and remediation |
-| `switchyard daemon start` | empty data dir flag | `CliUsageError` | reject before spawn | `--data-dir must be non-empty` |
-| `switchyard daemon start` | readiness timeout | `CliDaemonStartError` | terminate child and preserve logs | timeout and log path |
-| `switchyard run fake` | empty task | no throw | use safe default `Switchyard CLI fake smoke` | output notes default task in JSON |
-| `switchyard runtimes test` | non-fake without `--live` | no throw | check-only path | no run created, check-only message |
-| `switchyard debug run` | missing run | `SwitchyardHttpError run_not_found` | print remediation | run id and base URL hint |
-| `switchyard debug run` | missing artifact content | `SwitchyardHttpError missing_artifact_content` | keep metadata and print hint | content unavailable hint |
-| `contract export` | output path unwritable | `CliFileError` | fail before partial write or remove partial | path and OS message |
-| `generateOpenApi` | descriptor inventory empty | `contract_inventory_empty` | abort generation | inventory path and command |
-| `generateOpenApi` | duplicate operation id | `contract_operation_duplicate` | abort generation | operation id and paths |
-| `generateOpenApi` | schema cannot be represented | `contract_schema_unrepresentable` | require extension or fail | method/path and schema name |
-| `openapi:check` | generated JSON differs | `contract_output_drift` | fail with regenerate command | output file path |
-| `openapi:check` | descriptor missing real route | `contract_route_missing` | fail closed | method/path |
-| `openapi:check` | real route lacks descriptor | `contract_descriptor_missing` | fail closed | method/path |
-| `openSqliteStorage` | missing DB path | no exception | create current schema | normal startup |
-| `openSqliteStorage` | zero-byte existing file | `SqliteMigrationError storage_database_empty` | do not write file | named storage error |
-| `openSqliteStorage` | corrupt/non-SQLite file | `SqliteMigrationError storage_database_corrupt` | close handle and leave file in place | named storage error |
-| `applyMigrations` | destructive statement | `SqliteMigrationError storage_migration_policy_violation` | abort before execution | migration id and blocked statement |
-| `applyMigrations` | SQL execution fails | `SqliteMigrationError storage_migration_failed` | rollback current migration | migration id and SQLite message |
-| request id hook | inbound id empty or too long | no throw | generate bounded request id | `x-request-id` header |
-| daemon error handler | unexpected error | unknown throwable | log server-side, return `internal_error` | sanitized envelope with requestId |
-| metrics endpoint | no activity | no throw | return zero counters/gauges | deterministic JSON zeros |
-| startup recovery | active run has terminal event | no throw | skip reconciliation | no duplicate event |
-| startup recovery | active run lacks terminal event | no throw | mark run/session failed, append one event | `daemon_restarted` event |
-| compatibility generator | no adapters | `compatibility_matrix_empty` | abort generation | no adapters found |
-| compatibility generator | manifest missing | `compatibility_manifest_invalid` | fail CI mode | adapter id and field |
-| compatibility generator | no no-spend harness | `compatibility_harness_missing` | fail CI mode | runtime mode slug |
-| compatibility generator | live call attempted | `compatibility_live_call_blocked` | fail before call leaves process | adapter and target |
-| compatibility check | output drift | `compatibility_output_drift` | fail with regenerate command | output file path |
-| release pack | package build fails | child exit with status/stderr excerpt | stop before packing and keep log | package and log path |
-| release pack | release manifest points at source | `release_manifest_uses_source` | fail before smoke | package and offending field |
-| release smoke | bundle path missing | `release_bundle_missing` | fail before install | missing path |
-| release smoke | install fails | `release_install_failed` | keep temp report and skip daemon start | install command and report dir |
-| release smoke | daemon readiness timeout | `release_daemon_ready_timeout` | kill child and keep logs | base URL and log path |
+| SDK HTTP request | Daemon unreachable | `TypeError` or fetch rejection | Throw `SwitchyardNetworkError` with URL/method | CLI prints daemon unreachable with command hint |
+| SDK HTTP request | Timeout | `AbortError` from `AbortController` | Throw `SwitchyardTimeoutError` | CLI prints timeout and configured timeout seconds |
+| SDK HTTP request | 4xx/5xx with error envelope | HTTP status plus decoded `httpErrorEnvelopeSchema` | Throw `SwitchyardHttpError` with code/details/requestId | CLI prints code/message/requestId |
+| SDK HTTP request | 4xx/5xx malformed body | JSON parse or schema decode failure | Throw `SwitchyardDecodeError` containing status/request id if present | CLI prints invalid daemon response |
+| SDK JSON decode | Successful response shape drift | Zod parse failure or explicit validation failure | Throw `SwitchyardDecodeError` | Tests fail; user gets contract drift message |
+| SDK artifact content | Raw content not JSON | non-JSON content type | Return bytes/text without JSON decode | User receives content plus content type |
+| CLI command parsing | Missing/invalid args | explicit validation condition | Exit 2 with command-specific message | Concise usage error |
+| CLI daemon start | Port already in use | Fastify listen error code | Exit non-zero and preserve error code/message | Port-in-use message |
+| CLI contract export | Output path unwritable | filesystem `EACCES`/`ENOENT` | Exit non-zero, do not partial-write where possible | File write failure message |
+| OpenAPI generation | Unsupported route content type | explicit inventory validation failure | Throw at generation/test time | Contract test failure names route |
+| Route drift test | Registered route missing from inventory | route set mismatch | Fail test with method/path diff | Developer sees exact drift |
+| SQLite migration | Existing DB has no metadata table | metadata table absent | Create metadata and set current version after additive migrations | Startup continues; test proves rows preserved |
+| SQLite migration | Destructive migration proposed | policy validation sees drop/rename/destructive SQL | Reject migration in tests/helpers | Test failure names forbidden statement |
+| Compatibility matrix | Adapter cannot run CI-safe | manifest row lacks fake harness | Return skipped with reason | CLI/test report shows deterministic skip |
+| Startup recovery | Interrupted runs exist | run/session status active on boot | Mark/record recovery according to existing behavior and log count | Operator sees structured recovery log |
 
 **Observability:**
 
 ```json
 {
   "logs": [
-    "http.request.start requestId=... method=GET path=/health",
-    "http.request.complete requestId=... statusCode=200 durationMs=N",
-    "runtime_mode.seeded runtimeMode=fake.deterministic state=available",
-    "runtime_mode.check runtimeMode=fake.deterministic state=available",
-    "run.created runId=... runtimeMode=fake.deterministic",
-    "run.started runId=...",
-    "run.completed runId=...",
-    "artifact.persistence.failed runId=... artifactId=...",
-    "storage.migration.start path=...",
-    "storage.migration.success schemaVersion=N",
-    "startup.recovery.completed runs=N sessions=N",
-    "release.smoke.step name=fake-run status=passed"
+    "daemon.request.error includes requestId, method, path, status, error.code",
+    "daemon.startup.recovered_runs includes count and run ids or bounded sample",
+    "cli.command.failed includes command, error class, and requestId when present",
+    "compatibility.matrix.completed includes pass/skip/fail counts"
   ],
-  "success_metric": "all promotion checks pass and /metrics exposes non-missing counters/gauges with request ids in headers/logs",
-  "failure_metric": "named error code for SDK, CLI, contract, storage, compatibility, daemon, or release path with report/log location when available"
+  "success_metric": "local contract, SDK, CLI, migration, packaging, and adapter matrix tests pass without network/API spend",
+  "failure_metric": "typed SDK/CLI errors include class, code/status when applicable, and requestId for daemon HTTP failures"
 }
 ```
 
 **Test cases:**
 
-| Name | Lens | Given | Expect |
-| --- | --- | --- | --- |
-| SDK fake run integration | integration | local daemon and `createRun(..., { wait: true })` | completed run and `response.text === 'fake runtime output'` |
-| SDK missing run | error_path | `getRun('run_missing')` | `SwitchyardHttpError` status 404 code `run_not_found` |
-| SDK empty id validation | happy_shadow_empty | `getRun('')` | `SwitchyardValidationError`, no HTTP call |
-| SDK network failure | error_path | closed loopback port | `SwitchyardNetworkError` |
-| SDK invalid success JSON | error_path | fetch mock returns malformed success body | `SwitchyardDecodeError` |
-| SDK empty event replay | happy_shadow_empty | empty SSE response | empty event array |
-| SDK malformed SSE | error_path | SSE frame with invalid JSON data | `SwitchyardStreamError` |
-| SDK abort live stream | edge_abort | `streamRunEvents` with aborted `AbortSignal` | reader released and iterator terminates |
-| SDK raw artifact bytes | happy | transcript artifact content | `Uint8Array` and content type preserved |
-| CLI doctor human | happy | daemon on ephemeral port | human summary includes health and runtime summary |
-| CLI doctor JSON | happy | `switchyard doctor --json` | stdout parses as JSON |
-| CLI doctor unreachable | error_path | closed port | non-zero and remediation hint |
-| CLI daemon readiness | integration | daemon starts on ephemeral port | prints base URL and pid |
-| CLI daemon timeout | error_path | daemon child never ready | named timeout and child cleanup |
-| CLI fake default task | happy_shadow_empty | `run fake --wait --task ""` | completed run using safe default |
-| CLI runtime fake test | integration | `runtimes test fake.deterministic` | no-spend fake run and counts |
-| CLI non-fake check only | happy | `runtimes test codex.exec_json` without `--live` | no run created |
-| CLI debug missing run | error_path | `debug run run_missing` | run_not_found remediation |
-| CLI debug restart recovery | edge_recovery | run has `daemon_restarted` event | recovery hint printed |
-| Contract stable generation | happy | generator run twice | identical JSON bytes |
-| Contract empty inventory | happy_shadow_empty | `generateOpenApi([])` | `contract_inventory_empty` |
-| Contract duplicate operation | error_path | duplicate operation id fixture | `contract_operation_duplicate` |
-| Contract SSE descriptor | happy | `/runs/{id}/events` descriptor | OpenAPI has `text/event-stream` |
-| Contract raw artifact descriptor | happy | `/artifacts/{id}/content` descriptor | raw content plus extension marker |
-| Contract route drift | integration | descriptor removed in fixture | missing method/path reported |
-| Migration missing DB | happy_shadow_nil | nonexistent temp path | current schema and migration version created |
-| Migration empty DB | happy_shadow_empty | zero-byte file | named storage error and file unchanged |
-| Migration corrupt DB | error_path | non-SQLite file | named storage error and content unchanged |
-| Migration pre-R3 fixture | integration | `pre-r3.sql` | old rows survive and new columns exist |
-| Migration pre-R7 fixture | integration | `pre-r7.sql` | middleware tables/indexes exist |
-| Migration pre-R9 fixture | integration | `pre-r9.sql` | debate rows survive |
-| Migration pre-R11 fixture | integration | `pre-r11.sql` | version table added idempotently |
-| Migration policy blocks drop | error_path | `DROP TABLE runs` statement | policy violation |
-| Request id generated | happy_shadow_nil | `GET /health` without header | response has `x-request-id` |
-| Request id honored | happy | `x-request-id: req_test` | response returns same id |
-| Empty request id rejected | happy_shadow_empty | empty header | generated id |
-| Error envelope request id | error_path | `GET /runs/run_missing` | `error.requestId` present |
-| Unexpected error sanitized | error_path | route fixture throws stack-bearing error | `internal_error`, no stack in body |
-| Metrics empty shape | happy_shadow_empty | fresh daemon `GET /metrics` | all required fields with zeros |
-| Metrics count request | integration | call `/health`, then `/metrics` | count increments for `GET /health` |
-| Recovery active run once | integration | DB with active run, restart twice | one `run.failed` event |
-| Recovery waiting state | edge_recovery | DB with `waiting_for_input` no terminal event | run failed with `daemon_restarted` |
-| Recovery terminal untouched | edge_recovery | completed run with terminal event | no extra terminal event |
-| Compatibility shipped modes | happy | generated matrix | six required runtime mode slugs present |
-| Compatibility empty matrix | happy_shadow_empty | no adapters fixture | `compatibility_matrix_empty` |
-| Compatibility missing manifest | happy_shadow_nil | adapter fixture without manifest | invalid manifest error |
-| Compatibility missing harness | error_path | manifest without harness | `compatibility_harness_missing` |
-| Compatibility live blocked | error_path | harness attempts non-loopback or real model call | `compatibility_live_call_blocked` |
-| Compatibility deterministic output | happy | generator run twice | JSON and markdown bytes match |
-| Release dist exports | happy | packed manifests | public exports/types/bins point at dist |
-| Release rejects source export | error_path | fixture manifest uses `src/index.ts` | `release_manifest_uses_source` |
-| Release smoke | integration | built local bundle | doctor, fake run, event replay, artifact content, shutdown pass |
-| Docs current truth | happy | read docs after implementation | R11 shipped behavior present and non-goals preserved |
-| Docs no live-spend claim | error_path | scan adapter docs | required checks remain no-spend; live checks manual only |
+- `{ "name": "sdk_fake_run_lifecycle", "lens": "integration", "given": "in-process createDaemonApp and SwitchyardClient", "expect": "createRun returns a run; getRun/listRunEvents/listRunArtifacts/getArtifact/getArtifactContent succeed" }`
+- `{ "name": "sdk_http_error_typed", "lens": "error_path", "given": "getRun for missing id", "expect": "SwitchyardHttpError with run_not_found, status 404, optional requestId" }`
+- `{ "name": "sdk_network_error_typed", "lens": "error_path", "given": "client pointed at closed localhost port", "expect": "SwitchyardNetworkError" }`
+- `{ "name": "sdk_decode_error_typed", "lens": "error_path", "given": "fetch returns malformed JSON for a JSON endpoint", "expect": "SwitchyardDecodeError" }`
+- `{ "name": "cli_doctor_json", "lens": "integration", "given": "local daemon URL", "expect": "doctor command prints deterministic JSON and exits 0" }`
+- `{ "name": "cli_run_fake_wait", "lens": "integration", "given": "local daemon URL", "expect": "run fake creates and completes a fake run without external API spend" }`
+- `{ "name": "cli_runtime_test_no_spend", "lens": "happy_shadow_nil", "given": "no external credentials", "expect": "runtime test uses fake/no-spend matrix and reports pass/skip rows" }`
+- `{ "name": "cli_debug_missing_run", "lens": "error_path", "given": "missing run id", "expect": "typed HTTP error output includes run_not_found and requestId when available" }`
+- `{ "name": "contract_export_deterministic", "lens": "happy", "given": "two OpenAPI generations", "expect": "byte-identical JSON" }`
+- `{ "name": "contract_route_drift", "lens": "integration", "given": "createDaemonApp registered routes", "expect": "inventory methods/paths match local daemon route set" }`
+- `{ "name": "artifact_content_openapi_extension", "lens": "edge_raw_content", "given": "GET /artifacts/:id/content", "expect": "OpenAPI content types or x-switchyard extension documents raw content" }`
+- `{ "name": "sqlite_old_fixture_migration", "lens": "integration", "given": "old SQLite fixture without metadata table", "expect": "open succeeds, data preserved, schema version recorded" }`
+- `{ "name": "sqlite_destructive_policy_rejected", "lens": "error_path", "given": "DROP TABLE/ALTER TABLE RENAME migration statement", "expect": "policy helper rejects it" }`
+- `{ "name": "adapter_matrix_ci_safe", "lens": "integration", "given": "real adapter manifests with fake harnesses", "expect": "deterministic pass/skip/fail matrix and no live provider spend" }`
+- `{ "name": "package_smoke_clean_temp", "lens": "integration", "given": "temporary project", "expect": "SDK import, CLI help, and contract export work from packed/linked local packages" }`
+- `{ "name": "daemon_error_request_id", "lens": "error_path", "given": "invalid local daemon request", "expect": "error envelope includes requestId and SDK preserves it" }`
+- `{ "name": "daemon_metrics", "lens": "happy", "given": "health/error/run requests", "expect": "metrics endpoint reports request/error/run status counts" }`
+- `{ "name": "daemon_startup_recovery_log", "lens": "integration", "given": "interrupted active run in persisted store", "expect": "startup recovery log emitted and run not left active" }`
 
 **Integration contracts:**
 
@@ -300,7 +253,7 @@ Operational hardening stays in the local daemon. Fastify hooks add bounded reque
     {
       "name": "SwitchyardClient",
       "kind": "class",
-      "signature": "new SwitchyardClient(options?: { baseUrl?: string; fetch?: typeof fetch; headers?: HeadersInit })"
+      "signature": "new SwitchyardClient(options: SwitchyardClientOptions)"
     },
     {
       "name": "SwitchyardHttpError",
@@ -308,104 +261,62 @@ Operational hardening stays in the local daemon. Fastify hooks add bounded reque
       "signature": "class SwitchyardHttpError extends Error { status: number; code: HttpErrorCode; details?: HttpErrorDetail[]; requestId?: string }"
     },
     {
-      "name": "switchyard",
-      "kind": "command",
-      "signature": "switchyard <doctor|daemon start|run fake|runtimes test|debug run|contract export>"
+      "name": "generateOpenApiDocument",
+      "kind": "function",
+      "signature": "generateOpenApiDocument(options?: { surface?: 'local-daemon' | 'hosted-node' | 'all' }) => OpenApiDocument"
     },
     {
-      "name": "endpointDescriptors",
+      "name": "LOCAL_DAEMON_ROUTE_INVENTORY",
       "kind": "constant",
-      "signature": "EndpointDescriptor[]"
+      "signature": "readonly RouteInventoryEntry[]"
     },
     {
-      "name": "generateOpenApi",
+      "name": "runCompatibilityMatrix",
       "kind": "function",
-      "signature": "generateOpenApi(input: { surface: 'daemon-local' | 'server-hosted' | 'all' }) => OpenApiDocument"
+      "signature": "runCompatibilityMatrix(options?: { ciSafe?: boolean }) => Promise<CompatibilityMatrixResult>"
     },
     {
-      "name": "metricsResponseSchema",
+      "name": "SQLITE_SCHEMA_VERSION",
       "kind": "constant",
-      "signature": "z.ZodType<MetricsResponse>"
+      "signature": "number"
     },
     {
-      "name": "SqliteMigrationError",
-      "kind": "class",
-      "signature": "new SqliteMigrationError(code: StorageMigrationErrorCode, message: string, options?: { migrationId?: string })"
-    },
-    {
-      "name": "readSqliteMigrationInfo",
+      "name": "validateSqliteMigrationPolicy",
       "kind": "function",
-      "signature": "readSqliteMigrationInfo(sqlite: Database.Database) => { schemaVersion: number; applied: Array<{ id: string; appliedAt: string }> }"
-    },
-    {
-      "name": "buildCompatibilityMatrix",
-      "kind": "function",
-      "signature": "buildCompatibilityMatrix(input: CompatibilityMatrixInput) => Promise<CompatibilityMatrix>"
-    },
-    {
-      "name": "pnpm release:smoke-local",
-      "kind": "command",
-      "signature": "pnpm release:smoke-local => clean temp install smoke report"
+      "signature": "validateSqliteMigrationPolicy(statements: readonly string[]) => void"
     }
   ],
   "imports_from_other_tasks": [],
-  "file_paths_consumed_by_other_tasks": [
-    "packages/sdk/src/index.ts",
-    "packages/cli/src/main.ts",
-    "packages/contracts/src/endpoint-inventory.ts",
-    "packages/contracts/openapi/daemon-local.openapi.json",
-    "packages/adapters/compatibility-matrix.json",
-    "tools/release/smoke-local-release.ts"
-  ]
+  "file_paths_consumed_by_other_tasks": []
 }
-```
-
-## Phase-Level Promotion Checks
-
-```bash
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm lint
-pnpm --filter @switchyard/contracts openapi:check
-pnpm --filter @switchyard/adapters compatibility:check
-pnpm --filter @switchyard/storage test
-pnpm --filter @switchyard/cli test
-pnpm --filter @switchyard/sdk test
-pnpm release:smoke-local
-git diff --check
 ```
 
 ## Risks
 
-- This is a deliberately large single implementer task because the user requested one implementer/reviewer loop as the practical path. Reviewer and auditor should apply the promotion checks strictly because the task spans new packages, contracts, storage, daemon runtime behavior, packaging, and docs.
-- Existing workspace manifests point at source files for local TypeScript execution. R11 packaging must prove dist-only installed artifacts even if workspace development keeps source-oriented resolution.
-- Fastify route inventory may require parsing `printRoutes()` unless a structured registry is added. The route drift checker must fail closed if it cannot normalize routes.
+- This is a large single task because the user requested one implementer/reviewer pair per phase. The implementer must keep changes modular and tests focused.
+- Package smoke can be slow if it performs full workspace packing. Prefer deterministic local temp import/bin smoke with workspace build artifacts unless a stricter pack test is easy and fast.
+- OpenAPI cannot fully model SSE behavior and arbitrary raw artifact bytes; document those responses with correct content types plus `x-switchyard-*` extensions.
+- Some real runtime adapters cannot be executed CI-safe without local binaries or credentials. Matrix rows should explicitly skip with stable reasons rather than overclaiming pass coverage.
 
-## Self-Review
+## Integration Points
 
-1. Spec coverage: all Phase 10 acceptance items are covered by the single task acceptance list and promotion checks.
-2. Placeholder scan: no intentional placeholder instructions are left.
-3. Type consistency: SDK, CLI, contract, metrics, storage, and compatibility export signatures are locked in the task integration contract.
-4. Ownership disjoint: one task owns all implementation files, so there is no cross-task ownership conflict.
-5. Context files real: every context file listed above exists in the worktree at plan-authoring time.
-6. Acceptance testable: every acceptance item maps to a command or concrete test case.
-7. Dependency order sane: one task has no dependency ordering problem; instructions are sequenced from scaffolding through docs.
-8. Checks runnable: every listed promotion check is either existing or created by the task with exact package script names.
-9. Error/rescue map present: all failure-prone SDK, CLI, contract, storage, daemon, compatibility, release, and docs flows are named.
-10. Observability present: runtime and release behavior define logs, success metric, and failure metric.
-11. Test cases enumerate acceptance: happy, nil, empty, error, edge, and integration cases cover every acceptance area and rescue path.
-12. Integration contracts walk: there are no cross-task imports; exported public contracts are still specified for reviewer/auditor validation.
-13. Contract types match: declared SDK/CLI/contract/storage/compatibility signatures are internally consistent.
+The CLI depends on the SDK and contract generator. The SDK depends on contracts and fetch only. The daemon/protocol hardening is independent but required for typed SDK/CLI request-id behavior. Storage migration tests are independent except for daemon startup recovery coverage. The adapter compatibility matrix is independent but exposed through the CLI `runtime test` path.
 
-## Plan Completeness Self-Test
+```
+contracts ─┬─▶ protocol-rest/openapi ─▶ cli contract export
+           ├─▶ sdk ───────────────────▶ cli doctor/run/debug
+           └─▶ daemon errors/metrics
 
-- [x] Every acceptance criterion in the spec has at least one task that delivers it.
-- [x] The task has acceptance criteria.
-- [x] Every acceptance criterion has at least one test case.
-- [x] Every error rescue map entry has a matching error, shadow, edge, or integration test case.
-- [x] There are no cross-task imports to resolve because this is a single-task plan.
-- [x] Every context file path exists in the project.
-- [x] No task edits a file owned by another task.
-- [x] No placeholder text is intentionally present.
-- [x] Complexity L was challenged; the one-task path is chosen because it is the practical path for this manual Phase 10 run.
+storage sqlite ─▶ daemon startup recovery
+adapters/testkit ─▶ compatibility matrix ─▶ cli runtime test
+```
+
+## Acceptance Criteria (Phase-Level)
+
+- [ ] TypeScript SDK can create a run, inspect events, fetch artifacts, and handle typed errors against local daemon.
+- [ ] CLI can run doctor checks and launch a local fake run.
+- [ ] OpenAPI/contract output matches implemented endpoints.
+- [ ] Migration tests protect existing local data.
+- [ ] Compatibility matrix checks run CI-safe mode.
+- [ ] Release packaging can be installed and smoke-tested from a clean environment.
+- [ ] App developers and operators can consume Switchyard without hand-written curl workflows.
