@@ -27,3 +27,17 @@ R3 runtime capability inspection is now shipped on the phase branch. Switchyard 
 
 ### Deferred Concerns
 - None.
+
+## Phase 3: R4 Shared Runtime Substrates And Generic HTTP
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-29-phase-3-r4-shared-runtime-substrates-and-generic-http.md
+**Plan:** docs/superpowers/plans/phase-3-r4-shared-runtime-substrates-and-generic-http.md
+**Audit:** agent-runs/native-roadmap-20260529/audit/phase-3-report.md
+**Branch:** agent/phase-3-r4-shared-runtime-substrates-and-generic-http (audit GREEN; merge pending native runtime)
+**PR:** not created - native audit workflow requested; branch retained locally
+
+### What changed
+R4 is now shipped on the phase branch. Switchyard extracts shared runtime substrates from the proven Codex `exec --json` path, adds the `generic_http.async_rest` runtime mode plus deterministic fake HTTP wrapper coverage, wires Generic HTTP through daemon/runtime-mode/doctor/REST surfaces, and preserves transcript artifacts and verified-terminal cancellation semantics across both process-backed and HTTP-wrapper-backed adapters.
+
+### Deferred Concerns
+- None.
