@@ -80,6 +80,15 @@ ACP agent request session/request_permission
   -> no Switchyard approval request is created in R5
 ```
 
+Transcript confidentiality rule:
+
+```text
+ACP stdout/stderr
+  -> redact and bound first
+  -> transcript JSONL raw/text fields store only redacted transport payloads
+  -> artifact content store never receives pre-redaction secrets, env dumps, or unbounded JSON-RPC
+```
+
 ## Existing R4 Anchors
 
 - `packages/core/src/ports/runtime-adapter.ts` is the adapter lifecycle boundary and already supports `adapterType: "acpx"` through contracts.
@@ -115,7 +124,7 @@ ACP agent request session/request_permission
 - `packages/adapters/src/substrates/transcript-recorder.ts` - R4 transcript handoff pattern and metadata-content convention.
 - `packages/contracts/src/artifact.ts` - artifact type schema and transcript type.
 
-`instructions`: Create private workspace package `@switchyard/protocol-acpx` with `build`, `typecheck`, `test`, and `lint` scripts consistent with the existing packages. Implement newline-delimited JSON-RPC 2.0 helpers and package-local named protocol errors without importing `@switchyard/core`. JSON-RPC parsing must enforce `jsonrpc: "2.0"`, request/notification/response shapes, exactly one of `result` or `error`, no embedded newlines on writes, unknown/duplicate response ids as named errors, malformed JSON as `acp_invalid_json`, invalid envelopes as `acp_invalid_message`, and JSON-RPC error responses as `AcpResponseError` with sanitized code/message/data. Implement minimal ACP Zod schemas for initialize, `session/new`, `session/prompt`, `session/cancel`, `session/update`, and agent-to-client requests, permissive where the spec allows future ACP shape. Implement raw ACP transcript helpers that write JSONL entries for inbound/outbound ACP messages and stderr with timestamp, direction, id, method, byte length, raw line, redaction, and oversized-marker support. Do not implement process spawning or OpenCode-specific behavior in this task.
+`instructions`: Create private workspace package `@switchyard/protocol-acpx` with `build`, `typecheck`, `test`, and `lint` scripts consistent with the existing packages. Implement newline-delimited JSON-RPC 2.0 helpers and package-local named protocol errors without importing `@switchyard/core`. JSON-RPC parsing must enforce `jsonrpc: "2.0"`, request/notification/response shapes, exactly one of `result` or `error`, no embedded newlines on writes, unknown/duplicate response ids as named errors, malformed JSON as `acp_invalid_json`, invalid envelopes as `acp_invalid_message`, and JSON-RPC error responses as `AcpResponseError` with sanitized code/message/data. Implement minimal ACP Zod schemas for initialize, `session/new`, `session/prompt`, `session/cancel`, `session/update`, and agent-to-client requests, permissive where the spec allows future ACP shape. Implement raw ACP transcript helpers that write JSONL entries for inbound/outbound ACP messages and stderr with timestamp, direction, id, method, byte length, redacted raw line, redaction metadata, and oversized-marker support. The `raw` field means "redacted raw JSON-RPC line"; it must never store the pre-redaction line if it contained tokens, env-like secrets, configured token-like command path segments, or other redactable material. Do not implement process spawning or OpenCode-specific behavior in this task.
 
 `acceptance`:
 - `@switchyard/protocol-acpx` exists as a private package and local tests import its source files.
@@ -124,6 +133,7 @@ ACP agent request session/request_permission
 - ACP schemas parse the R5 initialize, `session/new`, `session/prompt`, `session/cancel`, known `session/update`, unknown `session/update`, and `session/request_permission` shapes.
 - Transcript helpers emit newline-delimited entries with `type: "acp.message"` or `type: "acp.stderr"`, direction, id/method when present, byte length, timestamp, and redacted raw/text.
 - Transcript redaction covers `Authorization`, `Bearer ...`, env-like keys ending in `_TOKEN`, `_KEY`, `_SECRET`, and token-like command path segments without storing environment dumps.
+- Transcript `raw` stores redacted raw JSON-RPC only; tests must prove pre-redaction secret values are absent from in-memory transcript content and from the returned artifact metadata content string.
 - No OpenCode adapter, daemon wiring, approval bridge, or inbound ACP server appears in this package.
 
 `checks`:
@@ -155,6 +165,7 @@ ACP agent request session/request_permission
 - `{ name: "invalid envelope rejects", lens: "error_path", given: "response with result and error", expect: "AcpProtocolError reason acp_invalid_message" }`
 - `{ name: "response error sanitizes data", lens: "error_path", given: "JSON-RPC error containing Authorization and API_TOKEN", expect: "AcpResponseError data/message redacted" }`
 - `{ name: "transcript redacts bearer token", lens: "edge_redaction", given: "raw message with Bearer secret", expect: "transcript raw contains Bearer [REDACTED]" }`
+- `{ name: "transcript raw never stores pre-redaction secret", lens: "edge_redaction", given: "raw JSON-RPC with Authorization, API_TOKEN, and safe fields", expect: "content() includes safe fields and redacted placeholders but not the original secret substrings" }`
 - `{ name: "oversized transcript marker", lens: "edge_oversized", given: "line over max bytes", expect: "metadata line with reasonCode acp_message_too_large" }`
 - `{ name: "permission request schema", lens: "integration", given: "agent-to-client session/request_permission request", expect: "method and id are parseable for unsupported-method response" }`
 
@@ -198,11 +209,13 @@ ACP agent request session/request_permission
 - `packages/adapters/package.json` - existing adapter package dependency/script style.
 - `packages/testkit/package.json` - existing testkit package dependency/script style.
 
-`instructions`: Implement `AcpStdioClient` as a reusable process-backed stdio ACP client with no OpenCode assumptions and no `@switchyard/core` dependency. It must spawn the configured command with fixed args provided by the adapter, `shell: false`, and explicit `cwd`; start stdout, stderr, response correlation, and transcript recording before the first request; send requests/notifications; enforce request and cancel timeouts; reject oversized stdout/stderr; reject duplicate ids; reject unknown response ids; reject transport close with in-flight requests; expose notifications to adapters through an async iterator or callback; respond to unsupported agent-to-client requests with JSON-RPC error `-32601` using the same id; and close/kill idempotently. Add a package barrel exporting the T1 and T2 public API. Add workspace dependencies from adapters and testkit to `@switchyard/protocol-acpx`, add the testkit fake ACP script entry, and update `pnpm-lock.yaml`. Do not add daemon config or OpenCode adapter code in this task.
+`instructions`: Implement `AcpStdioClient` as a reusable process-backed stdio ACP client with no OpenCode assumptions and no `@switchyard/core` dependency. It must spawn the configured command with fixed args provided by the adapter, `shell: false`, and explicit `cwd`; start stdout, stderr, response correlation, and transcript recording before the first request; send requests/notifications; enforce request and cancel timeouts; reject oversized stdout/stderr; reject duplicate ids; reject unknown response ids; reject transport close with in-flight requests; expose notifications to adapters through an async iterator or callback; respond to unsupported agent-to-client requests with JSON-RPC error `-32601` using the same id; and close/kill idempotently. Correlation keys must preserve JSON-RPC id type so numeric `1` and string `"1"` are distinct in-flight ids. Add a package barrel exporting the T1 and T2 public API, including explicit re-exports for T1 helpers used by testkit (`parseJsonRpcLine`, `serializeJsonRpcMessage`, `AcpProtocolError`, `AcpResponseError`, and `AcpTranscriptRecorder`) with the exact T1 signatures below. Add workspace dependencies from adapters and testkit to `@switchyard/protocol-acpx`, add the testkit fake ACP script entry, and update `pnpm-lock.yaml`. Do not add daemon config or OpenCode adapter code in this task.
 
 `acceptance`:
 - `@switchyard/protocol-acpx` exports JSON-RPC helpers, ACP schemas, transcript helpers, `AcpStdioClient`, client option types, and named errors from `src/index.ts`.
 - Client request/response correlation resolves matching responses and rejects unknown response ids, duplicate in-flight ids, request timeout, transport close, malformed JSON, invalid envelopes, response errors, and oversized stdout/stderr with named ACP reason codes.
+- Client correlation supports two or more concurrent in-flight requests whose responses arrive out of order; interleaved `session/update` notifications and `session/request_permission` requests are routed as client events and do not consume either response.
+- Client correlation does not conflate numeric JSON-RPC ids with string ids that render similarly, such as `1` and `"1"`.
 - Client records every outbound request/notification, inbound response/notification/request, stderr diagnostic, and oversized marker in the transcript.
 - Client ignores blank stdout lines and does not record them as ACP messages.
 - Client has a test-only process factory so adapters and testkit can run fake ACP processes without real OpenCode.
@@ -224,6 +237,8 @@ ACP agent request session/request_permission
 | `AcpStdioClient.request` | Hung request never settles | ACP process never responds | Race pending request with timeout and reject `acp_request_timeout` | Run/check fails instead of hanging |
 | stdout reader | Process closes with pending requests | EOF before response | Reject all pending requests with `acp_transport_closed` | Run fails with transport-close reason |
 | stdout reader | Agent emits oversized message | Line exceeds max bytes | Append oversized marker, reject `acp_message_too_large`, close client | Run fails and artifact records why |
+| response correlation | Out-of-order response resolves the wrong request | Two pending ids receive responses in reverse order with notifications between them | Key pending requests by typed id and dispatch notifications/agent requests outside response resolution | Each adapter operation sees its own response |
+| response correlation | Numeric and string ids collide | Pending ids `1` and `"1"` coexist | Include id type in the correlation key | Protocol mismatch is caught instead of misrouting a response |
 | stderr capture | Local warning becomes fatal | OpenCode writes benign stderr while stdout succeeds | Record bounded stderr diagnostics without failing by itself | Doctor can return partial warning instead of unavailable |
 | client request handler | Permission request blocks prompt forever | `session/request_permission` waits for approval | Respond `-32601`, surface permission request event/error to adapter | Run fails visibly; no approval UI is implied |
 | `close`/`kill` | Double cleanup throws | Cancel plus timeout both try to kill | Make process close/kill idempotent | Cancellation and timeout cleanup are stable |
@@ -235,6 +250,8 @@ ACP agent request session/request_permission
 
 `test_cases`:
 - `{ name: "initialize request resolves", lens: "happy", given: "fake process returns response id 0", expect: "request promise resolves and transcript has out/in entries" }`
+- `{ name: "out-of-order concurrent correlation", lens: "integration", given: "two in-flight requests ids 0 and 1; fake emits session/update notification, session/request_permission request id req-1, response id 1, then response id 0", expect: "second request resolves with response id 1, first request resolves with response id 0, notification and permission request are yielded as events, and neither response is consumed by those events" }`
+- `{ name: "numeric and string ids are distinct", lens: "edge_correlation", given: "pending request id 1 and pending request id \"1\"", expect: "responses resolve their matching typed ids and duplicate-id detection does not conflate them" }`
 - `{ name: "notification has no response", lens: "happy_shadow_nil", given: "session/cancel notification", expect: "client writes message without registering pending request" }`
 - `{ name: "blank stdout ignored", lens: "happy_shadow_empty", given: "fake process writes blank line then valid response", expect: "blank line not recorded, response resolves" }`
 - `{ name: "request timeout rejects", lens: "error_path", given: "fake process never responds", expect: "AcpProtocolError reason acp_request_timeout" }`
@@ -247,12 +264,20 @@ ACP agent request session/request_permission
 
 `integration_contracts`:
 - `exports`:
+  - `{ name: "AcpProtocolError", kind: "class", signature: "new AcpProtocolError(reasonCode: string, message: string, details?: Record<string, unknown>)" }`
+  - `{ name: "AcpResponseError", kind: "class", signature: "new AcpResponseError(input: { code: number | string; message: string; data?: unknown })" }`
+  - `{ name: "parseJsonRpcLine", kind: "function", signature: "(line: string, options?: { maxBytes?: number }) => JsonRpcMessage" }`
+  - `{ name: "serializeJsonRpcMessage", kind: "function", signature: "(message: JsonRpcMessage, options?: { maxBytes?: number }) => string" }`
+  - `{ name: "AcpTranscriptRecorder", kind: "class", signature: "appendMessage(direction, rawLine, parsed?), appendStderr(text), appendOversized(direction, byteLength), content(), metadata(input)" }`
   - `{ name: "AcpStdioClient", kind: "class", signature: "constructor(options: AcpStdioClientOptions); start(): Promise<void>; request(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<unknown>; notify(method: string, params?: unknown): Promise<void>; notifications(): AsyncIterable<AcpNotification>; close(): Promise<void>; kill(): void; transcript(): AcpTranscriptRecorder" }`
   - `{ name: "createAcpStdioClient", kind: "function", signature: "(options: AcpStdioClientOptions) => AcpStdioClient" }`
   - `{ name: "AcpClientEvent", kind: "type", signature: "union for notification, unsupported_request, permission_request, stderr, close, error" }`
 - `imports_from_other_tasks`:
-  - `{ from_task: "P4-T1-protocol-acpx-framing-schemas-transcripts", name: "parseJsonRpcLine", signature: "(line, options?) => JsonRpcMessage" }`
-  - `{ from_task: "P4-T1-protocol-acpx-framing-schemas-transcripts", name: "AcpTranscriptRecorder", signature: "records sanitized ACP transcript JSONL" }`
+  - `{ from_task: "P4-T1-protocol-acpx-framing-schemas-transcripts", name: "parseJsonRpcLine", signature: "(line: string, options?: { maxBytes?: number }) => JsonRpcMessage" }`
+  - `{ from_task: "P4-T1-protocol-acpx-framing-schemas-transcripts", name: "serializeJsonRpcMessage", signature: "(message: JsonRpcMessage, options?: { maxBytes?: number }) => string" }`
+  - `{ from_task: "P4-T1-protocol-acpx-framing-schemas-transcripts", name: "AcpProtocolError", signature: "new AcpProtocolError(reasonCode: string, message: string, details?: Record<string, unknown>)" }`
+  - `{ from_task: "P4-T1-protocol-acpx-framing-schemas-transcripts", name: "AcpResponseError", signature: "new AcpResponseError(input: { code: number | string; message: string; data?: unknown })" }`
+  - `{ from_task: "P4-T1-protocol-acpx-framing-schemas-transcripts", name: "AcpTranscriptRecorder", signature: "appendMessage(direction, rawLine, parsed?), appendStderr(text), appendOversized(direction, byteLength), content(), metadata(input)" }`
 - `file_paths_consumed_by_other_tasks`:
   - `packages/protocol-acpx/src/index.ts`
   - `packages/protocol-acpx/src/acp-stdio-client.ts`
@@ -262,13 +287,12 @@ ACP agent request session/request_permission
 ### Task P4-T3-fake-acp-runtime-and-contract-harness
 
 `id`: `P4-T3-fake-acp-runtime-and-contract-harness`
-`title`: Add deterministic fake ACP runtime and extend adapter contract harness
+`title`: Add deterministic fake ACP runtime and contract-harness fixtures
 
 `files`:
 - Create: `packages/testkit/src/fake-acp-runtime-cli.ts`
 - Create: `packages/testkit/src/fake-acp-runtime.ts`
 - Modify: `packages/testkit/src/index.ts`
-- Modify: `packages/testkit/src/runtime-adapter-contract-harness.ts`
 - Create: `packages/testkit/test/fake-acp-runtime.test.ts`
 
 `dependencies`: [`P4-T2-protocol-acpx-stdio-client-and-workspace-deps`]
@@ -280,7 +304,7 @@ ACP agent request session/request_permission
 - `packages/adapters/test/runtime-adapter-contracts.test.ts` - downstream contract suite that will import the fake ACP runtime in the adapter task.
 - `packages/testkit/package.json` - existing testkit script and dependency style.
 
-`instructions`: Add a deterministic fake ACP runtime under testkit that implements newline-delimited JSON-RPC over stdio and never calls external services. The fake must respond to `initialize`, `session/new`, and `session/prompt`; emit `session/update` notifications; handle `session/cancel` by returning active prompt response `stopReason: "cancelled"` for the cancelled scenario; optionally emit bounded stderr diagnostics; optionally emit `session/request_permission`; and support invalid/oversized protocol scenarios. Expose a process factory and CLI helper for tests. Extend the shared adapter contract harness only where needed for ACP: allow an adapter contract run to pass `adapterType: "acpx"`, assert exactly one terminal event, assert unsupported input throws `AdapterProtocolError`, assert cancel idempotency after terminal/cancel, and assert transcript artifact metadata content is a string when present.
+`instructions`: Add a deterministic fake ACP runtime under testkit that implements newline-delimited JSON-RPC over stdio and never calls external services. The fake must respond to `initialize`, `session/new`, and `session/prompt`; emit `session/update` notifications; handle `session/cancel` by returning active prompt response `stopReason: "cancelled"` for the cancelled scenario; optionally emit bounded stderr diagnostics; optionally emit `session/request_permission`; and support invalid/oversized protocol scenarios. Expose a process factory, CLI helper, and fake-ACP-specific fixture helpers that downstream adapter tests can pass into the existing ACP-ready `runtime-adapter-contract-harness`. Do not claim or require new generic harness behavior in this task; use the current harness as a ground-truth context file and add fake-specific imports/regression tests around it.
 
 `acceptance`:
 - Fake ACP supports scenarios: `happy`, `empty_output`, `prompt_failed`, `cancelled`, `cancel_unverified`, `invalid_json`, `invalid_initialize`, `invalid_session_new`, `permission_request`, `stderr_warning`, and `oversized_message`.
@@ -291,7 +315,7 @@ ACP agent request session/request_permission
 - Fake ACP `cancel_unverified` accepts/observes cancel but does not produce cancelled prompt response before timeout.
 - Fake ACP `permission_request` sends an agent-to-client request with an id so the client can respond `-32601`.
 - Fake ACP `stderr_warning` writes stderr while ACP stdout remains valid.
-- Contract harness still passes for fake runtime, Codex fake process, Generic HTTP fake server, and later OpenCode fake process without requiring `run.input`.
+- Existing runtime adapter contract harness remains the generic assertion surface; T3 adds fake ACP fixture exports and regression coverage that later OpenCode adapter contract tests can consume without requiring `run.input`.
 
 `checks`:
 - `pnpm --filter @switchyard/testkit test -- fake-acp-runtime`
@@ -307,7 +331,7 @@ ACP agent request session/request_permission
 | fake cancellation | Cancel test marks run cancelled without ACP confirmation | Fake immediately returns success on cancel call | Require prompt response `stopReason:"cancelled"` for cancelled scenario and omit it in unverified scenario | Public cancel semantics remain verified-terminal |
 | fake permission request | Permission request looks like notification and cannot be answered | Missing request id | Send proper agent-to-client request with id | Client can return `-32601` and adapter can fail visibly |
 | fake stderr warning | Non-fatal stderr path untested | Warning omitted | Scenario writes stderr with valid ACP success responses | OpenCode doctor partial behavior is testable |
-| contract harness | ACP adapter with no post-start input appears to support input | Harness calls send but accepts no-op | Assert adapters without `run.input` capability throw `AdapterProtocolError` | `POST /runs/:id/input` remains visibly unsupported |
+| fake contract fixture | Fake ACP process cannot be used by the existing harness | Fixture omits deterministic cwd/task/session controls | Export a fixture/process factory that downstream adapter tests can plug into the existing ACP-ready harness | OpenCode contract tests exercise fake ACP without real model APIs |
 
 `observability`:
 - `logs`: Fake runtime does not add production logs; tests assert stderr transcript capture through adapter/client.
@@ -319,7 +343,10 @@ ACP agent request session/request_permission
 - `{ name: "fake empty output", lens: "happy_shadow_empty", given: "scenario empty_output", expect: "prompt response end_turn with no agent_message_chunk" }`
 - `{ name: "fake cancelled", lens: "integration", given: "active prompt then session/cancel", expect: "prompt response stopReason cancelled" }`
 - `{ name: "fake cancel unverified", lens: "error_path", given: "session/cancel in cancel_unverified scenario", expect: "no cancelled response before timeout" }`
+- `{ name: "fake prompt failed", lens: "error_path", given: "scenario prompt_failed returns a session/prompt JSON-RPC error", expect: "AcpStdioClient surfaces AcpResponseError; downstream OpenCode adapter maps it to run.failed reason acp_prompt_error with transcript preserved" }`
+- `{ name: "fake invalid json", lens: "error_path", given: "scenario invalid_json writes malformed stdout after process start", expect: "client-visible AcpProtocolError reason acp_invalid_json; downstream adapter maps it to a failed run/check reason without hanging" }`
 - `{ name: "fake invalid initialize", lens: "error_path", given: "scenario invalid_initialize", expect: "initialize response missing required protocol fields" }`
+- `{ name: "fake invalid session new", lens: "error_path", given: "scenario invalid_session_new returns session/new result without sessionId", expect: "client schema rejects it and downstream OpenCode doctor/start maps it to opencode_acp_session_new_failed" }`
 - `{ name: "fake permission request", lens: "error_path", given: "scenario permission_request", expect: "agent-to-client request session/request_permission with id" }`
 - `{ name: "fake stderr warning", lens: "edge_stderr", given: "scenario stderr_warning", expect: "stderr diagnostic and successful ACP stdout" }`
 - `{ name: "fake oversized message", lens: "edge_oversized", given: "scenario oversized_message", expect: "stdout line larger than configured limit" }`
@@ -329,13 +356,14 @@ ACP agent request session/request_permission
   - `{ name: "startFakeAcpRuntimeProcess", kind: "function", signature: "(options: FakeAcpRuntimeOptions) => AcpTestProcessHandle" }`
   - `{ name: "createFakeAcpProcessFactory", kind: "function", signature: "(options: FakeAcpRuntimeOptions) => AcpProcessFactory" }`
   - `{ name: "FakeAcpRuntimeScenario", kind: "type", signature: "happy | empty_output | prompt_failed | cancelled | cancel_unverified | invalid_json | invalid_initialize | invalid_session_new | permission_request | stderr_warning | oversized_message" }`
-  - `{ name: "runRuntimeAdapterContract", kind: "function", signature: "accepts adapterType process | http | acpx and validates terminal/input/cancel/artifact behavior" }`
 - `imports_from_other_tasks`:
-  - `{ from_task: "P4-T2-protocol-acpx-stdio-client-and-workspace-deps", name: "serializeJsonRpcMessage", signature: "(message, options?) => string" }`
-  - `{ from_task: "P4-T2-protocol-acpx-stdio-client-and-workspace-deps", name: "parseJsonRpcLine", signature: "(line, options?) => JsonRpcMessage" }`
+  - `{ from_task: "P4-T2-protocol-acpx-stdio-client-and-workspace-deps", name: "serializeJsonRpcMessage", signature: "(message: JsonRpcMessage, options?: { maxBytes?: number }) => string" }`
+  - `{ from_task: "P4-T2-protocol-acpx-stdio-client-and-workspace-deps", name: "parseJsonRpcLine", signature: "(line: string, options?: { maxBytes?: number }) => JsonRpcMessage" }`
+  - `{ from_task: "P4-T2-protocol-acpx-stdio-client-and-workspace-deps", name: "AcpStdioClient", signature: "constructor(options: AcpStdioClientOptions); start(): Promise<void>; request(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<unknown>; notify(method: string, params?: unknown): Promise<void>; notifications(): AsyncIterable<AcpNotification>; close(): Promise<void>; kill(): void; transcript(): AcpTranscriptRecorder" }`
+  - `{ from_task: "P4-T2-protocol-acpx-stdio-client-and-workspace-deps", name: "AcpProtocolError", signature: "new AcpProtocolError(reasonCode: string, message: string, details?: Record<string, unknown>)" }`
+  - `{ from_task: "P4-T2-protocol-acpx-stdio-client-and-workspace-deps", name: "AcpResponseError", signature: "new AcpResponseError(input: { code: number | string; message: string; data?: unknown })" }`
 - `file_paths_consumed_by_other_tasks`:
   - `packages/testkit/src/fake-acp-runtime.ts`
-  - `packages/testkit/src/runtime-adapter-contract-harness.ts`
   - `packages/testkit/src/index.ts`
 
 ### Task P4-T4-opencode-contracts-and-runtime-mode-inference
@@ -436,6 +464,8 @@ ACP agent request session/request_permission
 - `RuntimeRunnerService.cancel()` persists transcript artifacts after verified public cancellation and emits `artifact.created` after `run.cancelled`.
 - Public cancel failure from `AdapterProtocolError` returns `409 adapter_protocol_failed`, includes reason-code detail, leaves run/session state unchanged, and does not emit a false `run.cancelled`.
 - Cancel against already terminal runs remains idempotent and does not call adapter cancel again.
+- Public cancel changes include regression coverage for existing fake, Codex process, and Generic HTTP adapters so verified-cancel artifact persistence does not change their cancellation contracts.
+- Terminal/cancel races persist at most one terminal state and exactly one transcript/artifact record for a started ACP session, even when adapter terminalization and public cancel complete in the same tick.
 - Timeout still marks run `timeout`, session `failed`, emits `run.failed` with `runtime_timeout`, and best-effort calls adapter cancel.
 - Existing fake, Codex, Generic HTTP, REST, and artifact tests continue to pass.
 
@@ -454,6 +484,7 @@ ACP agent request session/request_permission
 | `RuntimeRunnerService.cancel` | Verified ACP cancel loses transcript | Existing cancel returns after marking cancelled and start loop skips artifacts | Persist adapter artifacts in public cancel path with cancelled-run allowance | Cancelled OpenCode runs expose transcript artifact |
 | `RuntimeRunnerService.cancel` | Unverified cancel lies | Adapter cancel throws but run is marked cancelled | Update run/session only after adapter returns; rethrow `AdapterProtocolError` | Public cancel returns 409 and state stays previous |
 | artifact persistence after cancel | Artifact failure rewrites cancelled run | Content store throws after terminal update | Preserve terminal state and make artifact failure visible in tests/logs | Run stays cancelled; artifact issue is diagnosable |
+| terminal/cancel race | Both event loop and public cancel persist terminal artifacts | Adapter terminal event and cancel response complete together | Deduplicate by run terminal state and artifact path/content key before emitting `artifact.created` | Caller sees one terminal result and one transcript artifact |
 | REST error mapping | Reason code hidden from caller | AdapterProtocolError reasonCode omitted | Add `details: [{ path:"reasonCode", issue: reasonCode }]` or equivalent stable detail | Caller sees why input/cancel failed |
 
 `observability`:
@@ -468,6 +499,8 @@ ACP agent request session/request_permission
 - `{ name: "doctor redacts env secrets", lens: "edge_redaction", given: "message includes API_KEY and Bearer token", expect: "response/storage/logs omit secret values" }`
 - `{ name: "verified public cancel persists artifact", lens: "integration", given: "adapter.cancel returns and artifacts include transcript content", expect: "run cancelled and artifact.created emitted with stored content" }`
 - `{ name: "unverified cancel preserves state", lens: "error_path", given: "adapter.cancel throws AdapterProtocolError reason acp_cancel_unverified", expect: "409 from REST and run remains running or later terminal state" }`
+- `{ name: "public cancel regressions for existing adapters", lens: "integration", given: "fake, Codex fake process, and Generic HTTP fake server runs exercise their existing public cancel paths", expect: "their previous terminal/idempotency/error semantics remain unchanged after RuntimeRunnerService.cancel changes" }`
+- `{ name: "terminal cancel race stores transcript once", lens: "edge_race", given: "adapter emits terminal event while public cancel verification returns in the same tick", expect: "exactly one terminal run state and exactly one artifact.created event for the transcript path" }`
 - `{ name: "already terminal cancel idempotent", lens: "happy_shadow_nil", given: "cancel completed run", expect: "existing run returned and adapter cancel not called" }`
 - `{ name: "timeout behavior unchanged", lens: "integration", given: "adapter never emits terminal event", expect: "run timeout, session failed, runtime_timeout event" }`
 
@@ -507,18 +540,31 @@ ACP agent request session/request_permission
 - `packages/adapters/src/index.ts` - current package export barrel that must add OpenCode exports.
 - `docs/adapters/opencode.md` - verified local OpenCode facts and pre-R5 implementation notes.
 
-`instructions`: Add `OpenCodeAcpAdapter` with manifest exactly matching the spec: adapter id `opencode`, provider `provider_opencode`, runtime `runtime_opencode`, mode id `runtime_mode_opencode_acp`, slug `opencode.acp`, adapter type `acpx`, kind `acp`, capabilities including `artifact.raw_transcript`, limitations, placement, docs path, and custom check metadata. The adapter must launch configured OpenCode command with fixed args `["acp"]`, `shell: false`, daemon-level options only, and no arbitrary run metadata in env. `check()` must run `<command> --version`, launch ACP, send `initialize`, send `session/new`, close/kill, and never send `session/prompt`; non-fatal stderr maps to partial `opencode_stderr_warning`. `start()` must require absolute `cwd`, non-empty task, initialize protocol version 1, create ACP session with `{ cwd, mcpServers: [] }`, store external ACP session id, and return Switchyard session data. `events()` must first yield stored initialize/session status events, then send one `session/prompt` text block from the run task, stream `session/update` notifications through the event mapper, wait for prompt response, and yield exactly one terminal event from stopReason. `send()` must throw `AdapterProtocolError` reason `opencode_input_unsupported`. `cancel()` must send `session/cancel` notification only for active prompts, return idempotently when no prompt is active or already terminal, and otherwise return only after observing prompt response `stopReason: "cancelled"`; unverified cancellation throws `AdapterProtocolError` reason `acp_cancel_unverified`. Permission requests must be answered `-32601`, yield `run.failed` reason `acp_permission_request_unsupported`, and attempt best-effort cancel. `artifacts()` must always return `runs/<runId>/opencode-acp-transcript.jsonl` after an ACP subprocess starts, including completed, failed, timeout-after-start, and cancelled sessions.
+`instructions`: Add `OpenCodeAcpAdapter` with manifest exactly matching the spec: adapter id `opencode`, provider `provider_opencode`, runtime `runtime_opencode`, mode id `runtime_mode_opencode_acp`, slug `opencode.acp`, adapter type `acpx`, kind `acp`, capabilities including `artifact.raw_transcript`, limitations, placement, docs path, and custom check metadata. The adapter must launch configured OpenCode command with fixed args `["acp"]`, `shell: false`, daemon-level options only, and no arbitrary run metadata in env. `check()` must run `<command> --version`, launch ACP, send `initialize`, send `session/new`, close/kill, and never send `session/prompt`; non-fatal stderr maps to partial `opencode_stderr_warning`. Doctor-created ACP sessions are transient: do not persist them as Switchyard run/session state, and always attempt close/kill cleanup after success, partial, timeout, or failure. `start()` must require absolute `cwd`, non-empty task, initialize protocol version 1, create ACP session with `{ cwd, mcpServers: [] }`, store external ACP session id, and return Switchyard session data. `events()` must first yield stored initialize/session status events, then send one `session/prompt` text block from the run task, stream `session/update` notifications through the event mapper, wait for prompt response, and yield exactly one terminal event from stopReason. Updates received before the prompt response must be emitted before the terminal event; updates received after a terminal decision may be recorded in the transcript/logs but must not create a second terminal or reorder the already emitted terminal. `send()` must throw `AdapterProtocolError` reason `opencode_input_unsupported`. `cancel()` must send `session/cancel` notification only for active prompts, return idempotently when no prompt is active or already terminal, and otherwise return only after observing prompt response `stopReason: "cancelled"`; unverified cancellation throws `AdapterProtocolError` reason `acp_cancel_unverified`. Permission requests must be answered `-32601`, yield `run.failed` reason `acp_permission_request_unsupported`, and attempt best-effort cancel. Permission/public-cancel race rule: first verified terminal cause wins under the adapter's session state lock. If `session/request_permission` is observed before verified `stopReason:"cancelled"`, the run fails with `acp_permission_request_unsupported` and later public cancel is idempotent; if verified cancel is observed first, the run cancels and later permission activity cannot overwrite it. `artifacts()` must always return `runs/<runId>/opencode-acp-transcript.jsonl` after an ACP subprocess starts, including completed, failed-after-start, timeout-after-start, and cancelled sessions.
+
+Implementation sub-sequence for this large task:
+
+1. Build `opencode-doctor.ts` first with the exact spec doctor matrix and no-prompt assertions for every probe path.
+2. Add manifest/types and package exports without run lifecycle behavior.
+3. Add `opencode-event-mapper.ts` for session/update and prompt stopReason mapping, including prompt response/update ordering tests.
+4. Add `OpenCodeAcpAdapter.start()` and `events()` over `AcpStdioClient`, including run-path stderr capture that does not fail successful prompts.
+5. Add `send()`, verified `cancel()`, permission-request handling, and deterministic permission/cancel race coverage.
+6. Add transcript `artifacts()` coverage for completed, failed-after-start, timeout-after-start, cancelled, stderr, and redaction cases, then wire the existing runtime adapter contract suite to the fake ACP fixture.
 
 `acceptance`:
 - OpenCode manifest parses through existing contracts and includes no unshipped capabilities.
-- Adapter check matrix covers command missing, version timeout, no version, ACP exits before initialize, invalid initialize JSON-RPC, unsupported protocol version, auth/config failure on `session/new`, invalid session/new shape, success, and success with stderr warning partial.
-- `check()` never sends `session/prompt`; fake runtime tests assert no prompt is received during doctor checks.
+- Adapter check matrix covers every spec row with exact state/canRun/installed/auth/reasonCode expectations and a no-prompt assertion for each row: command missing, version timeout, no version, ACP exits before initialize, invalid initialize JSON-RPC, unsupported protocol version, auth/config failure on `session/new`, invalid session/new shape, success, and success with stderr warning partial.
+- `check()` never sends `session/prompt`; fake runtime tests assert no prompt is received during every doctor probe path, including failures before initialize and failures at `session/new`.
+- Doctor-created ACP sessions are transient and cleanup is attempted after success, partial warning, timeout, and failure paths.
 - `start()` fails relative `cwd` with reason `opencode_cwd_not_absolute` and does not pass run metadata into env.
 - `events()` maps initialize/session-new to `runtime.status`, known session updates to specified `runtime.output`/`runtime.status` payloads, unknown updates to visible `runtime.status`, and prompt stop reasons to exactly one terminal event.
 - `events()` allows empty output and `POST /runs?wait=1` can later return `response.text: null`.
+- Run-path non-fatal stderr is captured in the raw ACP transcript and bounded diagnostics without failing an otherwise successful prompt.
+- Prompt response/update ordering is deterministic: all updates observed before prompt response are yielded before the terminal event, and post-terminal updates cannot emit a second terminal event.
 - Permission request scenario fails visibly with `run.failed` error `acp_permission_request_unsupported` and no approval request/tool execution is created.
+- Permission-request/public-cancel races follow the first-verified-terminal-wins rule and are covered by fake ACP tests.
 - Verified cancel scenario yields `run.cancelled`; unverified cancel throws `AdapterProtocolError` reason `acp_cancel_unverified`.
-- Transcript artifact path, metadata, content, stderr lines, cancellation transcript, and redaction rules match the spec.
+- Transcript artifact path, metadata, content, stderr lines, cancellation transcript, failed-after-start transcript, timeout-after-start transcript, and redaction rules match the spec.
 - Shared runtime adapter contract suite passes for fake runtime, Codex fake process, Generic HTTP fake server, and OpenCode ACP fake process.
 
 `checks`:
@@ -532,13 +578,17 @@ ACP agent request session/request_permission
 | codepath | failure | exception | rescue | user_sees |
 | --- | --- | --- | --- | --- |
 | `OpenCodeAcpAdapter.check` | Doctor spends model budget | Check accidentally sends `session/prompt` | Implement check with version, initialize, session/new only; fake asserts prompt count zero | Doctor is safe to run locally |
+| `OpenCodeAcpAdapter.check` | Doctor-created ACP process/session leaks | Probe succeeds or fails before cleanup | Always attempt close/kill in `finally`; never persist doctor sessions as run sessions | Repeated checks do not accumulate local processes |
 | doctor stderr | Benign OpenCode local stderr marks unavailable | Notify-script warning on stderr | Return custom availability `partial`, `canRun:true`, reason `opencode_stderr_warning` | Runtime mode is runnable with warning diagnostics |
 | `start` cwd validation | ACP receives relative cwd | Public REST allows relative cwd | Validate absolute cwd in adapter and throw `opencode_cwd_not_absolute` | Run fails fast with named reason |
+| run stderr | Successful run fails because stderr has local warning | OpenCode writes diagnostic stderr while prompt succeeds | Record bounded stderr in transcript and logs; do not fail unless stderr exceeds max bytes | Run completes and artifact shows warning context |
 | event mapper | Unknown ACP update is dropped | New ACP update type appears | Emit `runtime.status` `status:"acp_update"` with `acpUpdateType` | Caller sees protocol activity |
+| prompt/update ordering | Prompt response terminal appears before already-read updates | Response and notifications are interleaved in same read cycle | Drain queued notifications in read order before yielding terminal response | Client sees output/status before terminal event |
 | stopReason mapper | Unknown stop reason completes incorrectly | Future stop reason | Yield `run.failed` error `acp_unknown_stop_reason` | Run does not falsely succeed |
 | permission request | OpenCode waits for unsupported approval | `session/request_permission` not answered | Client returns `-32601`, adapter fails run and cancels | Run fails visibly; no approval UI implied |
+| permission/cancel race | Permission failure and public cancel fight over terminal state | Permission request arrives while cancel is verifying | Apply first-verified-terminal-wins under session state lock | Run deterministically fails or cancels, never both |
 | cancel | Public cancel marks cancelled without ACP confirmation | Prompt response never says cancelled | Throw `AdapterProtocolError` reason `acp_cancel_unverified` | REST returns 409 and state is preserved |
-| artifacts | Failed/cancelled sessions lose raw protocol | Adapter only returns artifacts on completed terminal | Store transcript recorder per session and always return transcript after subprocess start | Artifacts exist for debugging failures and cancellation |
+| artifacts | Failed/cancelled/timeout sessions lose raw protocol | Adapter only returns artifacts on completed terminal | Store transcript recorder per session and always return transcript after subprocess start | Artifacts exist for debugging failures, timeout, and cancellation |
 
 `observability`:
 - `logs`: Adapter logs `opencode.check`, `opencode.acp.start`, `opencode.acp.prompt`, `opencode.acp.cancel`, `opencode.acp.terminal`, and `opencode.acp.protocol_error` with run id, session id, ACP session id, process id, method, stop reason, reason code, and bounded stderr snippets only.
@@ -546,17 +596,34 @@ ACP agent request session/request_permission
 - `failure_metric`: Any prompt sent by doctor, false cancellation, missing transcript, dropped unknown update, or permission request hang fails adapters tests.
 
 `test_cases`:
-- `{ name: "doctor available sends no prompt", lens: "happy", given: "fake ACP happy check", expect: "available check and fake prompt count 0" }`
-- `{ name: "doctor stderr partial", lens: "happy_shadow_empty", given: "fake ACP stderr_warning check", expect: "partial canRun true reason opencode_stderr_warning" }`
+- `{ name: "doctor command missing no prompt", lens: "error_path", given: "configured command does not exist", expect: "state unavailable, canRun false, installed false, auth unknown, reason opencode_binary_unavailable, no session/prompt attempted" }`
+- `{ name: "doctor version timeout no prompt", lens: "error_path", given: "<command> --version exceeds check timeout", expect: "state unknown, canRun false, installed false, auth unknown, reason check_timeout, no session/prompt attempted" }`
+- `{ name: "doctor no version no prompt", lens: "error_path", given: "<command> --version exits without parseable version", expect: "state unavailable, canRun false, installed true, auth unknown, reason opencode_version_unavailable, no session/prompt attempted" }`
+- `{ name: "doctor acp exits before initialize no prompt", lens: "error_path", given: "ACP process exits before initialize response", expect: "state unavailable, canRun false, installed true, auth unknown, reason opencode_acp_unavailable, fake prompt count 0" }`
+- `{ name: "doctor invalid initialize json-rpc no prompt", lens: "error_path", given: "fake ACP invalid_json or invalid initialize envelope during initialize", expect: "state unavailable, canRun false, installed true, auth unknown, reason opencode_acp_initialize_failed, fake prompt count 0" }`
+- `{ name: "doctor unsupported protocol no prompt", lens: "error_path", given: "initialize succeeds with protocolVersion other than 1", expect: "state unavailable, canRun false, installed true, auth unknown, reason acp_protocol_version_unsupported, fake prompt count 0" }`
+- `{ name: "doctor auth required no prompt", lens: "error_path", given: "session/new returns auth/config JSON-RPC error", expect: "state unavailable, canRun false, installed true, auth missing, reason opencode_auth_required, fake prompt count 0" }`
+- `{ name: "doctor invalid session new no prompt", lens: "error_path", given: "session/new result lacks sessionId", expect: "state unavailable, canRun false, installed true, auth unknown, reason opencode_acp_session_new_failed, fake prompt count 0" }`
+- `{ name: "doctor available no prompt", lens: "happy", given: "version, initialize, and session/new succeed with empty stderr", expect: "state available, canRun true, installed true, auth configured, reasonCode null, fake prompt count 0" }`
+- `{ name: "doctor stderr partial no prompt", lens: "happy_shadow_empty", given: "version, initialize, and session/new succeed with bounded stderr", expect: "state partial, canRun true, installed true, auth configured, reason opencode_stderr_warning, fake prompt count 0" }`
+- `{ name: "doctor cleanup attempted", lens: "edge_cleanup", given: "success, stderr partial, timeout, and session/new failure check probes", expect: "client close/kill attempted and no doctor ACP session stored as a Switchyard run/session" }`
 - `{ name: "relative cwd fails", lens: "error_path", given: "start cwd 'repo'", expect: "run.failed or thrown reason opencode_cwd_not_absolute" }`
 - `{ name: "happy prompt maps output", lens: "happy", given: "fake ACP happy run", expect: "runtime.output text and run.completed stopReason end_turn" }`
 - `{ name: "empty output completes null response", lens: "happy_shadow_empty", given: "fake ACP empty_output run", expect: "run.completed with no runtime.output" }`
+- `{ name: "run stderr warning captured", lens: "edge_stderr", given: "fake ACP writes bounded stderr during a successful prompt", expect: "run.completed and transcript includes acp.stderr without failing success" }`
 - `{ name: "known update types map", lens: "integration", given: "plan, tool_call, tool_call_update, session_info_update, current_mode_update, available_commands_update", expect: "visible runtime.status payloads" }`
 - `{ name: "unknown update visible", lens: "edge_unknown_update", given: "sessionUpdate new_future_type", expect: "runtime.status acp_update with acpUpdateType" }`
+- `{ name: "prompt updates precede terminal", lens: "edge_ordering", given: "fake emits two session/update notifications then prompt response in one flush", expect: "adapter yields both updates before the terminal event" }`
+- `{ name: "post-terminal update cannot create second terminal", lens: "edge_ordering", given: "fake emits prompt response then a late session/update", expect: "exactly one terminal event; late update is transcript/log context only" }`
 - `{ name: "refusal fails", lens: "error_path", given: "prompt response stopReason refusal", expect: "run.failed error acp_refusal" }`
+- `{ name: "prompt json-rpc error fails", lens: "error_path", given: "fake ACP prompt_failed scenario", expect: "run.failed error acp_prompt_error and transcript remains available" }`
 - `{ name: "permission request unsupported", lens: "error_path", given: "fake ACP permission_request", expect: "run.failed acp_permission_request_unsupported and JSON-RPC -32601 response" }`
+- `{ name: "permission cancel race permission first", lens: "edge_race", given: "permission request is observed before verified cancelled prompt response while public cancel is in flight", expect: "single terminal run.failed acp_permission_request_unsupported; later cancel is idempotent cleanup" }`
+- `{ name: "permission cancel race cancel first", lens: "edge_race", given: "verified cancelled prompt response is observed before permission request handling terminalizes", expect: "single terminal run.cancelled; later permission activity cannot overwrite terminal state" }`
 - `{ name: "verified cancel", lens: "integration", given: "active prompt then adapter.cancel", expect: "cancel returns after stopReason cancelled" }`
 - `{ name: "cancel unverified", lens: "error_path", given: "fake ACP cancel_unverified", expect: "AdapterProtocolError reason acp_cancel_unverified" }`
+- `{ name: "failed after start transcript", lens: "integration", given: "fake invalid_json or prompt_failed after ACP subprocess starts", expect: "artifacts() returns opencode-acp-transcript.jsonl with initialize/prompt context and redacted raw lines" }`
+- `{ name: "timeout after start transcript", lens: "integration", given: "started fake ACP prompt never returns before runtime timeout", expect: "best-effort cancel/kill occurs and artifacts() still returns opencode-acp-transcript.jsonl" }`
 - `{ name: "transcript artifact redacted", lens: "edge_redaction", given: "raw ACP/stderr with Bearer token", expect: "artifact content redacts token and has metadata r5.acp.v1" }`
 
 `integration_contracts`:
@@ -566,9 +633,9 @@ ACP agent request session/request_permission
   - `{ name: "mapAcpSessionUpdateToSwitchyardEvent", kind: "function", signature: "(input: { runId: string; acpSessionId?: string; update: unknown; sequence: number }) => SwitchyardEvent" }`
   - `{ name: "checkOpenCodeAcpAvailability", kind: "function", signature: "(options: OpenCodeAcpCheckOptions) => Promise<RuntimeAdapterCheck>" }`
 - `imports_from_other_tasks`:
-  - `{ from_task: "P4-T2-protocol-acpx-stdio-client-and-workspace-deps", name: "AcpStdioClient", signature: "outbound stdio ACP client" }`
-  - `{ from_task: "P4-T3-fake-acp-runtime-and-contract-harness", name: "createFakeAcpProcessFactory", signature: "fake ACP process factory for tests" }`
-  - `{ from_task: "P4-T5-core-doctor-rest-and-cancelled-artifacts", name: "RuntimeDoctorService custom availability", signature: "consumes adapter details.availability" }`
+  - `{ from_task: "P4-T2-protocol-acpx-stdio-client-and-workspace-deps", name: "AcpStdioClient", signature: "constructor(options: AcpStdioClientOptions); start(): Promise<void>; request(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<unknown>; notify(method: string, params?: unknown): Promise<void>; notifications(): AsyncIterable<AcpNotification>; close(): Promise<void>; kill(): void; transcript(): AcpTranscriptRecorder" }`
+  - `{ from_task: "P4-T3-fake-acp-runtime-and-contract-harness", name: "createFakeAcpProcessFactory", signature: "(options: FakeAcpRuntimeOptions) => AcpProcessFactory" }`
+  - `{ from_task: "P4-T5-core-doctor-rest-and-cancelled-artifacts", name: "RuntimeDoctorService.checkRuntimeMode", signature: "(idOrSlug: string) => Promise<RuntimeDoctorCheck> with custom details.availability support" }`
 - `file_paths_consumed_by_other_tasks`:
   - `packages/adapters/src/opencode/index.ts`
   - `packages/adapters/src/opencode/opencode-acp-adapter.ts`
@@ -594,7 +661,7 @@ ACP agent request session/request_permission
 - `packages/adapters/src/index.ts` - current adapter package export surface imported by daemon.
 - `packages/testkit/src/fake-http-runtime-server.ts` - fake runtime injection and daemon smoke pattern to mirror for ACP.
 
-`instructions`: Extend daemon config with daemon-level OpenCode/ACP settings: `SWITCHYARD_OPENCODE_COMMAND` default `opencode`, `SWITCHYARD_ACP_REQUEST_TIMEOUT_MS` default `5000`, `SWITCHYARD_ACP_CANCEL_TIMEOUT_MS` default `5000`, and `SWITCHYARD_ACP_MAX_MESSAGE_BYTES` default `1048576`. Do not allow per-run OpenCode command, ACP args, timeouts, max message bytes, or env injection. Register `OpenCodeAcpAdapter` under adapter key/runtime `opencode` with configured command and timeouts. Seed provider `provider_opencode`, runtime `runtime_opencode`, model `model_opencode_default`, and runtime mode `opencode.acp` using the adapter manifest and an initial stored availability snapshot. Add `opencode.acp` to capability-service seeding and logs. Keep `GET /doctor` read-only; `POST /runtime-modes/opencode.acp/check` must run the bounded adapter check and update stored availability. Add daemon smoke tests using fake ACP process injection: runtime-mode list includes `opencode.acp`, active check does not send prompts, partial stderr warning is stored, run create infers runtime mode when omitted, explicit internal id rejects, wait=1 happy run returns normalized output and artifact content, input returns 409 `opencode_input_unsupported`, verified cancel persists transcript artifacts, and unverified cancel returns 409 without false cancellation.
+`instructions`: Extend daemon config with daemon-level OpenCode/ACP settings: `SWITCHYARD_OPENCODE_COMMAND` default `opencode`, `SWITCHYARD_ACP_REQUEST_TIMEOUT_MS` default `5000`, `SWITCHYARD_ACP_CANCEL_TIMEOUT_MS` default `5000`, and `SWITCHYARD_ACP_MAX_MESSAGE_BYTES` default `1048576`. Do not allow per-run OpenCode command, ACP args, timeouts, max message bytes, or env injection. Register `OpenCodeAcpAdapter` under adapter key/runtime `opencode` with configured command and timeouts. Seed provider `provider_opencode`, runtime `runtime_opencode`, model `model_opencode_default`, and runtime mode `opencode.acp` using the adapter manifest and an initial stored availability snapshot. Add `opencode.acp` to capability-service seeding and logs. Keep `GET /doctor` read-only; `POST /runtime-modes/opencode.acp/check` must run the bounded adapter check and update stored availability. Add daemon smoke tests using fake ACP process injection: runtime-mode list includes `opencode.acp`, active check does not send prompts, partial stderr warning is stored, run create infers runtime mode when omitted, explicit internal id rejects, wait=1 happy run returns normalized output and artifact records retrievable through `GET /runs/:id/artifacts`, `GET /artifacts/:id`, and `GET /artifacts/:id/content`, input returns 409 `opencode_input_unsupported`, verified cancel persists transcript artifacts exactly once, failed-after-start and timeout-after-start runs persist transcript artifacts, and unverified cancel returns 409 without false cancellation.
 
 `acceptance`:
 - `loadDaemonConfig()` parses all OpenCode/ACP env vars with defaults and trims command only at daemon config boundary.
@@ -605,7 +672,9 @@ ACP agent request session/request_permission
 - `POST /runs?wait=1` with `runtime:"opencode"`, `provider:"opencode"`, `model:"opencode-default"`, `adapterType:"acpx"`, absolute cwd, and no explicit runtimeMode infers `opencode.acp` and completes through fake ACP.
 - Explicit `runtime_mode_opencode_acp` in public create body returns `400 invalid_input`.
 - `POST /runs/:id/input` for OpenCode returns `409 adapter_protocol_failed` with reason `opencode_input_unsupported`.
-- Verified public cancel persists `runs/<runId>/opencode-acp-transcript.jsonl` and content is retrievable through `GET /artifacts/:id/content`.
+- Verified public cancel persists `runs/<runId>/opencode-acp-transcript.jsonl` exactly once; the artifact list entry is retrievable through `GET /runs/:id/artifacts`, the artifact record is retrievable through `GET /artifacts/:id`, and stored content is retrievable through `GET /artifacts/:id/content`.
+- Failed-after-start OpenCode ACP runs persist a raw transcript artifact retrievable through `GET /artifacts/:id` and `GET /artifacts/:id/content`.
+- Timeout-after-start OpenCode ACP runs persist a raw transcript artifact retrievable through `GET /artifacts/:id` and `GET /artifacts/:id/content`.
 - Unverified public cancel returns `409 adapter_protocol_failed`, leaves run state non-cancelled, and does not emit false cancellation.
 
 `checks`:
@@ -622,13 +691,14 @@ ACP agent request session/request_permission
 | adapter registration | `opencode.acp` seeded but no adapter registered | Doctor check says adapter not registered | Add `["opencode", new OpenCodeAcpAdapter(...)]` before service creation | Runtime mode can check and run |
 | registry seeding | OpenCode records missing model or wrong adapter type | `POST /runs` mismatch validation fails | Seed provider/runtime/model/mode from manifest and default model record | Public payload works with `opencode-default` |
 | active check | Doctor sends prompt | Fake prompt count increments | Use adapter `check()` only and assert prompt count zero | Check is budget-safe |
-| public cancel | Cancel transcript not persisted | Existing runner skips artifacts after cancellation | Depend on T5 and assert artifact content after cancel | Cancelled runs remain debuggable |
+| public cancel | Cancel transcript not persisted or duplicated | Existing runner skips artifacts after cancellation, or terminal/cancel race persists twice | Depend on T5 and assert artifact list, `GET /artifacts/:id`, and content after cancel with exactly one transcript artifact | Cancelled runs remain debuggable without duplicate artifacts |
+| failed/timeout after start | Transcript only exists for successful runs | Started ACP subprocess fails or times out before terminal success | Assert REST artifact retrieval for failed-after-start and timeout-after-start cases | Operators can inspect protocol history for failures/timeouts |
 | unverified cancel | Daemon returns cancelled on failed ACP verify | Adapter cancel throws but REST returns 200 | Map `AdapterProtocolError` to 409 and assert stored run state | Caller sees cancel failed and run state is honest |
 
 `observability`:
 - `logs`: Startup emits `runtime_mode.seeded` for `opencode.acp`; checks log runtime mode, state, and reason code; runs log existing runner events plus OpenCode adapter logs. Logs must not contain raw transcripts, env values, or auth tokens.
-- `success_metric`: Daemon smoke proves `opencode.acp` is discoverable, checkable, runnable, cancellable, and artifact content is retrievable through REST.
-- `failure_metric`: Any prompt during doctor check, missing runtime-mode seed, false cancellation, missing cancelled transcript, or internal id acceptance fails daemon tests.
+- `success_metric`: Daemon smoke proves `opencode.acp` is discoverable, checkable, runnable, cancellable, and artifact records/content are retrievable through REST.
+- `failure_metric`: Any prompt during doctor check, missing runtime-mode seed, false cancellation, missing/duplicate cancelled transcript, missing failed/timeout transcript, or internal id acceptance fails daemon tests.
 
 `test_cases`:
 - `{ name: "config defaults", lens: "happy_shadow_nil", given: "empty env", expect: "opencode command and ACP timeout defaults" }`
@@ -638,7 +708,9 @@ ACP agent request session/request_permission
 - `{ name: "run inference opencode", lens: "happy_shadow_nil", given: "POST /runs?wait=1 without runtimeMode", expect: "run.runtimeMode opencode.acp and completed output" }`
 - `{ name: "internal mode id rejected", lens: "error_path", given: "runtimeMode runtime_mode_opencode_acp", expect: "400 invalid_input path runtimeMode" }`
 - `{ name: "input unsupported", lens: "error_path", given: "POST /runs/:id/input on OpenCode run", expect: "409 adapter_protocol_failed reason opencode_input_unsupported" }`
-- `{ name: "verified cancel stores artifact", lens: "integration", given: "active OpenCode fake run then cancel", expect: "run cancelled and transcript content retrievable" }`
+- `{ name: "verified cancel stores retrievable artifact", lens: "integration", given: "active OpenCode fake run then cancel", expect: "run cancelled; exactly one transcript appears in GET /runs/:id/artifacts; GET /artifacts/:id returns metadata/path; GET /artifacts/:id/content returns redacted JSONL" }`
+- `{ name: "failed after start stores retrievable artifact", lens: "integration", given: "fake ACP invalid_json or prompt_failed run through daemon after subprocess start", expect: "run failed and transcript artifact is retrievable through GET /artifacts/:id and content route" }`
+- `{ name: "timeout after start stores retrievable artifact", lens: "integration", given: "fake ACP run starts but prompt never returns before timeout", expect: "run timeout/failed per runner contract and transcript artifact is retrievable through GET /artifacts/:id and content route" }`
 - `{ name: "cancel unverified stays honest", lens: "error_path", given: "fake cancel_unverified then POST cancel", expect: "409 and stored run not cancelled" }`
 
 `integration_contracts`:
@@ -646,10 +718,10 @@ ACP agent request session/request_permission
   - `{ name: "loadDaemonConfig", kind: "function", signature: "(env?: NodeJS.ProcessEnv) => DaemonConfig with opencode ACP settings" }`
   - `{ name: "createDaemonApp", kind: "function", signature: "(config?: DaemonConfig, options?: CreateDaemonAppOptions) => Promise<FastifyInstance> with opencode adapter registration" }`
 - `imports_from_other_tasks`:
-  - `{ from_task: "P4-T4-opencode-contracts-and-runtime-mode-inference", name: "RegistryService.inferAndValidateRuntimeMode", signature: "infers opencode.acp" }`
-  - `{ from_task: "P4-T5-core-doctor-rest-and-cancelled-artifacts", name: "RuntimeRunnerService.cancel", signature: "persists artifacts after verified cancel" }`
-  - `{ from_task: "P4-T6-opencode-acp-adapter", name: "OpenCodeAcpAdapter", signature: "implements RuntimeAdapter" }`
-  - `{ from_task: "P4-T3-fake-acp-runtime-and-contract-harness", name: "createFakeAcpProcessFactory", signature: "fake ACP process factory" }`
+  - `{ from_task: "P4-T4-opencode-contracts-and-runtime-mode-inference", name: "RegistryService.inferAndValidateRuntimeMode", signature: "(input: { runtime: string; provider: string; adapterType: AdapterType; runtimeMode?: string }) => Promise<string | undefined>" }`
+  - `{ from_task: "P4-T5-core-doctor-rest-and-cancelled-artifacts", name: "RuntimeRunnerService.cancel", signature: "(runId: string) => Promise<Run> that persists artifacts after verified cancellation" }`
+  - `{ from_task: "P4-T6-opencode-acp-adapter", name: "OpenCodeAcpAdapter", signature: "implements RuntimeAdapter; constructor(options?: OpenCodeAcpAdapterOptions)" }`
+  - `{ from_task: "P4-T3-fake-acp-runtime-and-contract-harness", name: "createFakeAcpProcessFactory", signature: "(options: FakeAcpRuntimeOptions) => AcpProcessFactory" }`
 - `file_paths_consumed_by_other_tasks`:
   - `apps/daemon/src/config.ts`
   - `apps/daemon/src/app.ts`
@@ -718,7 +790,7 @@ ACP agent request session/request_permission
 - `{ name: "api create example", lens: "integration", given: "API docs OpenCode create curl", expect: "uses runtime opencode, provider opencode, model opencode-default, adapterType acpx, runtimeMode opencode.acp" }`
 - `{ name: "doctor no prompt warning", lens: "happy_shadow_nil", given: "OPENCODE.md doctor section", expect: "states check sends initialize/session-new only" }`
 - `{ name: "prompt budget warning", lens: "edge_cost", given: "OPENCODE.md run smoke section", expect: "states session/prompt can spend model budget" }`
-- `{ name: "transcript inspection documented", lens: "integration", given: "OPENCODE.md", expect: "GET artifacts and content commands for opencode-acp-transcript.jsonl" }`
+- `{ name: "transcript inspection documented", lens: "integration", given: "OPENCODE.md", expect: "GET /runs/:id/artifacts, GET /artifacts/:id, and GET /artifacts/:id/content commands for opencode-acp-transcript.jsonl" }`
 
 `integration_contracts`:
 - `exports`: []
@@ -780,36 +852,37 @@ curl -s "$BASE/runs/$RUN_ID/artifacts" | python3 -m json.tool
 - Doctor/check never sends `session/prompt`.
 - Cancellation never lies: public cancellation is persisted only after ACP verifies `stopReason: "cancelled"`.
 - Cancelled, failed-after-start, timeout-after-start, and completed OpenCode ACP runs have raw transcript artifacts.
+- Transcript artifact `raw` fields contain redacted raw JSON-RPC only; pre-redaction secret values are never stored in artifact content.
 - Permission requests fail visibly with `acp_permission_request_unsupported`; no approval workflow is implied.
 - OpenCode stderr warning can produce partial availability without failing successful initialize/session-new.
 - Existing fake, Codex, Generic HTTP, REST, SSE, storage, and daemon behavior remains green.
 
 ## CTO Self Review
 
-13-item review:
+13-item review after architect iteration 1 revisions:
 
-1. Scope is R5 only: pass.
-2. Existing code boundaries are reused: pass.
-3. Minimal changes are assigned to package/lifecycle owners: pass.
-4. Release-level complexity is acknowledged and split into disjoint tasks: pass.
-5. Built-in Node/Zod/Fastify/test infrastructure is preferred: pass.
-6. Distribution remains private workspace package plus testkit script only: pass.
-7. Task `files` ownership is disjoint: pass.
-8. Every task has non-empty `context_files`: pass.
-9. Dependencies form an additive graph: pass.
-10. Error rescue maps cover named failures and user-visible results: pass.
-11. Observability includes safe logs and success/failure metrics: pass.
-12. Test cases include happy, nil/empty shadow, error, edge, and integration paths: pass.
-13. Final verification includes package tests plus `pnpm typecheck`, `pnpm test`, `pnpm build`, `pnpm lint`, and `git diff --check`: pass.
+1. Spec coverage: pass. The plan maps ACPX package, fake ACP, OpenCode doctor/run/cancel, daemon/REST, artifacts, and docs to concrete tasks.
+2. Placeholder scan: pass. No TBD/TODO/vague placeholder language remains.
+3. Type consistency: pass. T2 imports exactly match T1 exports, T2 explicitly re-exports helpers consumed by T3, and T6 imports the exact T5 custom doctor contract name.
+4. Ownership disjoint: pass. Removing T3 ownership of `packages/testkit/src/runtime-adapter-contract-harness.ts` avoids a stale generic-harness edit claim; no task owns the same file as another.
+5. Context files real: pass. All `context_files` entries are existing worktree files and remain ground-truth anchors.
+6. Acceptance testable: pass. Added doctor matrix, fake ACP scenario, REST artifact retrieval, race, and transcript redaction criteria are objectively verifiable.
+7. Dependency order sane: pass. T3 depends on T2 re-exports; T6 depends on protocol/testkit/core lifecycle; T7 depends on registry/core/adapter wiring.
+8. Checks runnable: pass. Checks use existing `pnpm --filter` package commands and `git diff --check`.
+9. Error/rescue map present: pass. New race, cleanup, ordering, correlation, and artifact paths have rescue rows.
+10. Observability present: pass. Runtime tasks specify safe logs/metrics and explicitly avoid raw transcript/env/token logging.
+11. Test cases enumerate acceptance: pass. Architect-required cases for T2, T3, T6, and T7 are explicit.
+12. Integration contracts walk: pass. Each `imports_from_other_tasks` name resolves to a listed export in the referenced task.
+13. Contract types match: pass. Cross-task signatures were aligned for T1/T2 helpers, T3 fake factory, T4 registry inference, T5 cancel/custom doctor, and T6 adapter exports.
 
 9-item plan completeness self-test:
 
-1. Every task has `id`: pass.
-2. Every task has `title`: pass.
-3. Every task has disjoint `files`: pass.
-4. Every task has `dependencies`: pass.
-5. Every task has non-empty `context_files`: pass.
-6. Every task has `instructions`: pass.
-7. Every task has `acceptance`: pass.
-8. Every task has `checks`, `error_rescue_map`, `observability`, and `test_cases`: pass.
-9. Every task has `integration_contracts`: pass.
+1. Every acceptance criterion in the spec has at least one task that delivers it: pass.
+2. Every task has at least one acceptance criterion: pass.
+3. Every acceptance criterion has at least one matching `test_case`: pass for phase-risk level; high-cardinality matrices are represented by explicit row cases in T6.
+4. Every `error_rescue_map` entry has matching error, edge, or shadow test coverage: pass.
+5. Every `integration_contracts.imports_from_other_tasks` resolves to a real export elsewhere in the plan: pass.
+6. Every `context_files` path exists in the project: pass.
+7. No task edits a file owned by another task: pass.
+8. No placeholder text (`TBD`, `TODO`, "similar to", vague "edge cases") remains: pass.
+9. Complexity is L and was challenged: pass. T6 remains one task but now has an explicit sub-sequence to manage doctor, lifecycle, mapping, cancel, permission, and artifact responsibilities without overlapping file ownership.
