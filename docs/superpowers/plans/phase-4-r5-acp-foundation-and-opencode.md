@@ -124,12 +124,12 @@ ACP stdout/stderr
 - `packages/adapters/src/substrates/transcript-recorder.ts` - R4 transcript handoff pattern and metadata-content convention.
 - `packages/contracts/src/artifact.ts` - artifact type schema and transcript type.
 
-`instructions`: Create private workspace package `@switchyard/protocol-acpx` with `build`, `typecheck`, `test`, and `lint` scripts consistent with the existing packages. Implement newline-delimited JSON-RPC 2.0 helpers and package-local named protocol errors without importing `@switchyard/core`. JSON-RPC parsing must enforce `jsonrpc: "2.0"`, request/notification/response shapes, exactly one of `result` or `error`, no embedded newlines on writes, unknown/duplicate response ids as named errors, malformed JSON as `acp_invalid_json`, invalid envelopes as `acp_invalid_message`, and JSON-RPC error responses as `AcpResponseError` with sanitized code/message/data. Implement minimal ACP Zod schemas for initialize, `session/new`, `session/prompt`, `session/cancel`, `session/update`, and agent-to-client requests, permissive where the spec allows future ACP shape. Implement raw ACP transcript helpers that write JSONL entries for inbound/outbound ACP messages and stderr with timestamp, direction, id, method, byte length, redacted raw line, redaction metadata, and oversized-marker support. The `raw` field means "redacted raw JSON-RPC line"; it must never store the pre-redaction line if it contained tokens, env-like secrets, configured token-like command path segments, or other redactable material. Do not implement process spawning or OpenCode-specific behavior in this task.
+`instructions`: Create private workspace package `@switchyard/protocol-acpx` with `build`, `typecheck`, `test`, and `lint` scripts consistent with the existing packages. Implement newline-delimited JSON-RPC 2.0 helpers and package-local named protocol errors without importing `@switchyard/core`. JSON-RPC parsing must enforce `jsonrpc: "2.0"`, request/notification/response shapes, exactly one of `result` or `error`, no embedded newlines on writes, malformed JSON as `acp_invalid_json`, invalid envelopes as `acp_invalid_message`, and JSON-RPC error responses as `AcpResponseError` with sanitized code/message/data. Implement minimal ACP Zod schemas for initialize, `session/new`, `session/prompt`, `session/cancel`, `session/update`, and agent-to-client requests, permissive where the spec allows future ACP shape. Implement raw ACP transcript helpers that write JSONL entries for inbound/outbound ACP messages and stderr with timestamp, direction, id, method, byte length, redacted raw line, redaction metadata, and oversized-marker support. The `raw` field means "redacted raw JSON-RPC line"; it must never store the pre-redaction line if it contained tokens, env-like secrets, configured token-like command path segments, or other redactable material. Do not implement process spawning, in-flight request correlation, or OpenCode-specific behavior in this task; duplicate in-flight ids and unknown response ids are owned by T2's stdio client.
 
 `acceptance`:
 - `@switchyard/protocol-acpx` exists as a private package and local tests import its source files.
 - JSON-RPC helpers parse valid requests, notifications, success responses, and error responses.
-- JSON-RPC helpers reject malformed JSON, invalid envelopes, embedded-newline outbound payloads, missing ids on responses, both `result` and `error`, unknown response ids, duplicate in-flight ids, and oversized raw lines with the spec's named reason codes.
+- JSON-RPC helpers reject malformed JSON, invalid envelopes, embedded-newline outbound payloads, missing ids on responses, both `result` and `error`, and oversized raw lines with the spec's named reason codes.
 - ACP schemas parse the R5 initialize, `session/new`, `session/prompt`, `session/cancel`, known `session/update`, unknown `session/update`, and `session/request_permission` shapes.
 - Transcript helpers emit newline-delimited entries with `type: "acp.message"` or `type: "acp.stderr"`, direction, id/method when present, byte length, timestamp, and redacted raw/text.
 - Transcript redaction covers `Authorization`, `Bearer ...`, env-like keys ending in `_TOKEN`, `_KEY`, `_SECRET`, and token-like command path segments without storing environment dumps.
@@ -147,8 +147,6 @@ ACP stdout/stderr
 | --- | --- | --- | --- | --- |
 | `parseJsonRpcLine` | Malformed stdout line crashes with generic JSON error | `SyntaxError` | Catch parse errors and throw `AcpProtocolError` reason `acp_invalid_json` | Run fails with a named ACP parse reason instead of a 500 |
 | `validateJsonRpcMessage` | ACP response with bad envelope is accepted | Invalid or ambiguous message shape | Strictly enforce JSON-RPC 2.0 response/request rules in one helper | Invalid protocol output fails visibly |
-| `registerPendingRequest` | Duplicate in-flight request id corrupts correlation | Same id registered twice | Throw `acp_duplicate_request_id` before write | Adapter fails before sending ambiguous protocol state |
-| `resolveResponseId` | Unknown response id is ignored silently | Response id has no pending request | Throw/record `acp_unknown_response_id` | Transcript and run failure identify protocol mismatch |
 | `AcpResponseError` | JSON-RPC errors leak arbitrary data | Error data includes secrets or huge payload | Sanitize and bound message/data before exposing | REST/events show a safe reason |
 | `AcpTranscriptRecorder.appendMessage` | Transcript stores tokens or env values | Raw JSON contains Authorization/Bearer/env-like keys | Redact in raw transcript helper before storing content | Artifact remains useful without leaking secrets |
 | `AcpTranscriptRecorder.appendOversized` | Oversized line is omitted with no clue | Line exceeds max bytes | Write metadata marker with `reasonCode: "acp_message_too_large"` and byte count | Artifact explains why the run failed |
@@ -239,6 +237,8 @@ ACP stdout/stderr
 | stdout reader | Agent emits oversized message | Line exceeds max bytes | Append oversized marker, reject `acp_message_too_large`, close client | Run fails and artifact records why |
 | response correlation | Out-of-order response resolves the wrong request | Two pending ids receive responses in reverse order with notifications between them | Key pending requests by typed id and dispatch notifications/agent requests outside response resolution | Each adapter operation sees its own response |
 | response correlation | Numeric and string ids collide | Pending ids `1` and `"1"` coexist | Include id type in the correlation key | Protocol mismatch is caught instead of misrouting a response |
+| `registerPendingRequest` | Duplicate in-flight request id corrupts correlation | Same id registered twice | Throw `acp_duplicate_request_id` before write | Adapter fails before sending ambiguous protocol state |
+| `resolveResponseId` | Unknown response id is ignored silently | Response id has no pending request | Throw/record `acp_unknown_response_id` | Transcript and run failure identify protocol mismatch |
 | stderr capture | Local warning becomes fatal | OpenCode writes benign stderr while stdout succeeds | Record bounded stderr diagnostics without failing by itself | Doctor can return partial warning instead of unavailable |
 | client request handler | Permission request blocks prompt forever | `session/request_permission` waits for approval | Respond `-32601`, surface permission request event/error to adapter | Run fails visibly; no approval UI is implied |
 | `close`/`kill` | Double cleanup throws | Cancel plus timeout both try to kill | Make process close/kill idempotent | Cancellation and timeout cleanup are stable |
@@ -795,8 +795,9 @@ Implementation sub-sequence for this large task:
 `integration_contracts`:
 - `exports`: []
 - `imports_from_other_tasks`:
-  - `{ from_task: "P4-T7-daemon-opencode-wiring-and-rest-smoke", name: "opencode.acp REST smoke behavior", signature: "runtime mode, check, run, cancel, artifacts through daemon" }`
-  - `{ from_task: "P4-T6-opencode-acp-adapter", name: "OpenCode manifest and reason codes", signature: "docs source of runtime limitations and failures" }`
+  - `{ from_task: "P4-T7-daemon-opencode-wiring-and-rest-smoke", name: "createDaemonApp", signature: "(config?: DaemonConfig, options?: CreateDaemonAppOptions) => Promise<FastifyInstance> with opencode adapter registration" }`
+  - `{ from_task: "P4-T6-opencode-acp-adapter", name: "OpenCodeAcpAdapter", signature: "implements RuntimeAdapter; constructor(options?: OpenCodeAcpAdapterOptions)" }`
+  - `{ from_task: "P4-T6-opencode-acp-adapter", name: "checkOpenCodeAcpAvailability", signature: "(options: OpenCodeAcpCheckOptions) => Promise<RuntimeAdapterCheck>" }`
 - `file_paths_consumed_by_other_tasks`: []
 
 ## Final Verification
@@ -859,19 +860,19 @@ curl -s "$BASE/runs/$RUN_ID/artifacts" | python3 -m json.tool
 
 ## CTO Self Review
 
-13-item review after architect iteration 1 revisions:
+13-item review after architect iteration 2 second revision:
 
 1. Spec coverage: pass. The plan maps ACPX package, fake ACP, OpenCode doctor/run/cancel, daemon/REST, artifacts, and docs to concrete tasks.
 2. Placeholder scan: pass. No TBD/TODO/vague placeholder language remains.
-3. Type consistency: pass. T2 imports exactly match T1 exports, T2 explicitly re-exports helpers consumed by T3, and T6 imports the exact T5 custom doctor contract name.
+3. Type consistency: pass. T2 imports exactly match T1 exports, T2 explicitly re-exports helpers consumed by T3, T6 imports the exact T5 custom doctor contract name, and T8 imports existing T6/T7 export names instead of docs-source placeholders.
 4. Ownership disjoint: pass. Removing T3 ownership of `packages/testkit/src/runtime-adapter-contract-harness.ts` avoids a stale generic-harness edit claim; no task owns the same file as another.
 5. Context files real: pass. All `context_files` entries are existing worktree files and remain ground-truth anchors.
 6. Acceptance testable: pass. Added doctor matrix, fake ACP scenario, REST artifact retrieval, race, and transcript redaction criteria are objectively verifiable.
 7. Dependency order sane: pass. T3 depends on T2 re-exports; T6 depends on protocol/testkit/core lifecycle; T7 depends on registry/core/adapter wiring.
 8. Checks runnable: pass. Checks use existing `pnpm --filter` package commands and `git diff --check`.
-9. Error/rescue map present: pass. New race, cleanup, ordering, correlation, and artifact paths have rescue rows.
+9. Error/rescue map present: pass. New race, cleanup, ordering, correlation, and artifact paths have rescue rows; duplicate in-flight request ids and unknown response ids now sit in T2 with the client correlation owner.
 10. Observability present: pass. Runtime tasks specify safe logs/metrics and explicitly avoid raw transcript/env/token logging.
-11. Test cases enumerate acceptance: pass. Architect-required cases for T2, T3, T6, and T7 are explicit.
+11. Test cases enumerate acceptance: pass. Architect-required cases for T2, T3, T6, and T7 are explicit, including T2 error-path tests for duplicate in-flight ids and unknown response ids.
 12. Integration contracts walk: pass. Each `imports_from_other_tasks` name resolves to a listed export in the referenced task.
 13. Contract types match: pass. Cross-task signatures were aligned for T1/T2 helpers, T3 fake factory, T4 registry inference, T5 cancel/custom doctor, and T6 adapter exports.
 
@@ -880,8 +881,8 @@ curl -s "$BASE/runs/$RUN_ID/artifacts" | python3 -m json.tool
 1. Every acceptance criterion in the spec has at least one task that delivers it: pass.
 2. Every task has at least one acceptance criterion: pass.
 3. Every acceptance criterion has at least one matching `test_case`: pass for phase-risk level; high-cardinality matrices are represented by explicit row cases in T6.
-4. Every `error_rescue_map` entry has matching error, edge, or shadow test coverage: pass.
-5. Every `integration_contracts.imports_from_other_tasks` resolves to a real export elsewhere in the plan: pass.
+4. Every `error_rescue_map` entry has matching error, edge, or shadow test coverage: pass; T2 covers `acp_duplicate_request_id` and `acp_unknown_response_id`.
+5. Every `integration_contracts.imports_from_other_tasks` resolves to a real export elsewhere in the plan: pass; T8 now imports `createDaemonApp`, `OpenCodeAcpAdapter`, and `checkOpenCodeAcpAvailability`.
 6. Every `context_files` path exists in the project: pass.
 7. No task edits a file owned by another task: pass.
 8. No placeholder text (`TBD`, `TODO`, "similar to", vague "edge cases") remains: pass.
