@@ -87,7 +87,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
           await probePostgresDatabase(postgres);
         }
         await queue.stats();
-        if (config.objectStore.backend !== "memory" || config.objectStore.probe !== "disabled") {
+        if (config.objectStore.probe !== "disabled") {
           await artifactContent.probe();
         }
         return { ok: true };

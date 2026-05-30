@@ -1,4 +1,7 @@
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { MemoryRunQueue } from "@switchyard/queue";
 import { resolveObjectStoreConfig } from "@switchyard/storage";
@@ -144,5 +147,59 @@ describe("hosted worker app", () => {
     });
     expect(config.hostedRuntimeAllowlist).toEqual(["fake.deterministic"]);
     expect(config.objectStore.backend).toBe("memory");
+  });
+
+  it("skips local object-store probe when probe mode is disabled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-worker-probe-disabled-local-"));
+    const fileRoot = join(dir, "object-root-file");
+    await writeFile(fileRoot, "x");
+    const worker = createHostedWorker({
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({
+        deploymentMode: "test",
+        env: {
+          SWITCHYARD_OBJECT_STORE_BACKEND: "local",
+          SWITCHYARD_OBJECT_STORE_DIR: fileRoot,
+          SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
+        }
+      }),
+      idleIntervalMs: 1,
+      redactedSummary: {}
+    });
+
+    try {
+      await expect(worker.ready()).resolves.toMatchObject({ ok: true });
+    } finally {
+      await worker.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips s3-compatible object-store probe when probe mode is disabled", async () => {
+    const worker = createHostedWorker({
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({
+        deploymentMode: "test",
+        env: {
+          SWITCHYARD_OBJECT_STORE_BACKEND: "s3-compatible",
+          SWITCHYARD_OBJECT_STORE_ENDPOINT: "http://127.0.0.1:1",
+          SWITCHYARD_OBJECT_STORE_REGION: "us-east-1",
+          SWITCHYARD_OBJECT_STORE_BUCKET: "switchyard-artifacts",
+          SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID: "key",
+          SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY: "secret",
+          SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
+        }
+      }),
+      idleIntervalMs: 1,
+      redactedSummary: {}
+    });
+
+    try {
+      await expect(worker.ready()).resolves.toMatchObject({ ok: true });
+    } finally {
+      await worker.stop();
+    }
   });
 });

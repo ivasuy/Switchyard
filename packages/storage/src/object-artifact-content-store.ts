@@ -82,7 +82,7 @@ export class ObjectArtifactContentStore implements ArtifactContentStore {
       if (metadata["sizeBytes"] > 0 && out.body.byteLength === 0) {
         throw new Error("artifact_content_empty");
       }
-      throw new Error("object_store_read_failed");
+      throw new Error("artifact_digest_mismatch");
     }
     if (typeof metadata["sha256"] === "string") {
       const digest = createHash("sha256").update(out.body).digest("hex");

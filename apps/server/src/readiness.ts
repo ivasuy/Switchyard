@@ -57,7 +57,9 @@ export async function probeServerReadiness(input: {
     }
   } else if (input.config.objectStore.backend === "s3-compatible") {
     try {
-      await input.artifactContent.probe();
+      if (input.config.objectStore.probe !== "disabled") {
+        await input.artifactContent.probe();
+      }
       checks.objectStore = { ok: true };
     } catch (error) {
       const code = error instanceof Error ? error.message : "object_store_unavailable";

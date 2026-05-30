@@ -54,7 +54,10 @@ export class LocalObjectArtifactContentStore implements ArtifactContentStore {
       throw mapReadError(error);
     }
     if (typeof artifact.metadata["sizeBytes"] === "number" && body.byteLength !== artifact.metadata["sizeBytes"]) {
-      throw new Error(body.byteLength === 0 ? "artifact_content_empty" : "object_store_unavailable");
+      if (artifact.metadata["sizeBytes"] > 0 && body.byteLength === 0) {
+        throw new Error("artifact_content_empty");
+      }
+      throw new Error("artifact_digest_mismatch");
     }
     if (typeof artifact.metadata["sha256"] === "string") {
       const digest = createHash("sha256").update(body).digest("hex");

@@ -136,7 +136,7 @@ describe("artifact content stores", () => {
         sizeBytes: 999,
         contentType: "text/plain"
       }
-    })).rejects.toThrow("object_store_read_failed");
+    })).rejects.toThrow("artifact_digest_mismatch");
   });
 
   it("supports object store probe write/read/delete roundtrip", async () => {
@@ -198,7 +198,7 @@ describe("artifact content stores", () => {
       await expect(store.read({
         ...digestMismatchArtifact,
         metadata: { objectKey: saved.objectKey, contentType: saved.contentType, sha256: saved.sha256, sizeBytes: 1 }
-      } as any)).rejects.toThrow("object_store_unavailable");
+      } as any)).rejects.toThrow("artifact_digest_mismatch");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

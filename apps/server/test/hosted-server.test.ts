@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { resolveObjectStoreConfig } from "@switchyard/storage";
 import { createServerApp } from "../src/app.js";
@@ -116,6 +119,64 @@ describe("hosted server", () => {
         unavailable: 0,
         digestMismatches: 0
       });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("skips local object-store probe when probe mode is disabled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-server-probe-disabled-local-"));
+    const fileRoot = join(dir, "object-root-file");
+    await writeFile(fileRoot, "x");
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({
+        deploymentMode: "test",
+        env: {
+          SWITCHYARD_OBJECT_STORE_BACKEND: "local",
+          SWITCHYARD_OBJECT_STORE_DIR: fileRoot,
+          SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
+        }
+      }),
+      redactedSummary: {}
+    });
+    try {
+      const ready = await app.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json().checks.objectStore.ok).toBe(true);
+    } finally {
+      await app.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips s3-compatible object-store probe when probe mode is disabled", async () => {
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({
+        deploymentMode: "test",
+        env: {
+          SWITCHYARD_OBJECT_STORE_BACKEND: "s3-compatible",
+          SWITCHYARD_OBJECT_STORE_ENDPOINT: "http://127.0.0.1:1",
+          SWITCHYARD_OBJECT_STORE_REGION: "us-east-1",
+          SWITCHYARD_OBJECT_STORE_BUCKET: "switchyard-artifacts",
+          SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID: "key",
+          SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY: "secret",
+          SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
+        }
+      }),
+      redactedSummary: {}
+    });
+    try {
+      const ready = await app.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json().checks.objectStore.ok).toBe(true);
     } finally {
       await app.close();
     }
