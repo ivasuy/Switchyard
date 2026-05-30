@@ -125,7 +125,7 @@ artifacts(session: Record<string, unknown>): Promise<Artifact[]>;
 
 Extend `RuntimeRunnerService` rather than adding a new orchestrator. It must detect normalized adapter events with `payload.status` equal to `waiting_for_input` or `waiting_for_approval` and update both the persisted run and the runtime session to the matching waiting state. When a later normal `runtime.status` or `runtime.output` arrives for the same non-terminal run, it may move waiting runs back to `running`. Terminal events continue to own final state.
 
-Add bounded session state patch handling inside the runner. A `sessionStatePatch` payload must be a plain object, must be small enough to JSON-stringify under a fixed bound such as 16 KiB, must not be an array, and must reject keys containing case-insensitive `token`, `apiKey`, `authorization`, `password`, or `secret`. Accepted patches are recursively redacted with `redactSecrets`, merged over existing `runtime_sessions.state`, and persisted. If a patch contains a non-empty `claudeSessionId` or `codexThreadId`, store it in state; only set `externalSessionKey` when it is absent and the chosen value is a safe non-empty string.
+Add bounded session state patch handling inside the runner. A `sessionStatePatch` payload must be a plain object, must JSON-stringify under a fixed 16 KiB maximum, must not be an array, must not contain functions or symbols at any depth, and must reject keys containing case-insensitive `token`, `apiKey`, `authorization`, `password`, or `secret`. Accepted patches are recursively redacted with `redactSecrets`, merged over existing `runtime_sessions.state`, and persisted. If a patch contains a non-empty `claudeSessionId` or `codexThreadId`, store it in state; only set `externalSessionKey` when it is absent and the chosen value is a safe non-empty string.
 
 Add an optional runtime approval bridge dependency to the runner with a minimal interface that can create approvals from adapter-emitted pauses. When the runner sees `approval.requested` with `runtimeApprovalToken`, `approvalType`, and redacted payload fields, it must create a normal pending approval through that bridge, update run/session status to `waiting_for_approval`, and publish exactly one `approval.requested` event for the persisted approval. If a runtime approval event has no `runtimeApprovalToken`, fail the run visibly with `runtime_approval_token_missing`. If no approval bridge is configured, fail the run with `runtime_approval_bridge_unconfigured`.
 
@@ -143,7 +143,7 @@ Extend `ApprovalService` with an optional runtime-resolution sender. For approva
 
 Include `reason` as the message when provided. If the runtime sender rejects with `AdapterProtocolError`, return that error to REST and keep the approval resolved; a second approve/reject attempt must still return `approval_not_pending`. Existing fake tool approval resolution must remain green.
 
-Tighten `RuntimeRunnerService.sendInput`: terminal runs throw `AdapterProtocolError` with `reasonCode: "runtime_input_not_active"`; missing session throws `reasonCode: "runtime_session_missing"`; empty text input throws `reasonCode: "runtime_input_empty"` if it reaches core; adapter-specific unsupported input reason codes pass through from adapters. The runner should not mutate run status after a failed input attempt.
+Tighten `RuntimeRunnerService.sendInput`: terminal runs throw `AdapterProtocolError` with `reasonCode: "runtime_input_not_active"`; missing session throws `reasonCode: "runtime_session_missing"`; empty text input throws `reasonCode: "runtime_input_empty"` if it reaches core; adapter-specific unsupported input reason codes pass through from adapters. If public REST validation is bypassed and a text input exceeds the R8 public limit of 64 KiB, core throws `AdapterProtocolError` with `reasonCode: "runtime_input_too_large"` before adapter dispatch. The runner should not mutate run status after a failed input attempt.
 
 `acceptance`:
 - New R8 capability literals parse and shipped runtime manifests remain backward compatible.
@@ -168,7 +168,7 @@ Tighten `RuntimeRunnerService.sendInput`: terminal runs throw `AdapterProtocolEr
 - `{ codepath: "RuntimeRunnerService.handleRuntimeApproval", failure: "runtime approval token missing", exception: "AdapterProtocolError reasonCode runtime_approval_token_missing", rescue: "fail run and session, append run.failed", user_sees: "approval pause is not left hanging" }`
 - `{ codepath: "RuntimeRunnerService.handleRuntimeApproval", failure: "approval bridge not configured", exception: "AdapterProtocolError reasonCode runtime_approval_bridge_unconfigured", rescue: "fail run and session", user_sees: "visible failed run instead of an indefinite wait" }`
 - `{ codepath: "ApprovalService.resolve runtime sender", failure: "provider callback already closed", exception: "AdapterProtocolError reasonCode runtime_approval_pause_not_active", rescue: "surface 409 through REST; do not retry or auto-approve", user_sees: "approval is resolved but runtime resolution failure is explicit" }`
-- `{ codepath: "RuntimeRunnerService.sendInput", failure: "terminal run, missing session, empty text, unsupported adapter, or closed provider queue", exception: "AdapterProtocolError with specific reasonCode", rescue: "return 409 through existing REST mapping except body validation handled by REST", user_sees: "named reasonCode and unchanged run state" }`
+- `{ codepath: "RuntimeRunnerService.sendInput", failure: "terminal run, missing session, empty text, oversized text, unsupported adapter, or closed provider queue", exception: "AdapterProtocolError with specific reasonCode", rescue: "return 409 through existing REST mapping except body validation handled by REST; do not dispatch oversized input to adapter", user_sees: "named reasonCode and unchanged run state" }`
 
 `observability`:
 - `logs`: `runtime.status.waiting`, `runtime.session_state.updated`, `runtime.session_state_rejected`, `runtime.approval.requested`, `runtime.approval_resolution.sent`, `runtime.input.rejected`; logs include run id, session id, approval id, reason code, and no raw secrets.
@@ -183,6 +183,9 @@ Tighten `RuntimeRunnerService.sendInput`: terminal runs throw `AdapterProtocolEr
 - `{ name: "session state patch stored", lens: "happy", given: "runtime.status with sessionStatePatch claudeSessionId", expect: "runtime_sessions.state.claudeSessionId stored and externalSessionKey set when empty" }`
 - `{ name: "session state patch rejects nil", lens: "happy_shadow_nil", given: "sessionStatePatch null", expect: "no state mutation and bounded warning or failed run per event source" }`
 - `{ name: "session state patch rejects empty", lens: "happy_shadow_empty", given: "sessionStatePatch {}", expect: "no state mutation and run continues" }`
+- `{ name: "session state patch rejects array", lens: "error_path", given: "sessionStatePatch [] from adapter event", expect: "run.failed with session_state_patch_rejected and no session state mutation" }`
+- `{ name: "session state patch rejects oversized patch", lens: "error_path", given: "sessionStatePatch JSON larger than 16 KiB", expect: "run.failed with session_state_patch_too_large and no oversized payload in events or logs" }`
+- `{ name: "session state patch rejects function-bearing patch", lens: "error_path", given: "sessionStatePatch contains nested function value from in-memory adapter fixture", expect: "run.failed with session_state_patch_rejected and no session state mutation" }`
 - `{ name: "session state patch rejects secret key", lens: "error_path", given: "sessionStatePatch contains apiKey or authorization", expect: "run.failed with session_state_patch_rejected and no secret in events" }`
 - `{ name: "runtime approval creates approval", lens: "happy", given: "approval.requested with runtimeApprovalToken", expect: "pending approval persisted and run/session waiting_for_approval" }`
 - `{ name: "approval token missing fails", lens: "error_path", given: "approval.requested without runtimeApprovalToken", expect: "run.failed with runtime_approval_token_missing" }`
@@ -192,6 +195,9 @@ Tighten `RuntimeRunnerService.sendInput`: terminal runs throw `AdapterProtocolEr
 - `{ name: "approval not pending remains one shot", lens: "error_path", given: "approve same approval twice", expect: "second call rejects approval_not_pending and sends no second runtime input" }`
 - `{ name: "send input after terminal", lens: "error_path", given: "completed run then sendInput", expect: "AdapterProtocolError reasonCode runtime_input_not_active" }`
 - `{ name: "send input missing session", lens: "error_path", given: "running run without runtime session", expect: "AdapterProtocolError reasonCode runtime_session_missing" }`
+- `{ name: "send input empty text reaches core", lens: "happy_shadow_empty", given: "runner.sendInput(runId, { text: '   ' }) without REST validation", expect: "AdapterProtocolError reasonCode runtime_input_empty and adapter.send not called" }`
+- `{ name: "send input oversized text reaches core", lens: "error_path", given: "runner.sendInput(runId, { text: 'x'.repeat(65537) })", expect: "AdapterProtocolError reasonCode runtime_input_too_large and adapter.send not called" }`
+- `{ name: "send input adapter unsupported pass through", lens: "error_path", given: "active run whose adapter.send throws AdapterProtocolError reasonCode codex_input_unsupported", expect: "same reasonCode is surfaced and run status is unchanged" }`
 
 `integration_contracts`:
 - `exports`:
@@ -259,7 +265,7 @@ Map fake SDK/stream events deterministically:
 { "type": "completed", "usage": { "inputTokens": 1, "outputTokens": 2 } }
 ```
 
-Expected normalized outputs: text deltas become `runtime.output`; session events become `runtime.status` with `sessionStatePatch`; tool starts/results become `tool.call` and `tool.result`; approval and question pauses become `approval.requested` with redacted payload; completion/failure/cancel become terminal run events. Unknown provider events become bounded `runtime.status` with `status: "provider_event_unknown"` and no raw secrets. Malformed JSON in stream-json fallback yields `run.failed` with `reasonCode: "claude_stream_malformed"`.
+Expected normalized outputs: text deltas become `runtime.output`; session events become `runtime.status` with `sessionStatePatch`; tool starts/results become `tool.call` and `tool.result`; approval and question pauses become `approval.requested` with redacted payload; completion/failure/cancel become terminal run events. Unknown provider events become bounded `runtime.status` with `status: "provider_event_unknown"` and no raw secrets. To avoid unknown-event floods, emit at most 100 unknown-event status events per run; after that, suppress additional unknown events and emit one `runtime.status` warning with `status: "provider_event_unknown_suppressed"` and a redacted count. Malformed JSON in stream-json fallback yields `run.failed` with `reasonCode: "claude_stream_malformed"`.
 
 Implement `send()` for active Claude sessions. For `{ text: "continue" }`, enqueue a structured SDK user message shaped like the spec. For `{ type: "approval_resolution", ... }`, resolve the stored provider approval callback if still active; if not active, throw `AdapterProtocolError` with `reasonCode: "runtime_approval_pause_not_active"`. If the input queue is closed, throw `reasonCode: "claude_input_queue_closed"`. `cancel()` must be idempotent and make fake sessions emit or settle as cancelled.
 
@@ -270,12 +276,16 @@ Artifacts must include two transcript artifacts when content exists:
 
 Both artifact metadata records include `runtime: "claude_code"`, `mode: "sdk"`, `runtimeMode: "claude_code.sdk"`, `transcriptVersion: "r8.v1"`, and a redaction marker. The normalized transcript includes start, output, status, input accepted, tool call, tool result, approval pause, approval resolution, terminal, warning, and provider error entries. Secret redaction tests must scan JSON-stringified events, artifacts, and transcripts for fake auth tokens.
 
+Bound transcript content deterministically. Raw and normalized transcript buffers each have a hard 1 MiB UTF-8 content limit, and individual normalized transcript entries have a 64 KiB serialized-entry limit. When appending a record would exceed the transcript limit, truncate the stored artifact content at the boundary and append one final JSONL marker shaped like `{"type":"transcript.truncated","maxBytes":1048576,"omittedBytes":N,"redacted":true}`. When a single normalized record exceeds 64 KiB, store a bounded `transcript.record_truncated` marker with the event type, original byte count, and redacted summary instead of the full record. Transcript truncation must not fail an otherwise healthy run; malformed provider protocol still fails the run with the provider reason code.
+
 Update Codex only within the one-shot boundary. Keep `send()` returning `CodexInputUnsupportedError` with `reasonCode: "codex_input_unsupported"`. Update stale R3 limitation wording to R8 wording. Do not add `codex.interactive`, PTY, or default resume. If `codex-jsonl-parser` sees a `thread_id`, include `sessionStatePatch: { codexThreadId: "..." }` on the normalized status event so core can persist observed one-shot state.
 
 `acceptance`:
 - `ClaudeCodeAdapter.manifest` declares the exact `claude_code.sdk` mode, SDK kind, local conditional placement, no hosted support, and required R8 capabilities.
 - Claude doctor/check performs no model prompt by default and returns installed/auth/live-probe state with redacted diagnostics.
+- Fake/no-spend live-probe-enabled tests prove that an explicitly enabled probe passes `--max-budget-usd` or SDK equivalent, read-only/plan-like permission mode, and safe disabled-tool flags to the fake client without calling a real model.
 - Fake Claude tests cover start, streaming output, post-start input, session id persistence, approval pause/resume, approval reject, AskUserQuestion mapping, empty output, malformed event failure, timeout, cancel, transcript artifacts, artifact metadata, and secret redaction.
+- Raw and normalized transcript artifacts enforce the 1 MiB artifact content cap, 64 KiB normalized-record cap, and truncation/failure-marker behavior.
 - `send()` accepts text input for active fake Claude sessions and records a normalized transcript input acknowledgement.
 - Approval resolution input resumes or denies the fake provider callback and stale resolution returns `runtime_approval_pause_not_active`.
 - Adapter contract harness passes for Claude without calling a real provider.
@@ -294,10 +304,12 @@ Update Codex only within the one-shot boundary. Keep `send()` returning `CodexIn
 - `{ codepath: "ClaudeCodeAdapter.start", failure: "cwd is relative, task is empty, unsupported permission mode, unsafe tool config, or dangerous bypass flag", exception: "AdapterProtocolError with claude_* reasonCode", rescue: "reject before provider client starts", user_sees: "409 adapter_protocol_failed with reasonCode and no provider side effect" }`
 - `{ codepath: "ClaudeCodeDoctor.check", failure: "command missing, SDK import fails, auth missing, empty output, timeout, output too large, or auth JSON malformed", exception: "bounded check result, no throw for expected checks", rescue: "return unavailable, installed, partial, or unknown with redacted diagnostics", user_sees: "runtime-mode check response with no secret leakage and no prompt spend" }`
 - `{ codepath: "ClaudeCodeEventMapper.map", failure: "provider event is null, missing type, unknown type, malformed stream JSON, or empty output", exception: "run.failed for malformed JSON; runtime.status provider_event_unknown for unknown structured object", rescue: "emit bounded normalized event and preserve captured raw bytes", user_sees: "visible failed run or warning status plus transcript" }`
+- `{ codepath: "ClaudeCodeEventMapper.unknownEventFlood", failure: "provider emits many unknown structured events", exception: "no throw before flood limit; suppression marker after limit", rescue: "emit at most 100 provider_event_unknown statuses, then one provider_event_unknown_suppressed status and transcript marker with redacted count", user_sees: "bounded warning events instead of an unbounded event stream" }`
 - `{ codepath: "ClaudeCodeAdapter.send text", failure: "missing session, terminal session, empty text, closed input queue", exception: "AdapterProtocolError reasonCode claude_session_missing, runtime_input_not_active, runtime_input_empty, or claude_input_queue_closed", rescue: "do not mutate transcript except optional rejected-input marker with redacted reason", user_sees: "409 adapter_protocol_failed or core validation failure" }`
 - `{ codepath: "ClaudeCodeAdapter.send approval_resolution", failure: "runtimeApprovalToken not active or provider callback throws", exception: "AdapterProtocolError reasonCode runtime_approval_pause_not_active or claude_approval_resolution_failed", rescue: "record normalized failure marker and surface protocol error", user_sees: "approval resolution failure is explicit" }`
 - `{ codepath: "ClaudeCodeAdapter.cancel", failure: "cancel after terminal or provider cancel exception", exception: "none for idempotent terminal; AdapterProtocolError for active unverified cancel", rescue: "terminal sessions no-op; active fake emits run.cancelled or protocol error", user_sees: "cancel remains idempotent for terminal runs" }`
 - `{ codepath: "Claude transcript artifacts", failure: "artifact path unsafe, content empty, or transcript contains fake secret", exception: "test failure or AdapterProtocolError before artifact return", rescue: "safe relative paths, empty-output marker, recursive redaction before content and metadata", user_sees: "artifact list contains safe raw/normalized transcript without secrets" }`
+- `{ codepath: "Claude transcript artifacts", failure: "raw or normalized transcript exceeds 1 MiB, or a normalized record exceeds 64 KiB", exception: "no throw for transcript overflow; transcript.truncated or transcript.record_truncated marker", rescue: "truncate artifact content deterministically, include omitted byte counts, and keep run terminal state honest", user_sees: "artifact content is bounded and explicitly marked as truncated" }`
 - `{ codepath: "CodexExecJsonAdapter", failure: "R8 changes accidentally add interactive claims", exception: "manifest test failure", rescue: "keep one-shot manifest and CodexInputUnsupportedError", user_sees: "Codex input continues to return codex_input_unsupported" }`
 
 `observability`:
@@ -308,6 +320,7 @@ Update Codex only within the one-shot boundary. Keep `send()` returning `CodexIn
 `test_cases`:
 - `{ name: "manifest exposes claude sdk mode", lens: "happy", given: "new ClaudeCodeAdapter()", expect: "manifest slug claude_code.sdk, kind sdk, capabilities include run.input/session.state/approval.bridge and hosted unsupported" }`
 - `{ name: "doctor no live prompt disabled", lens: "happy_shadow_empty", given: "check with liveProbe false and fake version/auth probes", expect: "installed or partial with reasonCode live_probe_disabled and no prompt invocation" }`
+- `{ name: "doctor live probe enabled safe fake", lens: "edge_cost", given: "check with liveProbe true, fake live probe client, maxBudgetUsd 0.05, and safe permissions", expect: "fake client records max budget and read-only/plan-like tool flags, no real provider is called, and availability reflects fake live probe result" }`
 - `{ name: "doctor command missing", lens: "happy_shadow_nil", given: "fake version probe binary unavailable", expect: "availability unavailable reasonCode binary_unavailable" }`
 - `{ name: "fake streaming output", lens: "happy", given: "fake event assistant_text_delta then completed", expect: "runtime.output then run.completed" }`
 - `{ name: "fake post-start input", lens: "happy", given: "active fake session and send text continue", expect: "structured user message queued and normalized transcript input accepted entry" }`
@@ -315,8 +328,12 @@ Update Codex only within the one-shot boundary. Keep `send()` returning `CodexIn
 - `{ name: "fake approval approve", lens: "happy", given: "approval_required then approval_resolution approved", expect: "approval pause event, callback allow path, run completes" }`
 - `{ name: "fake approval reject", lens: "happy", given: "approval_required then approval_resolution rejected", expect: "callback deny path and terminal provider-denied status or failed event per fixture" }`
 - `{ name: "fake user question", lens: "integration", given: "ask_user_question event", expect: "approval.requested approvalType before_external_message with responseFormat ask_user_question" }`
+- `{ name: "fake user question text-only response", lens: "integration", given: "ask_user_question event then approval resolution with reason text and no answers field", expect: "adapter records user_question_text_response_only and resolves using text-only message semantics" }`
 - `{ name: "empty provider output", lens: "happy_shadow_empty", given: "fake provider completes without text", expect: "run.completed and normalized transcript empty_output true" }`
 - `{ name: "malformed stream json", lens: "error_path", given: "fake stream-json line not JSON", expect: "run.failed reasonCode claude_stream_malformed and raw transcript captured" }`
+- `{ name: "unknown event flood bounded", lens: "edge_backpressure", given: "fake provider emits 150 unknown event objects", expect: "100 provider_event_unknown statuses, one provider_event_unknown_suppressed status, bounded transcript marker, and no unbounded event growth" }`
+- `{ name: "transcript max bytes truncates", lens: "edge_artifact_bounds", given: "fake provider emits raw and normalized transcript content beyond 1 MiB", expect: "artifacts end with transcript.truncated marker, metadata remains redacted, and run terminal state remains completed if provider completed" }`
+- `{ name: "normalized transcript record truncates", lens: "edge_artifact_bounds", given: "single normalized provider event serializes above 64 KiB", expect: "normalized transcript stores transcript.record_truncated marker instead of full record" }`
 - `{ name: "input after closed queue", lens: "error_path", given: "send after fake provider terminal", expect: "AdapterProtocolError claude_input_queue_closed or runtime_input_not_active" }`
 - `{ name: "stale approval resolution", lens: "error_path", given: "approval_resolution after callback removed", expect: "AdapterProtocolError runtime_approval_pause_not_active" }`
 - `{ name: "cancel active fake", lens: "error_path", given: "cancel before completion", expect: "run.cancelled and transcript terminal cancelled marker" }`
@@ -368,9 +385,11 @@ Update Codex only within the one-shot boundary. Keep `send()` returning `CodexIn
 
 `instructions`: Add runtime-mode inference for `runtime: "claude_code"` with `adapterType: "native"` to `claude_code.sdk`. Keep all existing inference rules unchanged and continue rejecting runtime-mode ids such as `runtime_mode_claude_code_sdk` in request bodies.
 
-Tighten `parseInputBody` in `packages/protocol-rest/src/run-routes.ts` for R8 text-only input. Missing body, non-object body, missing `text`, non-string `text`, empty text, or whitespace-only text must return `400 invalid_input` with details path `body` or `text`. Valid text bodies pass through as `{ text }`. Approval resolution objects are internal core-to-adapter inputs and are not accepted by the public run input endpoint.
+Tighten `parseInputBody` in `packages/protocol-rest/src/run-routes.ts` for R8 text-only input. Missing body, non-object body, missing `text`, non-string `text`, empty text, whitespace-only text, or text larger than 64 KiB must return `400 invalid_input` with details path `body` or `text`. Valid text bodies pass through as `{ text }`. Approval resolution objects are internal core-to-adapter inputs and are not accepted by the public run input endpoint.
 
-Optionally extend approval approve/reject route bodies with `answers` only if it can be added without breaking current `{ actor, reason }` callers. If added, `answers` must be an object, recursively redacted by `ApprovalService`, and forwarded only for runtime approvals with `responseFormat: "ask_user_question"`. If not added, tests and docs must prove text-only question response semantics through `reason`.
+Keep AskUserQuestion response semantics text-only by default through the existing approve/reject `reason` field, and require tests/docs to record the `user_question_text_response_only` limitation. Optionally extend approval approve/reject route bodies with `answers` only if it can be added without breaking current `{ actor, reason }` callers. If added, `answers` must be an object, recursively redacted by `ApprovalService`, and forwarded only for runtime approvals with `responseFormat: "ask_user_question"`.
+
+Update approval approve/reject handling in `packages/protocol-rest/src/middleware-routes.ts` so runtime-sender `AdapterProtocolError` instances thrown by `ApprovalService.approve` or `ApprovalService.reject` are translated to the existing `409 adapter_protocol_failed` envelope with details `[{ "path": "reasonCode", "issue": "runtime_approval_pause_not_active" }]`. Existing `ServiceError` mappings such as `approval_not_found` and `approval_not_pending` remain unchanged.
 
 Add Claude daemon config:
 
@@ -388,20 +407,23 @@ Update daemon smoke tests:
 - runtime modes list includes `claude_code.sdk` plus existing five modes.
 - `GET /runtime-modes/claude_code.sdk` returns the expected manifest and local conditional placement.
 - `POST /runtime-modes/claude_code.sdk/check` uses fake/no-spend probes and reports live probe disabled without secrets.
+- `POST /runtime-modes/claude_code.sdk/check` with live probe explicitly enabled uses a fake/no-spend probe to assert max budget and safe permission/tool flags are passed.
 - async fake Claude run accepts `POST /runs/:id/input` while active and later completes.
-- fake Claude approval pause persists an approval, marks run/session waiting, approve resumes, reject denies, stale resolution returns 409.
+- fake Claude approval pause persists an approval, marks run/session waiting, approve resumes, reject denies, stale resolution returns 409, and a resolution racing a provider terminal event maps to `adapter_protocol_failed` with `runtime_approval_pause_not_active` when the approval was still pending at request start.
 - artifact retrieval returns raw and normalized Claude transcript artifacts with content stored when filesystem artifact store is configured.
 - existing unsupported input tests still return adapter-specific reason codes for fake, Codex, AgentField, Generic HTTP, and OpenCode.
 
 `acceptance`:
 - Runtime-mode inference accepts `claude_code.sdk` for `claude_code/native` and keeps all prior inference behavior.
-- `POST /runs/:id/input` returns `400 invalid_input` for missing, non-object, missing text, non-string text, empty text, and whitespace-only text.
+- `POST /runs/:id/input` returns `400 invalid_input` for missing, non-object, missing text, non-string text, empty text, whitespace-only text, and text larger than 64 KiB.
 - `POST /runs/:id/input` returns `202` for active fake-backed Claude sessions and appends an input acknowledgement to the normalized transcript.
 - `POST /runs/:id/input` returns existing `409 adapter_protocol_failed` reason codes for unsupported modes and terminal Claude runs.
 - Daemon config loads Claude env vars with safe defaults and does not enable live prompt probes by default.
 - Daemon seeds Claude provider/runtime/model/runtime-mode records without breaking fake/Codex/OpenCode/AgentField/Generic HTTP seeding.
 - Runtime doctor summary and active check include Claude Code state and do not crash when Claude is missing, auth missing, SDK import fails, or live probe disabled.
+- Explicitly enabled fake live-probe smoke proves max budget and safe permission/tool flags reach the fake Claude probe with no real provider call.
 - Runtime approval pause/resolution works through existing REST approval endpoints and stale resolution fails visibly.
+- Approval approve/reject routes translate runtime-sender `AdapterProtocolError` failures into `409 adapter_protocol_failed` with reasonCode details.
 - Filesystem artifact smoke can retrieve Claude raw and normalized transcript artifacts.
 
 `checks`:
@@ -414,10 +436,12 @@ Update daemon smoke tests:
 
 `error_rescue_map`:
 - `{ codepath: "RegistryService.inferAndValidateRuntimeMode", failure: "Claude runtime mode omitted or internal id supplied", exception: "RuntimeModeValidationError", rescue: "infer claude_code.sdk for claude_code/native; reject runtime_mode_* ids with invalid_input", user_sees: "valid Claude run bodies work and invalid mode ids get 400" }`
-- `{ codepath: "parseInputBody", failure: "missing body, non-object body, missing text, non-string text, empty text, whitespace text", exception: "HttpProblem invalid_input", rescue: "return path-specific details before core", user_sees: "400 invalid_input without touching run state" }`
+- `{ codepath: "parseInputBody", failure: "missing body, non-object body, missing text, non-string text, empty text, whitespace text, or text larger than 64 KiB", exception: "HttpProblem invalid_input", rescue: "return path-specific details before core", user_sees: "400 invalid_input without touching run state" }`
 - `{ codepath: "createDaemonApp Claude config", failure: "SDK import fails, command missing, auth missing, live probe disabled", exception: "bounded RuntimeAdapterCheck result", rescue: "seed mode with unavailable, installed, partial, or unknown and redacted reasonCode", user_sees: "daemon starts and doctor reports actionable Claude state" }`
 - `{ codepath: "seedClaudeRegistry", failure: "provider/runtime/model/mode already exist from prior daemon start", exception: "unique constraint or stale record", rescue: "use existing create/update pattern and upsert manifest", user_sees: "restarting daemon preserves registry and updates availability" }`
 - `{ codepath: "approval bridge wiring", failure: "runner and approval service need each other", exception: "undefined callback or runtime_approval_bridge_unconfigured", rescue: "wire through narrow closure or optional sender after both services exist; add smoke coverage", user_sees: "runtime approvals create normal approvals and resolve through existing endpoints" }`
+- `{ codepath: "approval approve/reject routes", failure: "runtime sender throws AdapterProtocolError during approve/reject", exception: "AdapterProtocolError reasonCode runtime_approval_pause_not_active", rescue: "middleware-routes catches AdapterProtocolError and returns 409 adapter_protocol_failed with reasonCode details", user_sees: "approval resolution failure uses the same adapter protocol envelope as run input/cancel" }`
+- `{ codepath: "approval resolution race", failure: "provider terminal event closes callback while user approval request is in flight", exception: "AdapterProtocolError runtime_approval_pause_not_active or ServiceError approval_not_pending depending on ordering", rescue: "surface 409 with the specific reason; do not emit duplicate provider terminal or approval resolution events", user_sees: "clear stale/raced approval response instead of a hang" }`
 - `{ codepath: "daemon smoke fake Claude run", failure: "async run completes before input can be sent", exception: "409 runtime_input_not_active", rescue: "fake client scenario waits for input before completion", user_sees: "supported input path is testable deterministically" }`
 - `{ codepath: "artifact retrieval", failure: "transcript metadata content not stored or path unsafe", exception: "artifact route 404 missing_artifact_content or artifact path error", rescue: "use existing artifact content store and safe `runs/<runId>/...` paths", user_sees: "GET /artifacts/:id/content streams transcript bytes" }`
 
@@ -430,7 +454,11 @@ Update daemon smoke tests:
 - `{ name: "infer claude runtime mode", lens: "happy", given: "POST /runs with runtime claude_code adapterType native and no runtimeMode", expect: "created run.runtimeMode is claude_code.sdk" }`
 - `{ name: "reject claude runtime mode id", lens: "error_path", given: "runtimeMode runtime_mode_claude_code_sdk", expect: "400 invalid_input runtimeMode slug error" }`
 - `{ name: "input body missing", lens: "happy_shadow_nil", given: "POST /runs/:id/input without JSON body", expect: "400 invalid_input path body" }`
+- `{ name: "input body non-object", lens: "happy_shadow_nil", given: "POST /runs/:id/input with JSON string or array body", expect: "400 invalid_input path body and run state unchanged" }`
+- `{ name: "input body missing text", lens: "happy_shadow_nil", given: "POST /runs/:id/input with {}", expect: "400 invalid_input path text and adapter.send not called" }`
+- `{ name: "input body non-string text", lens: "error_path", given: "POST /runs/:id/input with {\"text\":123}", expect: "400 invalid_input path text and adapter.send not called" }`
 - `{ name: "input body empty text", lens: "happy_shadow_empty", given: "{\"text\":\"   \"}", expect: "400 invalid_input path text" }`
+- `{ name: "input body oversized text", lens: "error_path", given: "{\"text\":\"x\" repeated 65537 times}", expect: "400 invalid_input path text, no adapter dispatch, and no oversized body in logs" }`
 - `{ name: "input supported active claude", lens: "happy", given: "async fake Claude run paused for input", expect: "POST input returns 202 and normalized transcript records input accepted" }`
 - `{ name: "input terminal claude", lens: "error_path", given: "completed fake Claude run then input", expect: "409 adapter_protocol_failed reasonCode runtime_input_not_active" }`
 - `{ name: "unsupported codex input unchanged", lens: "error_path", given: "codex.exec_json run input", expect: "409 reasonCode codex_input_unsupported" }`
@@ -439,11 +467,15 @@ Update daemon smoke tests:
 - `{ name: "daemon config trims env", lens: "happy", given: "Claude env vars with spaces", expect: "trimmed command and numeric timeout/budget" }`
 - `{ name: "daemon seeds claude mode", lens: "integration", given: "createDaemonApp with fake Claude probe", expect: "runtime-modes contains claude_code.sdk and existing modes" }`
 - `{ name: "doctor claude live disabled", lens: "happy_shadow_empty", given: "POST /runtime-modes/claude_code.sdk/check with liveProbe false", expect: "no fake prompt call and reasonCode live_probe_disabled" }`
+- `{ name: "doctor claude live enabled safe fake", lens: "edge_cost", given: "POST /runtime-modes/claude_code.sdk/check with liveProbe true, fake probe, maxBudgetUsd 0.05, safe permission mode, and disabled broad tools", expect: "fake probe records max budget and safe flags, no real provider called, and check result reflects fake live probe" }`
 - `{ name: "doctor claude missing binary", lens: "happy_shadow_nil", given: "fake probe binary unavailable", expect: "state unavailable and daemon still starts" }`
 - `{ name: "approval pause route", lens: "integration", given: "fake Claude approval pause", expect: "GET approval pending and run status waiting_for_approval" }`
 - `{ name: "approval approve resumes", lens: "happy", given: "POST /approvals/:id/approve", expect: "approval.approved event, provider resumes, run completes" }`
 - `{ name: "approval reject denies", lens: "happy", given: "POST /approvals/:id/reject", expect: "approval.rejected event and provider denial path" }`
 - `{ name: "approval stale resolution", lens: "error_path", given: "resolve approval after callback timed out or run terminalized", expect: "409 approval_not_pending or adapter_protocol_failed runtime_approval_pause_not_active" }`
+- `{ name: "approval approve/reject routes map runtime sender protocol error", lens: "error_path", given: "ApprovalService.approve or ApprovalService.reject rejects with AdapterProtocolError runtime_approval_pause_not_active", expect: "POST /approvals/:id/approve and POST /approvals/:id/reject return 409 adapter_protocol_failed with reasonCode detail" }`
+- `{ name: "approval race with terminal provider event", lens: "edge_concurrency", given: "provider terminalizes while approval approve request is resolving", expect: "409 approval_not_pending or adapter_protocol_failed runtime_approval_pause_not_active, one terminal run event, and no duplicate approval resolution event" }`
+- `{ name: "ask user question text only", lens: "integration", given: "approval payload responseFormat ask_user_question and approve body { reason: 'option A' }", expect: "runtime resolution carries text message/reason and records user_question_text_response_only when no answers field exists" }`
 - `{ name: "claude transcript content retrieval", lens: "integration", given: "filesystem artifact store and completed fake Claude run", expect: "raw and normalized transcript artifacts can be fetched by content endpoint" }`
 
 `integration_contracts`:
@@ -511,6 +543,7 @@ Update `PRODUCT.md` and `CHANGELOG.md` in shipped tense only when the implementa
 `acceptance`:
 - Docs name `claude_code.sdk` and list its actual capabilities, placement, doctor behavior, post-start text input, approval bridge semantics, and transcript artifacts.
 - Docs preserve `codex.exec_json` as one-shot and explicitly reject Codex PTY/TUI automation in R8.
+- Docs explicitly state Codex one-shot resume remains deferred when not implemented and do not document a shipped resume smoke path.
 - Smoke commands are fake/no-spend by default and any live Claude probe is opt-in with cost warning and max budget.
 - API docs include 400 input validation examples and 409 unsupported/terminal input examples.
 - API and development docs include approval-pause semantics and stale-resolution behavior.
@@ -540,6 +573,7 @@ Update `PRODUCT.md` and `CHANGELOG.md` in shipped tense only when the implementa
 - `{ name: "docs mention no-spend doctor", lens: "happy", given: "DEVELOPMENT.md Claude smoke", expect: "doctor/check commands do not run prompts by default" }`
 - `{ name: "docs mention opt-in live probe", lens: "edge_cost", given: "CLAUDE_CODE.md", expect: "cost warning, max budget env, and explicit live probe flag" }`
 - `{ name: "docs unsupported codex input", lens: "integration", given: "codex docs and API docs", expect: "codex_input_unsupported and no codex.interactive claim" }`
+- `{ name: "docs codex resume deferred", lens: "integration", given: "docs/adapters/codex.md and docs/development/API.md after implementation when Codex resume is not implemented", expect: "docs explicitly state codex exec resume --json and one-shot resume remain deferred, and no resume smoke command is documented as shipped" }`
 - `{ name: "docs input validation", lens: "error_path", given: "API send input section", expect: "400 invalid_input for missing/non-object/empty text and 409 runtime_input_not_active example" }`
 - `{ name: "docs approval pause", lens: "integration", given: "API and Claude Code adapter docs", expect: "approval.requested, approve/reject, stale resolution semantics, provider-managed tools" }`
 - `{ name: "docs transcript artifacts", lens: "happy", given: "API and Claude dev guide", expect: "raw and normalized transcript paths plus artifact content retrieval commands" }`
@@ -558,6 +592,8 @@ Update `PRODUCT.md` and `CHANGELOG.md` in shipped tense only when the implementa
 - Claude Code SDK package/API volatility is real. Keep SDK usage behind a tiny client port, keep fake fixtures as the stable contract, and report partial/unavailable doctor state rather than overclaiming live availability.
 - Approval callbacks are strongest through the SDK. If an implementation falls back to CLI stream-json and cannot prove structured approval callbacks, the manifest must omit `approval.bridge`, docs must state the limitation, and acceptance should fail rather than silently overclaim.
 - Runtime approval resolution has a service-cycle risk between runner and approval service. Use narrow callback interfaces and tests around daemon wiring to avoid a broad dependency knot.
+- Runtime approval resolution can race with provider terminal events. Treat both orderings as valid but bounded: either `approval_not_pending` or `adapter_protocol_failed` with `runtime_approval_pause_not_active`, never duplicate terminal or resolution events.
+- Provider event and transcript volume can grow unexpectedly. Bound unknown Claude event floods, public input size, normalized record size, and raw/normalized transcript artifact size in tests so local runs do not create unbounded stored data.
 - R8 touches many existing packages. The split keeps ownership disjoint, but the auditor must run full root typecheck and the package checks listed below after task branches merge.
 
 ## Integration Points
@@ -577,12 +613,15 @@ Cross-task import walk:
 - [ ] `GET /runtime-modes/codex.exec_json` still reports one-shot behavior and does not claim `run.input`, `approval.bridge`, `codex.interactive`, or PTY support.
 - [ ] `POST /runtime-modes/claude_code.sdk/check` performs no model-spend prompt by default and reports installed/auth/live-probe state without leaking secrets.
 - [ ] An explicit live-probe path exists, is off by default, and uses a bounded max budget.
+- [ ] Fake/no-spend enabled-live-probe tests prove max budget and safe permission/tool flags are passed when the live probe is explicitly enabled.
 - [ ] Deterministic Claude fake tests prove start, streaming output, post-start input, session id persistence, empty output, malformed event failure, cancellation, timeout, transcript capture, and artifact retrieval.
 - [ ] Deterministic approval tests prove provider approval pause creates a persisted approval, marks the run/session waiting, approve resumes provider execution, reject denies provider execution, and stale approval resolution fails visibly.
 - [ ] `POST /runs/:id/input` returns `202` for active supported Claude sessions and appends a redacted input acknowledgement to the normalized transcript.
 - [ ] `POST /runs/:id/input` returns `400 invalid_input` for missing, non-object, missing text, non-string text, empty text, or whitespace-only input bodies.
+- [ ] `POST /runs/:id/input` returns `400 invalid_input` for text larger than 64 KiB and never dispatches that oversized body to the adapter.
 - [ ] `POST /runs/:id/input` returns `409 adapter_protocol_failed` with provider-specific `reasonCode` for terminal runs, missing sessions, closed input queues, and unsupported runtime modes.
 - [ ] Claude adapter transcripts include raw and normalized artifacts and never include fake auth tokens or API keys in tests.
+- [ ] Claude raw and normalized transcripts are bounded to 1 MiB each with explicit truncation markers, normalized transcript records are bounded to 64 KiB, and unknown-event floods are suppressed after 100 unknown events.
 - [ ] Codex one-shot behavior and existing Codex adapter tests remain green.
 - [ ] Codex one-shot resume is deferred and docs explicitly say resume remains deferred.
 - [ ] Daemon startup seeds Claude Code provider/runtime/model/runtime-mode records and existing fake/Codex/OpenCode/AgentField/Generic HTTP seeding still works.
