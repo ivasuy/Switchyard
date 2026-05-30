@@ -160,6 +160,94 @@ describe("middleware routes", () => {
     }
   });
 
+  it("returns explicit 404 middleware codes for unknown route resources and context references", async () => {
+    const { app } = createHarness();
+    try {
+      const missingMessage = await app.inject({ method: "GET", url: "/messages/message_missing" });
+      expect(missingMessage.statusCode).toBe(404);
+      expect(missingMessage.json().error.code).toBe("message_not_found");
+
+      const missingEvidence = await app.inject({ method: "GET", url: "/evidence/evidence_missing" });
+      expect(missingEvidence.statusCode).toBe(404);
+      expect(missingEvidence.json().error.code).toBe("evidence_not_found");
+
+      const missingApproval = await app.inject({ method: "GET", url: "/approvals/approval_missing" });
+      expect(missingApproval.statusCode).toBe(404);
+      expect(missingApproval.json().error.code).toBe("approval_not_found");
+
+      const missingInvocation = await app.inject({ method: "GET", url: "/tools/invocations/tool_missing" });
+      expect(missingInvocation.statusCode).toBe(404);
+      expect(missingInvocation.json().error.code).toBe("tool_invocation_not_found");
+
+      const missingEvidenceContext = await app.inject({
+        method: "POST",
+        url: "/context",
+        payload: {
+          target: "run",
+          evidenceIds: ["evidence_missing"]
+        }
+      });
+      expect(missingEvidenceContext.statusCode).toBe(404);
+      expect(missingEvidenceContext.json().error.code).toBe("evidence_not_found");
+
+      const missingMessageContext = await app.inject({
+        method: "POST",
+        url: "/context",
+        payload: {
+          target: "run",
+          messageIds: ["message_missing"]
+        }
+      });
+      expect(missingMessageContext.statusCode).toBe(404);
+      expect(missingMessageContext.json().error.code).toBe("message_not_found");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns invalid_query for malformed middleware list filters", async () => {
+    const { app } = createHarness();
+    try {
+      const malformedCursor = await app.inject({ method: "GET", url: "/messages?before=not-a-cursor" });
+      expect(malformedCursor.statusCode).toBe(400);
+      expect(malformedCursor.json().error.code).toBe("invalid_query");
+      expect(malformedCursor.json().error.details?.[0]?.path).toBe("before");
+
+      const invalidLimit = await app.inject({ method: "GET", url: "/memory?limit=0" });
+      expect(invalidLimit.statusCode).toBe(400);
+      expect(invalidLimit.json().error.code).toBe("invalid_query");
+      expect(invalidLimit.json().error.details?.[0]?.path).toBe("limit");
+
+      const invalidEnum = await app.inject({ method: "GET", url: "/tools/invocations?status=banana" });
+      expect(invalidEnum.statusCode).toBe(400);
+      expect(invalidEnum.json().error.code).toBe("invalid_query");
+      expect(invalidEnum.json().error.details?.[0]?.path).toBe("status");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects unsafe evidence fetchedContentPath values", async () => {
+    const { app } = createHarness();
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/evidence",
+        payload: {
+          sourceType: "manual",
+          title: "unsafe path",
+          reliability: "primary",
+          fetchedContentPath: "../outside.txt"
+        }
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe("invalid_input");
+      expect(response.json().error.details?.[0]?.path).toBe("fetchedContentPath");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("returns 403 tool_policy_denied for real tools and never invokes fake adapter", async () => {
     const { app, fakeEcho } = createHarness();
     try {

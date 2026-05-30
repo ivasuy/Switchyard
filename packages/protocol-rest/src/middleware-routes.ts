@@ -56,7 +56,7 @@ export function registerMiddlewareRoutes(app: FastifyInstance, deps: MiddlewareR
     const filter = {
       runId: optionalString(query, "runId"),
       channel: optionalString(query, "channel"),
-      deliveryStatus: parseOptionalEnum(query["deliveryStatus"], deliveryStatusSchema, "deliveryStatus"),
+      deliveryStatus: parseOptionalQueryEnum(query["deliveryStatus"], deliveryStatusSchema, "deliveryStatus"),
       limit: parseLimit(query["limit"]),
       before: parseCursor(query["before"])
     };
@@ -107,7 +107,7 @@ export function registerMiddlewareRoutes(app: FastifyInstance, deps: MiddlewareR
     try {
       const result = await deps.memoryService.search({
         q: requiredString(query, "q"),
-        scope: parseOptionalEnum(query["scope"], memoryScopeSchema, "scope"),
+        scope: parseOptionalQueryEnum(query["scope"], memoryScopeSchema, "scope"),
         projectId: optionalString(query, "projectId"),
         runId: optionalString(query, "runId"),
         debateId: optionalString(query, "debateId"),
@@ -128,7 +128,7 @@ export function registerMiddlewareRoutes(app: FastifyInstance, deps: MiddlewareR
   app.get("/memory", async (request, reply) => {
     const query = ensureRecord(request.query, "Invalid query parameters");
     const result = await deps.memoryService.list({
-      scope: parseOptionalEnum(query["scope"], memoryScopeSchema, "scope"),
+      scope: parseOptionalQueryEnum(query["scope"], memoryScopeSchema, "scope"),
       projectId: optionalString(query, "projectId"),
       runId: optionalString(query, "runId"),
       debateId: optionalString(query, "debateId"),
@@ -174,8 +174,8 @@ export function registerMiddlewareRoutes(app: FastifyInstance, deps: MiddlewareR
     const query = ensureRecord(request.query, "Invalid query parameters");
     const result = await deps.evidenceService.list({
       debateId: optionalString(query, "debateId"),
-      sourceType: parseOptionalEnum(query["sourceType"], evidenceSourceTypeSchema, "sourceType"),
-      reliability: parseOptionalEnum(query["reliability"], evidenceReliabilitySchema, "reliability"),
+      sourceType: parseOptionalQueryEnum(query["sourceType"], evidenceSourceTypeSchema, "sourceType"),
+      reliability: parseOptionalQueryEnum(query["reliability"], evidenceReliabilitySchema, "reliability"),
       q: optionalString(query, "q"),
       limit: parseLimit(query["limit"]),
       before: parseCursor(query["before"])
@@ -239,8 +239,8 @@ export function registerMiddlewareRoutes(app: FastifyInstance, deps: MiddlewareR
     const query = ensureRecord(request.query, "Invalid query parameters");
     const result = await deps.approvalService.list({
       runId: optionalString(query, "runId"),
-      status: parseOptionalEnum(query["status"], approvalStatusSchema, "status"),
-      approvalType: parseOptionalEnum(query["approvalType"], approvalTypeSchema, "approvalType"),
+      status: parseOptionalQueryEnum(query["status"], approvalStatusSchema, "status"),
+      approvalType: parseOptionalQueryEnum(query["approvalType"], approvalTypeSchema, "approvalType"),
       limit: parseLimit(query["limit"]),
       before: parseCursor(query["before"])
     });
@@ -314,8 +314,8 @@ export function registerMiddlewareRoutes(app: FastifyInstance, deps: MiddlewareR
     const query = ensureRecord(request.query, "Invalid query parameters");
     const result = await deps.toolRouter.list({
       runId: optionalString(query, "runId"),
-      type: parseOptionalEnum(query["type"], toolTypeSchema, "type"),
-      status: parseOptionalEnum(query["status"], toolInvocationStatusSchema, "status"),
+      type: parseOptionalQueryEnum(query["type"], toolTypeSchema, "type"),
+      status: parseOptionalQueryEnum(query["status"], toolInvocationStatusSchema, "status"),
       approvalId: optionalString(query, "approvalId"),
       limit: parseLimit(query["limit"]),
       before: parseCursor(query["before"])
@@ -385,6 +385,17 @@ function parseOptionalEnum<T>(value: unknown, schema: { parse: (value: unknown) 
     return undefined;
   }
   return parseRequiredEnum(value, schema, path);
+}
+
+function parseOptionalQueryEnum<T>(value: unknown, schema: { parse: (value: unknown) => T }, path: string): T | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  try {
+    return schema.parse(value);
+  } catch {
+    throw new HttpProblem("invalid_query", `${path} is invalid`, [{ path, issue: "invalid value" }]);
+  }
 }
 
 function parseLimit(value: unknown): number {
