@@ -11,7 +11,7 @@ import type {
   RunService,
   RunStore
 } from "@switchyard/core";
-import { AdapterProtocolError } from "@switchyard/core";
+import { AdapterProtocolError, isRealHostedRuntimeMode } from "@switchyard/core";
 import {
   adapterTypeSchema,
   decodeCursor,
@@ -109,12 +109,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
         if (error.code === "queue_unavailable") {
           return sendHttpError(reply, "queue_unavailable", error.message);
         }
-        if (error.code === "hosted_runtime_not_allowed") {
-          return sendHttpError(reply, "placement_denied", "hosted_runtime_not_allowed", [
-            { path: "placement", issue: "hosted_runtime_not_allowed" }
-          ]);
-        }
-        return sendHttpError(reply, "placement_denied", error.message);
+        return sendHttpError(reply, "placement_denied", error.message, placementDeniedDetails(error.message));
       }
       if (error instanceof HttpProblem) {
         return sendHttpError(reply, error.code, error.message, error.details);
@@ -191,6 +186,17 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
     }
 
+    if (isHostedRealRun(run)) {
+      if (isTerminalStatus(run.status)) {
+        return sendHttpError(reply, "adapter_protocol_failed", "Run is not active", [
+          { path: "reasonCode", issue: "runtime_input_not_active" }
+        ]);
+      }
+      return sendHttpError(reply, "adapter_protocol_failed", "Hosted input bridge is not supported", [
+        { path: "reasonCode", issue: "hosted_input_unsupported" }
+      ]);
+    }
+
     try {
       await deps.runService.sendInput(id, parseInputBody(request.body));
     } catch (error) {
@@ -212,6 +218,19 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     const run = await deps.runs.get(id);
     if (!run) {
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
+    }
+
+    if (isHostedRealRun(run)) {
+      if (run.status === "queued") {
+        const cancelled = await deps.runService.cancelRun(id);
+        return reply.send({ run: cancelled });
+      }
+      if (!isTerminalStatus(run.status)) {
+        return sendHttpError(reply, "adapter_protocol_failed", "Hosted cancellation bridge is not supported", [
+          { path: "reasonCode", issue: "hosted_cancel_unsupported" }
+        ]);
+      }
+      return reply.send({ run });
     }
 
     try {
@@ -686,4 +705,26 @@ function isHostedRunServiceError(error: unknown): error is { code: "placement_de
   }
   const code = (error as { code?: unknown }).code;
   return code === "placement_denied" || code === "queue_unavailable" || code === "hosted_runtime_not_allowed";
+}
+
+function placementDeniedDetails(message: string): Array<{ path: string; issue: string }> | undefined {
+  const known = new Set([
+    "hosted_wait_unsupported",
+    "hosted_explicit_placement_required",
+    "hosted_real_runtime_disabled",
+    "hosted_real_runtime_production_forbidden",
+    "hosted_runtime_not_allowed"
+  ]);
+  if (!known.has(message)) {
+    return undefined;
+  }
+  return [{ path: "placement", issue: message }];
+}
+
+function isHostedRealRun(run: { placement: string; runtimeMode?: string | undefined }): boolean {
+  return run.placement === "hosted" && isRealHostedRuntimeMode(run.runtimeMode);
+}
+
+function isTerminalStatus(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled" || status === "timeout";
 }

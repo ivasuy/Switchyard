@@ -3,6 +3,7 @@ import {
   ArtifactSyncService,
   EventBus,
   EventSyncService,
+  HOSTED_RUNTIME_CATALOG,
   HostedRunService,
   HostedSandboxService,
   NodeCoordinatorService,
@@ -123,8 +124,9 @@ export async function createServerApp(config: ServerConfig) {
   const runService = new RunService({ runs, events, runner });
   const registryService = new RegistryService({ registry });
   const capabilityService = new RuntimeCapabilityService({ registry });
-  await seedFakeRegistry(registry);
-  await capabilityService.seedManifests([fakeAdapter.manifest], {
+  await seedHostedRegistryRecords(registry);
+  const catalogManifests = Object.values(HOSTED_RUNTIME_CATALOG).map((entry) => entry.manifest);
+  await capabilityService.seedManifests(catalogManifests, {
     "fake.deterministic": {
       state: "available",
       canRun: true,
@@ -134,6 +136,36 @@ export async function createServerApp(config: ServerConfig) {
       checkedAt: new Date().toISOString(),
       reasonCode: null,
       message: null
+    },
+    "codex.exec_json": {
+      state: "installed",
+      canRun: false,
+      installed: true,
+      auth: "missing",
+      version: null,
+      checkedAt: new Date().toISOString(),
+      reasonCode: "hosted_worker_owned",
+      message: "Discoverable for worker-owned self-hosted/staging execution only."
+    },
+    "claude_code.sdk": {
+      state: "installed",
+      canRun: false,
+      installed: true,
+      auth: "missing",
+      version: null,
+      checkedAt: new Date().toISOString(),
+      reasonCode: "hosted_worker_owned",
+      message: "Discoverable for worker-owned self-hosted/staging execution only."
+    },
+    "opencode.acp": {
+      state: "installed",
+      canRun: false,
+      installed: true,
+      auth: "missing",
+      version: null,
+      checkedAt: new Date().toISOString(),
+      reasonCode: "hosted_worker_owned",
+      message: "Discoverable for worker-owned self-hosted/staging execution only."
     }
   });
 
@@ -147,7 +179,14 @@ export async function createServerApp(config: ServerConfig) {
     assignments,
     placementService,
     hostedRuntimeAllowlist: config.hostedRuntimeAllowlist,
+    deploymentMode: config.deploymentMode,
+    hostedRealRuntimeExecution: config.hostedRealRuntimeExecution,
     listOnlineNodes: async () => nodes.list({ status: "online" }),
+    metrics,
+    logger: {
+      info: (event, details) => app.log.info({ event, ...details }),
+      warn: (event, details) => app.log.warn({ event, ...details })
+    },
     waitForRun: async (runId) => {
       const claimed = await queue.claim();
       if (claimed && claimed.payload.runId === runId) {
@@ -241,23 +280,19 @@ export async function createServerApp(config: ServerConfig) {
           diagnostics: []
         };
       },
-      summarize: async () => ({
-        runtimeModes: (await registry.listRuntimeModes({ limit: 100 })).runtimeModes.map((mode) => ({
-          runtimeModeId: mode.id,
-          runtimeMode: mode.slug,
-          state: mode.availability.state,
-          canRun: mode.availability.canRun,
-          checkedAt: mode.availability.checkedAt
-        })),
-        summary: {
-          available: 1,
-          installed: 0,
-          partial: 0,
-          unavailable: 0,
-          unsupported: 0,
-          unknown: 0
-        }
-      })
+      summarize: async () => {
+        const listed = await registry.listRuntimeModes({ limit: 100 });
+        return {
+          runtimeModes: listed.runtimeModes.map((mode) => ({
+            runtimeModeId: mode.id,
+            runtimeMode: mode.slug,
+            state: mode.availability.state,
+            canRun: mode.availability.canRun,
+            checkedAt: mode.availability.checkedAt
+          })),
+          summary: summarizeRuntimeStates(listed.runtimeModes.map((mode) => mode.availability.state))
+        };
+      }
     },
     registryService
   });
@@ -391,12 +426,30 @@ function captureObjectStoreErrorMetrics(error: unknown, metrics: HostedMetrics):
   }
 }
 
-async function seedFakeRegistry(registry: RegistryStore): Promise<void> {
+async function seedHostedRegistryRecords(registry: RegistryStore): Promise<void> {
   if (!(await registry.getProvider("provider_test"))) {
     await registry.createProvider({ id: "provider_test", name: "Test Provider", authMode: "none", status: "available" });
   }
+  if (!(await registry.getProvider("provider_openai"))) {
+    await registry.createProvider({ id: "provider_openai", name: "OpenAI", authMode: "local", status: "available" });
+  }
+  if (!(await registry.getProvider("provider_anthropic"))) {
+    await registry.createProvider({ id: "provider_anthropic", name: "Anthropic", authMode: "local", status: "available" });
+  }
+  if (!(await registry.getProvider("provider_opencode"))) {
+    await registry.createProvider({ id: "provider_opencode", name: "OpenCode", authMode: "local", status: "available" });
+  }
   if (!(await registry.getRuntime("runtime_fake"))) {
     await registry.createRuntime({ id: "runtime_fake", name: "Fake Runtime", adapterType: "process", status: "available" });
+  }
+  if (!(await registry.getRuntime("runtime_codex"))) {
+    await registry.createRuntime({ id: "runtime_codex", name: "Codex Runtime", adapterType: "process", status: "available" });
+  }
+  if (!(await registry.getRuntime("runtime_claude_code"))) {
+    await registry.createRuntime({ id: "runtime_claude_code", name: "Claude Code Runtime", adapterType: "native", status: "available" });
+  }
+  if (!(await registry.getRuntime("runtime_opencode"))) {
+    await registry.createRuntime({ id: "runtime_opencode", name: "OpenCode Runtime", adapterType: "acpx", status: "available" });
   }
   if (!(await registry.getModel("model_test"))) {
     await registry.createModel({
@@ -409,4 +462,61 @@ async function seedFakeRegistry(registry: RegistryStore): Promise<void> {
       status: "available"
     });
   }
+  if (!(await registry.getModel("model_openai_codex_default"))) {
+    await registry.createModel({
+      id: "model_openai_codex_default",
+      providerId: "provider_openai",
+      modelName: "gpt-5",
+      supportsTools: false,
+      supportsStreaming: true,
+      supportsBrowser: false,
+      status: "available"
+    });
+  }
+  if (!(await registry.getModel("model_anthropic_claude_code_default"))) {
+    await registry.createModel({
+      id: "model_anthropic_claude_code_default",
+      providerId: "provider_anthropic",
+      modelName: "claude-code",
+      supportsTools: false,
+      supportsStreaming: true,
+      supportsBrowser: false,
+      status: "available"
+    });
+  }
+  if (!(await registry.getModel("model_opencode_default"))) {
+    await registry.createModel({
+      id: "model_opencode_default",
+      providerId: "provider_opencode",
+      modelName: "opencode-default",
+      supportsTools: false,
+      supportsStreaming: true,
+      supportsBrowser: false,
+      status: "available"
+    });
+  }
+}
+
+function summarizeRuntimeStates(states: string[]): {
+  available: number;
+  installed: number;
+  partial: number;
+  unavailable: number;
+  unsupported: number;
+  unknown: number;
+} {
+  const summary = {
+    available: 0,
+    installed: 0,
+    partial: 0,
+    unavailable: 0,
+    unsupported: 0,
+    unknown: 0
+  };
+  for (const state of states) {
+    if (state === "available" || state === "installed" || state === "partial" || state === "unavailable" || state === "unsupported" || state === "unknown") {
+      summary[state] += 1;
+    }
+  }
+  return summary;
 }

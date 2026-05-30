@@ -4,6 +4,16 @@ export interface HostedMetricsSnapshot {
   requests: { total: number };
   errors: { total: number; metricsCollection: number };
   placement: { accepted: number; denied: number };
+  hostedRuntime: {
+    accepted: number;
+    denied: number;
+    started: number;
+    completed: number;
+    failed: number;
+    timeout: number;
+    unsupportedInteraction: number;
+    artifactPersisted: number;
+  };
   queue: {
     available: boolean;
     enqueue: number;
@@ -47,6 +57,16 @@ export class HostedMetrics {
     requests: { total: 0 },
     errors: { total: 0, metricsCollection: 0 },
     placement: { accepted: 0, denied: 0 },
+    hostedRuntime: {
+      accepted: 0,
+      denied: 0,
+      started: 0,
+      completed: 0,
+      failed: 0,
+      timeout: 0,
+      unsupportedInteraction: 0,
+      artifactPersisted: 0
+    },
     queue: { available: true, enqueue: 0, claim: 0, ack: 0, retry: 0, failed: 0, exhausted: 0, queued: 0, claimed: 0 },
     worker: { attempts: 0, exhausted: 0 },
     objectStore: { reads: 0, writes: 0, failures: 0, probeFailures: 0, authFailures: 0, unavailable: 0, digestMismatches: 0 },

@@ -532,15 +532,22 @@ pnpm --filter @switchyard/server dev
 SWITCHYARD_SERVER_URL=http://127.0.0.1:4646 pnpm --filter @switchyard/node dev
 ```
 
-Negative hosted local-runtime denial (Codex/Claude style runtime modes denied in hosted path):
+R15 hosted real-runtime opt-in envs (self-hosted/staging only):
+
+```bash
+export SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST="fake.deterministic,codex.exec_json,claude_code.sdk,opencode.acp"
+export SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=enabled
+```
+
+Gate-disabled denial example (must reject before queue side effects):
 
 ```bash
 curl -s -X POST "http://127.0.0.1:4646/runs" \
   -H 'content-type: application/json' \
-  -d '{"runtime":"fake","provider":"test","model":"test-model","adapterType":"process","runtimeMode":"codex.exec_json","cwd":"/repo","task":"must deny","placement":"hosted"}' | python3 -m json.tool
+  -d '{"runtime":"codex","provider":"openai","model":"gpt-5","adapterType":"process","runtimeMode":"codex.exec_json","cwd":"/repo","task":"must deny","placement":"hosted"}' | python3 -m json.tool
 ```
 
-Expected: `409 placement_denied` (or `400 invalid_input` if runtimeMode mapping is invalid before placement evaluation), and no hosted job execution occurs.
+Expected with gate disabled: `409 placement_denied` detail `hosted_real_runtime_disabled`, and no hosted job execution occurs.
 
 R14 hosted sandbox substrate smoke (fake/no-spend only):
 
@@ -549,6 +556,14 @@ pnpm sandbox:smoke
 ```
 
 Expected: deterministic fake command allow path, real-command deny path, timeout terminalization, cancellation idempotency, transcript redaction, readiness check success, and sandbox metrics counter increments. No real subprocess/PTY/shell execution occurs in this smoke.
+
+R15 hosted real-runtime no-spend smoke:
+
+```bash
+pnpm hosted-real-runtime:smoke
+```
+
+Expected: fake-factory hosted completion for Codex/Claude/OpenCode, one denied gate-disabled request with no queue side effects, one unsupported interaction that fails visibly (no waiting-state leak), and artifact content retrieval through existing artifact routes.
 
 R10 storage/queue scope in this shipped slice:
 
@@ -559,13 +574,23 @@ R10 storage/queue scope in this shipped slice:
 - `SWITCHYARD_OBJECT_STORE_DIR` is required when backend is `local`.
 - S3/R2-compatible artifact storage is shipped in R13 using explicit endpoint/region/bucket/static credential env vars (`SWITCHYARD_OBJECT_STORE_ENDPOINT`, `SWITCHYARD_OBJECT_STORE_REGION`, `SWITCHYARD_OBJECT_STORE_BUCKET`, `SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID`, `SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY`).
 
-R10 non-goals reminder:
+R15 non-goals reminder:
 
-- No hosted Codex/Claude/OpenCode/PTY/arbitrary subprocess execution.
+- No managed hosted platform or production hosted real-runtime support.
+- No hosted arbitrary subprocess/PTY execution beyond the closed catalog modes above.
 - No hosted browser/search/repo/GitHub/fetch tooling.
+- No public `/sandbox`, `/exec`, `/pty`, or `/terminal` execution API.
+- No interactive Codex session resume/approval bridge/post-start hosted input bridge.
 - No hosted debate participant execution or model judging.
 
 R13 object-store smoke posture:
 
 - Required CI tests stay no-spend and use fake/in-memory seams only.
 - Optional live S3/R2/MinIO smoke is operator-owned and never part of required checks.
+
+R15 rollback and runbook:
+
+- Disable hosted real runtime gate: set `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`, restart server and worker, then verify `/ready` reports `checks.hostedRuntimeGate.code=hosted_real_runtime_disabled` when real modes remain allowlisted.
+- Remove real modes from allowlist: set `SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic`, restart server and worker, and verify hosted real create requests return `409 placement_denied`.
+- Already-queued real hosted jobs fail closed at worker claim revalidation if gate/allowlist drift occurs before claim.
+- Alert on `hostedRuntime.denied`, adapter start failures, run timeouts, unsupported interactions, object-store failures, and queue retry exhaustion.

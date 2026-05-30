@@ -9,8 +9,7 @@ import {
   type EventStore,
   type RunQueuePort,
   type RunStore,
-  type SessionStore,
-  type RuntimeAdapter
+  type SessionStore
 } from "@switchyard/core";
 import { BullMqRunQueue, MemoryRunQueue } from "@switchyard/queue";
 import {
@@ -23,8 +22,9 @@ import {
   probePostgresDatabase,
   openPostgresDatabase
 } from "@switchyard/storage";
-import { FakeHostedSandboxExecutor, FakeRuntimeAdapter, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
+import { FakeHostedSandboxExecutor, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
 import type { WorkerConfig } from "./config.js";
+import { buildHostedWorkerAdapters, checkConfiguredHostedAdapters, type HostedWorkerAdapterFactoryDeps } from "./hosted-runtime-adapters.js";
 
 export interface HostedWorkerApp {
   tick: () => Promise<boolean>;
@@ -32,6 +32,8 @@ export interface HostedWorkerApp {
     ok: boolean;
     reason?: string;
     checks?: {
+      hostedRuntimeGate?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
+      hostedRuntimeAdapters?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
       sandbox?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     };
   }>;
@@ -42,6 +44,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   queue?: MemoryRunQueue;
   runs?: InMemoryRunStore;
   events?: InMemoryEventStore;
+  adapters?: HostedWorkerAdapterFactoryDeps;
 }): HostedWorkerApp {
   const postgres = config.postgresUrl ? openPostgresDatabase(config.postgresUrl) : undefined;
   let postgresReady: Promise<void> | undefined;
@@ -60,7 +63,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   const artifactContent: ArtifactContentStore & { probe: () => Promise<{ ok: true }> } =
     createArtifactContentStoreFromObjectConfig(config.objectStore);
 
-  const adapters = new Map<string, RuntimeAdapter>([["fake", new FakeRuntimeAdapter()]]);
+  const adapters = buildHostedWorkerAdapters(config, deps?.adapters);
   const _hostedSandbox = new HostedSandboxService({
     config: config.sandbox,
     executor: new FakeHostedSandboxExecutor()
@@ -84,7 +87,9 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     runs,
     events,
     startRun: async (runId) => runService.startRun(runId),
-    hostedRuntimeAllowlist: config.hostedRuntimeAllowlist
+    hostedRuntimeAllowlist: config.hostedRuntimeAllowlist,
+    deploymentMode: config.deploymentMode,
+    hostedRealRuntimeExecution: config.hostedRealRuntimeExecution
   });
 
   return {
@@ -103,25 +108,48 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
           await artifactContent.probe();
         }
 
+        const checks: NonNullable<Awaited<ReturnType<HostedWorkerApp["ready"]>>["checks"]> = {};
+
+        const hasRealAllowlist = config.hostedRuntimeAllowlist.some((mode) => mode !== "fake.deterministic");
+        if (!hasRealAllowlist) {
+          checks.hostedRuntimeGate = { ok: true };
+        } else if (config.hostedRealRuntimeExecution !== "enabled") {
+          checks.hostedRuntimeGate = { ok: false, code: "hosted_real_runtime_disabled" };
+        } else if (config.deploymentMode === "production") {
+          checks.hostedRuntimeGate = { ok: false, code: "hosted_real_runtime_production_forbidden" };
+        } else {
+          checks.hostedRuntimeGate = { ok: true };
+        }
+
+        const adapterCheck = await checkConfiguredHostedAdapters(config, deps?.adapters);
+        checks.hostedRuntimeAdapters = adapterCheck.ok
+          ? { ok: true, diagnostics: { modes: adapterCheck.modes } }
+          : {
+            ok: false,
+            code: firstAdapterFailureCode(adapterCheck.modes),
+            diagnostics: { modes: adapterCheck.modes }
+          };
+
         const sandbox = checkHostedSandboxReadiness(config.sandbox);
         if (!sandbox.ok) {
           const code = sandbox.code ?? "sandbox_config_invalid";
+          checks.sandbox = {
+            ok: false,
+            code,
+            diagnostics: {
+              summary: config.sandbox.redactedSummary
+            }
+          };
           return {
             ok: false,
             reason: code,
-            checks: {
-              sandbox: {
-                ok: false,
-                code,
-                diagnostics: {
-                  summary: config.sandbox.redactedSummary
-                }
-              }
-            }
+            checks
           };
         }
+        checks.sandbox = { ok: true };
 
-        return { ok: true, checks: { sandbox: { ok: true } } };
+        const ok = Object.values(checks).every((check) => check.ok);
+        return { ok, checks };
       } catch (error) {
         return { ok: false, reason: error instanceof Error ? error.message : String(error) };
       }
@@ -132,4 +160,13 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       await postgres?.close();
     }
   };
+}
+
+function firstAdapterFailureCode(modes: Record<string, { ok: boolean; code?: string }>): string {
+  for (const entry of Object.values(modes)) {
+    if (!entry.ok) {
+      return entry.code ?? "adapter_check_failed";
+    }
+  }
+  return "adapter_check_failed";
 }

@@ -2,6 +2,10 @@ import type { RunQueuePort, RunQueueClaimedJob } from "../ports/queue.js";
 import type { RunStore } from "../ports/run-store.js";
 import type { EventStore } from "../ports/event-store.js";
 import type { Run, SwitchyardEvent } from "@switchyard/contracts";
+import {
+  prepareHostedRunForExecution,
+  type HostedRealRuntimeExecution
+} from "./hosted-runtime-catalog.js";
 
 export interface HostedWorkerServiceDependencies {
   queue: RunQueuePort;
@@ -9,7 +13,14 @@ export interface HostedWorkerServiceDependencies {
   events: EventStore;
   startRun: (runId: string) => Promise<Run>;
   hostedRuntimeAllowlist: string[];
+  deploymentMode: string;
+  hostedRealRuntimeExecution: HostedRealRuntimeExecution;
   now?: () => string;
+  metrics?: { inc(path: string): void };
+  logger?: {
+    info(event: string, details?: Record<string, unknown>): void;
+    warn(event: string, details?: Record<string, unknown>): void;
+  };
 }
 
 export class HostedWorkerService {
@@ -33,43 +44,82 @@ export class HostedWorkerService {
       return true;
     }
 
-    const validationError = this.validateDurableRun(run);
-    if (validationError) {
-      await this.failRun(run, validationError);
-      await this.deps.queue.fail(job.id, { reasonCode: validationError, message: validationError });
+    const prepared = prepareHostedRunForExecution({
+      run,
+      queuePayload: job.payload,
+      allowlist: this.deps.hostedRuntimeAllowlist,
+      deploymentMode: this.deps.deploymentMode,
+      realRuntimeExecution: this.deps.hostedRealRuntimeExecution
+    });
+
+    if (!prepared.ok) {
+      this.deps.metrics?.inc("hostedRuntime.denied");
+      this.deps.logger?.warn("hosted.worker.claim.rejected", {
+        runId: run.id,
+        runtimeMode: run.runtimeMode,
+        reasonCode: prepared.reasonCode
+      });
+      await this.failRun(run, prepared.reasonCode);
+      await this.deps.queue.fail(job.id, { reasonCode: prepared.reasonCode, message: prepared.reasonCode });
+      return true;
+    }
+
+    const persisted = await this.persistPreparedRun(run, prepared.run);
+    if (!persisted.ok) {
+      this.deps.metrics?.inc("hostedRuntime.denied");
+      this.deps.logger?.warn("hosted.worker.claim.rejected", {
+        runId: run.id,
+        runtimeMode: run.runtimeMode,
+        reasonCode: "hosted_run_state_invalid"
+      });
+      await this.failRun(run, "hosted_run_state_invalid");
+      await this.deps.queue.fail(job.id, { reasonCode: "hosted_run_state_invalid", message: persisted.message });
       return true;
     }
 
     try {
       await this.deps.startRun(run.id);
+      this.deps.metrics?.inc("hostedRuntime.started");
+      this.deps.logger?.info("hosted.worker.claim.revalidated", {
+        runId: run.id,
+        runtimeMode: run.runtimeMode
+      });
       await this.deps.queue.ack(job.id);
       return true;
     } catch (error) {
-      return this.handleRunFailure(job, run, error);
+      return this.handleRunFailure(job, persisted.run, error);
     }
   }
 
-  private validateDurableRun(run: Run): "hosted_runtime_not_allowed" | "hosted_run_state_invalid" | undefined {
-    const terminal = run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "timeout";
-    if (terminal) {
-      return "hosted_run_state_invalid";
+  private async persistPreparedRun(
+    sourceRun: Run,
+    preparedRun: Run
+  ): Promise<{ ok: true; run: Run } | { ok: false; message: string }> {
+    const current = await this.deps.runs.get(sourceRun.id);
+    if (!current) {
+      return { ok: false, message: "run_not_found" };
     }
-    if (run.placement !== "hosted") {
-      return "hosted_run_state_invalid";
+
+    if (!sameExecutionIdentity(current, sourceRun)) {
+      return { ok: false, message: "run_changed_before_prepare_persist" };
     }
-    if (run.runtime !== "fake") {
-      return "hosted_runtime_not_allowed";
+
+    if (JSON.stringify(current.metadata ?? {}) === JSON.stringify(preparedRun.metadata ?? {})) {
+      return { ok: true, run: current };
     }
-    if (run.runtimeMode !== "fake.deterministic") {
-      return "hosted_runtime_not_allowed";
+
+    const next: Run = {
+      ...current,
+      metadata: preparedRun.metadata
+    };
+    await this.deps.runs.update(next);
+
+    const after = await this.deps.runs.get(sourceRun.id);
+    if (!after || !sameExecutionIdentity(after, sourceRun)) {
+      return { ok: false, message: "run_changed_after_prepare_persist" };
     }
-    if (run.adapterType !== "process") {
-      return "hosted_runtime_not_allowed";
-    }
-    if (!this.deps.hostedRuntimeAllowlist.includes("fake.deterministic")) {
-      return "hosted_runtime_not_allowed";
-    }
-    return undefined;
+
+    return { ok: true, run: next };
   }
 
   private async handleRunFailure(job: RunQueueClaimedJob, run: Run, error: unknown): Promise<boolean> {
@@ -134,4 +184,16 @@ function toReasonCode(error: unknown): string {
 
 function isTerminalRun(run: Run): boolean {
   return run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "timeout";
+}
+
+function sameExecutionIdentity(current: Run, expected: Run): boolean {
+  return (
+    current.id === expected.id &&
+    current.status === expected.status &&
+    current.placement === expected.placement &&
+    current.runtime === expected.runtime &&
+    current.runtimeMode === expected.runtimeMode &&
+    current.provider === expected.provider &&
+    current.adapterType === expected.adapterType
+  );
 }

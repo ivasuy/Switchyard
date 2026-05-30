@@ -1,4 +1,5 @@
 import type { ConnectedNode, PlacementDecision, RuntimePlacementFacts } from "@switchyard/contracts";
+import { isRealHostedRuntimeMode } from "./hosted-runtime-catalog.js";
 
 export interface PlacementDecisionInput {
   requestedPlacement?: "local" | "hosted" | "connected_local_node";
@@ -11,7 +12,9 @@ export interface PlacementDecisionInput {
 
 export class PlacementService {
   decide(input: PlacementDecisionInput): PlacementDecision {
-    const allowHosted = input.placementFacts.hosted.support === "supported" && input.hostedRuntimeAllowlist.includes(input.runtimeMode);
+    const allowHosted =
+      (input.placementFacts.hosted.support === "supported" || input.placementFacts.hosted.support === "conditional") &&
+      input.hostedRuntimeAllowlist.includes(input.runtimeMode);
     const eligibleNodes = input.onlineNodes
       .filter((node) => node.status === "online")
       .filter((node) => node.capabilities.includes(`runtime.${input.runtimeMode}`) || node.capabilities.includes(input.runtimeMode))
@@ -59,6 +62,10 @@ export class PlacementService {
         approvalRequired: false,
         policyTrace: ["explicit_connected_local_node", `selected_node:${node.id}`]
       };
+    }
+
+    if (allowHosted && isRealHostedRuntimeMode(input.runtimeMode)) {
+      return reject("hosted_explicit_placement_required");
     }
 
     if (allowHosted) {

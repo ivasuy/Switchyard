@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@switchyard/adapters": "workspace:*",
     "@switchyard/core": "workspace:*",
     "@switchyard/queue": "workspace:*",
     "@switchyard/testkit": "workspace:*",

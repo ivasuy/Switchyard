@@ -16,6 +16,7 @@ describe("hosted server", () => {
       port: 0,
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
       sandbox: defaultSandbox(),
       redactedSummary: {}
@@ -47,6 +48,7 @@ describe("hosted server", () => {
       port: 0,
       deploymentMode: "test",
       hostedRuntimeAllowlist: [],
+      hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
       sandbox: defaultSandbox(),
       redactedSummary: {}
@@ -77,6 +79,26 @@ describe("hosted server", () => {
     }
   });
 
+  it("reports hosted real runtime gate readiness failure when disabled", async () => {
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      hostedRealRuntimeExecution: "disabled",
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
+      redactedSummary: {}
+    });
+    try {
+      const ready = await app.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(503);
+      expect(ready.json().checks.hostedRuntimeGate.code).toBe("hosted_real_runtime_disabled");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("parses opt-in hosted infrastructure config", () => {
     const config = loadServerConfig({
       SWITCHYARD_POSTGRES_URL: "postgres://user:pass@localhost:5432/switchyard",
@@ -94,6 +116,31 @@ describe("hosted server", () => {
     expect(config.queueName).toBe("switchyard-hosted");
     expect(config.objectStore.backend).toBe("local");
     expect(config.deploymentMode).toBe("staging");
+    expect(config.hostedRealRuntimeExecution).toBe("disabled");
+  });
+
+  it("rejects invalid hosted real runtime gate value", () => {
+    expect(() =>
+      loadServerConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "local",
+        SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "yes"
+      })
+    ).toThrow("config_invalid:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION");
+  });
+
+  it("rejects production hosted real-runtime gate", () => {
+    expect(() =>
+      loadServerConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "production",
+        SWITCHYARD_POSTGRES_URL: "postgres://localhost/db",
+        SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
+        SWITCHYARD_OBJECT_STORE_BACKEND: "local",
+        SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store",
+        SWITCHYARD_NODE_SHARED_TOKEN: "token",
+        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+        SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled"
+      })
+    ).toThrow(/config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION|hosted_real_runtime_production_forbidden/);
   });
 
   it("exposes readiness and hosted metrics", async () => {
@@ -102,6 +149,7 @@ describe("hosted server", () => {
       port: 0,
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
       sandbox: defaultSandbox(),
       redactedSummary: {}
@@ -116,6 +164,16 @@ describe("hosted server", () => {
       expect(metrics.statusCode).toBe(200);
       expect(metrics.json().queue).toBeDefined();
       expect(metrics.json().dependencies).toBeDefined();
+      expect(metrics.json().hostedRuntime).toMatchObject({
+        accepted: 0,
+        denied: 0,
+        started: 0,
+        completed: 0,
+        failed: 0,
+        timeout: 0,
+        unsupportedInteraction: 0,
+        artifactPersisted: 0
+      });
       expect(metrics.json().objectStore).toMatchObject({
         reads: 0,
         writes: 0,
@@ -139,6 +197,7 @@ describe("hosted server", () => {
       port: 0,
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({
         deploymentMode: "test",
         env: {
@@ -166,6 +225,7 @@ describe("hosted server", () => {
       port: 0,
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({
         deploymentMode: "test",
         env: {
@@ -230,6 +290,7 @@ describe("hosted server", () => {
       port: 0,
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
       sandbox: resolveHostedSandboxConfig({
         deploymentMode: "test",
@@ -251,6 +312,7 @@ describe("hosted server", () => {
       port: 0,
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
       sandbox: resolveHostedSandboxConfig({
         deploymentMode: "test",
@@ -274,6 +336,7 @@ describe("hosted server", () => {
       port: 0,
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
       sandbox: defaultSandbox(),
       redactedSummary: {}
@@ -309,6 +372,7 @@ describe("hosted server", () => {
       port: 0,
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
       sandbox: defaultSandbox(),
       redactedSummary: {}

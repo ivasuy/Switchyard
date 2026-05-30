@@ -382,6 +382,100 @@ describe("run routes", () => {
     });
   });
 
+  it("rejects queued hosted real input without dispatching runService.sendInput", async () => {
+    const harness = createRouteHarness();
+    await harness.runs.create({
+      id: "run_hosted_real_input_queued",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "queued hosted real",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    const sendSpy = vi.spyOn(harness.runService, "sendInput");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs/run_hosted_real_input_queued/input",
+      payload: { text: "continue" }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("adapter_protocol_failed");
+    expect(response.json().error.details).toEqual([{ path: "reasonCode", issue: "hosted_input_unsupported" }]);
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects active hosted real cancel without provider cancel claim", async () => {
+    const harness = createRouteHarness();
+    await harness.runs.create({
+      id: "run_hosted_real_cancel_active",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "active hosted real",
+      status: "running",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    const cancelSpy = vi.spyOn(harness.runService, "cancelRun");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs/run_hosted_real_cancel_active/cancel"
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("adapter_protocol_failed");
+    expect(response.json().error.details).toEqual([{ path: "reasonCode", issue: "hosted_cancel_unsupported" }]);
+    expect(cancelSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns terminal hosted real run on cancel without invoking cancel bridge", async () => {
+    const harness = createRouteHarness();
+    await harness.runs.create({
+      id: "run_hosted_real_cancel_terminal",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "terminal hosted real",
+      status: "completed",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      endedAt: "2026-05-30T00:00:02.000Z"
+    });
+    const cancelSpy = vi.spyOn(harness.runService, "cancelRun");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs/run_hosted_real_cancel_terminal/cancel"
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().run.status).toBe("completed");
+    expect(cancelSpy).not.toHaveBeenCalled();
+  });
+
   it("rejects invalid run input payload shapes and size before adapter dispatch", async () => {
     const harness = createRouteHarness();
     const created = await harness.app.inject({

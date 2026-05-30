@@ -966,9 +966,9 @@ R10 now includes the previously planned hosted/hybrid surfaces in a safety-first
 
 Current safety posture:
 
-- Hosted worker execution is restricted to `fake.deterministic`.
-- R14 adds an internal hosted sandbox substrate (`HostedSandboxService` + deny-by-default fake command policy + `FakeHostedSandboxExecutor`) for future process/PTY adapter wiring, but runtime execution is still fake-only.
+- Hosted worker execution defaults to `fake.deterministic`; R15 adds operator opt-in self-hosted/staging hosted worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` through a closed runtime catalog and allowlist gate.
+- R14 adds an internal hosted sandbox substrate (`HostedSandboxService` + deny-by-default fake command policy + `FakeHostedSandboxExecutor`) for process/PTY safety contracts; R15 does not add arbitrary hosted process/PTY execution or public sandbox execution routes.
 - The R14 substrate is fake/no-spend only: no `child_process`, no `node-pty`, no shell/browser/fetch/GitHub/repo execution, no public `/sandbox`/`/exec`/`/pty`/`/terminal` route, and no kernel/container isolation claims.
-- Hosted server/worker do not run arbitrary subprocess/PTY/Codex/Claude/OpenCode runtimes.
+- Hosted server remains fake-runner-only; real provider adapters are worker-owned and opt-in only for self-hosted/staging. Production hosted real-runtime execution is fail-closed in R15.
 - Hybrid connected nodes are explicit trust boundaries and enforce local policy before execution and sync.
 - S3/R2-compatible object-store backing is shipped in R13; required verification remains deterministic and local/no-spend by default.

@@ -43,6 +43,7 @@ export * from "./services/session-service.js";
 export * from "./services/tool-router.js";
 export * from "./services/local-policy-gate.js";
 export * from "./services/hosted-sandbox-service.js";
+export * from "./services/hosted-runtime-catalog.js";
 export * from "./services/hosted-run-service.js";
 export * from "./services/hosted-worker-service.js";
 export * from "./services/node-coordinator-service.js";

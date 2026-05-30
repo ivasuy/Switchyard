@@ -69,4 +69,26 @@ describe("openapi generation", () => {
     expect(getRun?.["x-switchyard-no-body"]).toBe(true);
     expect(getRun?.["x-switchyard-error-envelope"]).toBe("contracts");
   });
+
+  it("keeps public arbitrary execution routes out of OpenAPI", () => {
+    const document = generateOpenApiDocument();
+    const forbiddenPathTokens = ["/sandbox", "/exec", "/pty", "/terminal"];
+    const paths = Object.keys(document.paths);
+    for (const path of paths) {
+      const lower = path.toLowerCase();
+      expect(forbiddenPathTokens.some((token) => lower === token || lower.startsWith(`${token}/`))).toBe(false);
+    }
+  });
+
+  it("keeps arbitrary execution operation ids out of OpenAPI", () => {
+    const document = generateOpenApiDocument();
+    const forbiddenOperationTokens = ["sandbox", "terminal", "exec", "pty", "genericProcess", "arbitrary"];
+    const operationIds = Object.values(document.paths).flatMap((methods) =>
+      Object.values(methods).map((operation) => String((operation as Record<string, unknown>)["operationId"] ?? ""))
+    );
+    for (const operationId of operationIds) {
+      const lower = operationId.toLowerCase();
+      expect(forbiddenOperationTokens.some((token) => lower.includes(token.toLowerCase()))).toBe(false);
+    }
+  });
 });

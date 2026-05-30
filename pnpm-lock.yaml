@@ -90,6 +90,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@switchyard/adapters':
+        specifier: workspace:*
+        version: link:../../packages/adapters
       '@switchyard/core':
         specifier: workspace:*
         version: link:../../packages/core

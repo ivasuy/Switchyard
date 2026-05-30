@@ -101,6 +101,8 @@ describe("HostedWorkerService", () => {
       runs,
       events,
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      deploymentMode: "test",
+      hostedRealRuntimeExecution: "disabled",
       startRun: async () => {
         await runs.update({ ...run, status: "completed", endedAt: "2026-05-30T00:00:01.000Z" });
         return { ...run, status: "completed", endedAt: "2026-05-30T00:00:01.000Z" } as any;
@@ -140,6 +142,8 @@ describe("HostedWorkerService", () => {
       runs,
       events,
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      deploymentMode: "test",
+      hostedRealRuntimeExecution: "disabled",
       startRun: async () => {
         throw new Error("must not start");
       },
@@ -180,6 +184,8 @@ describe("HostedWorkerService", () => {
       runs,
       events,
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      deploymentMode: "test",
+      hostedRealRuntimeExecution: "disabled",
       startRun: async () => {
         calls += 1;
         if (calls === 1) {
@@ -232,6 +238,8 @@ describe("HostedWorkerService", () => {
       runs,
       events,
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      deploymentMode: "test",
+      hostedRealRuntimeExecution: "disabled",
       startRun: async () => {
         throw new Error("permanent");
       },
@@ -242,6 +250,95 @@ describe("HostedWorkerService", () => {
     await svc.processNext();
     await svc.processNext();
     expect((await queue.getJob(queued.jobId))?.state).toBe("exhausted");
+  });
+
+  it("prepares codex hosted run metadata and starts exactly once", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const run = await runs.create({
+      id: "run_codex_prepare_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    let starts = 0;
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "staging",
+      hostedRealRuntimeExecution: "enabled",
+      startRun: async (runId) => {
+        starts += 1;
+        const current = await runs.get(runId);
+        await runs.update({
+          ...current,
+          status: "completed",
+          endedAt: "2026-05-30T00:00:01.000Z"
+        });
+        return (await runs.get(runId)) as any;
+      },
+      now: () => "2026-05-30T00:00:00.000Z"
+    });
+
+    const processed = await svc.processNext();
+    expect(processed).toBe(true);
+    expect(starts).toBe(1);
+    expect((await runs.get(run.id))?.metadata).toMatchObject({ sandbox: "read-only" });
+  });
+
+  it("rejects tampered queue runtime mode before adapter start", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const run = await runs.create({
+      id: "run_codex_tampered_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "opencode.acp" });
+
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "opencode.acp"],
+      deploymentMode: "staging",
+      hostedRealRuntimeExecution: "enabled",
+      startRun: async () => {
+        throw new Error("must_not_start");
+      },
+      now: () => "2026-05-30T00:00:00.000Z"
+    });
+
+    await svc.processNext();
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    expect(events.items.at(-1)?.payload?.reasonCode).toBe("hosted_run_state_invalid");
   });
 
   it("fails durable run when stale claimed job is exhausted during recovery", async () => {
@@ -278,6 +375,8 @@ describe("HostedWorkerService", () => {
       runs,
       events,
       hostedRuntimeAllowlist: ["fake.deterministic"],
+      deploymentMode: "test",
+      hostedRealRuntimeExecution: "disabled",
       startRun: async () => {
         throw new Error("must_not_start");
       },

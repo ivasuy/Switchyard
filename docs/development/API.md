@@ -2,22 +2,29 @@
 
 This is the current local daemon API contract. It documents what an app can call today.
 
-## R10-R13 Hosted And Hybrid Execution (Safe Slice)
+## R10-R15 Hosted And Hybrid Execution (Safe Slice)
 
 R10 adds hosted-like and connected-node execution surfaces while preserving the public run contract shape (`POST /runs`, `GET /runs`, `GET /runs/:id`, events/artifacts/cancel).
 
 Safety boundaries in this shipped slice:
 
-- Hosted worker execution is restricted to `fake.deterministic` only.
-- Hosted worker must reject non-fake runtime rows at claim time using durable run-state validation.
+- Hosted worker execution defaults to `fake.deterministic`.
+- R15 adds operator opt-in self-hosted/staging hosted worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` when both `SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST` includes the mode and `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=enabled`.
+- Hosted worker revalidates queue payload and durable run rows before adapter start (placement/status/runtime/provider/adapterType/runtimeMode/gate/allowlist/safety metadata).
+- Production hosted real-runtime execution is forbidden in R15 and must fail closed at config/readiness/claim validation.
 - R14 adds a hosted sandbox substrate that is internal-only and fake/no-spend (`switchyard.fake.*` command ids only); it is not a public execution API.
-- No hosted arbitrary subprocess, PTY, Codex, Claude, OpenCode, browser/search/repo/GitHub/fetch tooling, hosted debate participant execution, or model judging is shipped.
+- No hosted arbitrary subprocess/PTY execution, public sandbox execution route, hosted browser/search/repo/GitHub/fetch tooling, hosted debate participant execution, or model judging is shipped.
 
 R14 diagnostics additions:
 
 - `GET /ready` includes `checks.sandbox` with `ok=true` or one of `sandbox_disabled`, `sandbox_policy_invalid`, or `sandbox_config_invalid`.
 - `GET /metrics` includes low-cardinality `sandbox` counters (`jobs`, `allowed`, `denied`, `completed`, `failed`, `timeout`, `cancelled`, `outputTruncated`, `artifactTruncated`, `redactions`).
 - There is still no public `/sandbox`, `/exec`, `/pty`, or `/terminal` route.
+
+R15 diagnostics additions:
+
+- `GET /ready` includes `checks.hostedRuntimeGate` with `ok=true` or one of `hosted_real_runtime_disabled`, `hosted_real_runtime_production_forbidden`, or `config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION`.
+- `GET /metrics` includes low-cardinality `hostedRuntime` counters: `accepted`, `denied`, `started`, `completed`, `failed`, `timeout`, `unsupportedInteraction`, and `artifactPersisted`.
 
 Node endpoints added in R10:
 

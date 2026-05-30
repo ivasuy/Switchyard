@@ -1,3 +1,5 @@
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,9 +8,10 @@ import { describe, expect, it } from "vitest";
 import { resolveHostedSandboxConfig } from "@switchyard/core";
 import { MemoryRunQueue } from "@switchyard/queue";
 import { resolveObjectStoreConfig } from "@switchyard/storage";
-import { InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
-import { createHostedWorker } from "../src/worker.js";
+import { createFakeAcpProcessFactory, createFakeClaudeCodeClient, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
 import { loadWorkerConfig } from "../src/config.js";
+import { buildHostedWorkerAdapters, createHostedSafeLogger } from "../src/hosted-runtime-adapters.js";
+import { createHostedWorker } from "../src/worker.js";
 
 const defaultSandbox = () => resolveHostedSandboxConfig({ deploymentMode: "test", env: {} });
 
@@ -35,51 +38,60 @@ describe("hosted worker app", () => {
     });
     await queue.enqueue({ runId: "run_worker_1", placement: "hosted", runtimeMode: "fake.deterministic" });
 
-    const worker = createHostedWorker({
-      deploymentMode: "test",
-      hostedRuntimeAllowlist: ["fake.deterministic"],
-      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
-      sandbox: defaultSandbox(),
-      idleIntervalMs: 1,
-      redactedSummary: {}
-    }, { queue, runs, events });
+    const worker = createHostedWorker(baseConfig(), { queue, runs, events });
     const worked = await worker.tick();
 
     expect(worked).toBe(true);
     expect((await runs.get("run_worker_1"))?.status).toBe("completed");
+    await worker.stop();
+  });
+
+  it("builds allowlisted real adapters when gate is enabled", () => {
+    const config = {
+      ...baseConfig(),
+      deploymentMode: "staging" as const,
+      hostedRealRuntimeExecution: "enabled" as const,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"]
+    };
+    const claude = createFakeClaudeCodeClient();
+    const adapters = buildHostedWorkerAdapters(config, {
+      claudeClient: claude.client,
+      opencodeProcessFactory: createFakeAcpProcessFactory({ scenario: "happy" }),
+      codexProcessFactory: createCodexHappyProcessFactory()
+    });
+
+    expect(adapters.has("fake")).toBe(true);
+    expect(adapters.has("codex")).toBe(true);
+    expect(adapters.has("claude_code")).toBe(true);
+    expect(adapters.has("opencode")).toBe(true);
+  });
+
+  it("reports hosted runtime gate disabled in readiness", async () => {
+    const worker = createHostedWorker({
+      ...baseConfig(),
+      deploymentMode: "staging",
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      hostedRealRuntimeExecution: "disabled"
+    });
+
     const ready = await worker.ready();
-    expect(ready.ok).toBe(true);
-    expect(ready.checks?.sandbox?.ok).toBe(true);
+    expect(ready.ok).toBe(false);
+    expect(ready.checks?.hostedRuntimeGate).toMatchObject({ ok: false, code: "hosted_real_runtime_disabled" });
+    await worker.stop();
   });
 
-  it("does not import forbidden adapters", () => {
-    const source = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
-    expect(source).not.toContain("CodexExecJsonAdapter");
-    expect(source).not.toContain("ClaudeCodeAdapter");
-    expect(source).not.toContain("OpenCodeAcpAdapter");
-    expect(source).not.toContain("GenericHttpAsyncRestAdapter");
-    expect(source).not.toContain("AgentFieldAsyncRestAdapter");
-    expect(source).not.toContain("@switchyard/adapters");
-    expect(source).not.toContain("pty");
-    expect(source).not.toContain("browser");
-    expect(source).not.toContain("shell");
-    expect(source).not.toContain("github");
-    expect(source).not.toContain("fetch");
-    expect(source).not.toContain("repo");
-  });
-
-  it("denies non-fake hosted runtime before execution and marks run failed", async () => {
+  it("completes hosted codex run using fake process factory", async () => {
     const queue = new MemoryRunQueue();
     const runs = new InMemoryRunStore();
     const events = new InMemoryEventStore();
     await runs.create({
-      id: "run_worker_denied",
+      id: "run_worker_codex",
       runtime: "codex",
       provider: "openai",
       model: "gpt-5",
       adapterType: "process",
       cwd: "/repo",
-      task: "blocked",
+      task: "do",
       status: "queued",
       placement: "hosted",
       approvalPolicy: "default",
@@ -88,169 +100,155 @@ describe("hosted worker app", () => {
       runtimeMode: "codex.exec_json",
       createdAt: "2026-05-30T00:00:00.000Z"
     });
-    await queue.enqueue({ runId: "run_worker_denied", placement: "hosted", runtimeMode: "codex.exec_json" });
+    await queue.enqueue({ runId: "run_worker_codex", placement: "hosted", runtimeMode: "codex.exec_json" });
 
     const worker = createHostedWorker({
-      deploymentMode: "test",
-      hostedRuntimeAllowlist: ["fake.deterministic"],
-      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
-      sandbox: defaultSandbox(),
-      idleIntervalMs: 1,
-      redactedSummary: {}
-    }, { queue, runs, events });
+      ...baseConfig(),
+      deploymentMode: "staging",
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      hostedRealRuntimeExecution: "enabled"
+    }, {
+      queue,
+      runs,
+      events,
+      adapters: {
+        codexProcessFactory: createCodexHappyProcessFactory()
+      }
+    });
 
     const worked = await worker.tick();
     expect(worked).toBe(true);
-    expect((await runs.get("run_worker_denied"))?.status).toBe("failed");
-    expect(events.items.some((event) => event.type === "run.started")).toBe(false);
-    expect(events.items.at(-1)?.payload).toMatchObject({ reasonCode: "hosted_runtime_not_allowed" });
+
+    const run = await runs.get("run_worker_codex");
+    expect(run?.status).toBe("completed");
+    expect(run?.metadata).toMatchObject({ sandbox: "read-only" });
+    expect(events.items.some((event) => event.type === "run.completed")).toBe(true);
+    await worker.stop();
   });
 
-  it("parses opt-in hosted infrastructure config", () => {
-    const config = loadWorkerConfig({
+  it("fails hosted opencode permission request visibly", async () => {
+    const queue = new MemoryRunQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    await runs.create({
+      id: "run_worker_opencode_perm",
+      runtime: "opencode",
+      provider: "opencode",
+      model: "opencode-default",
+      adapterType: "acpx",
+      cwd: "/repo",
+      task: "do",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "opencode.acp",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await queue.enqueue({ runId: "run_worker_opencode_perm", placement: "hosted", runtimeMode: "opencode.acp" });
+
+    const worker = createHostedWorker({
+      ...baseConfig(),
+      deploymentMode: "staging",
+      hostedRuntimeAllowlist: ["fake.deterministic", "opencode.acp"],
+      hostedRealRuntimeExecution: "enabled"
+    }, {
+      queue,
+      runs,
+      events,
+      adapters: {
+        opencodeProcessFactory: createFakeAcpProcessFactory({ scenario: "permission_request" })
+      }
+    });
+
+    await worker.tick();
+    expect((await runs.get("run_worker_opencode_perm"))?.status).toBe("failed");
+    expect(events.items.some((event) => event.type === "run.failed")).toBe(true);
+    await worker.stop();
+  });
+
+  it("redacts unsafe logger fields", () => {
+    const seen: Array<{ event: string; details?: Record<string, unknown> }> = [];
+    const logger = createHostedSafeLogger({
+      info: (event, details) => seen.push({ event, details }),
+      warn: (event, details) => seen.push({ event, details }),
+      error: (event, details) => seen.push({ event, details })
+    });
+    logger?.info("adapter.log", {
+      runId: "run_1",
+      stdout: "secret",
+      stderr: "secret",
+      task: "top secret",
+      cwd: "/home/user",
+      command: "danger",
+      token: "abc",
+      providerOutput: "raw",
+      reasonCode: "ok"
+    });
+
+    expect(seen[0]?.details).toEqual({ runId: "run_1", reasonCode: "ok" });
+  });
+
+  it("keeps forbidden imports blocked while allowing approved hosted adapters", () => {
+    const workerSource = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
+    const adapterSource = readFileSync(new URL("../src/hosted-runtime-adapters.ts", import.meta.url), "utf8");
+
+    expect(adapterSource).toContain("CodexExecJsonAdapter");
+    expect(adapterSource).toContain("ClaudeCodeAdapter");
+    expect(adapterSource).toContain("OpenCodeAcpAdapter");
+    expect(adapterSource).toContain("createClaudeCodeCliClient");
+
+    expect(workerSource).not.toContain("GenericHttpAsyncRestAdapter");
+    expect(workerSource).not.toContain("AgentFieldAsyncRestAdapter");
+    expect(workerSource).not.toContain("node-pty");
+    expect(workerSource).not.toContain("Cursor");
+    expect(workerSource).not.toContain("OpenClaw");
+    expect(workerSource).not.toContain("Paperclip");
+    expect(workerSource).not.toContain("browser");
+    expect(workerSource).not.toContain("search");
+    expect(workerSource).not.toContain("fetch");
+    expect(workerSource).not.toContain("github");
+    expect(workerSource).not.toContain("repo");
+    expect(workerSource).not.toContain("shell");
+  });
+
+  it("parses real-runtime worker config and rejects production real allowlist", () => {
+    const parsed = loadWorkerConfig({
       SWITCHYARD_POSTGRES_URL: "postgres://user:pass@localhost:5432/switchyard",
       SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
       SWITCHYARD_QUEUE_NAME: "switchyard-worker",
       SWITCHYARD_OBJECT_STORE_BACKEND: "local",
       SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-worker-objects",
-      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic",
+      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+      SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
       SWITCHYARD_DEPLOYMENT_MODE: "staging"
     });
 
-    expect(config.postgresUrl).toContain("postgres://");
-    expect(config.redisUrl).toBe("redis://localhost:6379/0");
-    expect(config.queueName).toBe("switchyard-worker");
-    expect(config.objectStore.backend).toBe("local");
-    expect(config.deploymentMode).toBe("staging");
-  });
+    expect(parsed.hostedRealRuntimeExecution).toBe("enabled");
+    expect(parsed.claudeCode.command).toBe("claude");
+    expect(parsed.opencode.command).toBe("opencode");
 
-  it("fails closed in staging when redis is missing", () => {
     expect(() =>
       loadWorkerConfig({
-        SWITCHYARD_DEPLOYMENT_MODE: "staging",
-        SWITCHYARD_POSTGRES_URL: "postgres://localhost/db",
-        SWITCHYARD_OBJECT_STORE_BACKEND: "local",
-        SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store",
-        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic"
-      })
-    ).toThrow("config_required:SWITCHYARD_REDIS_URL");
-  });
-
-  it("fails closed in staging when hosted allowlist is missing", () => {
-    expect(() =>
-      loadWorkerConfig({
-        SWITCHYARD_DEPLOYMENT_MODE: "staging",
         SWITCHYARD_POSTGRES_URL: "postgres://localhost/db",
         SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
         SWITCHYARD_OBJECT_STORE_BACKEND: "local",
-        SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store"
+        SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store",
+        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "claude_code.sdk",
+        SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+        SWITCHYARD_DEPLOYMENT_MODE: "production"
       })
-    ).toThrow("config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST");
+    ).toThrow(/config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION|hosted_real_runtime_production_forbidden/);
   });
 
-  it("keeps local default hosted allowlist when env is absent", () => {
-    const config = loadWorkerConfig({
-      SWITCHYARD_DEPLOYMENT_MODE: "local"
-    });
-    expect(config.hostedRuntimeAllowlist).toEqual(["fake.deterministic"]);
-    expect(config.objectStore.backend).toBe("memory");
-  });
-
-  it("reports sandbox readiness failure states", async () => {
-    const disabled = createHostedWorker({
-      deploymentMode: "test",
-      hostedRuntimeAllowlist: ["fake.deterministic"],
-      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
-      sandbox: resolveHostedSandboxConfig({ deploymentMode: "test", env: { SWITCHYARD_SANDBOX_ENABLED: "false" } }),
-      idleIntervalMs: 1,
-      redactedSummary: {}
-    });
-    await expect(disabled.ready()).resolves.toMatchObject({
-      ok: false,
-      reason: "sandbox_disabled",
-      checks: { sandbox: { ok: false, code: "sandbox_disabled" } }
-    });
-    await disabled.stop();
-
-    const invalidPolicy = createHostedWorker({
-      deploymentMode: "test",
-      hostedRuntimeAllowlist: ["fake.deterministic"],
-      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
-      sandbox: resolveHostedSandboxConfig({ deploymentMode: "test", env: { SWITCHYARD_SANDBOX_FAKE_COMMAND_ALLOWLIST: "bash" } }),
-      idleIntervalMs: 1,
-      redactedSummary: {}
-    });
-    await expect(invalidPolicy.ready()).resolves.toMatchObject({
-      ok: false,
-      reason: "sandbox_policy_invalid",
-      checks: { sandbox: { ok: false, code: "sandbox_policy_invalid" } }
-    });
-    await invalidPolicy.stop();
-  });
-
-  it("denies hosted non-fake durable rows across runtime and adapter shapes", async () => {
-    const queue = new MemoryRunQueue();
-    const runs = new InMemoryRunStore();
-    const events = new InMemoryEventStore();
-
-    const deniedRows = [
-      { id: "run_denied_codex", runtime: "codex", provider: "openai", model: "gpt-5", adapterType: "process", runtimeMode: "codex.exec_json" },
-      { id: "run_denied_claude", runtime: "claude_code", provider: "anthropic", model: "claude", adapterType: "native", runtimeMode: "claude_code.sdk" },
-      { id: "run_denied_opencode", runtime: "opencode", provider: "opencode", model: "opencode", adapterType: "acpx", runtimeMode: "opencode.acp" },
-      { id: "run_denied_generic_http", runtime: "generic_http", provider: "test", model: "test", adapterType: "http", runtimeMode: "generic_http.async_rest" },
-      { id: "run_denied_agentfield", runtime: "agentfield", provider: "test", model: "test", adapterType: "http", runtimeMode: "agentfield.async_rest" },
-      { id: "run_denied_fake_mode", runtime: "fake", provider: "test", model: "test-model", adapterType: "process", runtimeMode: "fake.live" },
-      { id: "run_denied_pty", runtime: "fake", provider: "test", model: "test-model", adapterType: "pty", runtimeMode: "fake.deterministic" },
-      { id: "run_denied_browser", runtime: "fake", provider: "test", model: "test-model", adapterType: "browser", runtimeMode: "fake.deterministic" }
-    ] as const;
-
-    for (const row of deniedRows) {
-      await runs.create({
-        id: row.id,
-        runtime: row.runtime,
-        provider: row.provider,
-        model: row.model,
-        adapterType: row.adapterType,
-        cwd: "/repo",
-        task: "deny",
-        status: "queued",
-        placement: "hosted",
-        approvalPolicy: "default",
-        timeoutSeconds: 60,
-        metadata: {},
-        runtimeMode: row.runtimeMode,
-        createdAt: "2026-05-30T00:00:00.000Z"
-      });
-      await queue.enqueue({ runId: row.id, placement: "hosted", runtimeMode: row.runtimeMode });
-    }
-
-    const worker = createHostedWorker({
-      deploymentMode: "test",
-      hostedRuntimeAllowlist: ["fake.deterministic"],
-      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
-      sandbox: defaultSandbox(),
-      idleIntervalMs: 1,
-      redactedSummary: {}
-    }, { queue, runs, events });
-
-    for (let idx = 0; idx < deniedRows.length; idx += 1) {
-      await expect(worker.tick()).resolves.toBe(true);
-    }
-
-    for (const row of deniedRows) {
-      expect((await runs.get(row.id))?.status).toBe("failed");
-    }
-    expect(events.items.some((event) => event.type === "run.started")).toBe(false);
-    await worker.stop();
-  });
-
-  it("fails closed for invalid sandbox config values", () => {
+  it("rejects invalid numeric worker config", () => {
     expect(() =>
       loadWorkerConfig({
         SWITCHYARD_DEPLOYMENT_MODE: "local",
-        SWITCHYARD_SANDBOX_COMBINED_OUTPUT_BYTES: "0"
+        SWITCHYARD_ACP_REQUEST_TIMEOUT_MS: "0"
       })
-    ).toThrow("sandbox_config_invalid");
+    ).toThrow("config_invalid:SWITCHYARD_ACP_REQUEST_TIMEOUT_MS");
   });
 
   it("skips local object-store probe when probe mode is disabled", async () => {
@@ -258,8 +256,7 @@ describe("hosted worker app", () => {
     const fileRoot = join(dir, "object-root-file");
     await writeFile(fileRoot, "x");
     const worker = createHostedWorker({
-      deploymentMode: "test",
-      hostedRuntimeAllowlist: ["fake.deterministic"],
+      ...baseConfig(),
       objectStore: resolveObjectStoreConfig({
         deploymentMode: "test",
         env: {
@@ -267,10 +264,7 @@ describe("hosted worker app", () => {
           SWITCHYARD_OBJECT_STORE_DIR: fileRoot,
           SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
         }
-      }),
-      sandbox: defaultSandbox(),
-      idleIntervalMs: 1,
-      redactedSummary: {}
+      })
     });
 
     try {
@@ -280,32 +274,60 @@ describe("hosted worker app", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
-
-  it("skips s3-compatible object-store probe when probe mode is disabled", async () => {
-    const worker = createHostedWorker({
-      deploymentMode: "test",
-      hostedRuntimeAllowlist: ["fake.deterministic"],
-      objectStore: resolveObjectStoreConfig({
-        deploymentMode: "test",
-        env: {
-          SWITCHYARD_OBJECT_STORE_BACKEND: "s3-compatible",
-          SWITCHYARD_OBJECT_STORE_ENDPOINT: "http://127.0.0.1:1",
-          SWITCHYARD_OBJECT_STORE_REGION: "us-east-1",
-          SWITCHYARD_OBJECT_STORE_BUCKET: "switchyard-artifacts",
-          SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID: "key",
-          SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY: "secret",
-          SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
-        }
-      }),
-      sandbox: defaultSandbox(),
-      idleIntervalMs: 1,
-      redactedSummary: {}
-    });
-
-    try {
-      await expect(worker.ready()).resolves.toMatchObject({ ok: true });
-    } finally {
-      await worker.stop();
-    }
-  });
 });
+
+function baseConfig() {
+  return {
+    deploymentMode: "test" as const,
+    hostedRuntimeAllowlist: ["fake.deterministic"],
+    hostedRealRuntimeExecution: "disabled" as const,
+    objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+    sandbox: defaultSandbox(),
+    idleIntervalMs: 1,
+    claudeCode: {
+      command: "claude",
+      requestTimeoutMs: 5000,
+      liveProbe: false,
+      maxBudgetUsd: 0.05
+    },
+    opencode: {
+      command: "opencode"
+    },
+    acp: {
+      requestTimeoutMs: 5000,
+      cancelTimeoutMs: 5000,
+      maxMessageBytes: 1_048_576
+    },
+    redactedSummary: {}
+  };
+}
+
+function createCodexHappyProcessFactory() {
+  return () => {
+    const proc = new FakeCodexProcess();
+    queueMicrotask(() => {
+      proc.stdout.write('{"type":"thread.started","thread_id":"thread_1"}\n');
+      proc.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n');
+      proc.stdout.write('{"type":"turn.completed"}\n');
+      proc.stdout.end();
+      proc.emit("exit", 0, null);
+    });
+    return proc as never;
+  };
+}
+
+class FakeCodexProcess extends EventEmitter {
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly pid = 1234;
+
+  override once(event: "exit" | "error", listener: (...args: any[]) => void): this {
+    return super.once(event, listener);
+  }
+
+  kill(_signal?: NodeJS.Signals): boolean {
+    this.emit("exit", 0, null);
+    return true;
+  }
+}

@@ -1,5 +1,7 @@
 import {
   resolveHostedSandboxConfig,
+  validateHostedRuntimeAllowlist,
+  type HostedRealRuntimeExecution,
   type ResolvedHostedSandboxConfig
 } from "@switchyard/core";
 import {
@@ -26,6 +28,7 @@ export interface ServerConfig {
   deploymentMode: DeploymentMode;
   nodeSharedToken?: string;
   hostedRuntimeAllowlist: string[];
+  hostedRealRuntimeExecution: HostedRealRuntimeExecution;
   postgresUrl?: string;
   redisUrl?: string;
   queueName?: string;
@@ -37,12 +40,14 @@ export interface ServerConfig {
 export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const deploymentMode = parseDeploymentMode(env["SWITCHYARD_DEPLOYMENT_MODE"]);
   const hostedRuntimeAllowlistEnv = optional(env["SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"]);
+  const hostedRealRuntimeExecution = parseHostedRealRuntimeExecution(env["SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"]);
   const allowlist = parseCsv(hostedRuntimeAllowlistEnv, "fake.deterministic");
   const config: ServerConfig = {
     host: requiredOrDefault(env["SWITCHYARD_HOST"], "127.0.0.1"),
     port: Number(requiredOrDefault(env["SWITCHYARD_PORT"], "4646")),
     deploymentMode,
     hostedRuntimeAllowlist: allowlist,
+    hostedRealRuntimeExecution,
     queueName: requiredOrDefault(env["SWITCHYARD_QUEUE_NAME"], "switchyard-hosted-runs"),
     objectStore: {} as ResolvedObjectStoreConfig,
     sandbox: resolveHostedSandboxConfig({ env, deploymentMode }),
@@ -72,20 +77,18 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     requireVar(config.redisUrl, "SWITCHYARD_REDIS_URL", config);
     requireVar(config.nodeSharedToken, "SWITCHYARD_NODE_SHARED_TOKEN", config);
     requireVar(hostedRuntimeAllowlistEnv, "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST", config);
-    if (config.hostedRuntimeAllowlist.length === 0) {
-      throw new ConfigError(
-        "config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-        "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-        buildSummary(config)
-      );
-    }
-    if (!config.hostedRuntimeAllowlist.includes("fake.deterministic")) {
-      throw new ConfigError(
-        "config_invalid:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-        "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-        buildSummary(config)
-      );
-    }
+  }
+
+  const allowlistValidation = validateHostedRuntimeAllowlist({
+    allowlist: config.hostedRuntimeAllowlist,
+    deploymentMode: config.deploymentMode,
+    realRuntimeExecution: config.hostedRealRuntimeExecution
+  });
+  if (!allowlistValidation.ok) {
+    const variable = allowlistValidation.code.includes("REAL_RUNTIME_EXECUTION")
+      ? "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+      : "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST";
+    throw new ConfigError(allowlistValidation.code, variable, buildSummary(config));
   }
 
   if (!config.sandbox.valid) {
@@ -102,6 +105,21 @@ function parseDeploymentMode(value: string | undefined): DeploymentMode {
     return normalized;
   }
   throw new ConfigError("config_invalid:SWITCHYARD_DEPLOYMENT_MODE", "SWITCHYARD_DEPLOYMENT_MODE", { deploymentMode: normalized });
+}
+
+function parseHostedRealRuntimeExecution(value: string | undefined): HostedRealRuntimeExecution {
+  const normalized = optional(value);
+  if (!normalized || normalized === "disabled") {
+    return "disabled";
+  }
+  if (normalized === "enabled") {
+    return "enabled";
+  }
+  throw new ConfigError(
+    "config_invalid:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+    "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+    { hostedRealRuntimeExecution: normalized }
+  );
 }
 
 function parseCsv(value: string | undefined, fallback: string): string[] {
@@ -131,6 +149,7 @@ function buildSummary(config: ServerConfig): Record<string, unknown> {
     port: config.port,
     queueName: config.queueName,
     hostedRuntimeAllowlist: config.hostedRuntimeAllowlist,
+    hostedRealRuntimeExecution: config.hostedRealRuntimeExecution,
     hasNodeSharedToken: Boolean(config.nodeSharedToken),
     hasPostgresUrl: Boolean(config.postgresUrl),
     hasRedisUrl: Boolean(config.redisUrl),

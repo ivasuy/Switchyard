@@ -1,5 +1,10 @@
 import { access, constants } from "node:fs/promises";
-import { checkHostedSandboxReadiness, type RunQueuePort } from "@switchyard/core";
+import {
+  checkHostedSandboxReadiness,
+  isKnownHostedRuntimeMode,
+  validateHostedRuntimeAllowlist,
+  type RunQueuePort
+} from "@switchyard/core";
 import type { ProbeableArtifactContentStore } from "@switchyard/storage";
 import { probePostgresDatabase, type PostgresDatabaseHandle } from "@switchyard/storage";
 import type { ServerConfig } from "./config.js";
@@ -89,12 +94,20 @@ export async function probeServerReadiness(input: {
   }
 
   const allowlist = input.config.hostedRuntimeAllowlist;
-  if (allowlist.length === 0) {
-    checks.hostedAllowlist = { ok: false, code: "hosted_runtime_not_allowed" };
-  } else if (!allowlist.includes("fake.deterministic")) {
+  if (allowlist.length === 0 || allowlist.some((mode) => !isKnownHostedRuntimeMode(mode))) {
     checks.hostedAllowlist = { ok: false, code: "hosted_runtime_not_allowed" };
   } else {
     checks.hostedAllowlist = { ok: true };
+  }
+  const gateValidation = validateHostedRuntimeAllowlist({
+    allowlist,
+    deploymentMode: input.config.deploymentMode,
+    realRuntimeExecution: input.config.hostedRealRuntimeExecution
+  });
+  if (gateValidation.ok) {
+    checks.hostedRuntimeGate = { ok: true };
+  } else {
+    checks.hostedRuntimeGate = { ok: false, code: gateValidation.code };
   }
 
   const sandbox = checkHostedSandboxReadiness(input.config.sandbox);

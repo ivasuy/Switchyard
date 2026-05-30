@@ -49,9 +49,9 @@ When a release ships:
 
 Snapshot source: `agent/phase-11-r12-production-hosting-foundation` at commit `2b025ed18450ffe97403bb37422b0ef72df61024`.
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like fake worker and connected-node safe slice; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for the fake-only hosted/connected-node slice; and shipped S3/R2-compatible object-store client wiring for hosted artifact content.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like worker execution for fake deterministic plus operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; and shipped S3/R2-compatible object-store client wiring for hosted artifact content.
 
-The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like fake/hybrid node slice, and the R12 self-hosted staging deployment foundation. It is not yet a managed hosted platform with real hosted runtimes, dashboard, or TUI.
+The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, and the R12 self-hosted staging deployment foundation. It is not yet a managed hosted platform, and production hosted real-runtime execution remains forbidden.
 
 Important runtime wording: `codex.exec_json` exists as a one-shot non-interactive runtime mode. A full interactive Codex runtime is not shipped yet.
 
@@ -63,7 +63,7 @@ The repository is a TypeScript pnpm/Turborepo monorepo with these shipped packag
 
 - `apps/daemon`: local Fastify daemon.
 - `apps/server`: hosted-like API gateway for the safe fake-worker slice.
-- `apps/worker`: hosted worker app gated to fake deterministic execution.
+- `apps/worker`: hosted worker app with fake deterministic default and opt-in self-hosted/staging real runtime execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
 - `apps/node`: connected local-node app for registration, claim, and sync flows.
 - `packages/contracts`: Zod schemas, inferred TypeScript types, endpoint inventory, and OpenAPI 3.1 generation/checks.
 - `packages/core`: protocol-neutral ports and runtime lifecycle services.
@@ -249,8 +249,8 @@ The current workspace has passing package coverage for:
 These are planned or designed in docs, but not shipped product:
 
 - Managed production hosted platform deployment with tenant isolation, cloud networking, production secrets, and operator controls.
-- Hosted real-runtime worker deployment for Codex, Claude Code, OpenCode, arbitrary process, or PTY execution.
-- Production sandboxing for arbitrary subprocess/PTY workloads (R14 ships only a fake/no-spend substrate and validation contracts).
+- Production hosted real-runtime worker deployment for Codex, Claude Code, OpenCode, arbitrary process, or PTY execution.
+- Production sandboxing for arbitrary subprocess/PTY workloads (R15 still ships no managed production arbitrary subprocess/PTY substrate).
 - Presigned direct upload/download URLs, bucket provisioning automation, lifecycle policy management, provider-managed encryption setup, and CDN integration.
 - WebSocket protocol package.
 - Policy package beyond current contracts/ports.
@@ -952,7 +952,7 @@ Known release risks:
 - Local open-ended SSE (`GET /runs/:id/events?live=1`) is shipped for daemon use, but hosted production streaming remains unshipped.
 - Runtime capability and doctor reporting are shipped for `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; external/provider-backed modes still require local binaries/configuration or remain no-spend skipped in CI.
 - Artifact metadata/content endpoints are shipped (`GET /artifacts/:id`, `GET /artifacts/:id/content`), but HTTP `HEAD` and `Range` support is not implemented.
-- Hosted-like execution exists only as a safety-first fake-worker/connected-node slice with R12 self-hosted staging foundations. Managed hosted deployment, arbitrary hosted subprocess execution, and hosted real-runtime execution remain unshipped.
+- Hosted-like execution remains safety-first and worker-owned. Managed hosted deployment and production arbitrary hosted subprocess execution remain unshipped. R15 only adds operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` with production fail-closed posture.
 
 ## Source Map
 

@@ -19,6 +19,9 @@ All notable changes to Switchyard will be documented in this file.
 - Added persisted runtime-mode records and run/session `runtimeMode` compatibility fields for local SQLite storage.
 - Added R14 hosted sandbox substrate contracts (`sandbox.ts`), core hosted sandbox service/policy/config/readiness helpers, deterministic fake hosted sandbox executor, and no-spend smoke command (`pnpm sandbox:smoke`).
 - Added hosted app readiness/metrics sandbox diagnostics (`checks.sandbox` and low-cardinality `sandbox` counters) while keeping fake-only hosted runtime execution boundaries.
+- Added R15 hosted real-runtime execution catalog and policy gates for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` with explicit operator opt-in (`SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=enabled`) and production fail-closed posture.
+- Added worker hosted adapter construction for allowlisted `CodexExecJsonAdapter`, `ClaudeCodeAdapter`, and `OpenCodeAcpAdapter` with no-spend fake-factory seams and hosted-safe logger redaction.
+- Added no-spend hosted real-runtime smoke command (`pnpm hosted-real-runtime:smoke`) and OpenAPI guard assertions that keep `/sandbox`, `/exec`, `/pty`, and `/terminal` absent from the public contract.
 
 ### Changed
 
@@ -31,6 +34,9 @@ All notable changes to Switchyard will be documented in this file.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.
 - Updated hosted server/worker config parsing to include `SWITCHYARD_SANDBOX_*` contract validation and redacted summaries.
 - Updated hosted worker readiness shape to preserve `ok` compatibility while exposing optional `checks.sandbox` diagnostics.
+- Updated hosted run placement and worker claim revalidation to require closed runtime catalog matches, explicit hosted placement for real modes, hosted wait denial (`hosted_wait_unsupported`), durable-row revalidation, and Codex read-only sandbox metadata enforcement.
+- Updated hosted server/worker config parsing with closed allowlist validation and `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION` gate validation including production-forbidden error codes.
+- Updated run input/cancel route guards for hosted real runs so unsupported bridges fail visibly (`hosted_input_unsupported`, `hosted_cancel_unsupported`) without silently dropping interaction requests.
 
 ## 2026-05-30 - Roadmap Release Train R13 S3/R2 Object-Store Client Wiring
 
