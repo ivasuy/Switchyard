@@ -1,8 +1,8 @@
-export type RouteMethod = "get" | "post";
+export type RouteMethod = "get" | "post" | "put";
 
 export type ResponseContentKind = "json" | "sse" | "binary" | "text";
 
-export type EndpointSurface = "local_daemon";
+export type EndpointSurface = "local_daemon" | "hosted_node";
 
 export interface RouteInventorySuccess {
   status: number;
@@ -33,10 +33,19 @@ export interface RouteInventoryEntry {
 }
 
 const LOCAL_SURFACE: EndpointSurface = "local_daemon";
+const HOSTED_NODE_SURFACE: EndpointSurface = "hosted_node";
 
 function withDefaults(entry: Omit<RouteInventoryEntry, "surface" | "errorEnvelopeOwner">): RouteInventoryEntry {
   return {
     surface: LOCAL_SURFACE,
+    errorEnvelopeOwner: "contracts",
+    ...entry
+  };
+}
+
+function withHostedNodeDefaults(entry: Omit<RouteInventoryEntry, "surface" | "errorEnvelopeOwner">): RouteInventoryEntry {
+  return {
+    surface: HOSTED_NODE_SURFACE,
     errorEnvelopeOwner: "contracts",
     ...entry
   };
@@ -476,5 +485,88 @@ export const LOCAL_DAEMON_ROUTE_INVENTORY: readonly RouteInventoryEntry[] = [
     querySchemaRef: "EntityEventsQuery",
     noRequestBody: true,
     success: { status: 200, contentKind: "sse", schemaRef: "SseEventStream", description: "SSE debate events" }
+  })
+];
+
+export const HOSTED_NODE_ROUTE_INVENTORY: readonly RouteInventoryEntry[] = [
+  withHostedNodeDefaults({
+    method: "post",
+    path: "/nodes/register",
+    operationId: "registerNode",
+    summary: "Register node",
+    tags: ["node"],
+    requestBody: { schemaRef: "NodeRegisterRequest", required: true },
+    noRequestBody: false,
+    success: { status: 201, contentKind: "json", schemaRef: "NodeRegisterResponse", description: "Node registration response" }
+  }),
+  withHostedNodeDefaults({
+    method: "post",
+    path: "/nodes/:id/heartbeat",
+    operationId: "heartbeatNode",
+    summary: "Node heartbeat",
+    tags: ["node"],
+    requestBody: { schemaRef: "NodeHeartbeatRequest", required: true },
+    noRequestBody: false,
+    success: { status: 200, contentKind: "json", schemaRef: "NodeHeartbeatResponse", description: "Node heartbeat response" }
+  }),
+  withHostedNodeDefaults({
+    method: "post",
+    path: "/nodes/:id/assignments/claim",
+    operationId: "claimNodeAssignment",
+    summary: "Claim assignment",
+    tags: ["node"],
+    requestBody: { schemaRef: "AssignmentClaimRequest", required: false },
+    noRequestBody: false,
+    success: { status: 200, contentKind: "json", schemaRef: "AssignmentClaimResponse", description: "Assignment claim response" }
+  }),
+  withHostedNodeDefaults({
+    method: "post",
+    path: "/nodes/:id/assignments/:assignmentId/reject",
+    operationId: "rejectNodeAssignment",
+    summary: "Reject assignment",
+    tags: ["node"],
+    requestBody: { schemaRef: "AssignmentRejectRequest", required: true },
+    noRequestBody: false,
+    success: { status: 200, contentKind: "json", schemaRef: "AssignmentResponse", description: "Assignment response" }
+  }),
+  withHostedNodeDefaults({
+    method: "post",
+    path: "/nodes/:id/assignments/:assignmentId/events",
+    operationId: "syncNodeAssignmentEvents",
+    summary: "Sync assignment events",
+    tags: ["node"],
+    requestBody: { schemaRef: "AssignmentEventSyncRequest", required: true },
+    noRequestBody: false,
+    success: { status: 200, contentKind: "json", schemaRef: "AssignmentEventSyncResponse", description: "Event sync response" }
+  }),
+  withHostedNodeDefaults({
+    method: "post",
+    path: "/nodes/:id/assignments/:assignmentId/artifacts/manifest",
+    operationId: "syncNodeAssignmentArtifactsManifest",
+    summary: "Sync artifact manifest",
+    tags: ["node"],
+    requestBody: { schemaRef: "AssignmentArtifactManifestRequest", required: true },
+    noRequestBody: false,
+    success: { status: 200, contentKind: "json", schemaRef: "AssignmentArtifactManifestResponse", description: "Manifest sync response" }
+  }),
+  withHostedNodeDefaults({
+    method: "put",
+    path: "/nodes/:id/assignments/:assignmentId/artifacts/:artifactId/content",
+    operationId: "syncNodeAssignmentArtifactContent",
+    summary: "Sync artifact content",
+    tags: ["node"],
+    requestBody: { schemaRef: "RawArtifactContent", required: true, contentType: "application/octet-stream" },
+    noRequestBody: false,
+    success: { status: 200, contentKind: "json", schemaRef: "AssignmentArtifactContentResponse", description: "Artifact content sync response" }
+  }),
+  withHostedNodeDefaults({
+    method: "post",
+    path: "/nodes/:id/assignments/:assignmentId/complete",
+    operationId: "completeNodeAssignment",
+    summary: "Complete assignment",
+    tags: ["node"],
+    requestBody: { schemaRef: "AssignmentCompleteRequest", required: true },
+    noRequestBody: false,
+    success: { status: 200, contentKind: "json", schemaRef: "AssignmentResponse", description: "Assignment completion response" }
   })
 ];

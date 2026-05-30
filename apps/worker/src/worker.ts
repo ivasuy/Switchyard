@@ -19,6 +19,7 @@ import {
   PostgresEventStore,
   PostgresRunStore,
   PostgresSessionStore,
+  probePostgresDatabase,
   openPostgresDatabase
 } from "@switchyard/storage";
 import { FakeRuntimeAdapter, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
@@ -26,6 +27,7 @@ import type { WorkerConfig } from "./config.js";
 
 export interface HostedWorkerApp {
   tick: () => Promise<boolean>;
+  ready: () => Promise<{ ok: boolean; reason?: string }>;
   stop: () => Promise<void>;
 }
 
@@ -80,6 +82,18 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     tick: async () => {
       await postgresReady;
       return service.processNext();
+    },
+    ready: async () => {
+      try {
+        await postgresReady;
+        if (postgres) {
+          await probePostgresDatabase(postgres);
+        }
+        await queue.stats();
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      }
     },
     stop: async () => {
       await postgresReady;

@@ -24,6 +24,20 @@ import { approvalSchema } from "./approval.js";
 import { toolInvocationSchema } from "./tool.js";
 import { debateSchema } from "./debate.js";
 import { httpErrorEnvelopeSchema } from "./http-error.js";
+import { nodeSchema } from "./node.js";
+import {
+  assignmentSchema,
+  assignmentClaimRequestSchema,
+  assignmentClaimResponseSchema,
+  assignmentRejectRequestSchema,
+  assignmentEventSyncRequestSchema,
+  assignmentEventSyncResponseSchema,
+  assignmentArtifactManifestRequestSchema,
+  assignmentArtifactManifestResponseSchema,
+  assignmentCompleteRequestSchema,
+  nodeHeartbeatRequestSchema,
+  nodeRegisterRequestSchema
+} from "./assignment.js";
 import { LOCAL_DAEMON_ROUTE_INVENTORY, type ResponseContentKind, type RouteInventoryEntry } from "./endpoint-inventory.js";
 
 interface SchemaObject {
@@ -261,6 +275,21 @@ const SCHEMA_BY_REF: Record<string, z.ZodTypeAny> = {
   }).passthrough(),
   CreateDebateResponse: z.object({ debate: debateSchema }).passthrough(),
   GetDebateResponse: z.object({ debate: debateSchema }).passthrough(),
+
+  NodeRegisterRequest: nodeRegisterRequestSchema,
+  NodeRegisterResponse: z.object({ node: nodeSchema }),
+  NodeHeartbeatRequest: nodeHeartbeatRequestSchema,
+  NodeHeartbeatResponse: z.object({ node: nodeSchema }),
+  AssignmentClaimRequest: assignmentClaimRequestSchema,
+  AssignmentClaimResponse: assignmentClaimResponseSchema,
+  AssignmentRejectRequest: assignmentRejectRequestSchema,
+  AssignmentEventSyncRequest: assignmentEventSyncRequestSchema,
+  AssignmentEventSyncResponse: assignmentEventSyncResponseSchema,
+  AssignmentArtifactManifestRequest: assignmentArtifactManifestRequestSchema,
+  AssignmentArtifactManifestResponse: assignmentArtifactManifestResponseSchema,
+  AssignmentArtifactContentResponse: z.object({ accepted: z.boolean(), artifactId: z.string().min(1) }),
+  AssignmentCompleteRequest: assignmentCompleteRequestSchema,
+  AssignmentResponse: z.object({ assignment: assignmentSchema }),
 
   SseEventStream: z.string(),
   HttpErrorEnvelope: httpErrorEnvelopeSchema

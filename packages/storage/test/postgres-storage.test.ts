@@ -9,6 +9,7 @@ import {
   PostgresRunStore,
   PostgresSessionStore,
   ensurePostgresSchema,
+  probePostgresDatabase,
   openPostgresDatabase
 } from "../src/index.js";
 
@@ -121,6 +122,7 @@ describe("postgres storage", () => {
     const opened = openPostgresDatabase(url);
     try {
       await ensurePostgresSchema(opened);
+      expect((await probePostgresDatabase(opened)).ok).toBe(true);
       const runs = new PostgresRunStore(opened);
       const events = new PostgresEventStore(opened);
       const runId = `run_pg_real_${crypto.randomUUID().replaceAll("-", "_")}`;

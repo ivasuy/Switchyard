@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createNodeApp } from "../src/app.js";
+import { loadNodeConfig } from "../src/config.js";
 
 function createFakeClient() {
   const calls: string[] = [];
@@ -64,6 +65,7 @@ describe("node app", () => {
   it("registers, heartbeats, claims and completes fake assignment", async () => {
     const fake = createFakeClient();
     const app = createNodeApp({
+      deploymentMode: "test",
       serverUrl: "http://localhost:4646",
       capabilities: ["runtime.fake.deterministic"],
       policy: {
@@ -72,7 +74,9 @@ describe("node app", () => {
         allowCwdPrefixes: ["/repo"],
         allowEventTypes: [],
         artifactSync: "full"
-      }
+      },
+      idleIntervalMs: 1,
+      redactedSummary: {}
     }, { client: fake.client as any });
 
     await app.start();
@@ -90,6 +94,7 @@ describe("node app", () => {
   it("rejects assignment when local policy denies", async () => {
     const fake = createFakeClient();
     const app = createNodeApp({
+      deploymentMode: "test",
       serverUrl: "http://localhost:4646",
       capabilities: ["runtime.fake.deterministic"],
       policy: {
@@ -98,12 +103,26 @@ describe("node app", () => {
         allowCwdPrefixes: ["/repo"],
         allowEventTypes: [],
         artifactSync: "full"
-      }
+      },
+      idleIntervalMs: 1,
+      redactedSummary: {}
     }, { client: fake.client as any });
 
     await app.start();
     await app.tick();
 
     expect(fake.calls).toContain("reject");
+  });
+
+  it("fails closed in staging mode without shared token", () => {
+    expect(() =>
+      loadNodeConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "staging",
+        SWITCHYARD_SERVER_URL: "http://localhost:4646",
+        SWITCHYARD_NODE_CAPABILITIES: "runtime.fake.deterministic",
+        SWITCHYARD_NODE_ALLOW_RUNTIME_MODES: "fake.deterministic",
+        SWITCHYARD_NODE_ALLOW_CWD_PREFIXES: "/repo"
+      })
+    ).toThrow("config_required:SWITCHYARD_NODE_SHARED_TOKEN");
   });
 });

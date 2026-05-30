@@ -115,7 +115,9 @@ describe("PlacementService", () => {
         fail: async () => {},
         retry: async () => {},
         discard: async () => {},
-        getJob: async () => undefined
+        getJob: async () => undefined,
+        recoverStaleClaims: async () => ({ recovered: 0, exhausted: 0, invalid: 0 }),
+        stats: async () => ({ queued: 0, claimed: 0, failed: 0, exhausted: 0 })
       },
       assignments: {
         create: async (record: any) => record,

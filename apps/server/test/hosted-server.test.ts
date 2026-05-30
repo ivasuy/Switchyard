@@ -4,7 +4,13 @@ import { loadServerConfig } from "../src/config.js";
 
 describe("hosted server", () => {
   it("completes hosted fake run with wait", async () => {
-    const app = await createServerApp({ host: "127.0.0.1", port: 0, hostedRuntimeAllowlist: ["fake.deterministic"] });
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      redactedSummary: {}
+    });
     try {
       const response = await app.inject({
         method: "POST",
@@ -27,7 +33,13 @@ describe("hosted server", () => {
   });
 
   it("rejects hosted unsafe runtime", async () => {
-    const app = await createServerApp({ host: "127.0.0.1", port: 0, hostedRuntimeAllowlist: [] });
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: [],
+      redactedSummary: {}
+    });
     try {
       const response = await app.inject({
         method: "POST",
@@ -55,12 +67,49 @@ describe("hosted server", () => {
       SWITCHYARD_POSTGRES_URL: "postgres://user:pass@localhost:5432/switchyard",
       SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
       SWITCHYARD_QUEUE_NAME: "switchyard-hosted",
-      SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-objects"
+      SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-objects",
+      SWITCHYARD_NODE_SHARED_TOKEN: "token",
+      SWITCHYARD_DEPLOYMENT_MODE: "staging"
     });
 
     expect(config.postgresUrl).toContain("postgres://");
     expect(config.redisUrl).toBe("redis://localhost:6379/0");
     expect(config.queueName).toBe("switchyard-hosted");
     expect(config.objectStoreDir).toBe("/tmp/switchyard-objects");
+    expect(config.deploymentMode).toBe("staging");
+  });
+
+  it("exposes readiness and hosted metrics", async () => {
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      redactedSummary: {}
+    });
+    try {
+      const ready = await app.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json().ok).toBe(true);
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics" });
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.json().queue).toBeDefined();
+      expect(metrics.json().dependencies).toBeDefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("fails closed in staging for missing dependencies", () => {
+    expect(() =>
+      loadServerConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "staging",
+        SWITCHYARD_POSTGRES_URL: "postgres://localhost/db",
+        SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store",
+        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic",
+        SWITCHYARD_NODE_SHARED_TOKEN: "token"
+      })
+    ).toThrow("config_required:SWITCHYARD_REDIS_URL");
   });
 });

@@ -23,6 +23,7 @@ export type HttpErrorCode =
   | "invalid_query"
   | "adapter_protocol_failed"
   | "placement_denied"
+  | "node_auth_required"
   | "node_auth_failed"
   | "node_not_found"
   | "assignment_not_found"
@@ -34,6 +35,7 @@ export type HttpErrorCode =
   | "artifact_digest_mismatch"
   | "artifact_sync_failed"
   | "hosted_runtime_not_allowed"
+  | "payload_too_large"
   | "internal_error";
 
 export interface HttpErrorDetail {
@@ -72,6 +74,7 @@ const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   invalid_query: 400,
   adapter_protocol_failed: 409,
   placement_denied: 409,
+  node_auth_required: 401,
   node_auth_failed: 401,
   node_not_found: 404,
   assignment_not_found: 404,
@@ -83,6 +86,7 @@ const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   artifact_digest_mismatch: 409,
   artifact_sync_failed: 500,
   hosted_runtime_not_allowed: 409,
+  payload_too_large: 413,
   internal_error: 500
 };
 

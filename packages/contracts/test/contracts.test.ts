@@ -33,7 +33,9 @@ import {
   nodeRegisterRequestSchema,
   assignmentClaimResponseSchema,
   assignmentEventSyncRequestSchema,
-  assignmentArtifactManifestRequestSchema
+  assignmentArtifactManifestRequestSchema,
+  generateOpenApiDocument,
+  HOSTED_NODE_ROUTE_INVENTORY
 } from "../src/index.js";
 
 function expectRequiredFields(schema: z.ZodType, valid: Record<string, unknown>, requiredKeys: string[]): void {
@@ -1137,5 +1139,27 @@ describe("Switchyard contracts", () => {
       },
       ["code", "message"]
     );
+  });
+
+  it("keeps local OpenAPI default and supports hosted-node inventory generation", () => {
+    const local = generateOpenApiDocument();
+    expect(Object.keys(local.paths)).not.toContain("/nodes/register");
+
+    const hosted = generateOpenApiDocument({ inventory: HOSTED_NODE_ROUTE_INVENTORY });
+    expect(Object.keys(hosted.paths)).toContain("/nodes/register");
+    expect(Object.keys(hosted.paths)).toContain("/nodes/{id}/assignments/{assignmentId}/artifacts/{artifactId}/content");
+    expect((hosted.paths["/nodes/{id}/assignments/{assignmentId}/artifacts/{artifactId}/content"] as any).put).toBeDefined();
+  });
+
+  it("includes node auth required and payload too large error codes", () => {
+    expect(httpErrorCodeSchema.parse("node_auth_required")).toBe("node_auth_required");
+    expect(httpErrorCodeSchema.parse("payload_too_large")).toBe("payload_too_large");
+    const envelope = httpErrorEnvelopeSchema.parse({
+      error: {
+        code: "payload_too_large",
+        message: "Node payload exceeds limit"
+      }
+    });
+    expect(envelope.error.code).toBe("payload_too_large");
   });
 });

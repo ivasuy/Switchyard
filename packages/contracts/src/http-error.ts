@@ -23,6 +23,7 @@ export const httpErrorCodeSchema = z.enum([
   "adapter_protocol_failed",
   "internal_error",
   "placement_denied",
+  "node_auth_required",
   "node_auth_failed",
   "node_not_found",
   "assignment_not_found",
@@ -33,7 +34,8 @@ export const httpErrorCodeSchema = z.enum([
   "event_sync_conflict",
   "artifact_digest_mismatch",
   "artifact_sync_failed",
-  "hosted_runtime_not_allowed"
+  "hosted_runtime_not_allowed",
+  "payload_too_large"
 ]);
 
 export const httpErrorDetailSchema = z.object({

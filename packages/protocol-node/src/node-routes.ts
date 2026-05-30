@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type {
   ArtifactSyncService,
@@ -20,15 +21,39 @@ export interface NodeRouteDependencies {
   eventSync: EventSyncService;
   artifactSync: ArtifactSyncService;
   sharedToken?: string;
+  requireAuth?: boolean;
+  jsonBodyLimitBytes?: number;
+  artifactBodyLimitBytes?: number;
 }
 
 export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependencies): void {
   app.addHook("preHandler", async (request, reply) => {
     if (!request.url.startsWith("/nodes")) return;
-    if (!deps.sharedToken) return;
     const token = request.headers["x-switchyard-node-token"];
-    if (token !== deps.sharedToken) {
+    if (deps.requireAuth && !deps.sharedToken) {
+      return sendHttpError(reply, "node_auth_required", "Node token is required");
+    }
+    if (!deps.sharedToken) return;
+    if (typeof token !== "string" || !tokenMatches(token, deps.sharedToken)) {
       return sendHttpError(reply, "node_auth_failed", "Node token is invalid");
+    }
+  });
+
+  app.addHook("preValidation", async (request, reply) => {
+    if (!request.url.startsWith("/nodes")) return;
+    if (request.method !== "PUT") {
+      const limit = deps.jsonBodyLimitBytes ?? 512 * 1024;
+      const size = Buffer.byteLength(JSON.stringify(request.body ?? {}), "utf8");
+      if (size > limit) {
+        return sendHttpError(reply, "payload_too_large", "Node JSON payload exceeds limit");
+      }
+      return;
+    }
+    const limit = deps.artifactBodyLimitBytes ?? 2 * 1024 * 1024;
+    const contentLengthHeader = request.headers["content-length"];
+    const contentLength = typeof contentLengthHeader === "string" ? Number(contentLengthHeader) : Number.NaN;
+    if (Number.isFinite(contentLength) && contentLength > limit) {
+      return sendHttpError(reply, "payload_too_large", "Node artifact payload exceeds limit");
     }
   });
 
@@ -180,4 +205,11 @@ function asBuffer(request: FastifyRequest): Buffer {
   if (typeof raw === "string") return Buffer.from(raw, "utf8");
   if (raw && typeof raw === "object") return Buffer.from(JSON.stringify(raw));
   return Buffer.alloc(0);
+}
+
+function tokenMatches(got: string, expected: string): boolean {
+  const a = Buffer.from(got);
+  const b = Buffer.from(expected);
+  if (a.byteLength !== b.byteLength) return false;
+  return timingSafeEqual(a, b);
 }

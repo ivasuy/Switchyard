@@ -46,10 +46,17 @@ import {
 } from "@switchyard/storage";
 import { FakeRuntimeAdapter } from "@switchyard/testkit";
 import type { ServerConfig } from "./config.js";
+import { HostedMetrics } from "./metrics.js";
+import { probeServerReadiness } from "./readiness.js";
 
 export async function createServerApp(config: ServerConfig) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
   registerErrorEnvelope(app);
+  const metrics = new HostedMetrics();
+
+  app.addHook("onRequest", async () => {
+    metrics.inc("requests.total");
+  });
 
   const postgres = config.postgresUrl ? openPostgresDatabase(config.postgresUrl) : undefined;
   if (postgres) {
@@ -59,9 +66,15 @@ export async function createServerApp(config: ServerConfig) {
     });
   }
 
-  const queue: RunQueuePort & { close?: () => Promise<void> } = config.redisUrl
+  const forcePersistent = config.deploymentMode === "staging" || config.deploymentMode === "production";
+  const rawQueue: RunQueuePort & { close?: () => Promise<void> } = config.redisUrl
     ? new BullMqRunQueue({ redisUrl: config.redisUrl, queueName: config.queueName ?? "switchyard-hosted-runs" })
-    : new MemoryRunQueue();
+    : forcePersistent
+      ? (() => {
+        throw new Error("config_required:SWITCHYARD_REDIS_URL");
+      })()
+      : new MemoryRunQueue();
+  const queue = instrumentQueue(rawQueue, metrics);
   app.addHook("onClose", async () => {
     await queue.close?.();
   });
@@ -77,7 +90,11 @@ export async function createServerApp(config: ServerConfig) {
   const assignments: NodeAssignmentStore = new PostgresAssignmentStore(postgres);
   const artifactContent: ArtifactContentStore = config.objectStoreDir
     ? new LocalObjectArtifactContentStore(config.objectStoreDir)
-    : new MemoryArtifactContentStore();
+    : forcePersistent
+      ? (() => {
+        throw new Error("config_required:SWITCHYARD_OBJECT_STORE_DIR");
+      })()
+      : new MemoryArtifactContentStore();
 
   const fakeAdapter = new FakeRuntimeAdapter();
   const adapters = new Map<string, RuntimeAdapter>([["fake", fakeAdapter]]);
@@ -156,6 +173,24 @@ export async function createServerApp(config: ServerConfig) {
   });
 
   app.get("/health", async () => ({ ok: true }));
+  app.get("/ready", async (_request, reply) => {
+    const ready = await probeServerReadiness({ config, postgres, queue });
+    if (!ready.ok) {
+      metrics.inc("dependencies.notReady");
+      return reply.code(503).send(ready);
+    }
+    metrics.inc("dependencies.ready");
+    return ready;
+  });
+  app.get("/metrics", async () => {
+    try {
+      await metrics.captureQueue(queue);
+      return metrics.toJSON();
+    } catch {
+      metrics.inc("errors.metricsCollection");
+      return metrics.toJSON();
+    }
+  });
 
   registerRunRoutes(app, {
     runService,
@@ -223,13 +258,68 @@ export async function createServerApp(config: ServerConfig) {
   const nodeRouteDeps = {
     coordinator,
     eventSync,
-    artifactSync
+    artifactSync,
+    requireAuth: config.deploymentMode === "staging" || config.deploymentMode === "production",
+    jsonBodyLimitBytes: 512 * 1024,
+    artifactBodyLimitBytes: 2 * 1024 * 1024
   } as const;
   registerNodeRoutes(app, config.nodeSharedToken
     ? { ...nodeRouteDeps, sharedToken: config.nodeSharedToken }
     : nodeRouteDeps);
 
   return app;
+}
+
+function instrumentQueue(
+  queue: RunQueuePort & { close?: () => Promise<void> },
+  metrics: HostedMetrics
+): RunQueuePort & { close?: () => Promise<void> } {
+  const wrapped: RunQueuePort & { close?: () => Promise<void> } = {
+    ...queue,
+    async enqueue(payload, options) {
+      const out = await queue.enqueue(payload, options);
+      metrics.inc("queue.enqueue");
+      return out;
+    },
+    async claim(options) {
+      const out = await queue.claim(options);
+      if (out) {
+        metrics.inc("queue.claim");
+      }
+      return out;
+    },
+    async ack(jobId) {
+      metrics.inc("queue.ack");
+      return queue.ack(jobId);
+    },
+    async fail(jobId, error) {
+      metrics.inc("queue.failed");
+      if (error.reasonCode === "worker_retry_exhausted") {
+        metrics.inc("queue.exhausted");
+      }
+      return queue.fail(jobId, error);
+    },
+    async retry(jobId) {
+      metrics.inc("queue.retry");
+      return queue.retry(jobId);
+    },
+    discard(jobId) {
+      return queue.discard(jobId);
+    },
+    getJob(jobId) {
+      return queue.getJob(jobId);
+    },
+    recoverStaleClaims(options) {
+      return queue.recoverStaleClaims(options);
+    },
+    stats() {
+      return queue.stats();
+    },
+  };
+  if (queue.close) {
+    wrapped.close = queue.close.bind(queue);
+  }
+  return wrapped;
 }
 
 async function seedFakeRegistry(registry: RegistryStore): Promise<void> {

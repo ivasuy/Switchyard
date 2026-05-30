@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Artifact, AssignmentArtifactManifestRequest, Run, SwitchyardEvent } from "@switchyard/contracts";
 import { LocalNodePolicyService } from "@switchyard/core";
-import { NodeClient } from "@switchyard/protocol-node";
+import { NodeClient, NodeClientError } from "@switchyard/protocol-node";
 import type { NodeAppConfig } from "./config.js";
 
 export interface NodeApp {
@@ -37,9 +37,11 @@ export function createNodeApp(config: NodeAppConfig, deps?: {
   const client = deps?.client ?? new NodeClient(clientOptions);
   const policy = new LocalNodePolicyService();
   let nodeId = config.nodeId;
+  let stopped = false;
 
   return {
     start: async () => {
+      if (stopped) return;
       const registered = await client.register({
         id: nodeId,
         mode: "hybrid",
@@ -49,6 +51,7 @@ export function createNodeApp(config: NodeAppConfig, deps?: {
       nodeId = registered.node.id;
     },
     tick: async () => {
+      if (stopped) return false;
       if (!nodeId) {
         await client.register({ id: config.nodeId, mode: "hybrid", capabilities: config.capabilities, policy: config.policy });
         return true;
@@ -94,10 +97,15 @@ export function createNodeApp(config: NodeAppConfig, deps?: {
           status: "failed",
           error: error instanceof Error ? error.message : String(error)
         });
+        if (error instanceof NodeClientError) {
+          // Node client errors are explicit transport/protocol failures; keep the loop alive for retry.
+        }
       }
       return true;
     },
-    stop: async () => {}
+    stop: async () => {
+      stopped = true;
+    }
   };
 }
 

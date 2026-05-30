@@ -1,12 +1,20 @@
 import { createNodeApp } from "./app.js";
 import { loadNodeConfig } from "./config.js";
 
-const app = createNodeApp(loadNodeConfig());
+const config = loadNodeConfig();
+const app = createNodeApp(config);
 await app.start();
+const signal = new AbortController();
+process.on("SIGINT", () => signal.abort());
+process.on("SIGTERM", () => signal.abort());
 
-while (true) {
-  const worked = await app.tick();
-  if (!worked) {
-    await new Promise((resolve) => setTimeout(resolve, 200));
+try {
+  while (!signal.signal.aborted) {
+    const worked = await app.tick();
+    if (!worked) {
+      await new Promise((resolve) => setTimeout(resolve, config.idleIntervalMs));
+    }
   }
+} finally {
+  await app.stop();
 }

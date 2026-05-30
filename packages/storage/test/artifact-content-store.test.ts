@@ -86,6 +86,19 @@ describe("artifact content stores", () => {
         createdAt: "2026-05-30T00:00:00.000Z"
       });
       expect(read.body.toString("utf8")).toBe("content");
+      const digestMismatchArtifact = {
+        id: "artifact_4",
+        runId: "run_1",
+        type: "raw_log" as const,
+        path: "runs/run_1/file.txt",
+        metadata: { objectKey: saved.objectKey, contentType: saved.contentType, sha256: "0".repeat(64), sizeBytes: 7 },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      };
+      await expect(store.read(digestMismatchArtifact as any)).rejects.toThrow("artifact_digest_mismatch");
+      await expect(store.read({
+        ...digestMismatchArtifact,
+        metadata: { objectKey: saved.objectKey, contentType: saved.contentType, sha256: saved.sha256, sizeBytes: 1 }
+      } as any)).rejects.toThrow("artifact_sync_failed");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

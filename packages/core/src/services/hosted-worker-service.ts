@@ -20,6 +20,7 @@ export class HostedWorkerService {
   }
 
   async processNext(): Promise<boolean> {
+    await this.deps.queue.recoverStaleClaims();
     const job = await this.deps.queue.claim();
     if (!job) {
       return false;
@@ -28,7 +29,6 @@ export class HostedWorkerService {
     const run = await this.deps.runs.get(job.payload.runId);
     if (!run) {
       await this.deps.queue.fail(job.id, { reasonCode: "hosted_run_state_invalid", message: "run_not_found" });
-      await this.deps.queue.ack(job.id);
       return true;
     }
 
@@ -36,7 +36,6 @@ export class HostedWorkerService {
     if (validationError) {
       await this.failRun(run, validationError);
       await this.deps.queue.fail(job.id, { reasonCode: validationError, message: validationError });
-      await this.deps.queue.ack(job.id);
       return true;
     }
 
@@ -79,7 +78,6 @@ export class HostedWorkerService {
     if (exhausted) {
       await this.failRun(run, "worker_retry_exhausted");
       await this.deps.queue.fail(job.id, { reasonCode: "worker_retry_exhausted", message: reasonCode });
-      await this.deps.queue.ack(job.id);
       return true;
     }
 

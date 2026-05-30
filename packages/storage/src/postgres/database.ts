@@ -178,3 +178,8 @@ CREATE TABLE IF NOT EXISTS assignments (
 CREATE INDEX IF NOT EXISTS assignments_claim_idx ON assignments(node_id, status);
 `);
 }
+
+export async function probePostgresDatabase(handle: PostgresDatabaseHandle): Promise<{ ok: true }> {
+  await handle.pool.query("select 1");
+  return { ok: true };
+}

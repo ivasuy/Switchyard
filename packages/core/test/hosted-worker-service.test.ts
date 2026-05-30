@@ -17,7 +17,7 @@ class InMemoryEventStore {
 }
 
 class MemoryQueue {
-  jobs: Array<{ id: string; payload: any; attempts: number; maxAttempts: number; state: "queued" | "claimed" | "failed" }> = [];
+  jobs: Array<{ id: string; payload: any; attempts: number; maxAttempts: number; state: "queued" | "claimed" | "failed" | "exhausted"; failure?: any }> = [];
   async enqueue(payload: any) {
     const id = `job_${this.jobs.length + 1}`;
     const job = {
@@ -35,13 +35,21 @@ class MemoryQueue {
     if (!job) return undefined;
     job.state = "claimed";
     job.attempts += 1;
-    return { id: job.id, payload: job.payload, attempts: job.attempts, maxAttempts: job.maxAttempts };
+    return {
+      id: job.id,
+      payload: job.payload,
+      attempts: job.attempts,
+      maxAttempts: job.maxAttempts,
+      claimedAt: "2026-05-30T00:00:00.000Z",
+      leaseUntil: "2026-05-30T00:00:30.000Z"
+    };
   }
   async ack(jobId: string) { this.jobs = this.jobs.filter((job) => job.id !== jobId); }
-  async fail(jobId: string) {
+  async fail(jobId: string, failure: any) {
     const job = this.jobs.find((item) => item.id === jobId);
     if (!job) return;
-    job.state = "failed";
+    job.state = failure?.reasonCode === "worker_retry_exhausted" ? "exhausted" : "failed";
+    job.failure = failure;
   }
   async retry(jobId: string) {
     const job = this.jobs.find((item) => item.id === jobId);
@@ -52,7 +60,16 @@ class MemoryQueue {
   async getJob(id: string) {
     const job = this.jobs.find((j) => j.id === id);
     if (!job) return undefined;
-    return { id: job.id, payload: job.payload, attempts: job.attempts, maxAttempts: job.maxAttempts };
+    return { id: job.id, payload: job.payload, attempts: job.attempts, maxAttempts: job.maxAttempts, state: job.state, failure: job.failure };
+  }
+  async recoverStaleClaims() { return { recovered: 0, exhausted: 0, invalid: 0 }; }
+  async stats() {
+    return {
+      queued: this.jobs.filter((job) => job.state === "queued").length,
+      claimed: this.jobs.filter((job) => job.state === "claimed").length,
+      failed: this.jobs.filter((job) => job.state === "failed").length,
+      exhausted: this.jobs.filter((job) => job.state === "exhausted").length
+    };
   }
 }
 
@@ -131,6 +148,8 @@ describe("HostedWorkerService", () => {
 
     await svc.processNext();
     expect((await runs.get("run_2"))?.status).toBe("failed");
+    const snapshot = await queue.getJob("job_1");
+    expect(snapshot?.state).toBe("failed");
   });
 
   it("retries non-exhausted job and succeeds on next tick", async () => {
@@ -184,5 +203,44 @@ describe("HostedWorkerService", () => {
     expect(second).toBe(true);
     expect((await runs.get(run.id))?.status).toBe("completed");
     expect(await queue.getJob(queued.jobId)).toBeUndefined();
+  });
+
+  it("keeps exhausted jobs inspectable", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    await runs.create({
+      id: "run_exhaust_1",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    const queued = await queue.enqueue({ runId: "run_exhaust_1", placement: "hosted", runtimeMode: "fake.deterministic" });
+
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      startRun: async () => {
+        throw new Error("permanent");
+      },
+      now: () => "2026-05-30T00:00:00.000Z"
+    });
+
+    await svc.processNext();
+    await svc.processNext();
+    await svc.processNext();
+    expect((await queue.getJob(queued.jobId))?.state).toBe("exhausted");
   });
 });
