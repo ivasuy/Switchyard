@@ -304,7 +304,19 @@ function parseEndpoint(endpoint: string, deploymentMode: DeploymentMode, summary
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw configInvalid("SWITCHYARD_OBJECT_STORE_ENDPOINT", summary);
   }
+  if (
+    (deploymentMode === "local" || deploymentMode === "test") &&
+    url.protocol === "http:" &&
+    !isLocalHttpHost(url.hostname)
+  ) {
+    throw configInvalid("SWITCHYARD_OBJECT_STORE_ENDPOINT", summary);
+  }
   return url;
+}
+
+function isLocalHttpHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 
 function parseKeyPrefix(value: string): string {

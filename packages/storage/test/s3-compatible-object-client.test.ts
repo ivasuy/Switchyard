@@ -214,4 +214,41 @@ describe("s3-compatible object client", () => {
     );
     await expect(missingClient.getObject({ bucket: "b", key: "k" })).rejects.toThrow("artifact_content_not_found");
   });
+
+  it("times out getObject when body reader never resolves", async () => {
+    const client = createS3CompatibleObjectClient(
+      {
+        endpoint: "https://s3.us-east-1.amazonaws.com",
+        region: "us-east-1",
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        requestTimeoutMs: 25
+      },
+      {
+        client: {
+          async send(command: unknown) {
+            if ((command as { constructor: { name: string } }).constructor.name !== "GetObjectCommand") {
+              return {};
+            }
+            return {
+              Body: {
+                getReader() {
+                  return {
+                    async read() {
+                      return new Promise<{ done: boolean; value?: Uint8Array }>(() => {});
+                    },
+                    releaseLock() {
+                      return undefined;
+                    }
+                  };
+                }
+              }
+            };
+          }
+        }
+      }
+    );
+
+    await expect(client.getObject({ bucket: "b", key: "k" })).rejects.toThrow("object_store_timeout");
+  }, 1000);
 });

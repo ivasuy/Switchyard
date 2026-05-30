@@ -98,6 +98,16 @@ describe("object store config", () => {
 
     expect(() => resolveObjectStoreConfig({
       deploymentMode: "test",
+      env: { ...base, SWITCHYARD_OBJECT_STORE_ENDPOINT: "http://evil.example.com" }
+    })).toThrow("config_invalid:SWITCHYARD_OBJECT_STORE_ENDPOINT");
+
+    expect(() => resolveObjectStoreConfig({
+      deploymentMode: "test",
+      env: { ...base, SWITCHYARD_OBJECT_STORE_ENDPOINT: "http://minio:9000" }
+    })).toThrow("config_invalid:SWITCHYARD_OBJECT_STORE_ENDPOINT");
+
+    expect(() => resolveObjectStoreConfig({
+      deploymentMode: "test",
       env: {
         ...base,
         SWITCHYARD_OBJECT_STORE_ENDPOINT: "https://s3.us-east-1.amazonaws.com?x=1"
@@ -130,6 +140,31 @@ describe("object store config", () => {
         SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
       }
     })).toThrow("config_invalid:SWITCHYARD_OBJECT_STORE_PROBE");
+  });
+
+  it("allows loopback http endpoints in local/test only", () => {
+    const base = {
+      SWITCHYARD_OBJECT_STORE_BACKEND: "s3-compatible",
+      SWITCHYARD_OBJECT_STORE_REGION: "us-east-1",
+      SWITCHYARD_OBJECT_STORE_BUCKET: "switchyard-artifacts",
+      SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID: "key",
+      SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY: "secret"
+    } satisfies NodeJS.ProcessEnv;
+
+    expect(() => resolveObjectStoreConfig({
+      deploymentMode: "test",
+      env: { ...base, SWITCHYARD_OBJECT_STORE_ENDPOINT: "http://localhost:9000" }
+    })).not.toThrow();
+
+    expect(() => resolveObjectStoreConfig({
+      deploymentMode: "local",
+      env: { ...base, SWITCHYARD_OBJECT_STORE_ENDPOINT: "http://127.0.0.1:9000" }
+    })).not.toThrow();
+
+    expect(() => resolveObjectStoreConfig({
+      deploymentMode: "test",
+      env: { ...base, SWITCHYARD_OBJECT_STORE_ENDPOINT: "http://[::1]:9000" }
+    })).not.toThrow();
   });
 
   it("returns warning when local directory is ignored for s3 backend", () => {

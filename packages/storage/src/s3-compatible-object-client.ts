@@ -59,29 +59,33 @@ export function createS3CompatibleObjectClient(
       }
     },
     async getObject(input) {
-      let output: unknown;
       try {
-        output = await withTimeout(client, requestTimeoutMs, (abortSignal) => client.send(new GetObjectCommand({
-          Bucket: input.bucket,
-          Key: input.key
-        }), { abortSignal }));
+        return await withTimeout(client, requestTimeoutMs, async (abortSignal) => {
+          const output = await client.send(new GetObjectCommand({
+            Bucket: input.bucket,
+            Key: input.key
+          }), { abortSignal });
+
+          const response = output as { Body?: unknown; ContentType?: string };
+          if (!response.Body) {
+            throw new Error("object_store_read_failed");
+          }
+          try {
+            const body = await toBuffer(response.Body);
+            const result: { body: Buffer; contentType?: string } = { body };
+            if (response.ContentType !== undefined) {
+              result.contentType = response.ContentType;
+            }
+            return result;
+          } catch (error) {
+            if (error instanceof Error && error.message === "object_store_timeout") {
+              throw error;
+            }
+            throw new Error("object_store_read_failed");
+          }
+        });
       } catch (error) {
         throw mapS3Error(error, "get");
-      }
-
-      const response = output as { Body?: unknown; ContentType?: string };
-      if (!response.Body) {
-        throw new Error("object_store_read_failed");
-      }
-      try {
-        const body = await toBuffer(response.Body);
-        const result: { body: Buffer; contentType?: string } = { body };
-        if (response.ContentType !== undefined) {
-          result.contentType = response.ContentType;
-        }
-        return result;
-      } catch {
-        throw new Error("object_store_read_failed");
       }
     },
     async deleteObject(input) {
@@ -161,18 +165,27 @@ async function withTimeout<T>(
   fn: (abortSignal: AbortSignal) => Promise<T>
 ): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error("object_store_timeout"));
+    }, timeoutMs);
+  });
   try {
-    return await fn(controller.signal);
+    return await Promise.race([fn(controller.signal), timeout]);
   } catch (error) {
-    if (isAbortError(error)) {
+    if (
+      isAbortError(error) ||
+      (error instanceof Error && error.message === "object_store_timeout")
+    ) {
       throw new Error("object_store_timeout");
     }
     throw error;
   } finally {
-    clearTimeout(timer);
+    if (timer) {
+      clearTimeout(timer);
+    }
   }
 }
 
