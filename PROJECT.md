@@ -14,6 +14,20 @@ R0, R1, and R2 are now reconciled as shipped local-gateway releases. `PRODUCT.md
 ### Deferred Concerns
 - None.
 
+## Phase 6: R7 Middleware Foundation
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-6-r7-middleware-foundation.md
+**Plan:** docs/superpowers/plans/phase-6-r7-middleware-foundation.md
+**Audit:** agent-runs/native-roadmap-20260529/audit/phase-6-report.md
+**Branch:** agent/phase-6-r7-middleware-foundation (audit GREEN; merge pending native runtime)
+**PR:** not created - native audit workflow requested; branch retained locally
+
+### What changed
+R7 is now shipped on the phase branch. Switchyard adds durable local middleware APIs for messages, substring-only memory, evidence metadata, deterministic context packets, approval lifecycle records/events, and the policy-gated `fake_echo` tool. SQLite migrations add the middleware tables and indexes while preserving pre-R7 data, the daemon wires middleware stores/services/routes, `POST /runs` can optionally render context into the task with original task/context metadata preserved, and real tool types remain policy-denied before adapter dispatch. The shipped surface remains local and deterministic: no vector search, no remote evidence fetching, no real shell/browser/search/GitHub/fetch/repo execution, no debate engine, and no runtime-specific approval bridge.
+
+### Deferred Concerns
+- None.
+
 ## Phase 2: R3 Runtime Capability Infrastructure
 **Date:** 2026-05-29
 **Spec:** docs/superpowers/specs/2026-05-29-phase-2-r3-runtime-capability-infrastructure.md
