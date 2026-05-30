@@ -187,3 +187,19 @@ The shipped boundary remains explicit: R14 does not ship managed hosted deployme
 
 ### Deferred Concerns
 - None.
+
+## Phase 14: R15 Hosted Real Runtime Execution
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-14-r15-hosted-real-runtime-execution.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-14-r15-hosted-real-runtime-execution.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-14-report.md
+**Branch:** agent/phase-14-r15-hosted-real-runtime-execution (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R15 is now shipped on the phase branch. Switchyard adds operator opt-in self-hosted/staging hosted worker execution for the existing known real runtime modes `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`, while keeping `fake.deterministic` as the default safe hosted path. The release adds a closed hosted runtime catalog, real-runtime gate validation, explicit hosted placement requirements, production fail-closed behavior, server-side `?wait=1` denial before durable or queue side effects, worker claim revalidation, guarded prepared-metadata compare-and-update before adapter start, hosted-safe adapter logging, provider adapter construction limited to allowlisted known modes, no-spend hosted real-runtime smoke coverage, and product/development docs for rollback and operational boundaries.
+
+The shipped boundary remains explicit: R15 does not ship managed production hosted platform deployment, production arbitrary subprocess/PTY sandboxing, arbitrary hosted subprocess execution, generic process/PTY adapters, public `/sandbox`, `/exec`, `/pty`, or `/terminal` APIs, hosted Generic HTTP/AgentField/Cursor/OpenClaw/Paperclip/browser/search/fetch/GitHub/repo/shell execution, real shell/browser/search/GitHub/fetch/repo tools, interactive Codex sessions, Codex session resume or approval bridge, hosted post-start input bridge, enterprise auth/billing/tenant controls, hosted debate with real participants/model judging, dashboard, or TUI.
+
+### Deferred Concerns
+- None.
