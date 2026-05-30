@@ -4,6 +4,7 @@ import {
   EventBus,
   EventSyncService,
   HostedRunService,
+  HostedSandboxService,
   NodeCoordinatorService,
   PlacementService,
   RegistryService,
@@ -43,7 +44,7 @@ import {
   PostgresSessionStore,
   openPostgresDatabase
 } from "@switchyard/storage";
-import { FakeRuntimeAdapter } from "@switchyard/testkit";
+import { FakeHostedSandboxExecutor, FakeRuntimeAdapter } from "@switchyard/testkit";
 import type { ServerConfig } from "./config.js";
 import { HostedMetrics } from "./metrics.js";
 import { probeServerReadiness } from "./readiness.js";
@@ -93,6 +94,16 @@ export async function createServerApp(config: ServerConfig) {
   );
 
   const fakeAdapter = new FakeRuntimeAdapter();
+  const _hostedSandbox = new HostedSandboxService({
+    config: config.sandbox,
+    executor: new FakeHostedSandboxExecutor(),
+    metrics,
+    logger: {
+      info: (_event, _details) => {},
+      warn: (_event, _details) => {},
+      error: (_event, _details) => {}
+    }
+  });
   const adapters = new Map<string, RuntimeAdapter>([["fake", fakeAdapter]]);
 
   const runner = new RuntimeRunnerService({

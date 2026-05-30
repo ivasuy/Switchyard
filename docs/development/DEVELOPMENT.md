@@ -542,6 +542,14 @@ curl -s -X POST "http://127.0.0.1:4646/runs" \
 
 Expected: `409 placement_denied` (or `400 invalid_input` if runtimeMode mapping is invalid before placement evaluation), and no hosted job execution occurs.
 
+R14 hosted sandbox substrate smoke (fake/no-spend only):
+
+```bash
+pnpm sandbox:smoke
+```
+
+Expected: deterministic fake command allow path, real-command deny path, timeout terminalization, cancellation idempotency, transcript redaction, readiness check success, and sandbox metrics counter increments. No real subprocess/PTY/shell execution occurs in this smoke.
+
 R10 storage/queue scope in this shipped slice:
 
 - Hosted/hybrid verification defaults to deterministic memory substitutes.

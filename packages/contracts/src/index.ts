@@ -19,6 +19,7 @@ export * from "./openapi.js";
 export * from "./placement.js";
 export * from "./registry.js";
 export * from "./run.js";
+export * from "./sandbox.js";
 export * from "./session.js";
 export * from "./tool.js";
 export * from "./user.js";

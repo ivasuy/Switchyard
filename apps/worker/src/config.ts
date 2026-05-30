@@ -1,4 +1,8 @@
 import {
+  resolveHostedSandboxConfig,
+  type ResolvedHostedSandboxConfig
+} from "@switchyard/core";
+import {
   ObjectStoreConfigError,
   resolveObjectStoreConfig,
   type ResolvedObjectStoreConfig
@@ -19,6 +23,7 @@ export interface WorkerConfig {
   redisUrl?: string;
   queueName?: string;
   objectStore: ResolvedObjectStoreConfig;
+  sandbox: ResolvedHostedSandboxConfig;
   idleIntervalMs: number;
   redactedSummary: Record<string, unknown>;
 }
@@ -32,6 +37,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     queueName: optional(env["SWITCHYARD_QUEUE_NAME"]) ?? "switchyard-hosted-runs",
     idleIntervalMs: Number(optional(env["SWITCHYARD_WORKER_IDLE_MS"]) ?? "200"),
     objectStore: {} as ResolvedObjectStoreConfig,
+    sandbox: resolveHostedSandboxConfig({ env, deploymentMode }),
     redactedSummary: {}
   };
   const postgresUrl = optional(env["SWITCHYARD_POSTGRES_URL"]);
@@ -73,6 +79,9 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
       );
     }
   }
+  if (!config.sandbox.valid) {
+    throw new ConfigError("sandbox_config_invalid", "SWITCHYARD_SANDBOX_*", buildSummary(config));
+  }
   config.redactedSummary = buildSummary(config);
   return config;
 }
@@ -109,6 +118,7 @@ function buildSummary(config: WorkerConfig): Record<string, unknown> {
     hasPostgresUrl: Boolean(config.postgresUrl),
     hasRedisUrl: Boolean(config.redisUrl),
     objectStore: config.objectStore?.redactedSummary ?? {},
+    sandbox: config.sandbox?.redactedSummary ?? {},
     idleIntervalMs: config.idleIntervalMs
   };
 }

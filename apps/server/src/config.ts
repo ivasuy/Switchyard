@@ -1,4 +1,8 @@
 import {
+  resolveHostedSandboxConfig,
+  type ResolvedHostedSandboxConfig
+} from "@switchyard/core";
+import {
   ObjectStoreConfigError,
   resolveObjectStoreConfig,
   type ResolvedObjectStoreConfig
@@ -26,6 +30,7 @@ export interface ServerConfig {
   redisUrl?: string;
   queueName?: string;
   objectStore: ResolvedObjectStoreConfig;
+  sandbox: ResolvedHostedSandboxConfig;
   redactedSummary: Record<string, unknown>;
 }
 
@@ -40,6 +45,7 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     hostedRuntimeAllowlist: allowlist,
     queueName: requiredOrDefault(env["SWITCHYARD_QUEUE_NAME"], "switchyard-hosted-runs"),
     objectStore: {} as ResolvedObjectStoreConfig,
+    sandbox: resolveHostedSandboxConfig({ env, deploymentMode }),
     redactedSummary: {}
   };
 
@@ -80,6 +86,10 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
         buildSummary(config)
       );
     }
+  }
+
+  if (!config.sandbox.valid) {
+    throw new ConfigError("sandbox_config_invalid", "SWITCHYARD_SANDBOX_*", buildSummary(config));
   }
 
   config.redactedSummary = buildSummary(config);
@@ -124,6 +134,7 @@ function buildSummary(config: ServerConfig): Record<string, unknown> {
     hasNodeSharedToken: Boolean(config.nodeSharedToken),
     hasPostgresUrl: Boolean(config.postgresUrl),
     hasRedisUrl: Boolean(config.redisUrl),
-    objectStore: config.objectStore?.redactedSummary ?? {}
+    objectStore: config.objectStore?.redactedSummary ?? {},
+    sandbox: config.sandbox?.redactedSummary ?? {}
   };
 }

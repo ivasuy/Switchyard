@@ -11,7 +11,8 @@
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "release:smoke-local": "pnpm --filter @switchyard/cli release:smoke-local",
-    "self-hosted:smoke": "tsx scripts/self-hosted-smoke.ts"
+    "self-hosted:smoke": "tsx scripts/self-hosted-smoke.ts",
+    "sandbox:smoke": "tsx scripts/hosted-sandbox-smoke.ts"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

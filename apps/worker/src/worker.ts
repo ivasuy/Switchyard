@@ -1,5 +1,7 @@
 import {
   HostedWorkerService,
+  HostedSandboxService,
+  checkHostedSandboxReadiness,
   RunService,
   RuntimeRunnerService,
   type ArtifactContentStore,
@@ -21,12 +23,18 @@ import {
   probePostgresDatabase,
   openPostgresDatabase
 } from "@switchyard/storage";
-import { FakeRuntimeAdapter, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
+import { FakeHostedSandboxExecutor, FakeRuntimeAdapter, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
 import type { WorkerConfig } from "./config.js";
 
 export interface HostedWorkerApp {
   tick: () => Promise<boolean>;
-  ready: () => Promise<{ ok: boolean; reason?: string }>;
+  ready: () => Promise<{
+    ok: boolean;
+    reason?: string;
+    checks?: {
+      sandbox?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
+    };
+  }>;
   stop: () => Promise<void>;
 }
 
@@ -53,6 +61,10 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     createArtifactContentStoreFromObjectConfig(config.objectStore);
 
   const adapters = new Map<string, RuntimeAdapter>([["fake", new FakeRuntimeAdapter()]]);
+  const _hostedSandbox = new HostedSandboxService({
+    config: config.sandbox,
+    executor: new FakeHostedSandboxExecutor()
+  });
   const runner = new RuntimeRunnerService({
     runs,
     events,
@@ -90,7 +102,26 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         if (config.objectStore.probe !== "disabled") {
           await artifactContent.probe();
         }
-        return { ok: true };
+
+        const sandbox = checkHostedSandboxReadiness(config.sandbox);
+        if (!sandbox.ok) {
+          const code = sandbox.code ?? "sandbox_config_invalid";
+          return {
+            ok: false,
+            reason: code,
+            checks: {
+              sandbox: {
+                ok: false,
+                code,
+                diagnostics: {
+                  summary: config.sandbox.redactedSummary
+                }
+              }
+            }
+          };
+        }
+
+        return { ok: true, checks: { sandbox: { ok: true } } };
       } catch (error) {
         return { ok: false, reason: error instanceof Error ? error.message : String(error) };
       }

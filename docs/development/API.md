@@ -10,7 +10,14 @@ Safety boundaries in this shipped slice:
 
 - Hosted worker execution is restricted to `fake.deterministic` only.
 - Hosted worker must reject non-fake runtime rows at claim time using durable run-state validation.
+- R14 adds a hosted sandbox substrate that is internal-only and fake/no-spend (`switchyard.fake.*` command ids only); it is not a public execution API.
 - No hosted arbitrary subprocess, PTY, Codex, Claude, OpenCode, browser/search/repo/GitHub/fetch tooling, hosted debate participant execution, or model judging is shipped.
+
+R14 diagnostics additions:
+
+- `GET /ready` includes `checks.sandbox` with `ok=true` or one of `sandbox_disabled`, `sandbox_policy_invalid`, or `sandbox_config_invalid`.
+- `GET /metrics` includes low-cardinality `sandbox` counters (`jobs`, `allowed`, `denied`, `completed`, `failed`, `timeout`, `cancelled`, `outputTruncated`, `artifactTruncated`, `redactions`).
+- There is still no public `/sandbox`, `/exec`, `/pty`, or `/terminal` route.
 
 Node endpoints added in R10:
 

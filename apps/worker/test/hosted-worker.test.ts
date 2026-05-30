@@ -3,11 +3,14 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
+import { resolveHostedSandboxConfig } from "@switchyard/core";
 import { MemoryRunQueue } from "@switchyard/queue";
 import { resolveObjectStoreConfig } from "@switchyard/storage";
 import { InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
 import { createHostedWorker } from "../src/worker.js";
 import { loadWorkerConfig } from "../src/config.js";
+
+const defaultSandbox = () => resolveHostedSandboxConfig({ deploymentMode: "test", env: {} });
 
 describe("hosted worker app", () => {
   it("processes queued hosted fake job", async () => {
@@ -36,6 +39,7 @@ describe("hosted worker app", () => {
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
       idleIntervalMs: 1,
       redactedSummary: {}
     }, { queue, runs, events });
@@ -43,7 +47,9 @@ describe("hosted worker app", () => {
 
     expect(worked).toBe(true);
     expect((await runs.get("run_worker_1"))?.status).toBe("completed");
-    expect((await worker.ready()).ok).toBe(true);
+    const ready = await worker.ready();
+    expect(ready.ok).toBe(true);
+    expect(ready.checks?.sandbox?.ok).toBe(true);
   });
 
   it("does not import forbidden adapters", () => {
@@ -88,6 +94,7 @@ describe("hosted worker app", () => {
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
       idleIntervalMs: 1,
       redactedSummary: {}
     }, { queue, runs, events });
@@ -149,6 +156,103 @@ describe("hosted worker app", () => {
     expect(config.objectStore.backend).toBe("memory");
   });
 
+  it("reports sandbox readiness failure states", async () => {
+    const disabled = createHostedWorker({
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: resolveHostedSandboxConfig({ deploymentMode: "test", env: { SWITCHYARD_SANDBOX_ENABLED: "false" } }),
+      idleIntervalMs: 1,
+      redactedSummary: {}
+    });
+    await expect(disabled.ready()).resolves.toMatchObject({
+      ok: false,
+      reason: "sandbox_disabled",
+      checks: { sandbox: { ok: false, code: "sandbox_disabled" } }
+    });
+    await disabled.stop();
+
+    const invalidPolicy = createHostedWorker({
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: resolveHostedSandboxConfig({ deploymentMode: "test", env: { SWITCHYARD_SANDBOX_FAKE_COMMAND_ALLOWLIST: "bash" } }),
+      idleIntervalMs: 1,
+      redactedSummary: {}
+    });
+    await expect(invalidPolicy.ready()).resolves.toMatchObject({
+      ok: false,
+      reason: "sandbox_policy_invalid",
+      checks: { sandbox: { ok: false, code: "sandbox_policy_invalid" } }
+    });
+    await invalidPolicy.stop();
+  });
+
+  it("denies hosted non-fake durable rows across runtime and adapter shapes", async () => {
+    const queue = new MemoryRunQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+
+    const deniedRows = [
+      { id: "run_denied_codex", runtime: "codex", provider: "openai", model: "gpt-5", adapterType: "process", runtimeMode: "codex.exec_json" },
+      { id: "run_denied_claude", runtime: "claude_code", provider: "anthropic", model: "claude", adapterType: "native", runtimeMode: "claude_code.sdk" },
+      { id: "run_denied_opencode", runtime: "opencode", provider: "opencode", model: "opencode", adapterType: "acpx", runtimeMode: "opencode.acp" },
+      { id: "run_denied_generic_http", runtime: "generic_http", provider: "test", model: "test", adapterType: "http", runtimeMode: "generic_http.async_rest" },
+      { id: "run_denied_agentfield", runtime: "agentfield", provider: "test", model: "test", adapterType: "http", runtimeMode: "agentfield.async_rest" },
+      { id: "run_denied_fake_mode", runtime: "fake", provider: "test", model: "test-model", adapterType: "process", runtimeMode: "fake.live" },
+      { id: "run_denied_pty", runtime: "fake", provider: "test", model: "test-model", adapterType: "pty", runtimeMode: "fake.deterministic" },
+      { id: "run_denied_browser", runtime: "fake", provider: "test", model: "test-model", adapterType: "browser", runtimeMode: "fake.deterministic" }
+    ] as const;
+
+    for (const row of deniedRows) {
+      await runs.create({
+        id: row.id,
+        runtime: row.runtime,
+        provider: row.provider,
+        model: row.model,
+        adapterType: row.adapterType,
+        cwd: "/repo",
+        task: "deny",
+        status: "queued",
+        placement: "hosted",
+        approvalPolicy: "default",
+        timeoutSeconds: 60,
+        metadata: {},
+        runtimeMode: row.runtimeMode,
+        createdAt: "2026-05-30T00:00:00.000Z"
+      });
+      await queue.enqueue({ runId: row.id, placement: "hosted", runtimeMode: row.runtimeMode });
+    }
+
+    const worker = createHostedWorker({
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
+      idleIntervalMs: 1,
+      redactedSummary: {}
+    }, { queue, runs, events });
+
+    for (let idx = 0; idx < deniedRows.length; idx += 1) {
+      await expect(worker.tick()).resolves.toBe(true);
+    }
+
+    for (const row of deniedRows) {
+      expect((await runs.get(row.id))?.status).toBe("failed");
+    }
+    expect(events.items.some((event) => event.type === "run.started")).toBe(false);
+    await worker.stop();
+  });
+
+  it("fails closed for invalid sandbox config values", () => {
+    expect(() =>
+      loadWorkerConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "local",
+        SWITCHYARD_SANDBOX_COMBINED_OUTPUT_BYTES: "0"
+      })
+    ).toThrow("sandbox_config_invalid");
+  });
+
   it("skips local object-store probe when probe mode is disabled", async () => {
     const dir = await mkdtemp(join(tmpdir(), "switchyard-worker-probe-disabled-local-"));
     const fileRoot = join(dir, "object-root-file");
@@ -164,6 +268,7 @@ describe("hosted worker app", () => {
           SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
         }
       }),
+      sandbox: defaultSandbox(),
       idleIntervalMs: 1,
       redactedSummary: {}
     });
@@ -192,6 +297,7 @@ describe("hosted worker app", () => {
           SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
         }
       }),
+      sandbox: defaultSandbox(),
       idleIntervalMs: 1,
       redactedSummary: {}
     });

@@ -242,6 +242,7 @@ The current workspace has passing package coverage for:
 - adapter compatibility matrix no-spend pass/skip/fail reporting.
 - SQLite schema metadata, additive migration policy, representative pre-R3/pre-R7/pre-R9/pre-R11 fixture preservation, and corrupt/zero-byte database rejection.
 - self-hosted staging config fail-closed behavior, readiness/metrics dependency reporting, queue stale-claim exhaustion handling, local object-store named errors, node protocol hardening, and compose smoke prerequisite diagnostics.
+- fake/no-spend hosted sandbox substrate contracts, deny-by-default policy, deterministic fake process/PTY-like executor scenarios, sandbox readiness/metrics counters, transcript redaction, and no public sandbox execution routes.
 
 ## What Does Not Exist Yet
 
@@ -249,7 +250,7 @@ These are planned or designed in docs, but not shipped product:
 
 - Managed production hosted platform deployment with tenant isolation, cloud networking, production secrets, and operator controls.
 - Hosted real-runtime worker deployment for Codex, Claude Code, OpenCode, arbitrary process, or PTY execution.
-- Production sandboxing for arbitrary subprocess/PTY workloads.
+- Production sandboxing for arbitrary subprocess/PTY workloads (R14 ships only a fake/no-spend substrate and validation contracts).
 - Presigned direct upload/download URLs, bucket provisioning automation, lifecycle policy management, provider-managed encryption setup, and CDN integration.
 - WebSocket protocol package.
 - Policy package beyond current contracts/ports.

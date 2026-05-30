@@ -967,6 +967,8 @@ R10 now includes the previously planned hosted/hybrid surfaces in a safety-first
 Current safety posture:
 
 - Hosted worker execution is restricted to `fake.deterministic`.
+- R14 adds an internal hosted sandbox substrate (`HostedSandboxService` + deny-by-default fake command policy + `FakeHostedSandboxExecutor`) for future process/PTY adapter wiring, but runtime execution is still fake-only.
+- The R14 substrate is fake/no-spend only: no `child_process`, no `node-pty`, no shell/browser/fetch/GitHub/repo execution, no public `/sandbox`/`/exec`/`/pty`/`/terminal` route, and no kernel/container isolation claims.
 - Hosted server/worker do not run arbitrary subprocess/PTY/Codex/Claude/OpenCode runtimes.
 - Hybrid connected nodes are explicit trust boundaries and enforce local policy before execution and sync.
 - S3/R2-compatible object-store backing is shipped in R13; required verification remains deterministic and local/no-spend by default.

@@ -2,9 +2,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
+import { resolveHostedSandboxConfig } from "@switchyard/core";
 import { resolveObjectStoreConfig } from "@switchyard/storage";
 import { createServerApp } from "../src/app.js";
 import { loadServerConfig } from "../src/config.js";
+
+const defaultSandbox = () => resolveHostedSandboxConfig({ deploymentMode: "test", env: {} });
 
 describe("hosted server", () => {
   it("completes hosted fake run with wait", async () => {
@@ -14,6 +17,7 @@ describe("hosted server", () => {
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
       redactedSummary: {}
     });
     try {
@@ -44,6 +48,7 @@ describe("hosted server", () => {
       deploymentMode: "test",
       hostedRuntimeAllowlist: [],
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
       redactedSummary: {}
     });
     try {
@@ -98,6 +103,7 @@ describe("hosted server", () => {
       deploymentMode: "test",
       hostedRuntimeAllowlist: ["fake.deterministic"],
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
       redactedSummary: {}
     });
     try {
@@ -141,6 +147,7 @@ describe("hosted server", () => {
           SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
         }
       }),
+      sandbox: defaultSandbox(),
       redactedSummary: {}
     });
     try {
@@ -171,6 +178,7 @@ describe("hosted server", () => {
           SWITCHYARD_OBJECT_STORE_PROBE: "disabled"
         }
       }),
+      sandbox: defaultSandbox(),
       redactedSummary: {}
     });
     try {
@@ -214,5 +222,147 @@ describe("hosted server", () => {
     });
     expect(config.hostedRuntimeAllowlist).toEqual(["fake.deterministic"]);
     expect(config.objectStore.backend).toBe("memory");
+  });
+
+  it("exposes sandbox readiness states", async () => {
+    const disabledApp = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: resolveHostedSandboxConfig({
+        deploymentMode: "test",
+        env: { SWITCHYARD_SANDBOX_ENABLED: "false" }
+      }),
+      redactedSummary: {}
+    });
+
+    try {
+      const ready = await disabledApp.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(503);
+      expect(ready.json().checks.sandbox.code).toBe("sandbox_disabled");
+    } finally {
+      await disabledApp.close();
+    }
+
+    const invalidPolicyApp = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: resolveHostedSandboxConfig({
+        deploymentMode: "test",
+        env: { SWITCHYARD_SANDBOX_FAKE_COMMAND_ALLOWLIST: "bash" }
+      }),
+      redactedSummary: {}
+    });
+
+    try {
+      const ready = await invalidPolicyApp.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(503);
+      expect(ready.json().checks.sandbox.code).toBe("sandbox_policy_invalid");
+    } finally {
+      await invalidPolicyApp.close();
+    }
+  });
+
+  it("includes sandbox metrics and has no public sandbox routes", async () => {
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
+      redactedSummary: {}
+    });
+    try {
+      const metrics = await app.inject({ method: "GET", url: "/metrics" });
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.json().sandbox).toMatchObject({
+        jobs: 0,
+        allowed: 0,
+        denied: 0,
+        completed: 0,
+        failed: 0,
+        timeout: 0,
+        cancelled: 0,
+        outputTruncated: 0,
+        artifactTruncated: 0,
+        redactions: 0
+      });
+
+      for (const route of ["/sandbox", "/exec", "/pty", "/terminal"]) {
+        const res = await app.inject({ method: "POST", url: route, payload: {} });
+        expect(res.statusCode).toBe(404);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects hosted real-runtime style requests before queue side effects", async () => {
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
+      redactedSummary: {}
+    });
+    try {
+      const beforeRuns = await app.inject({ method: "GET", url: "/runs" });
+      expect(beforeRuns.statusCode).toBe(200);
+      expect(beforeRuns.json().runs).toHaveLength(0);
+
+      const beforeMetrics = await app.inject({ method: "GET", url: "/metrics" });
+      const beforeEnqueue = beforeMetrics.json().queue.enqueue;
+
+      const cases = [
+        { runtime: "codex", provider: "openai", model: "gpt-5", adapterType: "process", runtimeMode: "codex.exec_json" },
+        { runtime: "claude_code", provider: "anthropic", model: "claude", adapterType: "native", runtimeMode: "claude_code.sdk" },
+        { runtime: "opencode", provider: "opencode", model: "opencode", adapterType: "acpx", runtimeMode: "opencode.acp" },
+        { runtime: "generic_http", provider: "test", model: "test", adapterType: "http", runtimeMode: "generic_http.async_rest" },
+        { runtime: "agentfield", provider: "test", model: "test", adapterType: "http", runtimeMode: "agentfield.async_rest" },
+        { runtime: "fake", provider: "test", model: "test-model", adapterType: "pty", runtimeMode: "fake.deterministic" },
+        { runtime: "fake", provider: "test", model: "test-model", adapterType: "browser", runtimeMode: "fake.deterministic" }
+      ] as const;
+
+      for (const item of cases) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/runs",
+          payload: {
+            ...item,
+            cwd: "/repo",
+            task: "must reject",
+            placement: "hosted"
+          }
+        });
+        expect([400, 409]).toContain(response.statusCode);
+        expect(response.json().error.code).toMatch(/invalid_input|placement_denied/);
+      }
+
+      const afterRuns = await app.inject({ method: "GET", url: "/runs" });
+      expect(afterRuns.statusCode).toBe(200);
+      expect(afterRuns.json().runs).toHaveLength(0);
+
+      const afterMetrics = await app.inject({ method: "GET", url: "/metrics" });
+      expect(afterMetrics.json().queue.enqueue).toBe(beforeEnqueue);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("fails closed for invalid sandbox config values", () => {
+    expect(() =>
+      loadServerConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "local",
+        SWITCHYARD_SANDBOX_WALL_TIME_MS: "0"
+      })
+    ).toThrow("sandbox_config_invalid");
   });
 });

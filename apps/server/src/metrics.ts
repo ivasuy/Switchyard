@@ -25,6 +25,18 @@ export interface HostedMetricsSnapshot {
     unavailable: number;
     digestMismatches: number;
   };
+  sandbox: {
+    jobs: number;
+    allowed: number;
+    denied: number;
+    completed: number;
+    failed: number;
+    timeout: number;
+    cancelled: number;
+    outputTruncated: number;
+    artifactTruncated: number;
+    redactions: number;
+  };
   node: { register: number; heartbeat: number; claim: number; sync: number; complete: number; reject: number };
   dependencies: { ready: number; notReady: number };
   config: { failures: number };
@@ -38,6 +50,18 @@ export class HostedMetrics {
     queue: { available: true, enqueue: 0, claim: 0, ack: 0, retry: 0, failed: 0, exhausted: 0, queued: 0, claimed: 0 },
     worker: { attempts: 0, exhausted: 0 },
     objectStore: { reads: 0, writes: 0, failures: 0, probeFailures: 0, authFailures: 0, unavailable: 0, digestMismatches: 0 },
+    sandbox: {
+      jobs: 0,
+      allowed: 0,
+      denied: 0,
+      completed: 0,
+      failed: 0,
+      timeout: 0,
+      cancelled: 0,
+      outputTruncated: 0,
+      artifactTruncated: 0,
+      redactions: 0
+    },
     node: { register: 0, heartbeat: 0, claim: 0, sync: 0, complete: 0, reject: 0 },
     dependencies: { ready: 0, notReady: 0 },
     config: { failures: 0 }

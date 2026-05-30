@@ -1,5 +1,5 @@
 import { access, constants } from "node:fs/promises";
-import type { RunQueuePort } from "@switchyard/core";
+import { checkHostedSandboxReadiness, type RunQueuePort } from "@switchyard/core";
 import type { ProbeableArtifactContentStore } from "@switchyard/storage";
 import { probePostgresDatabase, type PostgresDatabaseHandle } from "@switchyard/storage";
 import type { ServerConfig } from "./config.js";
@@ -95,6 +95,20 @@ export async function probeServerReadiness(input: {
     checks.hostedAllowlist = { ok: false, code: "hosted_runtime_not_allowed" };
   } else {
     checks.hostedAllowlist = { ok: true };
+  }
+
+  const sandbox = checkHostedSandboxReadiness(input.config.sandbox);
+  if (sandbox.ok) {
+    checks.sandbox = { ok: true };
+  } else {
+    const code = sandbox.code ?? "sandbox_config_invalid";
+    checks.sandbox = {
+      ok: false,
+      code,
+      diagnostics: {
+        summary: input.config.sandbox.redactedSummary
+      }
+    };
   }
 
   const ok = Object.values(checks).every((check) => check.ok);

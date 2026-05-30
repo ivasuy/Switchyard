@@ -1,6 +1,13 @@
 import type { ToolPolicyInput, ToolPolicyPort } from "../ports/policy.js";
 
-const SECRET_KEY_PATTERN = /(token|apikey|authorization|password|secret)/i;
+const SECRET_KEY_PATTERN = /(token|apikey|authorization|password|secret|credential|cookie|privatekey|accesskey|refreshtoken|idtoken)/i;
+
+function isSecretKey(key: string): boolean {
+  if (SECRET_KEY_PATTERN.test(key)) {
+    return true;
+  }
+  return /(^session$|(^|[_-])session([_-]|$))/i.test(key);
+}
 
 export function redactSecrets<T>(value: T): T {
   if (Array.isArray(value)) {
@@ -14,7 +21,7 @@ export function redactSecrets<T>(value: T): T {
         out[key] = entry;
         continue;
       }
-      if (SECRET_KEY_PATTERN.test(key)) {
+      if (isSecretKey(key)) {
         out[key] = "[REDACTED]";
       } else {
         out[key] = redactSecrets(entry);
