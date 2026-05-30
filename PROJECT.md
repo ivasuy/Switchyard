@@ -97,3 +97,17 @@ R8 is now shipped on the phase branch. Switchyard adds the first bounded interac
 
 ### Deferred Concerns
 - None.
+
+## Phase 8: R9 Debate V1
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-8-r9-debate-v1.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-8-r9-debate-v1.md
+**Audit:** agent-runs/native-roadmap-20260529/audit/phase-8-report.md
+**Branch:** agent/phase-8-r9-debate-v1 (audit GREEN; merge pending native runtime)
+**PR:** not created - native audit workflow requested; branch retained locally
+
+### What changed
+R9 is now shipped on the phase branch. Switchyard adds a local, deterministic Debate V1 workflow on top of the existing run, message, evidence, event, and artifact primitives. The API now supports debate create, inspect, and debate-scoped event replay/live streams; the core service creates normal fake participant runs, routes every turn through `MessageRouter`, enforces hard round/message/cost/search/runtime limits, validates evidence before side effects, runs a deterministic no-model judge, and writes a final markdown report artifact. SQLite adds durable debate state and debate-scoped event/artifact lookup, while local smoke docs cover the no-spend fake debate path and negative cases. R9 remains fake-only: no hosted or hybrid execution, real participant runtimes, real tools, model judging, swarms, SDK/CLI/TUI/dashboard work, or external research automation shipped in this phase.
+
+### Deferred Concerns
+- None.
