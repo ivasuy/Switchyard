@@ -111,3 +111,17 @@ R9 is now shipped on the phase branch. Switchyard adds a local, deterministic De
 
 ### Deferred Concerns
 - None.
+
+## Phase 9: R10 Hosted And Hybrid Execution
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-9-r10-hosted-and-hybrid-execution.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-9-r10-hosted-and-hybrid-execution.md
+**Audit:** agent-runs/native-roadmap-20260529/audit/phase-9-report.md
+**Branch:** agent/phase-9-r10-hosted-and-hybrid-execution (audit GREEN; merge pending native runtime)
+**PR:** not created - native audit workflow requested; branch retained locally
+
+### What changed
+R10 is now shipped on the phase branch. Switchyard adds hosted-like and connected-node execution while preserving the existing public run contract. The release adds `apps/server`, `apps/worker`, and `apps/node`; hosted and node protocol surfaces; placement, node coordination, local policy, queue, event sync, and artifact sync services; Postgres metadata store adapters; Redis/BullMQ-backed queue wiring; and filesystem-backed object-compatible artifact content for the shipped hosted-like mode. Hosted worker execution is gated to `fake.deterministic` only and revalidates durable run state at claim time before execution. Connected nodes claim authoritative run payloads, enforce local policy, sync real events/artifacts, and reject invalid assignment states. The final audited truth is explicit: S3/R2 network object stores, hosted subprocess/PTY execution, hosted Codex/Claude/OpenCode, real tools, hosted debate, model judging, SDK/CLI/TUI/dashboard packaging, enterprise auth/billing, and production sandboxing remain unshipped.
+
+### Deferred Concerns
+- None.
