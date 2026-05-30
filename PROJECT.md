@@ -41,3 +41,17 @@ R4 is now shipped on the phase branch. Switchyard extracts shared runtime substr
 
 ### Deferred Concerns
 - None.
+
+## Phase 4: R5 ACP Foundation And OpenCode
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-29-phase-4-r5-acp-foundation-and-opencode.md
+**Plan:** docs/superpowers/plans/phase-4-r5-acp-foundation-and-opencode.md
+**Audit:** agent-runs/native-roadmap-20260529/audit/phase-4-report.md
+**Branch:** agent/phase-4-r5-acp-foundation-and-opencode (audit GREEN; merge pending native runtime)
+**PR:** not created - native audit workflow requested; branch retained locally
+
+### What changed
+R5 is now shipped on the phase branch. Switchyard adds the reusable `@switchyard/protocol-acpx` package for ACP framing, schemas, stdio correlation, and redacted raw transcripts; a deterministic fake ACP runtime harness; and the local `opencode.acp` runtime mode over that shared foundation. The daemon now seeds and checks OpenCode ACP without sending `session/prompt`, runs can infer `opencode.acp` through the existing API, verified cancellation persists transcript artifacts for cancelled and failed/timeout-after-start sessions, and the development/product docs now describe the shipped local OpenCode ACP boundary without overclaiming hosted, approval, tool, memory, PTY, or interactive runtime support.
+
+### Deferred Concerns
+- None.
