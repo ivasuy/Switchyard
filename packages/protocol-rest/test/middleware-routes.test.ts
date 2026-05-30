@@ -218,6 +218,11 @@ describe("middleware routes", () => {
       expect(invalidLimit.json().error.code).toBe("invalid_query");
       expect(invalidLimit.json().error.details?.[0]?.path).toBe("limit");
 
+      const tooLargeLimit = await app.inject({ method: "GET", url: "/memory?limit=201" });
+      expect(tooLargeLimit.statusCode).toBe(400);
+      expect(tooLargeLimit.json().error.code).toBe("invalid_query");
+      expect(tooLargeLimit.json().error.details?.[0]?.path).toBe("limit");
+
       const invalidEnum = await app.inject({ method: "GET", url: "/tools/invocations?status=banana" });
       expect(invalidEnum.statusCode).toBe(400);
       expect(invalidEnum.json().error.code).toBe("invalid_query");
