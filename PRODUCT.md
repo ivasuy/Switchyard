@@ -47,11 +47,11 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/phase-7-r8-interactive-coding-runtimes`.
+Snapshot source: `agent/phase-10-r11-sdk-cli-and-hardening` at commit `995dfccfb7fa21e597ccf2529a61df2dd81507c7`.
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`, plus shipped local middleware foundation APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like fake worker and connected-node safe slice; and shipped SDK/CLI/OpenAPI packaging and hardening.
 
-The product is usable locally for one-shot agent runs, fake deterministic debate execution, event inspection, artifact listing, cancellation, registry lookups, durable middleware records, and the R10 hosted-like fake/hybrid node slice. It is not yet an SDK, dashboard, or multi-runtime production platform.
+The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, and the R10 hosted-like fake/hybrid node slice. It is not yet a production-grade hosted platform, dashboard, or TUI.
 
 Important runtime wording: `codex.exec_json` exists as a one-shot non-interactive runtime mode. A full interactive Codex runtime is not shipped yet.
 
@@ -62,14 +62,21 @@ Important runtime wording: `codex.exec_json` exists as a one-shot non-interactiv
 The repository is a TypeScript pnpm/Turborepo monorepo with these shipped packages:
 
 - `apps/daemon`: local Fastify daemon.
-- `packages/contracts`: Zod schemas and inferred TypeScript types.
+- `apps/server`: hosted-like API gateway for the safe fake-worker slice.
+- `apps/worker`: hosted worker app gated to fake deterministic execution.
+- `apps/node`: connected local-node app for registration, claim, and sync flows.
+- `packages/contracts`: Zod schemas, inferred TypeScript types, endpoint inventory, and OpenAPI 3.1 generation/checks.
 - `packages/core`: protocol-neutral ports and runtime lifecycle services.
 - `packages/testkit`: fake runtime adapter and in-memory test stores.
 - `packages/storage`: SQLite stores and filesystem artifact content storage.
 - `packages/protocol-rest`: local REST route groups.
 - `packages/protocol-sse`: SSE event formatting and bounded replay/live collection helpers.
-- `packages/adapters`: Claude Code, Codex, Generic HTTP, and OpenCode adapters.
+- `packages/protocol-node`: connected-node protocol routes/client contracts.
+- `packages/queue`: in-memory and opt-in Redis/BullMQ queue adapters.
+- `packages/adapters`: Claude Code, Codex, Generic HTTP, AgentField, and OpenCode adapters plus no-spend compatibility matrix automation.
 - `packages/protocol-acpx`: outbound ACP/acpx protocol framing, schemas, stdio client, and transcript helpers.
+- `packages/sdk`: TypeScript SDK for the local daemon contract.
+- `packages/cli`: `switchyard` CLI for doctor, daemon start, fake run, runtime test, debug, contract export, and release smoke.
 
 ### Local Daemon
 
@@ -80,8 +87,10 @@ The local daemon can:
 - Store artifact content on the filesystem.
 - Wire REST routes, event bus, storage, fake runtime, and Codex runtime together.
 - Wire middleware services for local messages/memory/evidence/context/approvals/tools through the same SQLite-backed daemon.
-- Reconcile persisted `running` runs to `failed` on restart.
-- Log run start/completion, Codex process PID, stderr snippets, first stdout detection, runtime output, timeout, and startup reconciliation.
+- Preserve bounded inbound `x-request-id` values and generate request ids otherwise.
+- Expose local metrics for request counts, error counts, run statuses, and startup recovery.
+- Reconcile persisted active run states to terminal failure on restart with idempotency coverage.
+- Log run start/completion, Codex process PID, stderr snippets, first stdout detection, runtime output, timeout, request errors, and startup reconciliation.
 
 ### Runs
 
@@ -146,6 +155,7 @@ R8 Codex boundary note:
 Implemented local endpoints:
 
 - `GET /health`
+- `GET /metrics`
 - `POST /runs`
 - `POST /runs?wait=1`
 - `GET /runs`
@@ -160,6 +170,7 @@ Implemented local endpoints:
 - `POST /context`
 - `POST /approvals`, `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, `POST /approvals/:id/reject`
 - `POST /tools/invocations`, `GET /tools/invocations`, `GET /tools/invocations/:id`
+- `POST /debates`, `GET /debates/:id`, `GET /debates/:id/events`
 - `GET /providers`, `GET /providers/:id`
 - `GET /runtimes`, `GET /runtimes/:id`
 - `GET /models`, `GET /models/:id`
@@ -169,7 +180,7 @@ Implemented local endpoints:
 - `GET /artifacts/:id`
 - `GET /artifacts/:id/content`
 
-Every 4xx and 5xx response uses the unified `{ error: { code, message, details? } }` envelope with a closed code set.
+Every 4xx and 5xx response uses the unified `{ error: { code, message, details?, requestId? } }` envelope with a closed code set.
 
 The full current endpoint contract lives in `docs/development/API.md`.
 
@@ -192,7 +203,7 @@ Current events include:
 - `run.cancelled`
 - `run.failed`
 
-`GET /runs/:id/events` returns SSE-formatted replay. Open-ended local live streaming ships through `?live=1` with a 15-second heartbeat and 5-minute idle close; the bounded `live=1&stopAfter=N` mode is preserved for deterministic tests. Hosted production streaming is still planned (R10).
+`GET /runs/:id/events` returns SSE-formatted replay. Open-ended local live streaming ships through `?live=1` with a 15-second heartbeat and 5-minute idle close; the bounded `live=1&stopAfter=N` mode is preserved for deterministic tests. Hosted production streaming beyond the safe fake-worker slice is still not production-grade.
 
 Completed, cancelled, failed-after-start, and timeout-after-start runs can expose transcript artifacts through `GET /runs/:id/artifacts`, `GET /artifacts/:id` for global metadata lookup, and `GET /artifacts/:id/content` for streaming the raw bytes (transcripts as `application/x-ndjson`).
 
@@ -224,6 +235,11 @@ The current workspace has passing package coverage for:
 - ACP framing/correlation/redaction behavior in `@switchyard/protocol-acpx`.
 - OpenCode ACP adapter checks, event mapping, cancellation semantics, and transcript artifacts.
 - daemon smoke behavior including runtime-mode checks (including Claude no-spend defaults and fake live-probe budget flags), OpenCode ACP run/cancel/failure/timeout artifact retrieval, registry seeding, persistence, and restart reconciliation.
+- contracts-owned OpenAPI generation and route/error-code drift checks.
+- SDK lifecycle, event replay/live stream, artifact metadata/content, registry, runtime-mode, and typed error behavior.
+- CLI doctor, daemon start, fake run, runtime/runtimes test, debug, contract export, and clean local packaging smoke behavior.
+- adapter compatibility matrix no-spend pass/skip/fail reporting.
+- SQLite schema metadata, additive migration policy, representative pre-R3/pre-R7/pre-R9/pre-R11 fixture preservation, and corrupt/zero-byte database rejection.
 
 ## What Does Not Exist Yet
 
@@ -234,8 +250,6 @@ These are planned or designed in docs, but not shipped product:
 - Production-grade hybrid local node deployment.
 - S3/R2 network object storage backing. R10 ships memory and filesystem-backed object-compatible artifact stores.
 - WebSocket protocol package.
-- SDK package.
-- CLI package.
 - Policy package beyond current contracts/ports.
 - Cursor adapter.
 - OpenClaw adapter.
@@ -243,11 +257,10 @@ These are planned or designed in docs, but not shipped product:
 - Browser/search adapter.
 - Generic process adapter.
 - PTY adapter.
-- Debate engine.
+- Hosted debate with real participant runtimes and model judging.
 - Runtime-specific approval bridges (Codex/OpenCode/AgentField/Generic HTTP) are not shipped.
 - Real browser/search/fetch/repo/shell/GitHub tool execution is not shipped; R7 executes only deterministic `fake_echo`.
 - Trace endpoint.
-- OpenAPI generation.
 - Dashboard.
 - TUI.
 - Hosted (non-local) open-ended SSE streams.
@@ -769,7 +782,7 @@ Promotion criteria:
 
 ### R10: Hosted And Hybrid Execution
 
-Status: planned.
+Status: shipped. Verified on 2026-05-30 in `agent/phase-9-r10-hosted-and-hybrid-execution`.
 
 Goal: move from local product to deploy-anywhere product once local semantics are stable.
 
@@ -824,7 +837,7 @@ Promotion criteria:
 
 ### R11: SDK, CLI, And Hardening
 
-Status: planned.
+Status: shipped. Verified on 2026-05-30 in `agent/phase-10-r11-sdk-cli-and-hardening`.
 
 Goal: make Switchyard easier to consume and operate once the API is stable.
 
@@ -921,19 +934,20 @@ For releases that claim Codex behavior, verify:
 
 Current release readiness:
 
-- Local MVP is testable.
-- Codex `exec --json` is usable for one-shot local runs.
-- API docs exist for the local daemon.
-- Development docs contain local smoke and inspection commands.
-- Specs and implementation plans are no longer reliable as product truth because several plan checkboxes are stale.
+- R0-R11 have audit-green phase branches.
+- Local daemon, hosted-like fake worker slice, connected-node safe slice, SDK, CLI, OpenAPI, compatibility matrix, migrations, and packaging smoke are locally testable.
+- Codex `exec --json` remains usable for one-shot local runs.
+- Claude Code SDK mode is the shipped bounded interactive coding path.
+- API docs, generated OpenAPI, SDK, CLI, and development docs exist for the local daemon surface.
+- `PROJECT.md` records phase-by-phase audit status; `PRODUCT.md` is the owner-facing current truth.
 
 Known release risks:
 
 - Codex event shape depends on the local Codex CLI version.
 - Local open-ended SSE (`GET /runs/:id/events?live=1`) is shipped for daemon use, but hosted production streaming remains unshipped.
-- Runtime capability and doctor reporting are shipped for `fake.deterministic` and `codex.exec_json`, but only these two runtime modes are currently implemented.
+- Runtime capability and doctor reporting are shipped for `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; external/provider-backed modes still require local binaries/configuration or remain no-spend skipped in CI.
 - Artifact metadata/content endpoints are shipped (`GET /artifacts/:id`, `GET /artifacts/:id/content`), but HTTP `HEAD` and `Range` support is not implemented.
-- There is no hosted deployment path yet.
+- Hosted-like execution exists only as a safety-first fake-worker/connected-node slice. Production-grade hosted deployment, arbitrary hosted subprocess execution, and hosted real-runtime execution remain unshipped.
 
 ## Source Map
 
@@ -968,6 +982,27 @@ Explicitly not shipped in R10:
 - Hosted arbitrary subprocess/PTY/Codex/Claude/OpenCode execution.
 - Hosted browser/search/repo/GitHub/fetch tooling.
 - Hosted debate participant runtimes or model-judging workflows.
-- SDK/CLI/TUI/dashboard packaging changes beyond interface boundaries.
+- TUI/dashboard packaging changes.
 - Enterprise auth/billing/tenant controls.
 - S3/R2 network object-store client wiring.
+
+## R11 SDK, CLI, And Hardening (Shipped)
+
+Shipped in this phase:
+
+- `@switchyard/sdk` typed local daemon client for health/doctor, run lifecycle, event replay/live stream helpers, artifact metadata/content retrieval, registry/runtime-mode discovery, runtime-mode checks, and typed HTTP/network/decode/timeout/validation/stream errors.
+- `@switchyard/cli` `switchyard` binary with doctor, daemon start, fake run, runtime/runtimes test, debug run, contract export, and release smoke flows.
+- `@switchyard/contracts` endpoint inventory and deterministic OpenAPI 3.1 generation/checks.
+- Optional request ids in the HTTP error envelope, with bounded inbound `x-request-id` preservation.
+- Local `/metrics` endpoint.
+- SQLite schema metadata, additive migration policy checks, representative legacy fixture preservation, and corrupt/zero-byte database rejection.
+- Adapter compatibility matrix automation in CI-safe/no-spend mode.
+- Dist package exports plus clean temp packaging smoke that packs, installs, and exercises SDK/CLI/daemon flows outside the monorepo.
+
+Explicitly not shipped in R11:
+
+- Dashboard or TUI.
+- New runtime adapters beyond the existing runtime modes.
+- External provider spend in required checks.
+- Production-grade hosted deployment.
+- Enterprise auth, billing, or tenant controls.
