@@ -83,3 +83,17 @@ R7 is now shipped on the phase branch. Switchyard adds durable local middleware 
 
 ### Deferred Concerns
 - None.
+
+## Phase 7: R8 Interactive Coding Runtimes
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-7-r8-interactive-coding-runtimes.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-7-r8-interactive-coding-runtimes.md
+**Audit:** agent-runs/native-roadmap-20260529/audit/phase-7-report.md
+**Branch:** agent/phase-7-r8-interactive-coding-runtimes (audit GREEN; merge pending native runtime)
+**PR:** not created - native audit workflow requested; branch retained locally
+
+### What changed
+R8 is now shipped on the phase branch. Switchyard adds the first bounded interactive coding runtime path through `claude_code.sdk`, backed by structured Claude stream-json CLI transport behind the Claude client port. The runtime spine now handles post-start text input, waiting-for-input and waiting-for-approval states, bounded session-state patches, runtime approval pauses through the existing approval store, approval-resolution error mapping, and transcript artifacts with hard size limits and truncation markers. The daemon seeds and checks Claude Code without live prompt spend by default, while fake/no-spend tests cover the opt-in live-probe path. Codex remains `codex.exec_json` one-shot with explicit unsupported post-start input; Codex interactive promotion, PTY/TUI automation, hosted execution, and Claude session resume remain deferred.
+
+### Deferred Concerns
+- None.
