@@ -410,6 +410,65 @@ describe("sqlite persistence stores", () => {
     }
   });
 
+  it("guard-updates prepared metadata only when execution identity still matches", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-storage-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let connection: ReturnType<typeof openSqliteStorage> | undefined;
+
+    try {
+      connection = openSqliteStorage(dbPath);
+      const runs = new SqliteRunStore(connection.db);
+      await runs.create(
+        buildRun({
+          id: "run_guard_sqlite",
+          placement: "hosted",
+          runtime: "codex",
+          provider: "openai",
+          adapterType: "process",
+          runtimeMode: "codex.exec_json",
+          status: "queued",
+          metadata: { before: true }
+        })
+      );
+
+      const updated = await runs.updatePreparedMetadataIfMatch({
+        expected: {
+          id: "run_guard_sqlite",
+          status: "queued",
+          placement: "hosted",
+          runtime: "codex",
+          runtimeMode: "codex.exec_json",
+          provider: "openai",
+          adapterType: "process"
+        },
+        metadata: { sandbox: "read-only" }
+      });
+
+      expect(updated).toMatchObject({
+        ok: true,
+        run: { id: "run_guard_sqlite", metadata: { sandbox: "read-only" } }
+      });
+
+      const mismatch = await runs.updatePreparedMetadataIfMatch({
+        expected: {
+          id: "run_guard_sqlite",
+          status: "queued",
+          placement: "hosted",
+          runtime: "codex",
+          runtimeMode: "opencode.acp",
+          provider: "openai",
+          adapterType: "process"
+        },
+        metadata: { sandbox: "workspace-write" }
+      });
+      expect(mismatch).toEqual({ ok: false, reason: "identity_mismatch" });
+      expect((await runs.get("run_guard_sqlite"))?.metadata).toEqual({ sandbox: "read-only" });
+    } finally {
+      connection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("orders run events by sequence and filters by run id", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-storage-"));
     const dbPath = join(tempDir, "storage.sqlite");

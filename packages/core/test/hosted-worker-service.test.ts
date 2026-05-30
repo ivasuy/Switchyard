@@ -6,7 +6,39 @@ class InMemoryRunStore {
   async create(run: any) { this.items.set(run.id, run); return run; }
   async get(id: string) { return this.items.get(id); }
   async update(run: any) { this.items.set(run.id, run); return run; }
+  async updatePreparedMetadataIfMatch(input: any) {
+    const current = this.items.get(input.expected.id);
+    if (!current) {
+      return { ok: false, reason: "not_found" };
+    }
+    const sameIdentity =
+      current.status === input.expected.status &&
+      current.placement === input.expected.placement &&
+      current.runtime === input.expected.runtime &&
+      current.runtimeMode === input.expected.runtimeMode &&
+      current.provider === input.expected.provider &&
+      current.adapterType === input.expected.adapterType;
+    if (!sameIdentity) {
+      return { ok: false, reason: "identity_mismatch" };
+    }
+    const next = { ...current, metadata: input.metadata ?? {} };
+    this.items.set(next.id, next);
+    return { ok: true, run: next };
+  }
   async list() { return { runs: [...this.items.values()], nextCursor: null }; }
+}
+
+class MutatingRunStore extends InMemoryRunStore {
+  mutateBeforeNextGuardedUpdate?: (input: any) => Promise<void> | void;
+
+  override async updatePreparedMetadataIfMatch(input: any) {
+    if (this.mutateBeforeNextGuardedUpdate) {
+      const mutate = this.mutateBeforeNextGuardedUpdate;
+      this.mutateBeforeNextGuardedUpdate = undefined;
+      await mutate(input);
+    }
+    return super.updatePreparedMetadataIfMatch(input);
+  }
 }
 
 class InMemoryEventStore {
@@ -299,6 +331,59 @@ describe("HostedWorkerService", () => {
     expect(processed).toBe(true);
     expect(starts).toBe(1);
     expect((await runs.get(run.id))?.metadata).toMatchObject({ sandbox: "read-only" });
+  });
+
+  it("fails hosted run when durable row changes before prepared metadata persist", async () => {
+    const queue = new MemoryQueue();
+    const runs = new MutatingRunStore();
+    const events = new InMemoryEventStore();
+    const run = await runs.create({
+      id: "run_codex_guard_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    runs.mutateBeforeNextGuardedUpdate = async () => {
+      const current = await runs.get(run.id);
+      await runs.update({
+        ...current,
+        status: "cancelled",
+        endedAt: "2026-05-30T00:00:05.000Z"
+      });
+    };
+
+    let started = 0;
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "staging",
+      hostedRealRuntimeExecution: "enabled",
+      startRun: async () => {
+        started += 1;
+        return (await runs.get(run.id)) as any;
+      },
+      now: () => "2026-05-30T00:00:10.000Z"
+    });
+
+    await svc.processNext();
+    expect(started).toBe(0);
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    expect(events.items.at(-1)?.payload?.reasonCode).toBe("hosted_run_state_invalid");
+    expect((await queue.getJob("job_1"))?.failure?.reasonCode).toBe("hosted_run_state_invalid");
   });
 
   it("rejects tampered queue runtime mode before adapter start", async () => {

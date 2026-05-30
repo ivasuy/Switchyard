@@ -108,18 +108,23 @@ export class HostedWorkerService {
       return { ok: true, run: current };
     }
 
-    const next: Run = {
-      ...current,
-      metadata: preparedRun.metadata
-    };
-    await this.deps.runs.update(next);
-
-    const after = await this.deps.runs.get(sourceRun.id);
-    if (!after || !sameExecutionIdentity(after, sourceRun)) {
-      return { ok: false, message: "run_changed_after_prepare_persist" };
+    if (!this.deps.runs.updatePreparedMetadataIfMatch) {
+      return { ok: false, message: "prepared_metadata_guard_unsupported" };
     }
 
-    return { ok: true, run: next };
+    const guarded = await this.deps.runs.updatePreparedMetadataIfMatch({
+      expected: executionIdentity(sourceRun),
+      metadata: preparedRun.metadata ?? {}
+    });
+
+    if (!guarded.ok) {
+      return {
+        ok: false,
+        message: guarded.reason === "not_found" ? "run_not_found" : "run_changed_before_prepare_persist"
+      };
+    }
+
+    return { ok: true, run: guarded.run };
   }
 
   private async handleRunFailure(job: RunQueueClaimedJob, run: Run, error: unknown): Promise<boolean> {
@@ -187,13 +192,34 @@ function isTerminalRun(run: Run): boolean {
 }
 
 function sameExecutionIdentity(current: Run, expected: Run): boolean {
+  const identity = executionIdentity(expected);
   return (
-    current.id === expected.id &&
-    current.status === expected.status &&
-    current.placement === expected.placement &&
-    current.runtime === expected.runtime &&
-    current.runtimeMode === expected.runtimeMode &&
-    current.provider === expected.provider &&
-    current.adapterType === expected.adapterType
+    current.id === identity.id &&
+    current.status === identity.status &&
+    current.placement === identity.placement &&
+    current.runtime === identity.runtime &&
+    current.runtimeMode === identity.runtimeMode &&
+    current.provider === identity.provider &&
+    current.adapterType === identity.adapterType
   );
+}
+
+function executionIdentity(run: Run): {
+  id: string;
+  status: Run["status"];
+  placement: Run["placement"];
+  runtime: Run["runtime"];
+  runtimeMode: Run["runtimeMode"];
+  provider: Run["provider"];
+  adapterType: Run["adapterType"];
+} {
+  return {
+    id: run.id,
+    status: run.status,
+    placement: run.placement,
+    runtime: run.runtime,
+    runtimeMode: run.runtimeMode,
+    provider: run.provider,
+    adapterType: run.adapterType
+  };
 }

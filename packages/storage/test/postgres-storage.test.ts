@@ -110,6 +110,38 @@ describe("postgres storage", () => {
       createdAt: "2026-05-30T00:00:00.000Z"
     });
     expect((await assignments.listClaimable("node_1", "2026-05-30T00:00:00.000Z")).length).toBe(1);
+
+    const guarded = await runs.updatePreparedMetadataIfMatch({
+      expected: {
+        id: run.id,
+        status: "queued",
+        placement: "hosted",
+        runtime: "fake",
+        runtimeMode: "fake.deterministic",
+        provider: "test",
+        adapterType: "process"
+      },
+      metadata: { sandbox: "read-only" }
+    });
+    expect(guarded).toMatchObject({
+      ok: true,
+      run: { id: run.id, metadata: { sandbox: "read-only" } }
+    });
+
+    const mismatch = await runs.updatePreparedMetadataIfMatch({
+      expected: {
+        id: run.id,
+        status: "queued",
+        placement: "hosted",
+        runtime: "fake",
+        runtimeMode: "opencode.acp",
+        provider: "test",
+        adapterType: "process"
+      },
+      metadata: { sandbox: "workspace-write" }
+    });
+    expect(mismatch).toEqual({ ok: false, reason: "identity_mismatch" });
+    expect((await runs.get(run.id))?.metadata).toEqual({ sandbox: "read-only" });
   });
 
   it("uses real postgres stores when SWITCHYARD_TEST_POSTGRES_URL is configured", async () => {

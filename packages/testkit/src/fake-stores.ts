@@ -14,6 +14,8 @@ import type {
   ArtifactStore,
   DebateStore,
   EventStore,
+  GuardedPreparedMetadataUpdateInput,
+  GuardedPreparedMetadataUpdateResult,
   ListModelsFilter,
   ListModelsResult,
   ListProvidersFilter,
@@ -46,6 +48,30 @@ export class InMemoryRunStore implements RunStore {
   async update(run: Run): Promise<Run> {
     this.items.set(run.id, run);
     return run;
+  }
+
+  async updatePreparedMetadataIfMatch(
+    input: GuardedPreparedMetadataUpdateInput
+  ): Promise<GuardedPreparedMetadataUpdateResult> {
+    const current = this.items.get(input.expected.id);
+    if (!current) {
+      return { ok: false, reason: "not_found" };
+    }
+
+    const sameIdentity =
+      current.status === input.expected.status &&
+      current.placement === input.expected.placement &&
+      current.runtime === input.expected.runtime &&
+      current.runtimeMode === input.expected.runtimeMode &&
+      current.provider === input.expected.provider &&
+      current.adapterType === input.expected.adapterType;
+    if (!sameIdentity) {
+      return { ok: false, reason: "identity_mismatch" };
+    }
+
+    const next: Run = { ...current, metadata: input.metadata ?? {} };
+    this.items.set(next.id, next);
+    return { ok: true, run: next };
   }
 
   async list(filter: ListRunsFilter): Promise<ListRunsResult> {

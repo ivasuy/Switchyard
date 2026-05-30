@@ -1,8 +1,14 @@
 import type { Run } from "@switchyard/contracts";
-import type { ListRunsFilter, ListRunsResult, RunStore } from "@switchyard/core";
+import type {
+  GuardedPreparedMetadataUpdateInput,
+  GuardedPreparedMetadataUpdateResult,
+  ListRunsFilter,
+  ListRunsResult,
+  RunStore
+} from "@switchyard/core";
 import type { SwitchyardSqliteDatabase } from "./database.js";
 import { runs } from "./schema.js";
-import { and, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 
 type RunRow = typeof runs.$inferSelect;
 type RunInsertRow = Omit<typeof runs.$inferInsert, "startedAt" | "endedAt" | "runtimeMode"> & {
@@ -113,6 +119,36 @@ export class SqliteRunStore implements RunStore {
   async update(run: Run): Promise<Run> {
     await this.db.update(runs).set(toUpdateRow(run)).where(eq(runs.id, run.id));
     return run;
+  }
+
+  async updatePreparedMetadataIfMatch(
+    input: GuardedPreparedMetadataUpdateInput
+  ): Promise<GuardedPreparedMetadataUpdateResult> {
+    const identityConditions = [
+      eq(runs.id, input.expected.id),
+      eq(runs.status, input.expected.status),
+      eq(runs.placement, input.expected.placement),
+      eq(runs.runtime, input.expected.runtime),
+      eq(runs.provider, input.expected.provider),
+      eq(runs.adapterType, input.expected.adapterType),
+      input.expected.runtimeMode === undefined ? isNull(runs.runtimeMode) : eq(runs.runtimeMode, input.expected.runtimeMode)
+    ];
+
+    const rows = await this.db
+      .update(runs)
+      .set({ metadataJson: JSON.stringify(input.metadata ?? {}) })
+      .where(and(...identityConditions))
+      .returning();
+    const row = rows[0];
+    if (row) {
+      return { ok: true, run: fromRow(row) };
+    }
+
+    const existing = await this.get(input.expected.id);
+    if (!existing) {
+      return { ok: false, reason: "not_found" };
+    }
+    return { ok: false, reason: "identity_mismatch" };
   }
 
   async list(filter: ListRunsFilter): Promise<ListRunsResult> {

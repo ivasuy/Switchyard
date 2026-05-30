@@ -15,10 +15,34 @@ import { createHostedWorker } from "../src/worker.js";
 
 const defaultSandbox = () => resolveHostedSandboxConfig({ deploymentMode: "test", env: {} });
 
+class GuardedInMemoryRunStore extends InMemoryRunStore {
+  async updatePreparedMetadataIfMatch(input: any) {
+    const current = await this.get(input.expected.id);
+    if (!current) {
+      return { ok: false, reason: "not_found" };
+    }
+
+    const sameIdentity =
+      current.status === input.expected.status &&
+      current.placement === input.expected.placement &&
+      current.runtime === input.expected.runtime &&
+      current.runtimeMode === input.expected.runtimeMode &&
+      current.provider === input.expected.provider &&
+      current.adapterType === input.expected.adapterType;
+    if (!sameIdentity) {
+      return { ok: false, reason: "identity_mismatch" };
+    }
+
+    const next = { ...current, metadata: input.metadata ?? {} };
+    await this.update(next);
+    return { ok: true, run: next };
+  }
+}
+
 describe("hosted worker app", () => {
   it("processes queued hosted fake job", async () => {
     const queue = new MemoryRunQueue();
-    const runs = new InMemoryRunStore();
+    const runs = new GuardedInMemoryRunStore();
     const events = new InMemoryEventStore();
     await runs.create({
       id: "run_worker_1",
@@ -82,7 +106,7 @@ describe("hosted worker app", () => {
 
   it("completes hosted codex run using fake process factory", async () => {
     const queue = new MemoryRunQueue();
-    const runs = new InMemoryRunStore();
+    const runs = new GuardedInMemoryRunStore();
     const events = new InMemoryEventStore();
     await runs.create({
       id: "run_worker_codex",
@@ -128,7 +152,7 @@ describe("hosted worker app", () => {
 
   it("fails hosted opencode permission request visibly", async () => {
     const queue = new MemoryRunQueue();
-    const runs = new InMemoryRunStore();
+    const runs = new GuardedInMemoryRunStore();
     const events = new InMemoryEventStore();
     await runs.create({
       id: "run_worker_opencode_perm",
