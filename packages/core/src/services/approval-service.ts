@@ -46,6 +46,8 @@ export interface ApprovalServiceDependencies {
 }
 
 export class ApprovalService {
+  private readonly resolutionTails = new Map<string, Promise<void>>();
+
   constructor(private readonly deps: ApprovalServiceDependencies) {}
 
   async create(input: CreateApprovalInput): Promise<Approval> {
@@ -98,50 +100,81 @@ export class ApprovalService {
     eventType: "approval.approved" | "approval.rejected",
     input: ResolveApprovalInput
   ): Promise<ResolveApprovalResult> {
-    const approval = await this.deps.approvals.get(id);
-    if (!approval) {
-      throw new ServiceError("approval_not_found", `Approval not found: ${id}`);
-    }
-    if (approval.status !== "pending") {
-      throw new ServiceError("approval_not_pending", `Approval is not pending: ${id}`);
-    }
+    return this.withResolutionLock(id, async () => {
+      const approval = await this.deps.approvals.get(id);
+      if (!approval) {
+        throw new ServiceError("approval_not_found", `Approval not found: ${id}`);
+      }
+      if (approval.status !== "pending") {
+        throw new ServiceError("approval_not_pending", `Approval is not pending: ${id}`);
+      }
 
-    const resolution: Record<string, unknown> = {};
-    if (input.actor && input.actor.trim().length > 0) {
-      resolution.actor = input.actor.trim();
-    }
-    if (input.reason && input.reason.trim().length > 0) {
-      resolution.reason = input.reason.trim();
-    }
+      const resolution: Record<string, unknown> = {};
+      if (input.actor && input.actor.trim().length > 0) {
+        resolution.actor = input.actor.trim();
+      }
+      if (input.reason && input.reason.trim().length > 0) {
+        resolution.reason = input.reason.trim();
+      }
 
-    approval.status = status;
-    approval.resolvedAt = new Date().toISOString();
-    if (Object.keys(resolution).length > 0) {
-      approval.payload = redactSecrets({
-        ...approval.payload,
-        resolution
-      });
-    }
-    await this.deps.approvals.update(approval);
-    await this.appendAndPublish(await this.eventForRun(approval.runId, eventType, {
-      approvalId: approval.id,
-      status: approval.status
-    }));
-
-    let invocation: ToolInvocation | null = null;
-    if (this.deps.toolRouter) {
-      try {
-        invocation = await this.deps.toolRouter.resolveQueuedByApproval(approval);
-      } catch (error) {
-        this.deps.logger?.warn("approval.lifecycle_failed", {
-          approvalId: approval.id,
-          reason: error instanceof Error ? error.message : String(error)
+      const now = new Date().toISOString();
+      const nextApproval: Approval = {
+        ...approval,
+        status,
+        resolvedAt: now
+      };
+      if (Object.keys(resolution).length > 0) {
+        nextApproval.payload = redactSecrets({
+          ...approval.payload,
+          resolution
         });
-        throw error;
+      }
+
+      const persisted = await this.deps.approvals.updateIfStatus(id, "pending", nextApproval);
+      if (!persisted) {
+        throw new ServiceError("approval_not_pending", `Approval is not pending: ${id}`);
+      }
+
+      await this.appendAndPublish(await this.eventForRun(persisted.runId, eventType, {
+        approvalId: persisted.id,
+        status: persisted.status
+      }));
+
+      let invocation: ToolInvocation | null = null;
+      if (this.deps.toolRouter) {
+        try {
+          invocation = await this.deps.toolRouter.resolveQueuedByApproval(persisted);
+        } catch (error) {
+          this.deps.logger?.warn("approval.lifecycle_failed", {
+            approvalId: persisted.id,
+            reason: error instanceof Error ? error.message : String(error)
+          });
+          throw error;
+        }
+      }
+
+      return { approval: persisted, invocation };
+    });
+  }
+
+  private async withResolutionLock<T>(approvalId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.resolutionTails.get(approvalId) ?? Promise.resolve();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.resolutionTails.set(approvalId, tail);
+
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.resolutionTails.get(approvalId) === tail) {
+        this.resolutionTails.delete(approvalId);
       }
     }
-
-    return { approval, invocation };
   }
 
   private async appendAndPublish(event: SwitchyardEvent): Promise<void> {

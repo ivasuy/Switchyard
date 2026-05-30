@@ -79,6 +79,16 @@ export class SqliteApprovalStore implements ApprovalStore {
     return approval;
   }
 
+  async updateIfStatus(id: string, expectedStatus: Approval["status"], value: Approval): Promise<Approval | null> {
+    const rows = await this.db
+      .update(approvals)
+      .set(toUpdateRow(value))
+      .where(and(eq(approvals.id, id), eq(approvals.status, expectedStatus)))
+      .returning();
+    const row = rows[0];
+    return row ? fromRow(row) : null;
+  }
+
   async list(filter: ListApprovalsFilter): Promise<ListApprovalsResult> {
     const conditions: Array<ReturnType<typeof eq> | ReturnType<typeof or>> = [];
     if (filter.runId) {

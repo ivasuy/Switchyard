@@ -79,6 +79,20 @@ export class SqliteToolInvocationStore implements ToolInvocationStore {
     return value;
   }
 
+  async updateIfStatus(
+    id: string,
+    expectedStatus: ToolInvocation["status"],
+    value: ToolInvocation
+  ): Promise<ToolInvocation | null> {
+    const rows = await this.db
+      .update(toolInvocations)
+      .set(toUpdateRow(value))
+      .where(and(eq(toolInvocations.id, id), eq(toolInvocations.status, expectedStatus)))
+      .returning();
+    const row = rows[0];
+    return row ? fromRow(row) : null;
+  }
+
   async list(filter: ListToolInvocationsFilter): Promise<ListToolInvocationsResult> {
     const conditions: Array<ReturnType<typeof eq> | ReturnType<typeof or>> = [];
     if (filter.runId) conditions.push(eq(toolInvocations.runId, filter.runId));

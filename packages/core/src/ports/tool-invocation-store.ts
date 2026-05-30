@@ -18,4 +18,9 @@ export interface ListToolInvocationsResult {
 export interface ToolInvocationStore extends GenericStore<ToolInvocation> {
   list(filter: ListToolInvocationsFilter): Promise<ListToolInvocationsResult>;
   listByApproval(approvalId: string): Promise<ToolInvocation[]>;
+  updateIfStatus(
+    id: string,
+    expectedStatus: ToolInvocation["status"],
+    value: ToolInvocation
+  ): Promise<ToolInvocation | null>;
 }

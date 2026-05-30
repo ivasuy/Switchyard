@@ -50,6 +50,8 @@ export interface ToolRouterDependencies {
 }
 
 export class ToolRouter {
+  private readonly approvalResolutionTails = new Map<string, Promise<void>>();
+
   constructor(private readonly deps: ToolRouterDependencies) {}
 
   async invoke(input: InvokeToolInput): Promise<InvokeToolResult> {
@@ -190,66 +192,107 @@ export class ToolRouter {
   }
 
   async resolveQueuedByApproval(approval: Approval): Promise<ToolInvocation | null> {
-    const linked = await this.deps.invocations.listByApproval(approval.id);
-    const queued = linked.find((item) => item.status === "queued");
-    if (!queued) {
+    return this.withApprovalResolutionLock(approval.id, async () => {
+      const linked = await this.deps.invocations.listByApproval(approval.id);
+      const queued = linked.find((item) => item.status === "queued");
+      if (!queued) {
+        return null;
+      }
+
+      if (approval.status === "approved") {
+        const runningAttempt: ToolInvocation = { ...queued, status: "running" };
+        const running = await this.deps.invocations.updateIfStatus(queued.id, "queued", runningAttempt);
+        if (!running) {
+          return null;
+        }
+        await this.appendAndPublish(await this.eventForRun(running.runId, "tool.call", {
+          toolInvocationId: running.id,
+          type: running.type,
+          resumedByApprovalId: approval.id
+        }));
+
+        const adapter = this.deps.adapters.get("fake_echo");
+        if (!adapter) {
+          throw new ServiceError("internal_error", "fake_echo adapter is not configured");
+        }
+        let terminalAttempt: ToolInvocation;
+        try {
+          const output = redactSecrets(await adapter.invoke(running.input));
+          terminalAttempt = {
+            ...running,
+            status: "completed",
+            output,
+            completedAt: new Date().toISOString()
+          };
+        } catch (error) {
+          terminalAttempt = {
+            ...running,
+            status: "failed",
+            error: redactSecrets({
+              code: "tool_execution_failed",
+              message: error instanceof Error ? error.message : String(error)
+            }),
+            completedAt: new Date().toISOString()
+          };
+        }
+
+        const terminal = await this.deps.invocations.updateIfStatus(running.id, "running", terminalAttempt);
+        if (!terminal) {
+          return null;
+        }
+        await this.appendAndPublish(await this.eventForRun(terminal.runId, "tool.result", {
+          toolInvocationId: terminal.id,
+          status: terminal.status,
+          output: terminal.output,
+          error: terminal.error
+        }));
+        return terminal;
+      }
+
+      if (approval.status === "rejected") {
+        const deniedAttempt: ToolInvocation = {
+          ...queued,
+          status: "denied",
+          error: {
+            code: "approval_rejected",
+            message: "Tool invocation denied because approval was rejected"
+          },
+          completedAt: new Date().toISOString()
+        };
+        const denied = await this.deps.invocations.updateIfStatus(queued.id, "queued", deniedAttempt);
+        if (!denied) {
+          return null;
+        }
+        await this.appendAndPublish(await this.eventForRun(denied.runId, "tool.result", {
+          toolInvocationId: denied.id,
+          status: "denied",
+          reason: "approval_rejected"
+        }));
+        return denied;
+      }
+
       return null;
-    }
+    });
+  }
 
-    if (approval.status === "approved") {
-      queued.status = "running";
-      await this.deps.invocations.update(queued);
-      await this.appendAndPublish(await this.eventForRun(queued.runId, "tool.call", {
-        toolInvocationId: queued.id,
-        type: queued.type,
-        resumedByApprovalId: approval.id
-      }));
+  private async withApprovalResolutionLock<T>(approvalId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.approvalResolutionTails.get(approvalId) ?? Promise.resolve();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.approvalResolutionTails.set(approvalId, tail);
 
-      const adapter = this.deps.adapters.get("fake_echo");
-      if (!adapter) {
-        throw new ServiceError("internal_error", "fake_echo adapter is not configured");
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.approvalResolutionTails.get(approvalId) === tail) {
+        this.approvalResolutionTails.delete(approvalId);
       }
-      try {
-        const output = redactSecrets(await adapter.invoke(queued.input));
-        queued.status = "completed";
-        queued.output = output;
-        queued.completedAt = new Date().toISOString();
-      } catch (error) {
-        queued.status = "failed";
-        queued.error = redactSecrets({
-          code: "tool_execution_failed",
-          message: error instanceof Error ? error.message : String(error)
-        });
-        queued.completedAt = new Date().toISOString();
-      }
-
-      await this.deps.invocations.update(queued);
-      await this.appendAndPublish(await this.eventForRun(queued.runId, "tool.result", {
-        toolInvocationId: queued.id,
-        status: queued.status,
-        output: queued.output,
-        error: queued.error
-      }));
-      return queued;
     }
-
-    if (approval.status === "rejected") {
-      queued.status = "denied";
-      queued.error = {
-        code: "approval_rejected",
-        message: "Tool invocation denied because approval was rejected"
-      };
-      queued.completedAt = new Date().toISOString();
-      await this.deps.invocations.update(queued);
-      await this.appendAndPublish(await this.eventForRun(queued.runId, "tool.result", {
-        toolInvocationId: queued.id,
-        status: "denied",
-        reason: "approval_rejected"
-      }));
-      return queued;
-    }
-
-    return null;
   }
 
   private async requireRun(id: string) {

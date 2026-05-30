@@ -158,6 +158,14 @@ class InMemoryApprovalStore implements ApprovalStore {
     this.items.set(value.id, value);
     return value;
   }
+  async updateIfStatus(id: string, expectedStatus: Approval["status"], value: Approval): Promise<Approval | null> {
+    const existing = this.items.get(id);
+    if (!existing || existing.status !== expectedStatus) {
+      return null;
+    }
+    this.items.set(id, value);
+    return value;
+  }
   async list(_filter: ListApprovalsFilter): Promise<ListApprovalsResult> {
     return { approvals: [...this.items.values()], nextCursor: null };
   }
@@ -176,11 +184,50 @@ class InMemoryToolInvocationStore implements ToolInvocationStore {
     this.items.set(value.id, value);
     return value;
   }
+  async updateIfStatus(
+    id: string,
+    expectedStatus: ToolInvocation["status"],
+    value: ToolInvocation
+  ): Promise<ToolInvocation | null> {
+    const existing = this.items.get(id);
+    if (!existing || existing.status !== expectedStatus) {
+      return null;
+    }
+    this.items.set(id, value);
+    return value;
+  }
   async list(_filter: ListToolInvocationsFilter): Promise<ListToolInvocationsResult> {
     return { invocations: [...this.items.values()], nextCursor: null };
   }
   async listByApproval(approvalId: string): Promise<ToolInvocation[]> {
     return [...this.items.values()].filter((item) => item.approvalId === approvalId);
+  }
+}
+
+class SnapshotApprovalStore extends InMemoryApprovalStore {
+  async get(id: string): Promise<Approval | undefined> {
+    const item = this.items.get(id);
+    return item ? structuredClone(item) : undefined;
+  }
+}
+
+class SnapshotToolInvocationStore extends InMemoryToolInvocationStore {
+  async get(id: string): Promise<ToolInvocation | undefined> {
+    const item = this.items.get(id);
+    return item ? structuredClone(item) : undefined;
+  }
+
+  async update(value: ToolInvocation): Promise<ToolInvocation> {
+    // Yield once to amplify concurrent queued->running transitions.
+    await Promise.resolve();
+    this.items.set(value.id, structuredClone(value));
+    return value;
+  }
+
+  async listByApproval(approvalId: string): Promise<ToolInvocation[]> {
+    return [...this.items.values()]
+      .filter((item) => item.approvalId === approvalId)
+      .map((item) => structuredClone(item));
   }
 }
 
@@ -200,6 +247,13 @@ class FakeEchoToolAdapter implements ToolAdapter {
   async cancel(): Promise<void> {}
   async artifacts() {
     return [];
+  }
+}
+
+class DelayedFakeEchoToolAdapter extends FakeEchoToolAdapter {
+  async invoke(input: Record<string, unknown>) {
+    await Promise.resolve();
+    return super.invoke(input);
   }
 }
 
@@ -365,5 +419,61 @@ describe("middleware services", () => {
     expect(toolResultEvents).toHaveLength(1);
     expect(JSON.stringify(queued.invocation.input)).not.toContain("abc");
     expect(JSON.stringify(queued.invocation.input)).toContain("[REDACTED]");
+  });
+
+  it("allows only one concurrent approval resolution and persists one terminal tool.result", async () => {
+    const runs = new InMemoryRunStore();
+    const run = makeRun("run_concurrent_approval");
+    await runs.create(run);
+    const events = new InMemoryEventStore();
+    const approvals = new SnapshotApprovalStore();
+    const invocations = new SnapshotToolInvocationStore();
+    const fakeEcho = new DelayedFakeEchoToolAdapter();
+    const policy = new LocalPolicyGate();
+    const toolRouter = new ToolRouter({
+      runs,
+      events,
+      approvals,
+      invocations,
+      adapters: new Map([["fake_echo", fakeEcho]]),
+      policy
+    });
+    const approvalService = new ApprovalService({ approvals, runs, events, toolRouter });
+
+    const queued = await toolRouter.invoke({
+      runId: run.id,
+      type: "fake_echo",
+      input: {
+        text: "one-shot",
+        requiresApproval: true
+      }
+    });
+    expect(queued.statusCode).toBe(202);
+
+    const approvalId = queued.approval?.id;
+    if (!approvalId) {
+      throw new Error("approval id missing");
+    }
+
+    const [first, second] = await Promise.allSettled([
+      approvalService.approve(approvalId, { actor: "actor-1" }),
+      approvalService.approve(approvalId, { actor: "actor-2" })
+    ]);
+
+    const successes = [first, second].filter((result) => result.status === "fulfilled");
+    const failures = [first, second].filter((result) => result.status === "rejected");
+    expect(successes).toHaveLength(1);
+    expect(failures).toHaveLength(1);
+    if (failures[0]?.status === "rejected") {
+      expect(failures[0].reason).toMatchObject({ code: "approval_not_pending" });
+    }
+
+    const terminal = await invocations.list({ runId: run.id, status: "completed", limit: 10 });
+    expect(terminal.invocations).toHaveLength(1);
+    expect(fakeEcho.invocationCount).toBe(1);
+
+    const runEvents = await events.listByRun(run.id);
+    const toolResults = runEvents.filter((event) => event.type === "tool.result");
+    expect(toolResults).toHaveLength(1);
   });
 });

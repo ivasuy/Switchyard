@@ -172,6 +172,15 @@ export class InMemoryApprovalStore implements ApprovalStore {
     return value;
   }
 
+  async updateIfStatus(id: string, expectedStatus: Approval["status"], value: Approval): Promise<Approval | null> {
+    const existing = this.items.get(id);
+    if (!existing || existing.status !== expectedStatus) {
+      return null;
+    }
+    this.items.set(id, value);
+    return value;
+  }
+
   async list(filter: ListApprovalsFilter): Promise<ListApprovalsResult> {
     let items = sortNewest([...this.items.values()]);
     items = items.filter((item) => {
@@ -200,6 +209,19 @@ export class InMemoryToolInvocationStore implements ToolInvocationStore {
 
   async update(value: ToolInvocation): Promise<ToolInvocation> {
     this.items.set(value.id, value);
+    return value;
+  }
+
+  async updateIfStatus(
+    id: string,
+    expectedStatus: ToolInvocation["status"],
+    value: ToolInvocation
+  ): Promise<ToolInvocation | null> {
+    const existing = this.items.get(id);
+    if (!existing || existing.status !== expectedStatus) {
+      return null;
+    }
+    this.items.set(id, value);
     return value;
   }
 

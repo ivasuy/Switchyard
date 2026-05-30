@@ -276,9 +276,6 @@ CREATE INDEX IF NOT EXISTS placement_decisions_run_id_idx
 CREATE INDEX IF NOT EXISTS runs_created_at_idx
   ON runs (created_at DESC, id DESC);
 
-CREATE INDEX IF NOT EXISTS runtimes_provider_id_idx
-  ON runtimes (provider_id);
-
 CREATE INDEX IF NOT EXISTS models_provider_id_idx
   ON models (provider_id);
 
@@ -324,6 +321,10 @@ function applyAdditiveMigrations(sqlite: Database.Database): void {
 function migrate(sqlite: Database.Database): void {
   sqlite.exec(migrationSql);
   applyAdditiveMigrations(sqlite);
+  sqlite.exec(`
+CREATE INDEX IF NOT EXISTS runtimes_provider_id_idx
+  ON runtimes (provider_id);
+`);
 }
 
 export function openSqliteStorage(path: string): OpenSqliteStorageResult {

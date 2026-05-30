@@ -16,4 +16,5 @@ export interface ListApprovalsResult {
 
 export interface ApprovalStore extends GenericStore<Approval> {
   list(filter: ListApprovalsFilter): Promise<ListApprovalsResult>;
+  updateIfStatus(id: string, expectedStatus: Approval["status"], value: Approval): Promise<Approval | null>;
 }
