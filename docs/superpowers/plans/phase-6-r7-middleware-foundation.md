@@ -144,9 +144,15 @@ POST /tools/invocations fake_echo
 
 `instructions`: Implement the R7 vertical slice exactly as a local middleware foundation. Extend contracts for `fake_echo`, tool approval/error fields, approval lifecycle event types, and new HTTP error codes while keeping existing run, registry, artifact, SSE, runtime-mode, and adapter behavior backward compatible. Extend store ports with list/search filters and cursor support only where the spec requires it. Add durable SQLite tables, indexes, additive migrations, and stores for memory, evidence, and tool invocations; extend existing message and approval stores with list filters. Add in-memory middleware stores and a deterministic `FakeEchoToolAdapter` in testkit.
 
-Replace the six not-implemented service shells with real services: `MessageRouter`, `MemoryService`, `EvidenceService`, `ContextBuilder`, `ApprovalService`, and `ToolRouter`. Services must validate run references, use generated ids/timestamps, emit/publish events where specified, redact secrets in policy traces/events/invocation records/approval payloads, and return deterministic packets/rendered text. `ContextBuilder` must not persist context packets. `ToolRouter` must execute only `fake_echo`; real tool types are denied before adapter execution with `tool_policy_denied`. Approval-required fake tool requests create queued invocations and pending approvals, then resume or deny exactly once when approval resolves.
+Replace the six not-implemented service shells with real services: `MessageRouter`, `MemoryService`, `EvidenceService`, `ContextBuilder`, `ApprovalService`, and `ToolRouter`. Services must validate run references, use generated ids/timestamps, emit/publish events where specified, redact secrets in policy traces/events/invocation records/approval payloads, and return deterministic packets/rendered text. Use one shared recursive redaction helper before every persistence, event, and log boundary for approval payloads, invocation input/output/error, policy traces, and lifecycle event payloads. Matching is case-insensitive for keys containing `token`, `apiKey`, `authorization`, `password`, or `secret`, and traversal must include nested arrays and objects.
+
+`ContextBuilder` must not persist context packets. If `POST /runs` includes `context`, reject caller metadata that already contains reserved keys `originalTask` or `contextPacket` so Switchyard-owned context metadata cannot be spoofed. If `context` is absent, preserve caller task and metadata exactly as R6 did.
+
+`ToolRouter` must execute only `fake_echo`; real tool types `web_search`, `fetch`, `browser`, `repo`, `shell`, and `github` are denied before adapter dispatch with `tool_policy_denied`. Add test-only adapter counters to prove denied real tools do not invoke adapters. Approval-required fake tool requests create queued invocations and pending approvals, then resume or deny exactly once when approval resolves. SQLite-backed approval resolution should use conditional status updates and a local transaction for approval update, invocation update, and event writes where practical; in-memory stores must mirror the same one-shot semantics.
 
 Add protocol-rest middleware routes for messages, memory, evidence, context, approvals, and tools. All new errors use the existing error envelope. `POST /runs` must accept optional `context`; when absent, existing run behavior is unchanged. When present, it builds/render context, stores `metadata.originalTask` and `metadata.contextPacket`, and persists the rendered task. Wire daemon in-memory and SQLite stores/services/routes plus the fake echo tool. Update docs/product/changelog only after tests pass.
+
+Clarify the R7 error-code surface during implementation: `tool_policy_denied` is returned for all known real tool denials; unknown tool types return `400 invalid_input`; approval-required fake tool requests return `202` and do not emit `approval_required` as an error. If `approval_required` or `unsupported_tool` remain in the contract enum for forward compatibility, document that no R7 REST route emits them.
 
 `acceptance`:
 - Messages can be created/listed/read locally, validate destinations, persist to SQLite, and emit `message.sent`.
@@ -183,16 +189,21 @@ Add protocol-rest middleware routes for messages, memory, evidence, context, app
 | contract enum expansion | Existing exact-enum tests fail or new events are rejected | `fake_echo`, approval lifecycle event, or new error code absent | Update contracts and tests in same slice | New middleware records/events parse; old contracts still pass |
 | SQLite migration | R6 databases fail to open or lose existing data | new tables/indexes not additive | Add `CREATE TABLE IF NOT EXISTS`, index DDL, and pre-R7 migration test | Existing local data survives R7 startup |
 | list pagination | Middleware list endpoints repeat or skip rows | cursor only uses timestamp | Use createdAt plus id cursor, newest first | Stable `nextCursor` behavior |
+| list validation | Malformed/expired cursor or invalid limit returns vague 500 | bad `before`, `limit=0`, or `limit=201` | Validate query params and return `400 invalid_query` with field detail | User gets actionable query error |
 | message routing | Message emits event on wrong run or accepts no destination | only channel/from/to partial body | Require toRunId or channel; choose event run id per spec | `message.sent` is inspectable on correct stream |
+| event publication | Record is persisted but event write/publish fails silently | EventStore write or EventBus publish throws | Treat EventStore failure as request failure; log/preserve EventBus publish failure without corrupting persisted state | Event-backed inspection remains truthful |
 | memory API | REST implies vector memory | embedding accepted or search uses embedding | Reject REST embedding, use substring-only search | User sees `400 invalid_input` for embeddings |
 | evidence API | Unsafe local path is stored | absolute, parent traversal, or Windows path | Validate relative safe paths before create | `400 invalid_input` |
 | context builder | Unknown references create partial packets | missing memory/evidence/message id | Read all referenced ids first and fail with matching `*_not_found` | No partial context or run is created |
 | run create context | Existing run behavior changes when context is absent | route always mutates task/metadata | Branch only when `context` exists | R0-R6 run tests remain green |
+| run create context | Caller spoofs context metadata | metadata includes `originalTask` or `contextPacket` with `context` present | Reject reserved keys in R7 | `400 invalid_input`, no run created |
 | approval resolution | Approval can be approved/rejected twice | stale pending check | Require pending status and update atomically enough for local stores | `409 approval_not_pending` |
-| tool policy | Real tools execute or adapter is called before denial | shell/browser/fetch/etc. accepted | Deny real tool types before adapter dispatch | `403 tool_policy_denied`, no side effects |
+| tool policy | Real tools execute or adapter is called before denial | `web_search`, `fetch`, `browser`, `repo`, `shell`, or `github` accepted | Deny real tool types before adapter dispatch | `403 tool_policy_denied`, no side effects |
 | tool approval resume | Queued invocation resumes multiple times or not at all | approval linkage missing | Store `approvalId`, lookup queued invocation, transition once | One `tool.result` terminal state |
-| secret redaction | policy trace or payload stores tokens | input includes token/apiKey/authorization/password/secret | Redact recursively before persistence/events | No secret in events/invocations/approvals/logs |
+| fake tool execution | Adapter throws after invocation is created | fake adapter failure or malformed input | Mark invocation failed, store redacted error, emit one failed `tool.result` | Invocation has terminal failed state |
+| secret redaction | policy trace or payload stores tokens | input includes token/apiKey/authorization/password/secret | Redact recursively before persistence/events/logging | No secret in events/invocations/approvals/logs |
 | route registration | `/tools/invocations/:id` shadows collection route | Fastify order conflict | Register collection and item routes unambiguously | GET/POST route tests pass |
+| SQLite write contention | Busy/locked write turns into partial state | SQLite busy/locked during approval/tool transition | Fail request with envelope; do not emit success events after failed write | User can retry; no double terminal event |
 
 `observability`:
 - `logs`: service-level warnings for `message.route_failed`, `memory.persistence_failed`, `evidence.persistence_failed`, `context.build_failed`, `approval.lifecycle_failed`, and `tool.invoke_failed`; logs must include ids/reason codes only and no secrets.
@@ -209,15 +220,23 @@ Add protocol-rest middleware routes for messages, memory, evidence, context, app
 - `{ name: "context missing reference", lens: "error_path", given: "unknown memory/evidence/message id", expect: "matching *_not_found and no run created" }`
 - `{ name: "run create without context unchanged", lens: "happy_shadow_nil", given: "existing fake run body", expect: "same run.task/metadata shape as R6" }`
 - `{ name: "run create with context", lens: "integration", given: "fake run with memory/evidence context", expect: "rendered task, originalTask, contextPacket metadata, normal completion" }`
+- `{ name: "run context reserved metadata collision", lens: "error_path", given: "POST /runs with context plus metadata.originalTask or metadata.contextPacket", expect: "400 invalid_input and no run created" }`
 - `{ name: "approval lifecycle", lens: "happy", given: "pending approval", expect: "approve/reject updates status, resolvedAt, lifecycle event" }`
 - `{ name: "approval not pending", lens: "error_path", given: "approve already approved approval", expect: "409 approval_not_pending" }`
+- `{ name: "approval one-shot tool transition", lens: "edge_concurrency", given: "approve twice or approve/reject a queued invocation", expect: "one lifecycle transition and one terminal tool.result only" }`
 - `{ name: "fake echo safe", lens: "happy", given: "fake_echo text hello", expect: "completed invocation with output.echo and tool.call/tool.result events" }`
+- `{ name: "fake echo adapter failure", lens: "error_path", given: "fake adapter throws after tool.call", expect: "failed invocation, redacted error, and one failed tool.result" }`
 - `{ name: "fake echo approval resume", lens: "integration", given: "requiresApproval true then approve", expect: "queued invocation, approval, resumed completed invocation" }`
 - `{ name: "fake echo rejection denial", lens: "integration", given: "requiresApproval true then reject", expect: "invocation denied and denied tool.result" }`
 - `{ name: "real tool denied", lens: "error_path", given: "type shell/github/browser/fetch/repo/web_search", expect: "403 tool_policy_denied and no adapter execution" }`
+- `{ name: "real tool adapter not invoked", lens: "edge_security", given: "registered throwing/counter adapter and known real tool type", expect: "tool_policy_denied and adapter call count remains zero" }`
+- `{ name: "middleware route ordering", lens: "integration", given: "GET /memory/search, GET /memory/:id, approval action routes, tool invocation collection/item routes", expect: "each resolves to intended handler without shadowing" }`
+- `{ name: "list query validation", lens: "error_path", given: "malformed before cursor, limit 0, limit 201, invalid enum filter", expect: "400 invalid_query or 400 invalid_input per existing route convention" }`
 - `{ name: "secret redaction", lens: "edge_security", given: "token/apiKey/password/authorization in input/payload", expect: "stored events/invocation/approval/policy traces do not contain secret values" }`
 - `{ name: "sqlite reopen persistence", lens: "integration", given: "records created then storage reopened", expect: "message/memory/evidence/approval/tool records remain inspectable" }`
 - `{ name: "pre-r7 migration", lens: "integration", given: "R6 sqlite schema with run/session/runtime data", expect: "new tables/indexes created and old data preserved" }`
+- `{ name: "pre-r7 migration indexes", lens: "integration", given: "R6 sqlite database opened by R7", expect: "PRAGMA index_list confirms required message, approval, memory, evidence, and tool invocation indexes exist" }`
+- `{ name: "R7 docs closeout", lens: "edge_docs", given: "implementation closeout docs", expect: "PRODUCT.md, CHANGELOG.md, docs/development/API.md, and docs/development/DEVELOPMENT.md mention substring-only memory, no remote evidence fetch, fake_echo-only execution, real-tool denial, and context packet persistence limits" }`
 
 `integration_contracts`:
 - `exports`:
@@ -248,6 +267,15 @@ Add protocol-rest middleware routes for messages, memory, evidence, context, app
 4. REST middleware routes and run-context extension.
 5. Daemon wiring and smoke tests.
 6. Product/development docs and changelog after checks pass.
+
+Implementer checklist:
+
+- Contracts pass before storage work starts.
+- Storage tests prove fresh schema, pre-R7 migration, required indexes, and reopen persistence.
+- Core service tests prove one-shot approval/tool transitions and shared redaction.
+- REST tests prove route ordering, error envelopes, and run-context backward compatibility.
+- Daemon smoke proves the end-to-end local middleware workflow.
+- Docs/product/changelog are updated last and checked against the R7 docs closeout test case.
 
 ## Deferred Concerns
 
