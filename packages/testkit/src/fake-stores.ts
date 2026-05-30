@@ -1,5 +1,6 @@
 import type {
   Artifact,
+  Debate,
   Model,
   Provider,
   Run,
@@ -11,6 +12,7 @@ import type {
 } from "@switchyard/contracts";
 import type {
   ArtifactStore,
+  DebateStore,
   EventStore,
   ListModelsFilter,
   ListModelsResult,
@@ -114,6 +116,10 @@ export class InMemoryEventStore implements EventStore {
   async listByRun(runId: string): Promise<SwitchyardEvent[]> {
     return this.items.filter((event) => event.runId === runId);
   }
+
+  async listByDebate(debateId: string): Promise<SwitchyardEvent[]> {
+    return this.items.filter((event) => event.debateId === debateId);
+  }
 }
 
 export class InMemorySessionStore implements SessionStore {
@@ -157,6 +163,28 @@ export class InMemoryArtifactStore implements ArtifactStore {
 
   async listByRun(runId: string): Promise<Artifact[]> {
     return [...this.items.values()].filter((artifact) => artifact.runId === runId);
+  }
+
+  async listByDebate(debateId: string): Promise<Artifact[]> {
+    return [...this.items.values()].filter((artifact) => artifact.debateId === debateId);
+  }
+}
+
+export class InMemoryDebateStore implements DebateStore {
+  readonly items = new Map<string, Debate>();
+
+  async create(value: Debate): Promise<Debate> {
+    this.items.set(value.id, value);
+    return value;
+  }
+
+  async get(id: string): Promise<Debate | undefined> {
+    return this.items.get(id);
+  }
+
+  async update(value: Debate): Promise<Debate> {
+    this.items.set(value.id, value);
+    return value;
   }
 }
 

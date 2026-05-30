@@ -810,6 +810,10 @@ class InMemoryArtifactStore implements ArtifactStore {
   async listByRun(runId: string): Promise<Artifact[]> {
     return this.items.filter((artifact) => artifact.runId === runId);
   }
+
+  async listByDebate(debateId: string): Promise<Artifact[]> {
+    return this.items.filter((artifact) => artifact.debateId === debateId);
+  }
 }
 
 function seedRuntimeMode(registry: InMemoryRegistryStore, mode: {

@@ -597,6 +597,11 @@ describe("Switchyard contracts", () => {
     ).toBe("runtime_mode_not_found");
   });
 
+  it("includes debate_not_found and evidence_not_found in HTTP error schemas", () => {
+    expect(httpErrorCodeSchema.parse("debate_not_found")).toBe("debate_not_found");
+    expect(httpErrorCodeSchema.parse("evidence_not_found")).toBe("evidence_not_found");
+  });
+
   it("parses debate participant and limits", () => {
     const debate = debateSchema.parse({
       id: "debate_123",
@@ -611,7 +616,8 @@ describe("Switchyard contracts", () => {
           model: "opencode/big-pickle",
           role: "architect",
           status: "created",
-          turnsUsed: 0
+          turnsUsed: 0,
+          runIds: []
         }
       ],
       limits: {
@@ -627,10 +633,22 @@ describe("Switchyard contracts", () => {
         stopOnLowNewInformation: true,
         humanStopAllowed: true
       },
+      evidenceIds: [],
+      messageIds: [],
+      eventIds: [],
+      budget: {
+        status: "within_budget",
+        maxCostUsd: 0,
+        spentCostUsd: 0
+      },
       createdAt: "2026-05-11T00:00:00.000Z"
     });
 
     expect(debate.participants[0]?.role).toBe("architect");
+    expect(debate.evidenceIds).toEqual([]);
+    expect(debate.messageIds).toEqual([]);
+    expect(debate.eventIds).toEqual([]);
+    expect(debate.budget.status).toBe("within_budget");
   });
 
   it("parses the normalized event envelope", () => {
@@ -832,9 +850,17 @@ describe("Switchyard contracts", () => {
           stopOnLowNewInformation: false,
           humanStopAllowed: true
         },
+        evidenceIds: [],
+        messageIds: [],
+        eventIds: [],
+        budget: {
+          status: "within_budget",
+          maxCostUsd: 0,
+          spentCostUsd: 0
+        },
         createdAt: "2026-05-11T00:00:00.000Z"
       },
-      ["id", "topic", "mode", "status", "participants", "limits", "createdAt"]
+      ["id", "topic", "mode", "status", "participants", "limits", "budget", "createdAt"]
     );
 
     expectRequiredFields(

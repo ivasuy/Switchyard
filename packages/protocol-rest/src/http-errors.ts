@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 
 export type HttpErrorCode =
   | "run_not_found"
+  | "debate_not_found"
   | "artifact_not_found"
   | "missing_artifact_content"
   | "provider_not_found"
@@ -38,6 +39,7 @@ export interface HttpErrorEnvelope {
 
 const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   run_not_found: 404,
+  debate_not_found: 404,
   artifact_not_found: 404,
   missing_artifact_content: 404,
   provider_not_found: 404,

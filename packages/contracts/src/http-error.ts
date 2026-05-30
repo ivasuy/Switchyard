@@ -2,12 +2,14 @@ import { z } from "zod";
 
 export const httpErrorCodeSchema = z.enum([
   "run_not_found",
+  "debate_not_found",
   "artifact_not_found",
   "missing_artifact_content",
   "provider_not_found",
   "runtime_not_found",
   "runtime_mode_not_found",
   "model_not_found",
+  "evidence_not_found",
   "invalid_input",
   "invalid_query",
   "adapter_protocol_failed",

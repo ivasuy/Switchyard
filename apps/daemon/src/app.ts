@@ -20,6 +20,7 @@ import {
   MessageRouter,
   MemoryService,
   EvidenceService,
+  DebateService,
   ContextBuilder,
   ApprovalService,
   ToolRouter,
@@ -29,6 +30,7 @@ import {
   RunLauncherService,
   RunService,
   RuntimeRunnerService,
+  type DebateStore,
   type EventStore,
   type MessageStore,
   type MemoryStore,
@@ -42,6 +44,7 @@ import {
 import {
   contentTypeForArtifact,
   registerArtifactRoutes,
+  registerDebateRoutes,
   registerErrorEnvelope,
   registerMiddlewareRoutes,
   registerRegistryRoutes,
@@ -54,6 +57,7 @@ import {
   InMemoryApprovalStore,
   InMemoryEvidenceStore,
   InMemoryArtifactStore,
+  InMemoryDebateStore,
   InMemoryEventStore,
   InMemoryMemoryStore,
   InMemoryMessageStore,
@@ -66,6 +70,7 @@ import {
   openSqliteStorage,
   SqliteApprovalStore,
   SqliteArtifactStore,
+  SqliteDebateStore,
   SqliteEvidenceStore,
   SqliteEventStore,
   SqliteMemoryStore,
@@ -80,6 +85,7 @@ import { type DaemonConfig } from "./config.js";
 
 interface DaemonStores {
   runs: RunStore;
+  debates: DebateStore;
   events: EventStore;
   sessions: SessionStore;
   artifacts: ArtifactStore;
@@ -381,16 +387,42 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   registerErrorEnvelope(app);
 
   app.get("/health", async () => ({ ok: true }));
+  const contextBuilder = new ContextBuilder({
+    memory: stores.memory,
+    evidence: stores.evidence,
+    messages: stores.messages
+  });
+  const messageRouter = new MessageRouter({
+    runs: stores.runs,
+    messages: stores.messages,
+    events: stores.events,
+    eventBus
+  });
+  const debateServiceOptions: ConstructorParameters<typeof DebateService>[0] = {
+    debates: stores.debates,
+    runs: stores.runs,
+    runService,
+    contextBuilder,
+    messageRouter,
+    evidence: stores.evidence,
+    events: stores.events,
+    artifacts: stores.artifacts,
+    eventBus,
+    defaultCwd: process.cwd()
+  };
+  if (stores.artifactContent) {
+    debateServiceOptions.artifactContent = stores.artifactContent;
+  }
+  if (options.logger) {
+    debateServiceOptions.logger = options.logger;
+  }
+  const debateService = new DebateService(debateServiceOptions);
   registerRunRoutes(app, {
     ...stores,
     eventBus,
     launcher,
     runService,
-    contextBuilder: new ContextBuilder({
-      memory: stores.memory,
-      evidence: stores.evidence,
-      messages: stores.messages
-    }),
+    contextBuilder,
     registry: stores.registry,
     registryService
   });
@@ -417,19 +449,10 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   });
   approvalServiceRef = approvalService;
   registerMiddlewareRoutes(app, {
-    messageRouter: new MessageRouter({
-      runs: stores.runs,
-      messages: stores.messages,
-      events: stores.events,
-      eventBus: middlewareEventBus
-    }),
+    messageRouter,
     memoryService: new MemoryService({ memory: stores.memory }),
     evidenceService: new EvidenceService({ evidence: stores.evidence }),
-    contextBuilder: new ContextBuilder({
-      memory: stores.memory,
-      evidence: stores.evidence,
-      messages: stores.messages
-    }),
+    contextBuilder,
     approvalService,
     toolRouter
   });
@@ -437,6 +460,12 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     registry: stores.registry,
     doctor: doctorService,
     registryService
+  });
+  registerDebateRoutes(app, {
+    debateService,
+    debates: stores.debates,
+    events: stores.events,
+    eventBus
   });
   const reader = buildArtifactContentReader(stores.artifactContent);
   registerArtifactRoutes(app, {
@@ -473,6 +502,7 @@ function buildArtifactContentReader(
 function createInMemoryStores(): DaemonStores {
   return {
     runs: new InMemoryRunStore(),
+    debates: new InMemoryDebateStore(),
     events: new InMemoryEventStore(),
     sessions: new InMemorySessionStore(),
     artifacts: new InMemoryArtifactStore(),
@@ -494,6 +524,7 @@ function createStorageStores(config: DaemonConfig): DaemonStoreResult {
 
   return {
     runs: new SqliteRunStore(storage.db),
+    debates: new SqliteDebateStore(storage.db),
     events: new SqliteEventStore(storage.db),
     sessions: new SqliteSessionStore(storage.db),
     artifacts: new SqliteArtifactStore(storage.db),

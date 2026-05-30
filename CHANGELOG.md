@@ -17,6 +17,24 @@ All notable changes to Switchyard will be documented in this file.
 - Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.
 
+## 2026-05-30 - Roadmap Release Train R9 Debate V1
+
+### Added
+
+- Added local fake deterministic debate workflow routes: `POST /debates`, `POST /debates?wait=1`, `GET /debates/:id`, and `GET /debates/:id/events`.
+- Added debate persistence (`debates` table + indexes) with additive SQLite migration and `SqliteDebateStore`.
+- Added `DebateService` orchestration for bounded two-participant fake debates using existing run/message/evidence/event/artifact primitives.
+- Added debate-aware message routing metadata (`debateId`, `participantId`) and `MessageRouter.createWithEvent`.
+- Added debate-scoped event/artifact listing APIs in storage and ports (`EventStore.listByDebate`, `ArtifactStore.listByDebate`).
+- Added deterministic judge output and final markdown report artifact generation (`summary` type) at `debates/<debateId>/final-report.md`.
+- Added debate SSE filtering support through generic entity event streaming helpers.
+
+### Changed
+
+- Updated HTTP error contracts/mapping to include `debate_not_found` while preserving `evidence_not_found`.
+- Updated daemon wiring to include shared debate service dependencies and debate routes in both in-memory and configured storage modes.
+- Updated product and development docs to mark R9 as shipped fake-only debate and document no-spend smoke + negative checks.
+
 ## 2026-05-30 - Roadmap Release Train R8 Interactive Coding Runtimes
 
 ### Added

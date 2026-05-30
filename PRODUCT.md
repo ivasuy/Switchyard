@@ -51,7 +51,7 @@ Snapshot source: `agent/phase-7-r8-interactive-coding-runtimes`.
 
 Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`, plus shipped local middleware foundation APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations.
 
-The product is usable locally for one-shot agent runs, event inspection, artifact listing, cancellation, registry lookups, and durable middleware records. It is not yet a hosted gateway, debate system, SDK, dashboard, or multi-runtime production platform.
+The product is usable locally for one-shot agent runs, fake deterministic debate execution, event inspection, artifact listing, cancellation, registry lookups, and durable middleware records. It is not yet a hosted gateway, SDK, dashboard, or multi-runtime production platform.
 
 Important runtime wording: `codex.exec_json` exists as a one-shot non-interactive runtime mode. A full interactive Codex runtime is not shipped yet.
 
@@ -714,7 +714,7 @@ Promotion criteria:
 
 ### R9: Debate V1
 
-Status: planned.
+Status: shipped (fake deterministic local path only).
 
 Goal: build bounded multi-agent debate on top of runs, messages, context, evidence, and artifacts.
 
@@ -753,6 +753,8 @@ Not included:
 - unbounded autonomous swarms.
 - hosted/hybrid debate execution unless hosted has already shipped.
 - complex research tools unless R7 explicitly shipped them.
+- real participant runtimes in debate orchestration.
+- model-based judging, vector retrieval, or external search/browser/shell tooling inside debate execution.
 
 Local verification:
 

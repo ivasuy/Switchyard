@@ -10,9 +10,9 @@ http://127.0.0.1:4545
 
 Current implementation status:
 
-- Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, and middleware foundation routes (messages, memory, evidence, context, approvals, tools).
+- Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
-- Not implemented yet: trace endpoint, OpenAPI generation, debate orchestration, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, and remote artifact URL fetching.
+- Not implemented yet: trace endpoint, OpenAPI generation, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, and model-based debate judging.
 
 ## Error Contract
 
@@ -37,6 +37,7 @@ Closed code set:
 | Code | HTTP | Used for |
 | --- | --- | --- |
 | `run_not_found` | 404 | Unknown run id. |
+| `debate_not_found` | 404 | Unknown debate id. |
 | `artifact_not_found` | 404 | Unknown artifact id. |
 | `missing_artifact_content` | 404 | Artifact exists, content unavailable. |
 | `provider_not_found` | 404 | Unknown provider id or slug. |
@@ -65,7 +66,7 @@ All success bodies (`{run, events}`, `{accepted: true}`, etc.) are unchanged.
 | `201` | Run created and completed synchronously through `wait=1`. |
 | `202` | Run accepted and launched asynchronously, or input accepted. |
 | `400` | Validation failure on the body or query string. |
-| `404` | Requested run/artifact/provider/runtime/model is not found. |
+| `404` | Requested run/debate/artifact/provider/runtime/model is not found. |
 | `409` | Request is valid, but the selected adapter cannot perform it. |
 | `500` | Unexpected server failure. |
 
@@ -76,6 +77,54 @@ All success bodies (`{run, events}`, `{accepted: true}`, etc.) are unchanged.
 - Tool execution is limited to local deterministic `fake_echo`.
 - Known real tool types (`web_search`, `fetch`, `browser`, `repo`, `shell`, `github`) are denied before adapter dispatch with `403 tool_policy_denied`.
 - Context packets are not first-class persisted records in R7; they are persisted only inside `run.metadata.contextPacket` when `POST /runs` includes `context`.
+
+## R9 Debate V1 Constraints
+
+- Debate V1 is fake-first and deterministic only.
+- Exactly two participants are required per debate.
+- Participant runtime fields are optional; when supplied they must match:
+  - `runtime: "fake"`
+  - `provider: "test"`
+  - `model: "test-model"`
+  - `adapterType: "process"`
+  - `runtimeMode: "fake.deterministic"`
+- Real participant runtimes (Codex/Claude/OpenCode/HTTP/AgentField) are rejected with `400 invalid_input`.
+- `evidenceIds` are validated before debate creation; unknown ids return `404 evidence_not_found` with no side effects.
+- `POST /debates?wait=1` executes a bounded local debate and returns `{ debate, events, finalReportArtifact }`.
+- `POST /debates` returns `202 { debate }` after creation and executes asynchronously.
+- `GET /debates/:id` returns `{ debate, events, messages, evidence, artifacts }`.
+- `GET /debates/:id/events` supports replay-only, `live=1`, `live=1&stopAfter=N`, and `Last-Event-ID` / `lastEventId`.
+- Final report artifacts use `type: "summary"` and are written at `debates/<debateId>/final-report.md` when artifact content storage is configured.
+
+## Debate Endpoints
+
+Create and execute synchronously:
+
+```bash
+curl -s -X POST "http://127.0.0.1:4545/debates?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{
+    "topic": "Should Switchyard prove fake debate before real runtimes?",
+    "participants": [
+      { "role": "affirmative", "runtime": "fake", "provider": "test", "model": "test-model", "adapterType": "process", "runtimeMode": "fake.deterministic" },
+      { "role": "skeptic", "runtime": "fake", "provider": "test", "model": "test-model", "adapterType": "process", "runtimeMode": "fake.deterministic" }
+    ],
+    "limits": { "maxRounds": 2, "maxTurnsPerAgent": 2, "maxTotalMessages": 4, "maxDurationSeconds": 30 }
+  }'
+```
+
+Inspect:
+
+```bash
+DEBATE_ID=debate_replace_me
+curl -s "http://127.0.0.1:4545/debates/$DEBATE_ID"
+```
+
+Replay debate SSE:
+
+```bash
+curl -s "http://127.0.0.1:4545/debates/$DEBATE_ID/events"
+```
 
 ## Run Object
 

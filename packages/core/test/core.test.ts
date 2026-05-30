@@ -1389,6 +1389,10 @@ class MemoryEventStore implements EventStore {
   async listByRun(runId: string): Promise<SwitchyardEvent[]> {
     return this.items.filter((event) => event.runId === runId);
   }
+
+  async listByDebate(debateId: string): Promise<SwitchyardEvent[]> {
+    return this.items.filter((event) => event.debateId === debateId);
+  }
 }
 
 class MemorySessionStore implements SessionStore {
@@ -1433,6 +1437,10 @@ class MemoryArtifactStore implements ArtifactStore {
     }
     this.items[index] = artifact;
     return artifact;
+  }
+
+  async listByDebate(debateId: string): Promise<Artifact[]> {
+    return this.items.filter((artifact) => artifact.debateId === debateId);
   }
 
   async listByRun(runId: string): Promise<Artifact[]> {

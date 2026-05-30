@@ -294,6 +294,65 @@ R7 middleware boundaries:
 - Known real tools are denied with `tool_policy_denied` before adapter dispatch.
 - Context packets persist only under `run.metadata.contextPacket` on run creation with `context`.
 
+## R9 Debate Smoke (No Spend)
+
+```bash
+BASE=http://127.0.0.1:4545
+
+EVIDENCE_ID=$(curl -s -X POST "$BASE/evidence" \
+  -H 'content-type: application/json' \
+  -d '{"sourceType":"manual","title":"Local debate smoke evidence","snippet":"fake debate must stay bounded","reliability":"primary"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["evidence"]["id"])')
+
+DEBATE_ID=$(curl -s -X POST "$BASE/debates?wait=1" \
+  -H 'content-type: application/json' \
+  -d "{\"topic\":\"Should Switchyard prove fake debate before real runtimes?\",\"participants\":[{\"role\":\"affirmative\",\"runtime\":\"fake\",\"provider\":\"test\",\"model\":\"test-model\",\"adapterType\":\"process\",\"runtimeMode\":\"fake.deterministic\"},{\"role\":\"skeptic\",\"runtime\":\"fake\",\"provider\":\"test\",\"model\":\"test-model\",\"adapterType\":\"process\",\"runtimeMode\":\"fake.deterministic\"}],\"evidenceIds\":[\"$EVIDENCE_ID\"],\"limits\":{\"maxRounds\":2,\"maxTurnsPerAgent\":2,\"maxTotalMessages\":4,\"maxDurationSeconds\":30}}" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["debate"]["id"])')
+
+curl -s "$BASE/debates/$DEBATE_ID" | python3 -m json.tool
+curl -N "$BASE/debates/$DEBATE_ID/events?live=1&stopAfter=20"
+```
+
+Expected:
+
+- Debate reaches terminal fake deterministic state (`no_consensus` by default).
+- Exactly two participant seed runs are present in `debate.participants[*].runId`.
+- `debate.messageIds`, `debate.eventIds`, `debate.judge`, and `debate.stopReason` are populated.
+- Final report artifact metadata is present in inspect output.
+
+## R9 Negative Smoke
+
+Unsupported runtime:
+
+```bash
+curl -s -X POST "$BASE/debates?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"topic":"bad runtime","participants":[{"role":"affirmative","runtime":"codex"},{"role":"skeptic"}]}'
+```
+
+Unknown evidence id:
+
+```bash
+curl -s -X POST "$BASE/debates?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"topic":"missing evidence","participants":[{"role":"affirmative"},{"role":"skeptic"}],"evidenceIds":["evidence_missing"]}'
+```
+
+Early stop on message cap:
+
+```bash
+curl -s -X POST "$BASE/debates?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"topic":"short debate","participants":[{"role":"affirmative"},{"role":"skeptic"}],"limits":{"maxTotalMessages":1}}' \
+  | python3 -m json.tool
+```
+
+Expected:
+
+- Unsupported runtime returns `400 invalid_input` with no debate side effects.
+- Unknown evidence id returns `404 evidence_not_found` with no debate side effects.
+- `maxTotalMessages: 1` returns terminal debate state with one routed message and `stopReason: "max_total_messages"`.
+
 ## Inspect A Run
 
 ```bash

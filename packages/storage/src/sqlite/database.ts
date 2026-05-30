@@ -42,6 +42,27 @@ CREATE TABLE IF NOT EXISTS run_events (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS debates (
+  id TEXT PRIMARY KEY NOT NULL,
+  topic TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  status TEXT NOT NULL,
+  participants_json TEXT NOT NULL,
+  limits_json TEXT NOT NULL,
+  evidence_ids_json TEXT NOT NULL,
+  message_ids_json TEXT NOT NULL,
+  event_ids_json TEXT NOT NULL,
+  budget_json TEXT NOT NULL,
+  judge_json TEXT,
+  final_report_artifact_id TEXT,
+  final_report_path TEXT,
+  stop_reason TEXT,
+  error_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT,
+  completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS runtime_sessions (
   id TEXT PRIMARY KEY NOT NULL,
   run_id TEXT NOT NULL,
@@ -192,11 +213,23 @@ CREATE TABLE IF NOT EXISTS placement_decisions (
 CREATE INDEX IF NOT EXISTS run_events_run_sequence_idx
   ON run_events (run_id, sequence);
 
+CREATE INDEX IF NOT EXISTS run_events_debate_sequence_idx
+  ON run_events (debate_id, sequence);
+
+CREATE INDEX IF NOT EXISTS debates_created_at_idx
+  ON debates (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS debates_status_idx
+  ON debates (status);
+
 CREATE UNIQUE INDEX IF NOT EXISTS runtime_sessions_run_id_idx
   ON runtime_sessions (run_id);
 
 CREATE INDEX IF NOT EXISTS artifacts_run_id_idx
   ON artifacts (run_id);
+
+CREATE INDEX IF NOT EXISTS artifacts_debate_id_idx
+  ON artifacts (debate_id);
 
 CREATE INDEX IF NOT EXISTS messages_from_run_id_idx
   ON messages (from_run_id);

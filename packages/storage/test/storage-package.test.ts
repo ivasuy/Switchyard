@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import {
   openSqliteStorage,
   SqliteApprovalStore,
+  SqliteDebateStore,
   SqliteEvidenceStore,
   SqliteMemoryStore,
   SqliteMessageStore,
@@ -38,6 +39,7 @@ describe("storage package", () => {
       expect(tableSet.has("memory_items")).toBe(true);
       expect(tableSet.has("evidence_items")).toBe(true);
       expect(tableSet.has("tool_invocations")).toBe(true);
+      expect(tableSet.has("debates")).toBe(true);
 
       const toolIndexes = opened.sqlite
         .prepare("PRAGMA index_list('tool_invocations')")
@@ -45,6 +47,12 @@ describe("storage package", () => {
       const indexNames = toolIndexes.map((row) => row.name);
       expect(indexNames).toContain("tool_invocations_created_at_idx");
       expect(indexNames).toContain("tool_invocations_approval_id_idx");
+      const debateIndexes = opened.sqlite
+        .prepare("PRAGMA index_list('debates')")
+        .all() as Array<{ name: string }>;
+      const debateIndexNames = debateIndexes.map((row) => row.name);
+      expect(debateIndexNames).toContain("debates_created_at_idx");
+      expect(debateIndexNames).toContain("debates_status_idx");
     } finally {
       opened.sqlite.close();
     }
@@ -59,6 +67,7 @@ describe("storage package", () => {
       const evidenceStore = new SqliteEvidenceStore(first.db);
       const approvalStore = new SqliteApprovalStore(first.db);
       const invocationStore = new SqliteToolInvocationStore(first.db);
+      const debateStore = new SqliteDebateStore(first.db);
 
       await messageStore.create({
         id: "message_1",
@@ -96,6 +105,56 @@ describe("storage package", () => {
         input: {},
         createdAt: "2026-05-30T00:00:00.000Z"
       });
+      await debateStore.create({
+        id: "debate_1",
+        topic: "Persist me",
+        mode: "same_provider_model_debate",
+        status: "created",
+        participants: [
+          {
+            id: "participant_1",
+            runtime: "fake",
+            provider: "test",
+            model: "test-model",
+            role: "affirmative",
+            status: "created",
+            turnsUsed: 0,
+            runIds: []
+          },
+          {
+            id: "participant_2",
+            runtime: "fake",
+            provider: "test",
+            model: "test-model",
+            role: "skeptic",
+            status: "created",
+            turnsUsed: 0,
+            runIds: []
+          }
+        ],
+        limits: {
+          maxRounds: 2,
+          maxTurnsPerAgent: 2,
+          maxSearchesPerAgent: 0,
+          maxTotalMessages: 4,
+          maxDurationSeconds: 30,
+          maxCostUsd: 0,
+          requireCitations: false,
+          requireDisagreementSummary: true,
+          stopOnConsensus: false,
+          stopOnLowNewInformation: false,
+          humanStopAllowed: false
+        },
+        evidenceIds: [],
+        messageIds: [],
+        eventIds: [],
+        budget: {
+          status: "within_budget",
+          maxCostUsd: 0,
+          spentCostUsd: 0
+        },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      });
     } finally {
       first.sqlite.close();
     }
@@ -107,12 +166,14 @@ describe("storage package", () => {
       const evidenceStore = new SqliteEvidenceStore(reopened.db);
       const approvalStore = new SqliteApprovalStore(reopened.db);
       const invocationStore = new SqliteToolInvocationStore(reopened.db);
+      const debateStore = new SqliteDebateStore(reopened.db);
 
       expect(await messageStore.get("message_1")).toBeTruthy();
       expect(await memoryStore.get("memory_1")).toBeTruthy();
       expect(await evidenceStore.get("evidence_1")).toBeTruthy();
       expect(await approvalStore.get("approval_1")).toBeTruthy();
       expect(await invocationStore.get("tool_1")).toBeTruthy();
+      expect(await debateStore.get("debate_1")).toBeTruthy();
     } finally {
       reopened.sqlite.close();
       rmSync(filePath, { force: true });

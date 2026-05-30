@@ -75,6 +75,9 @@ class InMemoryEventStore implements EventStore {
   async listByRun(runId: string): Promise<SwitchyardEvent[]> {
     return this.items.filter((event) => event.runId === runId);
   }
+  async listByDebate(debateId: string): Promise<SwitchyardEvent[]> {
+    return this.items.filter((event) => event.debateId === debateId);
+  }
 }
 
 class InMemoryMessageStore implements MessageStore {
@@ -283,6 +286,30 @@ describe("middleware services", () => {
     expect(created.deliveredAt).toBeDefined();
     expect((await router.list({ limit: 50 })).messages).toHaveLength(1);
     expect(seen).toContain("message.sent");
+  });
+
+  it("routes debate messages with createWithEvent metadata", async () => {
+    const runs = new InMemoryRunStore();
+    await runs.create(makeRun("run_from"));
+    await runs.create(makeRun("run_to"));
+    const messages = new InMemoryMessageStore();
+    const events = new InMemoryEventStore();
+    const router = new MessageRouter({ runs, messages, events });
+
+    const created = await router.createWithEvent({
+      fromRunId: "run_from",
+      toRunId: "run_to",
+      channel: "debate:debate_1",
+      debateId: "debate_1",
+      participantId: "participant_1",
+      content: "debate turn"
+    });
+
+    expect(created.message.channel).toBe("debate:debate_1");
+    expect(created.event.type).toBe("message.sent");
+    expect(created.event.debateId).toBe("debate_1");
+    expect(created.event.participantId).toBe("participant_1");
+    expect(created.event.payload["messageId"]).toBe(created.message.id);
   });
 
   it("supports substring-only memory search", async () => {

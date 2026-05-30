@@ -22,6 +22,8 @@ export interface CreateMessageInput {
   fromRunId?: string | undefined;
   toRunId?: string | undefined;
   channel?: string | undefined;
+  debateId?: string | undefined;
+  participantId?: string | undefined;
   content: string;
   attachments?: Array<Record<string, unknown>> | undefined;
 }
@@ -38,6 +40,11 @@ export class MessageRouter {
   constructor(private readonly deps: MessageRouterDependencies) {}
 
   async create(input: CreateMessageInput): Promise<RoutedMessage> {
+    const created = await this.createWithEvent(input);
+    return created.message;
+  }
+
+  async createWithEvent(input: CreateMessageInput): Promise<{ message: RoutedMessage; event: SwitchyardEvent }> {
     const trimmedContent = input.content.trim();
     if (trimmedContent.length === 0) {
       throw new ServiceError("invalid_input", "content is required", [{ path: "content", issue: "must be a non-empty string" }]);
@@ -76,7 +83,7 @@ export class MessageRouter {
     await this.deps.messages.create(message);
 
     const eventRunId = input.toRunId ?? input.fromRunId;
-    const event = await this.createMessageEvent(eventRunId, message);
+    const event = await this.createMessageEvent(eventRunId, message, input.debateId, input.participantId);
     await this.deps.events.append(event);
     if (this.deps.eventBus) {
       try {
@@ -89,7 +96,7 @@ export class MessageRouter {
       }
     }
 
-    return message;
+    return { message, event };
   }
 
   async list(filter: ListMessagesFilter): Promise<ListMessagesResult> {
@@ -100,8 +107,15 @@ export class MessageRouter {
     return this.deps.messages.get(id);
   }
 
-  private async createMessageEvent(runId: string | undefined, message: RoutedMessage): Promise<SwitchyardEvent> {
-    const sequence = runId ? (await this.deps.events.listByRun(runId)).length : 0;
+  private async createMessageEvent(
+    runId: string | undefined,
+    message: RoutedMessage,
+    debateId: string | undefined,
+    participantId: string | undefined
+  ): Promise<SwitchyardEvent> {
+    const runSequence = runId ? this.nextSequence(await this.deps.events.listByRun(runId)) : 0;
+    const debateSequence = debateId ? this.nextSequence(await this.deps.events.listByDebate(debateId)) : 0;
+    const sequence = debateId ? Math.max(runSequence, debateSequence) : runSequence;
     const event: SwitchyardEvent = {
       id: `event_${crypto.randomUUID()}`,
       type: "message.sent",
@@ -109,14 +123,30 @@ export class MessageRouter {
       payload: {
         messageId: message.id,
         channel: message.channel,
-        deliveryStatus: message.deliveryStatus
+        deliveryStatus: message.deliveryStatus,
+        debateId,
+        participantId
       },
       createdAt: new Date().toISOString()
     };
     if (runId) {
       event.runId = runId;
     }
+    if (debateId) {
+      event.debateId = debateId;
+    }
+    if (participantId) {
+      event.participantId = participantId;
+    }
     return event;
+  }
+
+  private nextSequence(events: SwitchyardEvent[]): number {
+    if (events.length === 0) {
+      return 0;
+    }
+    const max = events.reduce((acc, event) => (event.sequence > acc ? event.sequence : acc), -1);
+    return max + 1;
   }
 }
 

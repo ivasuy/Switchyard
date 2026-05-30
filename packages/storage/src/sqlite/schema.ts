@@ -32,6 +32,27 @@ export const runEvents = sqliteTable("run_events", {
   createdAt: text("created_at").notNull()
 });
 
+export const debates = sqliteTable("debates", {
+  id: text("id").primaryKey(),
+  topic: text("topic").notNull(),
+  mode: text("mode").notNull(),
+  status: text("status").notNull(),
+  participantsJson: text("participants_json").notNull(),
+  limitsJson: text("limits_json").notNull(),
+  evidenceIdsJson: text("evidence_ids_json").notNull(),
+  messageIdsJson: text("message_ids_json").notNull(),
+  eventIdsJson: text("event_ids_json").notNull(),
+  budgetJson: text("budget_json").notNull(),
+  judgeJson: text("judge_json"),
+  finalReportArtifactId: text("final_report_artifact_id"),
+  finalReportPath: text("final_report_path"),
+  stopReason: text("stop_reason"),
+  errorJson: text("error_json"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at"),
+  completedAt: text("completed_at")
+});
+
 export const runtimeSessions = sqliteTable("runtime_sessions", {
   id: text("id").primaryKey(),
   runId: text("run_id").notNull(),
@@ -182,6 +203,7 @@ export const placementDecisions = sqliteTable("placement_decisions", {
 export const schema = {
   runs,
   runEvents,
+  debates,
   runtimeSessions,
   artifacts,
   messages,

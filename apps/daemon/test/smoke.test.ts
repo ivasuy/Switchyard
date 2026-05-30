@@ -335,6 +335,104 @@ describe("daemon app", () => {
     }
   });
 
+  it("runs R9 debate smoke in in-memory mode with metadata-only report content", async () => {
+    const app = await createDaemonApp(undefined, { codexProbe: unavailableCodexProbe });
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/debates?wait=1",
+        payload: {
+          topic: "Should fake debate ship first?",
+          participants: [{ role: "affirmative" }, { role: "skeptic" }]
+        }
+      });
+      expect(created.statusCode).toBe(201);
+      const body = created.json();
+      expect(body.debate.status).toBe("no_consensus");
+      expect(body.debate.participants).toHaveLength(2);
+      expect(body.debate.messageIds.length).toBeGreaterThan(0);
+      expect(body.finalReportArtifact).toBeTruthy();
+
+      const inspect = await app.inject({
+        method: "GET",
+        url: `/debates/${body.debate.id}`
+      });
+      expect(inspect.statusCode).toBe(200);
+      expect(inspect.json().artifacts.length).toBeGreaterThan(0);
+      const artifactId = inspect.json().artifacts[0].id as string;
+
+      const missingContent = await app.inject({
+        method: "GET",
+        url: `/artifacts/${artifactId}/content`
+      });
+      expect(missingContent.statusCode).toBe(404);
+      expect(missingContent.json().error.code).toBe("missing_artifact_content");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("runs R9 debate smoke in configured storage mode and persists report content across reopen", async () => {
+    const config = tempDaemonConfig("switchyard-daemon-r9-debate-");
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+    try {
+      const evidence = await app.inject({
+        method: "POST",
+        url: "/evidence",
+        payload: {
+          sourceType: "manual",
+          title: "Debate evidence",
+          snippet: "bounded fake debate",
+          reliability: "primary"
+        }
+      });
+      expect(evidence.statusCode).toBe(201);
+      const evidenceId = evidence.json().evidence.id as string;
+
+      const created = await app.inject({
+        method: "POST",
+        url: "/debates?wait=1",
+        payload: {
+          topic: "Should fake debate ship first?",
+          participants: [{ role: "affirmative" }, { role: "skeptic" }],
+          evidenceIds: [evidenceId]
+        }
+      });
+      expect(created.statusCode).toBe(201);
+      const createdBody = created.json();
+      const debateId = createdBody.debate.id as string;
+      const artifactId = createdBody.finalReportArtifact.id as string;
+
+      const content = await app.inject({
+        method: "GET",
+        url: `/artifacts/${artifactId}/content`
+      });
+      expect(content.statusCode).toBe(200);
+      expect(content.body).toContain("# Debate Report:");
+      expect(content.body).toContain("## Judge Summary");
+
+      await app.close();
+      const reopened = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+      try {
+        const inspect = await reopened.inject({
+          method: "GET",
+          url: `/debates/${debateId}`
+        });
+        expect(inspect.statusCode).toBe(200);
+        expect(inspect.json().debate.finalReportArtifactId).toBe(artifactId);
+      } finally {
+        await reopened.close();
+      }
+    } finally {
+      try {
+        await app.close();
+      } catch {
+        // best effort
+      }
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("persists fake run events and artifacts when configured with local storage", async () => {
     const dir = mkdtempSync(join(tmpdir(), "switchyard-daemon-"));
     const config: DaemonConfig = {

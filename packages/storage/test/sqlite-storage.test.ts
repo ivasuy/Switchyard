@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type {
   Artifact,
   Approval,
+  Debate,
   Model,
   Provider,
   RuntimeAvailability,
@@ -20,6 +21,7 @@ import type { PlacementDecisionRecord } from "@switchyard/core";
 
 import {
   SqliteApprovalStore,
+  SqliteDebateStore,
   SqliteArtifactStore,
   SqliteEventStore,
   SqliteMessageStore,
@@ -110,6 +112,60 @@ function buildArtifact(overrides: Partial<Artifact>): Artifact {
     type: "transcript",
     path: "/tmp/transcript.txt",
     metadata: { bytes: 12 },
+    createdAt: startedAt,
+    ...overrides
+  };
+}
+
+function buildDebate(overrides: Partial<Debate>): Debate {
+  return {
+    id: "debate_storage",
+    topic: "Should fake debate ship first?",
+    mode: "same_provider_model_debate",
+    status: "created",
+    participants: [
+      {
+        id: "participant_storage_1",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        role: "affirmative",
+        status: "created",
+        turnsUsed: 0,
+        runIds: []
+      },
+      {
+        id: "participant_storage_2",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        role: "skeptic",
+        status: "created",
+        turnsUsed: 0,
+        runIds: []
+      }
+    ],
+    limits: {
+      maxRounds: 2,
+      maxTurnsPerAgent: 2,
+      maxSearchesPerAgent: 0,
+      maxTotalMessages: 4,
+      maxDurationSeconds: 30,
+      maxCostUsd: 0,
+      requireCitations: false,
+      requireDisagreementSummary: true,
+      stopOnConsensus: false,
+      stopOnLowNewInformation: false,
+      humanStopAllowed: false
+    },
+    evidenceIds: [],
+    messageIds: [],
+    eventIds: [],
+    budget: {
+      status: "within_budget",
+      maxCostUsd: 0,
+      spentCostUsd: 0
+    },
     createdAt: startedAt,
     ...overrides
   };
@@ -389,6 +445,45 @@ describe("sqlite persistence stores", () => {
       });
 
       expect((await events.listByRun("run_storage")).map((event) => event.id)).toEqual(["event_a_1", "event_a_2"]);
+    } finally {
+      connection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists debates and supports listByDebate for events and artifacts", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-storage-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let connection: ReturnType<typeof openSqliteStorage> | undefined;
+
+    try {
+      connection = openSqliteStorage(dbPath);
+      const debates = new SqliteDebateStore(connection.db);
+      const events = new SqliteEventStore(connection.db);
+      const artifacts = new SqliteArtifactStore(connection.db);
+
+      const debate = buildDebate({ id: "debate_storage_1" });
+      await debates.create(debate);
+      await events.append({
+        id: "event_debate_1",
+        debateId: debate.id,
+        type: "debate.round.started",
+        sequence: 0,
+        payload: { round: 1 },
+        createdAt: startedAt
+      });
+      await artifacts.create({
+        id: "artifact_debate_1",
+        debateId: debate.id,
+        type: "summary",
+        path: `debates/${debate.id}/final-report.md`,
+        metadata: { contentStored: false },
+        createdAt: startedAt
+      });
+
+      expect(await debates.get(debate.id)).toEqual(debate);
+      expect(await events.listByDebate(debate.id)).toHaveLength(1);
+      expect(await artifacts.listByDebate(debate.id)).toHaveLength(1);
     } finally {
       connection?.sqlite.close();
       rmSync(tempDir, { recursive: true, force: true });
