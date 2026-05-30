@@ -171,3 +171,19 @@ The shipped boundary remains explicit: R13 does not ship managed hosted deployme
 
 ### Deferred Concerns
 - None.
+
+## Phase 13: R14 Hosted Sandbox Substrate For Process/PTY
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-13-r14-hosted-sandbox-substrate.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-13-r14-hosted-sandbox-substrate.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-13-report.md
+**Branch:** agent/phase-13-r14-hosted-sandbox-substrate (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R14 is now shipped on the phase branch. Switchyard adds an internal fake/no-spend hosted sandbox substrate for future process-like and PTY-like work: typed sandbox contracts, deny-by-default fake-command policy, deterministic fake executor coverage, resource-limit validation, redacted transcripts/artifact metadata, readiness and metrics wiring, hosted worker construction, and a no-spend sandbox smoke command. The OpenAPI contract remains free of public `/sandbox`, `/exec`, `/pty`, or `/terminal` execution routes, and hosted runtime execution still registers only `FakeRuntimeAdapter`.
+
+The shipped boundary remains explicit: R14 does not ship managed hosted deployment, production arbitrary subprocess/PTY execution, hosted Codex/Claude/OpenCode execution, Cursor/OpenClaw/Paperclip/browser/search/fetch/GitHub/repo/generic process/generic PTY adapters, real shell/browser/search/GitHub/fetch/repo tool execution, interactive Codex runtime/session-resume/approval bridges, enterprise auth/billing/tenant controls, hosted debate with real participant runtimes or model judging, dashboard, or TUI.
+
+### Deferred Concerns
+- None.
