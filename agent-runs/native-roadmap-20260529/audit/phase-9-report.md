@@ -2,48 +2,36 @@
 
 Date: 2026-05-30
 Phase: 9 / R10 Hosted And Hybrid Execution
-Iteration: 2
-Verdict: NEEDS_REVISION
-Revision audited: `f3f97df77e5c9fa53960f4bc1063f9f3a9010805`
+Iteration: 3
+Verdict: GREEN
+Revision audited: `c3b4d943c2866589e6b6b9c9fe039f41e59484a6`
 
 ## Summary
 
-Pass 2 closes two of the three prior blockers:
+Pass 3 verified the only remaining pass-2 redflag is resolved. `ARCHITECTURE.md` no longer overclaims shipped R10 hosted artifact storage as S3/R2-backed. The current shipped R10 truth is:
 
-1. Hosted enqueue failure now correctly terminalizes the durable run with `run.failed` / `queue_enqueue_failed`.
-2. Event sync now rejects `pending` / terminal assignments and wrong-owner or stale-cursor attempts.
+- Postgres for hosted metadata stores
+- Redis/BullMQ for hosted queueing
+- filesystem-backed object-compatible artifact content for shipped hosted-like mode
+- S3/R2 network object storage explicitly future / not shipped
 
-The remaining blocker is narrowed to product truth in `ARCHITECTURE.md`: older hosted-storage sections still describe shipped R10 as `S3/R2`-backed, while the implementation and updated shipped-slice docs now correctly scope R10 to filesystem-backed object-compatible storage with S3/R2 network wiring explicitly not shipped.
+All prior audit redflags are now closed.
 
 ## Checks
 
 - `git status --short` -> clean
 - `git diff --check` -> clean
-- `pnpm --filter @switchyard/core test` -> passed
-- `pnpm --filter @switchyard/queue test` -> passed
-- `pnpm --filter @switchyard/storage test` -> passed
-- `pnpm --filter @switchyard/server test` -> passed
-- `pnpm --filter @switchyard/worker test` -> passed
-- `pnpm test` -> passed
-- Direct repro: hosted enqueue failure -> passed
-- Direct repro: event sync on pending assignment -> passed
+- Wording scan across `ARCHITECTURE.md` -> passed
 
-## Remaining Blocking Finding
+## Verification Notes
 
-### 3. `ARCHITECTURE.md` still overclaims shipped hosted storage as `S3/R2`
-
-- Resolved portions:
-  - real opt-in env parsing and wiring now exist in `apps/server` and `apps/worker`
-  - BullMQ/Redis queue path is no longer a memory-only shim
-  - Postgres stores use real `pg` handles when configured
-  - product/dev/changelog sections inspected for R10 shipped truth are aligned with filesystem-backed object-compatible storage
-- Remaining conflicting refs:
+- Corrected hosted-storage wording is present in the previously conflicting sections:
   - `ARCHITECTURE.md:130-153`
   - `ARCHITECTURE.md:691-709`
-  - `ARCHITECTURE.md:788-812`
-  - `ARCHITECTURE.md:878-880`
-- Correct shipped-slice ref already present:
-  - `ARCHITECTURE.md:948-964`
+  - `ARCHITECTURE.md:790-812`
+  - `ARCHITECTURE.md:878-882`
+- The shipped-slice summary remains aligned:
+  - `ARCHITECTURE.md:950-966`
 
 ## Per-Task Log
 

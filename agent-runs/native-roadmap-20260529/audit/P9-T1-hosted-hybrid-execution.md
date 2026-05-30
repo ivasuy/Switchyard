@@ -169,3 +169,43 @@ Remaining blocker:
 ## Required Change Before Green
 
 - Align the stale `ARCHITECTURE.md` hosted-storage sections with the shipped R10 truth: Postgres + Redis/BullMQ + filesystem-backed object-compatible artifact storage, with S3/R2 network object-store wiring explicitly future/not shipped.
+
+---
+
+Date: 2026-05-30
+Iteration: 3
+Verdict: GREEN
+Revision audited: `c3b4d943c2866589e6b6b9c9fe039f41e59484a6`
+
+## Re-Audit Scope
+
+Per pass-3 discipline, only the remaining pass-2 documentation-truth redflag was re-checked.
+
+## Checks Run
+
+- `git status --short`
+- `git diff --check`
+- Wording scan across `ARCHITECTURE.md` for `S3/R2`, `filesystem-backed object-compatible`, `Redis/BullMQ`, `Postgres`, `not shipped`, and `future`.
+
+## Re-Audit Result
+
+### 3. `ARCHITECTURE.md` shipped storage truth
+
+Verdict: RESOLVED
+
+- The previously conflicting hosted-storage sections now align with the shipped R10 slice:
+  - `ARCHITECTURE.md:130-153`
+  - `ARCHITECTURE.md:691-709`
+  - `ARCHITECTURE.md:790-812`
+  - `ARCHITECTURE.md:878-882`
+- Those sections now describe hosted execution as:
+  - Postgres metadata stores
+  - Redis/BullMQ queueing
+  - filesystem-backed object-compatible artifact content for shipped R10
+  - S3/R2 network object storage explicitly future / not shipped
+- The document-level disclaimer at `ARCHITECTURE.md:5` also makes clear that the file mixes current and target architecture, which keeps the remaining generic references non-deceptive.
+
+## Final Verdict
+
+- All three audit redflags from pass 1 are now resolved.
+- No further blocking findings remain from this audit cycle.
