@@ -125,3 +125,17 @@ R10 is now shipped on the phase branch. Switchyard adds hosted-like and connecte
 
 ### Deferred Concerns
 - None.
+
+## Phase 10: R11 SDK, CLI, And Hardening
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-10-r11-sdk-cli-and-hardening.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-10-r11-sdk-cli-and-hardening.md
+**Audit:** agent-runs/native-roadmap-20260529/audit/phase-10-report.md
+**Branch:** agent/phase-10-r11-sdk-cli-and-hardening (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R11 is now shipped on the phase branch. Switchyard adds the consumable local product surface on top of the audited daemon API: `@switchyard/sdk`, `@switchyard/cli`, contracts-owned OpenAPI 3.1 generation, no-spend adapter compatibility automation, local release packaging smoke, and operational hardening. The SDK can create fake local runs, inspect/replay events, fetch artifact metadata and raw content, query registry/runtime-mode surfaces, and report typed HTTP/network/decode/timeout/validation/stream errors with request ids. The CLI now supports doctor, daemon start, fake run, runtime/runtimes test, debug run, and contract export workflows without hand-written curl. SQLite has explicit schema metadata, additive migration policy checks, representative pre-R3/pre-R7/pre-R9/pre-R11 fixture preservation tests, and corrupt/zero-byte database rejection. The daemon now preserves bounded inbound request ids, emits local metrics, and has startup recovery/idempotency coverage. Clean temp packaging smoke packs and installs the local artifacts outside the monorepo and exercises SDK/CLI/daemon flows with no live external provider spend.
+
+### Deferred Concerns
+- None.
