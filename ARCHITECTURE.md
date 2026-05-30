@@ -130,9 +130,9 @@ Frontend / Backend / CLI / Automation
 | Local / Remote Execution    |   | Hosted Execution            |
 | apps/daemon                 |   | apps/server                 |
 | apps/node                   |   | apps/worker                 |
-| SQLite + filesystem         |   | Postgres + Redis + S3/R2    |
+| SQLite + filesystem         |   | Postgres + Redis + local    |
 | packages/storage/sqlite     |   | packages/storage/postgres   |
-| packages/storage/filesystem |   | packages/storage/s3         |
+| packages/storage/filesystem |   | filesystem object content   |
 +--------------+--------------+   +--------------+--------------+
                |                                 |
                v                                 v
@@ -149,7 +149,7 @@ Short mapping:
 - `Event Bus / Message Router`: event and message services in `packages/core`.
 - `Runtime Adapter Layer`: `packages/adapters`, `packages/protocol-acpx`, `packages/protocol-node`, and queue integration.
 - `Local / Remote Execution`: `apps/daemon`, `apps/node`, SQLite, filesystem artifacts.
-- `Hosted Execution`: `apps/server`, `apps/worker`, Postgres, Redis/BullMQ, S3/R2 artifacts.
+- `Hosted Execution`: `apps/server`, `apps/worker`, Postgres, Redis/BullMQ, and filesystem-backed object-compatible artifact content.
 
 ## Layer-by-Layer Design
 
@@ -691,7 +691,7 @@ Stores:
 ### Hosted Mode
 
 ```text
-Postgres + Redis/BullMQ + S3/R2
+Postgres + Redis/BullMQ + filesystem-backed object content
 ```
 
 Used for:
@@ -706,7 +706,7 @@ Postgres stores durable metadata and events.
 
 Redis/BullMQ handles queues and background jobs.
 
-S3/R2 stores large artifacts.
+The filesystem-backed object-compatible content store durably stores large artifact payloads when `SWITCHYARD_OBJECT_STORE_DIR` is configured. S3/R2 network object stores are not shipped in R10 and remain future adapter work.
 
 ### Hybrid Mode
 
@@ -787,7 +787,7 @@ switchyard/
 
 - `apps/daemon`: local standalone Switchyard gateway. It wires local Fastify routes, SQLite, filesystem artifacts, local queues, local policy, and local-capable adapters.
 - `apps/node`: remote execution node for teams running workers on different servers. It connects outward to hosted/team Switchyard, receives assigned work, enforces node policy, runs local/server-local adapters, and syncs approved events/artifacts.
-- `apps/server`: hosted/team Switchyard API. It owns public API serving, org/team auth hooks, node coordination, Postgres, Redis/BullMQ, object storage, and hosted-safe adapters.
+- `apps/server`: hosted/team Switchyard API. It owns public API serving, org/team auth hooks, node coordination, Postgres, Redis/BullMQ, filesystem-backed object-compatible artifact content, and hosted-safe adapters.
 - `apps/worker`: hosted background worker process for queued runs, debate turns, tools, artifact extraction, memory extraction, and report generation.
 
 ### Core Packages
@@ -808,7 +808,7 @@ switchyard/
 ### Runtime and Integration Packages
 
 - `packages/adapters`: runtime and tool integrations. The currently implemented adapters are `codex` for non-interactive local `codex exec --json` runs (`runtimeMode: codex.exec_json`) and `generic_http` for daemon-configured async REST wrapper runs (`runtimeMode: generic_http.async_rest`), alongside the fake deterministic runtime mode (`fake.deterministic`). Planned adapter folders include `opencode`, `claude-code`, `cursor`, `openclaw`, `paperclip`, `agentfield`, `browser-search`, `process`, and `pty`.
-- `packages/storage`: persistence implementations for in-memory tests, SQLite local mode, Postgres hosted mode, filesystem artifacts, and S3/R2-compatible object storage.
+- `packages/storage`: persistence implementations for in-memory tests, SQLite local mode, Postgres hosted mode, filesystem artifacts, and filesystem-backed object-compatible artifact content.
 - `packages/queue`: local in-process queue and hosted Redis/BullMQ queue implementations.
 - `packages/sdk`: typed client for frontend, backend, CLI, automation, and third-party consumers.
 - `packages/cli`: developer/admin commands for doctor, local launch, runtime test, adapter verification, and debugging.
@@ -848,7 +848,7 @@ Switchyard uses:
 - SQLite for local metadata and events.
 - Redis/BullMQ for hosted job orchestration.
 - Filesystem artifact storage locally.
-- S3/R2-compatible object storage hosted.
+- Filesystem-backed object-compatible artifact content for hosted-like mode.
 - Vitest for unit, contract, adapter, and smoke tests.
 
 ## Why This Stack
@@ -875,9 +875,11 @@ Drizzle supports Postgres and SQLite while keeping SQL understandable. That matt
 
 Redis/BullMQ provide practical hosted job orchestration for run execution, debate rounds, tool calls, artifact extraction, retries, and worker pools.
 
-### Filesystem and S3/R2 Artifacts
+### Filesystem and Object-Compatible Artifacts
 
-Artifacts should have one logical model regardless of backend. Local mode maps logical artifact paths to files. Hosted mode maps them to object storage keys.
+Artifacts should have one logical model regardless of backend. Local mode maps logical artifact paths to files. R10 hosted-like mode maps them to object-compatible keys persisted under a configured local filesystem root.
+
+R10 ships the hosted-like artifact content backend as a local filesystem-backed object-compatible store selected by `SWITCHYARD_OBJECT_STORE_DIR`. S3/R2 network object storage is not shipped and remains future adapter work.
 
 ### acpx
 
