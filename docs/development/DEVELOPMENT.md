@@ -51,8 +51,10 @@ BASE=http://127.0.0.1:4545
 curl -s "$BASE/runtime-modes" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/fake.deterministic" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/codex.exec_json" | python3 -m json.tool
+curl -s "$BASE/runtime-modes/agentfield.async_rest" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/opencode.acp" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/codex.exec_json/check" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/agentfield.async_rest/check" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/opencode.acp/check" | python3 -m json.tool
 curl -s "$BASE/doctor" | python3 -m json.tool
 ```
@@ -64,6 +66,7 @@ Notes:
 - missing/slow/oversized Codex checks are bounded and reported as sanitized `unavailable`/`unknown`; daemon startup remains up.
 - `opencode.acp` check runs `opencode --version`, ACP `initialize`, and ACP `session/new` only.
 - Doctor/check does not send ACP `session/prompt`; prompt execution can spend model budget.
+- `agentfield.async_rest` check runs bounded AgentField health/discovery probes and does not create executions.
 
 Generic HTTP runtime checks:
 
@@ -106,6 +109,45 @@ R4 Generic HTTP boundaries:
 - No post-start input (`POST /runs/:id/input` returns `409 adapter_protocol_failed`).
 - No per-run base URL override; endpoint config is daemon env only.
 - No webhooks and no remote artifact URL fetching.
+
+## AgentField Local Smoke
+
+Terminal 1 (fake AgentField):
+
+```bash
+pnpm --filter @switchyard/testkit fake-agentfield -- --host 127.0.0.1 --port 5057 --api-key af-local-key
+```
+
+Terminal 2 (daemon):
+
+```bash
+SWITCHYARD_PORT=4546 \
+SWITCHYARD_DATA_DIR=/private/tmp/switchyard-r6-agentfield \
+SWITCHYARD_AGENTFIELD_BASE_URL=http://127.0.0.1:5057 \
+SWITCHYARD_AGENTFIELD_API_KEY=af-local-key \
+SWITCHYARD_AGENTFIELD_TARGET=research-agent.deep_analysis \
+SWITCHYARD_LOG_LEVEL=info \
+pnpm --filter @switchyard/daemon dev
+```
+
+Smoke calls:
+
+```bash
+BASE=http://127.0.0.1:4546
+curl -s "$BASE/runtime-modes/agentfield.async_rest" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/agentfield.async_rest/check" | python3 -m json.tool
+curl -s -X POST "$BASE/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"runtime":"agentfield","provider":"agentfield","model":"agentfield-default","adapterType":"http","cwd":"/repo","task":"r6 agentfield smoke","timeoutSeconds":30}' \
+  | python3 -m json.tool
+```
+
+R6 AgentField boundaries:
+
+- No post-start input (`POST /runs/:id/input` returns `409 adapter_protocol_failed` with `reasonCode: agentfield_input_unsupported`).
+- Active cancel is unsupported (`POST /runs/:id/cancel` returns `409 adapter_protocol_failed` with `reasonCode: agentfield_cancel_unsupported`).
+- No per-run base URL/API key/target overrides; endpoint and target config are daemon env only.
+- No webhooks and no AgentField control-plane proxying for memory/admin/node lifecycle APIs.
 
 ## OpenCode ACP Local Smoke
 

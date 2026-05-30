@@ -18,7 +18,7 @@ import type {
 import type { RegistryStore } from "../src/index.js";
 
 describe("RegistryService runtime mode inference and validation", () => {
-  it("infers fake, codex, generic_http, and opencode runtime modes when omitted", async () => {
+  it("infers fake, codex, generic_http, agentfield, and opencode runtime modes when omitted", async () => {
     const service = new RegistryService({ registry: new InMemoryRegistryStore() });
 
     await expect(
@@ -44,6 +44,14 @@ describe("RegistryService runtime mode inference and validation", () => {
         adapterType: "http"
       })
     ).resolves.toBe("generic_http.async_rest");
+
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "agentfield",
+        provider: "agentfield",
+        adapterType: "http"
+      })
+    ).resolves.toBe("agentfield.async_rest");
 
     await expect(
       service.inferAndValidateRuntimeMode({
@@ -116,6 +124,45 @@ describe("RegistryService runtime mode inference and validation", () => {
         runtimeMode: "opencode.acp"
       })
     ).resolves.toBe("opencode.acp");
+  });
+
+  it("accepts explicit agentfield runtime mode and rejects internal ids/mismatches", async () => {
+    const registry = new InMemoryRegistryStore();
+    await registry.upsertRuntimeMode(agentfieldModeFixture());
+    const service = new RegistryService({ registry });
+
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "agentfield",
+        provider: "agentfield",
+        adapterType: "http",
+        runtimeMode: "agentfield.async_rest"
+      })
+    ).resolves.toBe("agentfield.async_rest");
+
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "agentfield",
+        provider: "agentfield",
+        adapterType: "http",
+        runtimeMode: "runtime_mode_agentfield_async_rest"
+      })
+    ).rejects.toMatchObject({
+      code: "invalid_input",
+      details: [{ path: "runtimeMode", issue: expect.stringContaining("slug") }]
+    } satisfies Partial<RuntimeModeValidationError>);
+
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "fake",
+        provider: "test",
+        adapterType: "process",
+        runtimeMode: "agentfield.async_rest"
+      })
+    ).rejects.toMatchObject({
+      code: "invalid_input",
+      details: [{ path: "runtimeMode", issue: expect.stringContaining("match runtime, provider, and adapterType") }]
+    } satisfies Partial<RuntimeModeValidationError>);
   });
 
   it("rejects internal opencode runtime mode ids and mismatched explicit opencode mode", async () => {
@@ -226,6 +273,46 @@ function opencodeModeFixture() {
       checkedAt: "2026-05-30T00:00:00.000Z",
       reasonCode: "opencode_binary_unavailable",
       message: "OpenCode binary unavailable."
+    },
+    createdAt: "2026-05-30T00:00:00.000Z",
+    updatedAt: "2026-05-30T00:00:00.000Z"
+  };
+}
+
+function agentfieldModeFixture() {
+  return {
+    id: "runtime_mode_agentfield_async_rest",
+    slug: "agentfield.async_rest",
+    name: "AgentField async REST",
+    providerId: "provider_agentfield",
+    runtimeId: "runtime_agentfield",
+    adapterId: "agentfield",
+    adapterType: "http" as const,
+    kind: "async_rest" as const,
+    status: "unknown" as const,
+    capabilities: [
+      "run.start",
+      "run.timeout",
+      "event.normalized",
+      "event.streaming",
+      "artifact.transcript",
+      "auth.api_key"
+    ],
+    limitations: [{ code: "cancel_unsupported", message: "AgentField upstream cancel is not shipped in R6." }],
+    placement: {
+      local: { support: "conditional" as const, reason: "Configured AgentField endpoint required." },
+      hosted: { support: "future" as const, reason: "Not shipped in R6." },
+      connectedLocalNode: { support: "future" as const, reason: "Not shipped in R6." }
+    },
+    availability: {
+      state: "unavailable" as const,
+      canRun: false,
+      installed: false,
+      auth: "missing" as const,
+      version: null,
+      checkedAt: "2026-05-30T00:00:00.000Z",
+      reasonCode: "agentfield_config_missing",
+      message: "SWITCHYARD_AGENTFIELD_BASE_URL is not configured."
     },
     createdAt: "2026-05-30T00:00:00.000Z",
     updatedAt: "2026-05-30T00:00:00.000Z"

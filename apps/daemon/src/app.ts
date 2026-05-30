@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { mkdirSync } from "node:fs";
 import {
+  AgentFieldAsyncRestAdapter,
   CodexExecJsonAdapter,
   GenericHttpAsyncRestAdapter,
   OpenCodeAcpAdapter,
@@ -104,6 +105,11 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     pollIntervalMs: 100,
     maxResponseBytes: 1024 * 1024
   };
+  const agentfieldConfig = config?.agentfield ?? {
+    requestTimeoutMs: 5000,
+    pollIntervalMs: 1000,
+    maxResponseBytes: 1024 * 1024
+  };
   const opencodeConfig = config?.opencode ?? {
     command: "opencode"
   };
@@ -116,6 +122,7 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   const now = new Date().toISOString();
   const codexAvailability = availabilityFromProbe(codexProbe, now, maxDiagnosticBytes);
   const genericHttpAvailability = initialGenericHttpAvailability(genericHttpConfig, now);
+  const agentfieldAvailability = initialAgentFieldAvailability(agentfieldConfig, now);
   const opencodeAvailability: DaemonRuntimeAvailability = {
     state: "unknown",
     canRun: false,
@@ -155,6 +162,15 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     ...(options.logger ? { logger: options.logger } : {})
   };
   const genericHttpAdapter = new GenericHttpAsyncRestAdapter(genericHttpAdapterOptions);
+  const agentfieldAdapter = new AgentFieldAsyncRestAdapter({
+    ...(agentfieldConfig.baseUrl ? { baseUrl: agentfieldConfig.baseUrl } : {}),
+    ...(agentfieldConfig.apiKey ? { apiKey: agentfieldConfig.apiKey } : {}),
+    ...(agentfieldConfig.target ? { target: agentfieldConfig.target } : {}),
+    requestTimeoutMs: agentfieldConfig.requestTimeoutMs,
+    pollIntervalMs: agentfieldConfig.pollIntervalMs,
+    maxResponseBytes: agentfieldConfig.maxResponseBytes,
+    ...(options.logger ? { logger: options.logger } : {})
+  });
   const opencodeAdapterOptions: ConstructorParameters<typeof OpenCodeAcpAdapter>[0] = {
     command: opencodeConfig.command,
     requestTimeoutMs: acpConfig.requestTimeoutMs,
@@ -174,6 +190,7 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   const adapters = new Map<string, RuntimeAdapter>([
     ["fake", new FakeRuntimeAdapter()],
     ["codex", new CodexExecJsonAdapter(codexOptions)],
+    ["agentfield", agentfieldAdapter],
     ["generic_http", genericHttpAdapter],
     ["opencode", opencodeAdapter]
   ]);
@@ -208,18 +225,21 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   try {
     await seedFakeRegistry(stores.registry);
     await seedCodexRegistry(stores, codexProbe, codexAvailability);
+    await seedAgentFieldRegistry(stores, agentfieldAvailability);
     await seedGenericHttpRegistry(stores, genericHttpAvailability);
     await seedOpenCodeRegistry(stores, opencodeAvailability);
     await capabilityService.seedManifests(
       [
         adapters.get("fake")!.manifest,
         adapters.get("codex")!.manifest,
+        adapters.get("agentfield")!.manifest,
         adapters.get("generic_http")!.manifest,
         adapters.get("opencode")!.manifest
       ],
       {
         "fake.deterministic": fakeAvailability,
         "codex.exec_json": codexAvailability,
+        "agentfield.async_rest": agentfieldAvailability,
         "generic_http.async_rest": genericHttpAvailability,
         "opencode.acp": opencodeAvailability
       }
@@ -233,6 +253,11 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
       runtimeMode: "codex.exec_json",
       adapterId: "codex",
       state: codexAvailability.state
+    });
+    options.logger?.info("runtime_mode.seeded", {
+      runtimeMode: "agentfield.async_rest",
+      adapterId: "agentfield",
+      state: agentfieldAvailability.state
     });
     options.logger?.info("runtime_mode.seeded", {
       runtimeMode: "generic_http.async_rest",
@@ -525,6 +550,62 @@ async function seedGenericHttpRegistry(
   }
 }
 
+async function seedAgentFieldRegistry(
+  stores: DaemonStoreResult,
+  availability: DaemonRuntimeAvailability
+): Promise<void> {
+  const registry = stores.registry;
+  const status = statusFromAvailability(availability);
+
+  const existingProvider = await registry.getProvider("provider_agentfield");
+  if (!existingProvider) {
+    await registry.createProvider({
+      id: "provider_agentfield",
+      name: "AgentField",
+      authMode: "api_key",
+      status
+    });
+  } else {
+    await updateProviderRecord(stores, {
+      id: "provider_agentfield",
+      name: "AgentField",
+      authMode: "api_key",
+      status
+    });
+  }
+
+  const existingRuntime = await registry.getRuntime("runtime_agentfield");
+  if (!existingRuntime) {
+    await registry.createRuntime({
+      id: "runtime_agentfield",
+      name: "AgentField",
+      adapterType: "http",
+      status,
+      providerId: "provider_agentfield"
+    });
+  } else {
+    await updateRuntimeRecord(stores, {
+      id: "runtime_agentfield",
+      name: "AgentField",
+      adapterType: "http",
+      status,
+      providerId: "provider_agentfield"
+    });
+  }
+
+  if (!(await registry.getModel("model_agentfield_default"))) {
+    await registry.createModel({
+      id: "model_agentfield_default",
+      providerId: "provider_agentfield",
+      modelName: "agentfield-default",
+      supportsTools: false,
+      supportsStreaming: false,
+      supportsBrowser: false,
+      status: "available"
+    });
+  }
+}
+
 async function seedOpenCodeRegistry(
   stores: DaemonStoreResult,
   availability: DaemonRuntimeAvailability
@@ -759,6 +840,74 @@ function initialGenericHttpAvailability(
     canRun: false,
     installed: true,
     auth: config.authToken ? "configured" : "not_required",
+    version: null,
+    checkedAt,
+    reasonCode: null,
+    message: null
+  };
+}
+
+function initialAgentFieldAvailability(
+  config: {
+    baseUrl?: string;
+    apiKey?: string;
+    target?: string;
+  },
+  checkedAt: string
+): DaemonRuntimeAvailability {
+  if (!config.baseUrl) {
+    return {
+      state: "unavailable",
+      canRun: false,
+      installed: false,
+      auth: "unknown",
+      version: null,
+      checkedAt,
+      reasonCode: "agentfield_config_missing",
+      message: "SWITCHYARD_AGENTFIELD_BASE_URL is not configured."
+    };
+  }
+  if (!isValidHttpUrl(config.baseUrl)) {
+    return {
+      state: "unavailable",
+      canRun: false,
+      installed: false,
+      auth: "unknown",
+      version: null,
+      checkedAt,
+      reasonCode: "agentfield_config_invalid",
+      message: "SWITCHYARD_AGENTFIELD_BASE_URL must use http or https."
+    };
+  }
+  if (!config.apiKey) {
+    return {
+      state: "unavailable",
+      canRun: false,
+      installed: false,
+      auth: "missing",
+      version: null,
+      checkedAt,
+      reasonCode: "agentfield_auth_missing",
+      message: "SWITCHYARD_AGENTFIELD_API_KEY is not configured."
+    };
+  }
+  if (!config.target) {
+    return {
+      state: "unavailable",
+      canRun: false,
+      installed: false,
+      auth: "configured",
+      version: null,
+      checkedAt,
+      reasonCode: "agentfield_target_missing",
+      message: "SWITCHYARD_AGENTFIELD_TARGET is not configured."
+    };
+  }
+  return {
+    state: "unknown",
+    canRun: false,
+    installed: true,
+    auth: "configured",
     version: null,
     checkedAt,
     reasonCode: null,

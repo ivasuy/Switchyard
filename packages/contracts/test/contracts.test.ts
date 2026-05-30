@@ -327,6 +327,63 @@ describe("Switchyard contracts", () => {
     expect(mode.capabilities).toContain("auth.api_key");
   });
 
+  it("parses agentfield.async_rest runtime mode record", () => {
+    const mode = runtimeModeSchema.parse({
+      id: "runtime_mode_agentfield_async_rest",
+      slug: "agentfield.async_rest",
+      name: "AgentField async REST",
+      providerId: "provider_agentfield",
+      runtimeId: "runtime_agentfield",
+      adapterId: "agentfield",
+      adapterType: "http",
+      kind: "async_rest",
+      status: "unknown",
+      capabilities: [
+        "run.start",
+        "run.timeout",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "auth.api_key"
+      ],
+      limitations: [
+        {
+          code: "configured_target_only",
+          message: "agentfield.async_rest uses the daemon-level AgentField target configured by SWITCHYARD_AGENTFIELD_TARGET."
+        },
+        {
+          code: "cancel_unsupported",
+          message: "AgentField upstream cancellation is not claimed in R6 because no cancel endpoint is verified by this spec."
+        }
+      ],
+      placement: {
+        local: {
+          support: "conditional",
+          reason: "Requires SWITCHYARD_AGENTFIELD_BASE_URL, SWITCHYARD_AGENTFIELD_API_KEY, and SWITCHYARD_AGENTFIELD_TARGET."
+        },
+        hosted: { support: "future", reason: "Hosted execution is not shipped in R6." },
+        connectedLocalNode: { support: "future", reason: "Hybrid local-node execution is not shipped in R6." }
+      },
+      availability: {
+        state: "unavailable",
+        canRun: false,
+        installed: false,
+        auth: "missing",
+        version: null,
+        checkedAt: "2026-05-30T00:00:00.000Z",
+        reasonCode: "agentfield_config_missing",
+        message: "SWITCHYARD_AGENTFIELD_BASE_URL is not configured."
+      },
+      docsPath: "docs/development/adapters/AGENTFIELD.md",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      updatedAt: "2026-05-30T00:00:00.000Z"
+    });
+
+    expect(mode.slug).toBe("agentfield.async_rest");
+    expect(mode.capabilities).not.toContain("run.cancel");
+    expect(mode.capabilities).toContain("auth.api_key");
+  });
+
   it("parses opencode.acp runtime mode record", () => {
     const mode = runtimeModeSchema.parse({
       id: "runtime_mode_opencode_acp",

@@ -354,7 +354,7 @@ describe("run routes", () => {
     expect(response.json().run.runtimeMode).toBe("fake.deterministic");
   });
 
-  it("infers generic http runtime mode and validates explicit generic runtime mode", async () => {
+  it("infers generic http/agentfield runtime modes and validates explicit generic runtime mode", async () => {
     const harness = createRouteHarness();
     const inferred = await harness.app.inject({
       method: "POST",
@@ -414,6 +414,49 @@ describe("run routes", () => {
     expect(explicit.json().run.runtimeMode).toBe("generic_http.async_rest");
     expect(rejectedId.statusCode).toBe(400);
     expect(rejectedMismatch.statusCode).toBe(400);
+
+    const agentfieldInferred = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: {
+        runtime: "agentfield",
+        provider: "agentfield",
+        model: "agentfield-default",
+        adapterType: "http",
+        cwd: "/repo",
+        task: "infer agentfield mode"
+      }
+    });
+    const agentfieldRejectedId = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: {
+        runtime: "agentfield",
+        provider: "agentfield",
+        model: "agentfield-default",
+        adapterType: "http",
+        runtimeMode: "runtime_mode_agentfield_async_rest",
+        cwd: "/repo",
+        task: "agentfield id"
+      }
+    });
+    const agentfieldRejectedMismatch = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: {
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        runtimeMode: "agentfield.async_rest",
+        cwd: "/repo",
+        task: "agentfield mismatch"
+      }
+    });
+    expect(agentfieldInferred.statusCode).toBe(202);
+    expect(agentfieldInferred.json().run.runtimeMode).toBe("agentfield.async_rest");
+    expect(agentfieldRejectedId.statusCode).toBe(400);
+    expect(agentfieldRejectedMismatch.statusCode).toBe(400);
   });
 
   it("accepts runtimeMode slug and rejects runtimeMode ids or mismatches", async () => {
@@ -552,6 +595,36 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
     updatedAt: "2026-05-29T00:00:00.000Z"
   });
   seedRuntimeMode(registry, {
+    id: "runtime_mode_agentfield_async_rest",
+    slug: "agentfield.async_rest",
+    name: "AgentField async REST",
+    providerId: "provider_agentfield",
+    runtimeId: "runtime_agentfield",
+    adapterId: "agentfield",
+    adapterType: "http",
+    kind: "async_rest",
+    status: "unknown",
+    capabilities: ["run.start", "run.timeout", "event.normalized", "event.streaming", "artifact.transcript", "auth.api_key"],
+    limitations: [{ code: "cancel_unsupported", message: "AgentField upstream cancellation is not claimed in R6." }],
+    placement: {
+      local: { support: "conditional", reason: "Configured endpoint required." },
+      hosted: { support: "future", reason: "Not hosted." },
+      connectedLocalNode: { support: "future", reason: "Future." }
+    },
+    availability: {
+      state: "unknown",
+      canRun: false,
+      installed: false,
+      auth: "missing",
+      version: null,
+      checkedAt: "2026-05-30T00:00:00.000Z",
+      reasonCode: "agentfield_config_missing",
+      message: "missing"
+    },
+    createdAt: "2026-05-30T00:00:00.000Z",
+    updatedAt: "2026-05-30T00:00:00.000Z"
+  });
+  seedRuntimeMode(registry, {
     id: "runtime_mode_codex_exec_json",
     slug: "codex.exec_json",
     name: "Codex exec JSON",
@@ -671,7 +744,7 @@ function seedRuntimeMode(registry: InMemoryRegistryStore, mode: {
     state: "available" | "unknown";
     canRun: boolean;
     installed: boolean;
-    auth: "not_required" | "configured" | "unknown";
+    auth: "not_required" | "configured" | "missing" | "unknown";
     version: string | null;
     checkedAt: string;
     reasonCode: string | null;

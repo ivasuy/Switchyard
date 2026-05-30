@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { type FastifyInstance } from "fastify";
 import type { CodexCatalogProbe } from "@switchyard/adapters";
-import { createFakeAcpProcessFactory, type FakeAcpRuntimeStats, startFakeHttpRuntimeServer } from "@switchyard/testkit";
+import {
+  createFakeAcpProcessFactory,
+  type FakeAcpRuntimeStats,
+  startFakeAgentFieldServer,
+  startFakeHttpRuntimeServer
+} from "@switchyard/testkit";
 import { createDaemonApp } from "../src/app.js";
 import { loadDaemonConfig, type DaemonConfig } from "../src/config.js";
 import { openSqliteStorage } from "@switchyard/storage";
@@ -26,6 +31,11 @@ function tempDaemonConfig(prefix: string): DaemonConfig {
       maxMessageBytes: 1024 * 1024
     },
     genericHttp: {
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 25,
+      maxResponseBytes: 1024 * 1024
+    },
+    agentfield: {
       requestTimeoutMs: 5000,
       pollIntervalMs: 25,
       maxResponseBytes: 1024 * 1024
@@ -66,17 +76,34 @@ describe("daemon app", () => {
     expect(defaults.acp.requestTimeoutMs).toBe(5000);
     expect(defaults.acp.cancelTimeoutMs).toBe(5000);
     expect(defaults.acp.maxMessageBytes).toBe(1024 * 1024);
+    expect(defaults.agentfield?.requestTimeoutMs).toBe(5000);
+    expect(defaults.agentfield?.pollIntervalMs).toBe(1000);
+    expect(defaults.agentfield?.maxResponseBytes).toBe(1024 * 1024);
 
     const custom = loadDaemonConfig({
       SWITCHYARD_OPENCODE_COMMAND: "  /usr/local/bin/opencode  ",
       SWITCHYARD_ACP_REQUEST_TIMEOUT_MS: "1234",
       SWITCHYARD_ACP_CANCEL_TIMEOUT_MS: "5678",
-      SWITCHYARD_ACP_MAX_MESSAGE_BYTES: "4096"
+      SWITCHYARD_ACP_MAX_MESSAGE_BYTES: "4096",
+      SWITCHYARD_AGENTFIELD_BASE_URL: "  http://127.0.0.1:6060/prefix  ",
+      SWITCHYARD_AGENTFIELD_API_KEY: "  af-key  ",
+      SWITCHYARD_AGENTFIELD_TARGET: "  research-agent.deep_analysis  ",
+      SWITCHYARD_AGENTFIELD_REQUEST_TIMEOUT_MS: "2222",
+      SWITCHYARD_AGENTFIELD_POLL_INTERVAL_MS: "3333",
+      SWITCHYARD_AGENTFIELD_MAX_RESPONSE_BYTES: "4444"
     });
     expect(custom.opencode.command).toBe("/usr/local/bin/opencode");
     expect(custom.acp.requestTimeoutMs).toBe(1234);
     expect(custom.acp.cancelTimeoutMs).toBe(5678);
     expect(custom.acp.maxMessageBytes).toBe(4096);
+    expect(custom.agentfield).toEqual({
+      baseUrl: "http://127.0.0.1:6060/prefix",
+      apiKey: "af-key",
+      target: "research-agent.deep_analysis",
+      requestTimeoutMs: 2222,
+      pollIntervalMs: 3333,
+      maxResponseBytes: 4444
+    });
   });
 
   it("creates a fake run through the local REST API", async () => {
@@ -265,6 +292,7 @@ describe("daemon app", () => {
       const doctor = await app.inject({ method: "GET", url: "/doctor" });
       expect(list.statusCode).toBe(200);
       expect(list.json().runtimeModes.map((mode: { slug: string }) => mode.slug).sort()).toEqual([
+        "agentfield.async_rest",
         "codex.exec_json",
         "fake.deterministic",
         "generic_http.async_rest",
@@ -285,6 +313,18 @@ describe("daemon app", () => {
       const mode = await app.inject({ method: "GET", url: "/runtime-modes/generic_http.async_rest" });
       expect(mode.statusCode).toBe(200);
       expect(mode.json().runtimeMode.availability.reasonCode).toBe("generic_http_config_missing");
+      expect(mode.json().runtimeMode.availability.state).toBe("unavailable");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("seeds agentfield mode as unavailable when required config is missing", async () => {
+    const app = await createDaemonApp(undefined, { codexProbe: unavailableCodexProbe });
+    try {
+      const mode = await app.inject({ method: "GET", url: "/runtime-modes/agentfield.async_rest" });
+      expect(mode.statusCode).toBe(200);
+      expect(mode.json().runtimeMode.availability.reasonCode).toBe("agentfield_config_missing");
       expect(mode.json().runtimeMode.availability.state).toBe("unavailable");
     } finally {
       await app.close();
@@ -373,6 +413,210 @@ describe("daemon app", () => {
     } finally {
       await app.close();
       await server.close();
+    }
+  });
+
+  it("runs agentfield checks and wait=1 lifecycle against fake server without leaking API key", async () => {
+    const server = await startFakeAgentFieldServer({ scenario: "happy", expectedApiKey: "af-secret-key" });
+    const config = tempDaemonConfig("switchyard-daemon-agentfield-");
+    config.agentfield = {
+      baseUrl: server.baseUrl,
+      apiKey: "af-secret-key",
+      target: "research-agent.deep_analysis",
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 10,
+      maxResponseBytes: 1024 * 1024
+    };
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+    try {
+      const check = await app.inject({ method: "POST", url: "/runtime-modes/agentfield.async_rest/check" });
+      expect(check.statusCode).toBe(200);
+      expect(check.json().check.state).toBe("available");
+      expect(JSON.stringify(check.json())).not.toContain("af-secret-key");
+      expect(server.stats.executeAsyncCalls).toBe(0);
+
+      const run = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "agentfield",
+          provider: "agentfield",
+          model: "agentfield-default",
+          adapterType: "http",
+          cwd: "/repo",
+          task: "agentfield smoke",
+          timeoutSeconds: 30
+        }
+      });
+      expect(run.statusCode).toBe(201);
+      expect(run.json().run.runtimeMode).toBe("agentfield.async_rest");
+      expect(run.json().run.status).toBe("completed");
+      expect(run.json().response.text).toBe("agentfield output");
+
+      const runId = run.json().run.id as string;
+      const artifacts = await app.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
+      expect(artifacts.statusCode).toBe(200);
+      const transcript = artifacts.json().artifacts.find((artifact: { path: string }) =>
+        artifact.path === `runs/${runId}/agentfield-transcript.jsonl`
+      );
+      const result = artifacts.json().artifacts.find((artifact: { path: string }) =>
+        artifact.path === `runs/${runId}/agentfield-result.json`
+      );
+      expect(transcript).toBeDefined();
+      expect(result).toBeDefined();
+
+      const transcriptContent = await app.inject({ method: "GET", url: `/artifacts/${String(transcript.id)}/content` });
+      const resultContent = await app.inject({ method: "GET", url: `/artifacts/${String(result.id)}/content` });
+      expect(transcriptContent.statusCode).toBe(200);
+      expect(resultContent.statusCode).toBe(200);
+      expect(transcriptContent.body).not.toContain("af-secret-key");
+      expect(resultContent.body).not.toContain("af-secret-key");
+
+      const input = await app.inject({
+        method: "POST",
+        url: `/runs/${runId}/input`,
+        payload: { text: "continue" }
+      });
+      expect(input.statusCode).toBe(409);
+      expect(input.json().error.details).toEqual(
+        expect.arrayContaining([expect.objectContaining({ path: "reasonCode", issue: "agentfield_input_unsupported" })])
+      );
+    } finally {
+      await app.close();
+      await server.close();
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("maps active agentfield cancel to 409 adapter_protocol_failed and keeps run non-cancelled", async () => {
+    const server = await startFakeAgentFieldServer({ scenario: "pending_forever", expectedApiKey: "af-key" });
+    const config = tempDaemonConfig("switchyard-daemon-agentfield-cancel-");
+    config.agentfield = {
+      baseUrl: server.baseUrl,
+      apiKey: "af-key",
+      target: "research-agent.deep_analysis",
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 10,
+      maxResponseBytes: 1024 * 1024
+    };
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "agentfield",
+          provider: "agentfield",
+          model: "agentfield-default",
+          adapterType: "http",
+          cwd: "/repo",
+          task: "cancel unsupported"
+        }
+      });
+      expect(created.statusCode).toBe(202);
+      const runId = created.json().run.id as string;
+      await waitForRunStatus(app, runId, "running");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const cancel = await app.inject({ method: "POST", url: `/runs/${runId}/cancel` });
+      expect(cancel.statusCode).toBe(409);
+      expect(cancel.json().error.code).toBe("adapter_protocol_failed");
+      expect(cancel.json().error.details).toEqual(
+        expect.arrayContaining([expect.objectContaining({ path: "reasonCode", issue: "agentfield_cancel_unsupported" })])
+      );
+
+      const read = await app.inject({ method: "GET", url: `/runs/${runId}` });
+      expect(read.statusCode).toBe(200);
+      expect(read.json().run.status).not.toBe("cancelled");
+    } finally {
+      await app.close();
+      await server.close();
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists Switchyard timeout for agentfield when upstream cancel is unsupported", async () => {
+    const server = await startFakeAgentFieldServer({ scenario: "pending_forever", expectedApiKey: "af-key" });
+    const config = tempDaemonConfig("switchyard-daemon-agentfield-timeout-");
+    config.agentfield = {
+      baseUrl: server.baseUrl,
+      apiKey: "af-key",
+      target: "research-agent.deep_analysis",
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 10,
+      maxResponseBytes: 1024 * 1024
+    };
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+    try {
+      const timedOut = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "agentfield",
+          provider: "agentfield",
+          model: "agentfield-default",
+          adapterType: "http",
+          cwd: "/repo",
+          task: "timeout run",
+          timeoutSeconds: 1
+        }
+      });
+      expect(timedOut.statusCode).toBe(201);
+      expect(timedOut.json().run.status).toBe("timeout");
+
+      const runId = timedOut.json().run.id as string;
+      const events = await app.inject({ method: "GET", url: `/runs/${runId}/events` });
+      expect(events.statusCode).toBe(200);
+      expect((events.body.match(/event: run\.failed/g) ?? []).length).toBe(1);
+    } finally {
+      await app.close();
+      await server.close();
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps timed-out agentfield run terminal when upstream later succeeds", async () => {
+    const server = await startFakeAgentFieldServer({
+      scenario: "late_success",
+      expectedApiKey: "af-key",
+      lateSuccessPollCount: 20
+    });
+    const config = tempDaemonConfig("switchyard-daemon-agentfield-race-");
+    config.agentfield = {
+      baseUrl: server.baseUrl,
+      apiKey: "af-key",
+      target: "research-agent.deep_analysis",
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 100,
+      maxResponseBytes: 1024 * 1024
+    };
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+    try {
+      const timedOut = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "agentfield",
+          provider: "agentfield",
+          model: "agentfield-default",
+          adapterType: "http",
+          cwd: "/repo",
+          task: "late success race",
+          timeoutSeconds: 1
+        }
+      });
+      expect(timedOut.statusCode).toBe(201);
+      expect(timedOut.json().run.status).toBe("timeout");
+      const runId = timedOut.json().run.id as string;
+
+      await new Promise((resolve) => setTimeout(resolve, 1400));
+      const read = await app.inject({ method: "GET", url: `/runs/${runId}` });
+      expect(read.statusCode).toBe(200);
+      expect(read.json().run.status).toBe("timeout");
+    } finally {
+      await app.close();
+      await server.close();
+      rmSync(config.dataDir, { recursive: true, force: true });
     }
   });
 

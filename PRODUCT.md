@@ -49,7 +49,7 @@ When a release ships:
 
 Snapshot source: `agent/phase-4-r5-acp-foundation-and-opencode`.
 
-Current product state: local daemon MVP with shipped runtime modes `fake.deterministic`, `codex.exec_json`, `generic_http.async_rest`, and `opencode.acp`.
+Current product state: local daemon MVP with shipped runtime modes `fake.deterministic`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`.
 
 The product is usable locally for one-shot agent runs, event inspection, artifact listing, cancellation, and registry lookups. It is not yet a hosted gateway, debate system, approval system, SDK, dashboard, or multi-runtime production platform.
 
@@ -103,6 +103,7 @@ Shipped runtime modes:
 
 - `fake.deterministic`: deterministic test runtime mode for local smoke tests and contract coverage.
 - `codex.exec_json`: local non-interactive Codex CLI execution through `codex exec --json`.
+- `agentfield.async_rest`: daemon-configured AgentField async REST wrapper runtime with bounded health/discovery checks, async execute/status polling, normalized events, transcript artifacts, and result payload artifacts.
 - `generic_http.async_rest`: daemon-configured async REST wrapper runtime with bounded health/start/status/events/cancel/artifacts, verified-terminal cancellation, and transcript artifact capture.
 - `opencode.acp`: local OpenCode ACP subprocess runtime with bounded doctor check, one-prompt-per-run behavior, verified cancellation, and raw ACP transcript artifacts.
 
@@ -171,6 +172,7 @@ The daemon seeds local registry records for:
 
 - test provider/runtime/model records for the fake runtime.
 - OpenAI provider and Codex runtime records.
+- AgentField provider/runtime/model records for `agentfield.async_rest`.
 - OpenCode provider/runtime/model records for `opencode.acp`.
 - Codex model records when `codex debug models` is available.
 
@@ -207,7 +209,6 @@ These are planned or designed in docs, but not shipped product:
 - Policy package beyond current contracts/ports.
 - Claude Code adapter.
 - Cursor adapter.
-- AgentField adapter.
 - OpenClaw adapter.
 - Paperclip adapter.
 - Browser/search adapter.

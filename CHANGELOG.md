@@ -17,6 +17,23 @@ All notable changes to Switchyard will be documented in this file.
 - Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.
 
+## 2026-05-30 - Roadmap Release Train R6 Wrapper Runtime Integration
+
+### Added
+
+- Added `agentfield.async_rest` runtime adapter/mode with daemon-level AgentField configuration, async execute/status polling, normalized event mapping, and runtime-mode doctor availability checks.
+- Added AgentField daemon env config support: `SWITCHYARD_AGENTFIELD_BASE_URL`, `SWITCHYARD_AGENTFIELD_API_KEY`, `SWITCHYARD_AGENTFIELD_TARGET`, `SWITCHYARD_AGENTFIELD_REQUEST_TIMEOUT_MS`, `SWITCHYARD_AGENTFIELD_POLL_INTERVAL_MS`, and `SWITCHYARD_AGENTFIELD_MAX_RESPONSE_BYTES`.
+- Added deterministic fake AgentField control-plane server + CLI in `@switchyard/testkit` and local script `pnpm --filter @switchyard/testkit fake-agentfield`.
+- Added AgentField transcript and result artifacts for completed/failed/timeout flows, including upstream execution id metadata.
+- Added AgentField local adapter guide at `docs/development/adapters/AGENTFIELD.md`.
+
+### Changed
+
+- Updated runtime-mode inference and validation to map `runtime: "agentfield"` + `adapterType: "http"` to `agentfield.async_rest` and reject internal runtime-mode ids in public payloads.
+- Updated daemon registry/runtime-mode seeding to include `provider_agentfield`, `runtime_agentfield`, and `model_agentfield_default`.
+- Updated public protocol behavior so active AgentField cancel returns `409 adapter_protocol_failed` with `reasonCode: agentfield_cancel_unsupported`, and post-start input returns `agentfield_input_unsupported`.
+- Updated failure mapping and security handling so network/fetch failures emit `agentfield_request_failed`, upstream failed terminal status emits `agentfield_status_failed`, and API keys are redacted from checks, events, logs, transcripts, and artifacts.
+
 ## 2026-05-30 - Roadmap Release Train R5 ACP Foundation And OpenCode
 
 ### Added

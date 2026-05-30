@@ -1,11 +1,12 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "vitest";
-import { CodexExecJsonAdapter, GenericHttpAsyncRestAdapter, OpenCodeAcpAdapter } from "../src/index.js";
+import { AgentFieldAsyncRestAdapter, CodexExecJsonAdapter, GenericHttpAsyncRestAdapter, OpenCodeAcpAdapter } from "../src/index.js";
 import {
   FakeRuntimeAdapter,
   createFakeAcpProcessFactory,
   runRuntimeAdapterContract,
+  startFakeAgentFieldServer,
   startFakeHttpRuntimeServer
 } from "@switchyard/testkit";
 
@@ -52,6 +53,26 @@ describe("runtime adapter contract suite", () => {
         runtime: "generic_http",
         provider: "generic_http",
         model: "generic-http-default",
+        adapterType: "http"
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("passes for agentfield adapter with fake agentfield server", async () => {
+    const server = await startFakeAgentFieldServer({ scenario: "happy" });
+    try {
+      await runRuntimeAdapterContract({
+        adapter: new AgentFieldAsyncRestAdapter({
+          baseUrl: server.baseUrl,
+          apiKey: "af-key",
+          target: "research-agent.deep_analysis",
+          pollIntervalMs: 5
+        }),
+        runtime: "agentfield",
+        provider: "agentfield",
+        model: "agentfield-default",
         adapterType: "http"
       });
     } finally {

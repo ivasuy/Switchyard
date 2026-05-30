@@ -21,12 +21,23 @@ export interface DaemonConfig {
     pollIntervalMs: number;
     maxResponseBytes: number;
   };
+  agentfield?: {
+    baseUrl?: string;
+    apiKey?: string;
+    target?: string;
+    requestTimeoutMs: number;
+    pollIntervalMs: number;
+    maxResponseBytes: number;
+  };
 }
 
 export function loadDaemonConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   const dataDir = env["SWITCHYARD_DATA_DIR"] ?? join(process.cwd(), ".switchyard");
   const baseUrl = env["SWITCHYARD_GENERIC_HTTP_BASE_URL"]?.trim();
   const authToken = env["SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN"]?.trim();
+  const agentfieldBaseUrl = env["SWITCHYARD_AGENTFIELD_BASE_URL"]?.trim();
+  const agentfieldApiKey = env["SWITCHYARD_AGENTFIELD_API_KEY"]?.trim();
+  const agentfieldTarget = env["SWITCHYARD_AGENTFIELD_TARGET"]?.trim();
   const opencodeCommand = env["SWITCHYARD_OPENCODE_COMMAND"]?.trim();
 
   return {
@@ -49,6 +60,14 @@ export function loadDaemonConfig(env: NodeJS.ProcessEnv = process.env): DaemonCo
       requestTimeoutMs: Number(env["SWITCHYARD_GENERIC_HTTP_REQUEST_TIMEOUT_MS"] ?? 5000),
       pollIntervalMs: Number(env["SWITCHYARD_GENERIC_HTTP_POLL_INTERVAL_MS"] ?? 100),
       maxResponseBytes: Number(env["SWITCHYARD_GENERIC_HTTP_MAX_RESPONSE_BYTES"] ?? 1024 * 1024)
+    },
+    agentfield: {
+      ...(agentfieldBaseUrl && agentfieldBaseUrl.length > 0 ? { baseUrl: agentfieldBaseUrl } : {}),
+      ...(agentfieldApiKey && agentfieldApiKey.length > 0 ? { apiKey: agentfieldApiKey } : {}),
+      ...(agentfieldTarget && agentfieldTarget.length > 0 ? { target: agentfieldTarget } : {}),
+      requestTimeoutMs: Number(env["SWITCHYARD_AGENTFIELD_REQUEST_TIMEOUT_MS"] ?? 5000),
+      pollIntervalMs: Number(env["SWITCHYARD_AGENTFIELD_POLL_INTERVAL_MS"] ?? 1000),
+      maxResponseBytes: Number(env["SWITCHYARD_AGENTFIELD_MAX_RESPONSE_BYTES"] ?? 1024 * 1024)
     }
   };
 }
