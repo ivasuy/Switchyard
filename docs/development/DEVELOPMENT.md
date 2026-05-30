@@ -489,3 +489,37 @@ pnpm build
 pnpm lint
 git diff --check
 ```
+
+## R10 Hosted/Hybrid No-Spend Smoke
+
+Hosted-like server smoke (`fake.deterministic` only):
+
+```bash
+pnpm --filter @switchyard/server dev
+curl -s -X POST "http://127.0.0.1:4646/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"runtime":"fake","provider":"test","model":"test-model","adapterType":"process","runtimeMode":"fake.deterministic","cwd":"/repo","task":"r10 hosted fake smoke","placement":"hosted"}' | python3 -m json.tool
+```
+
+Connected-node fake smoke:
+
+```bash
+pnpm --filter @switchyard/server dev
+SWITCHYARD_SERVER_URL=http://127.0.0.1:4646 pnpm --filter @switchyard/node dev
+```
+
+Negative hosted local-runtime denial (Codex/Claude style runtime modes denied in hosted path):
+
+```bash
+curl -s -X POST "http://127.0.0.1:4646/runs" \
+  -H 'content-type: application/json' \
+  -d '{"runtime":"fake","provider":"test","model":"test-model","adapterType":"process","runtimeMode":"codex.exec_json","cwd":"/repo","task":"must deny","placement":"hosted"}' | python3 -m json.tool
+```
+
+Expected: `409 placement_denied` (or `400 invalid_input` if runtimeMode mapping is invalid before placement evaluation), and no hosted job execution occurs.
+
+R10 non-goals reminder:
+
+- No hosted Codex/Claude/OpenCode/PTY/arbitrary subprocess execution.
+- No hosted browser/search/repo/GitHub/fetch tooling.
+- No hosted debate participant execution or model judging.

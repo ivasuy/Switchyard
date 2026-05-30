@@ -6,6 +6,16 @@ import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 
 import {
+  MemoryArtifactContentStore,
+  ObjectArtifactContentStore,
+  PostgresAssignmentStore,
+  PostgresArtifactStore,
+  PostgresEventStore,
+  PostgresNodeStore,
+  PostgresPlacementStore,
+  PostgresRegistryStore,
+  PostgresRunStore,
+  PostgresSessionStore,
   openSqliteStorage,
   SqliteApprovalStore,
   SqliteDebateStore,
@@ -27,6 +37,19 @@ describe("storage package", () => {
     } finally {
       opened.sqlite.close();
     }
+  });
+
+  it("exports R10 postgres and artifact-content implementations", () => {
+    expect(typeof PostgresRunStore).toBe("function");
+    expect(typeof PostgresEventStore).toBe("function");
+    expect(typeof PostgresSessionStore).toBe("function");
+    expect(typeof PostgresArtifactStore).toBe("function");
+    expect(typeof PostgresRegistryStore).toBe("function");
+    expect(typeof PostgresPlacementStore).toBe("function");
+    expect(typeof PostgresNodeStore).toBe("function");
+    expect(typeof PostgresAssignmentStore).toBe("function");
+    expect(typeof MemoryArtifactContentStore).toBe("function");
+    expect(typeof ObjectArtifactContentStore).toBe("function");
   });
 
   it("creates middleware tables and indexes in fresh sqlite databases", () => {

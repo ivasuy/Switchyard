@@ -1,13 +1,13 @@
 import type { FastifyInstance } from "fastify";
-import type { ArtifactStore } from "@switchyard/core";
+import type { ArtifactContentStore, ArtifactStore } from "@switchyard/core";
 import type { Artifact } from "@switchyard/contracts";
 import { sendHttpError } from "./http-errors.js";
 
 export type ContentType = "transcript" | string;
 
-export interface ArtifactContentReader {
+export type ArtifactContentReader = Pick<ArtifactContentStore, "read"> | {
   read(artifact: Artifact): Promise<{ body: Buffer | string; contentType: string }>;
-}
+};
 
 export interface ArtifactRouteDependencies {
   artifacts: ArtifactStore;

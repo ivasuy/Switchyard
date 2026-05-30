@@ -185,3 +185,25 @@ All notable changes to Switchyard will be documented in this file.
 
 - Expanded `.gitignore` to keep generated artifacts, dependencies, caches, environment files, logs, editor files, `docs/decisions`, and `docs/superpowers` out of the repository.
 - Updated the daemon dev script to suppress Node 26's upstream `tsx` `DEP0205` warning while keeping other process warnings visible.
+
+## 2026-05-30 - Roadmap Release Train R10 Hosted And Hybrid Execution
+
+### Added
+
+- Added hosted-like `@switchyard/server`, hosted `@switchyard/worker`, and connected local `@switchyard/node` apps.
+- Added node protocol package (`@switchyard/protocol-node`) with register/heartbeat/claim/reject/event-sync/artifact-sync/complete endpoints and client helper.
+- Added queue package (`@switchyard/queue`) with deterministic `MemoryRunQueue` and BullMQ-backed adapter.
+- Added Postgres-shaped storage classes for runs/events/sessions/artifacts/registry/placement/nodes/assignments plus object/memory artifact-content stores.
+- Added core hosted/hybrid services: placement, hosted run orchestration, hosted worker safety checks, node coordination, local node policy gating, event sync, and artifact sync.
+
+### Changed
+
+- Preserved the public run/artifact contract across local daemon and hosted-like execution paths.
+- Expanded HTTP error code mapping for placement/node/sync failures.
+- Updated fake runtime placement facts to support hosted-safe and connected-node fake execution in R10 smoke paths.
+
+### Safety Boundaries
+
+- Hosted worker execution is fake-only (`fake.deterministic`) and re-validates durable run state at claim time.
+- Local-only runtime modes remain denied for hosted placement.
+- Hosted arbitrary subprocess/PTY/tooling/debate-model-judging execution is not shipped.

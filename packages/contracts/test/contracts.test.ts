@@ -28,7 +28,11 @@ import {
   toolInvocationSchema,
   userSchema,
   httpErrorCodeSchema,
-  httpErrorEnvelopeSchema
+  httpErrorEnvelopeSchema,
+  assignmentSchema,
+  nodeRegisterRequestSchema,
+  assignmentEventSyncRequestSchema,
+  assignmentArtifactManifestRequestSchema
 } from "../src/index.js";
 
 function expectRequiredFields(schema: z.ZodType, valid: Record<string, unknown>, requiredKeys: string[]): void {
@@ -122,8 +126,8 @@ describe("Switchyard contracts", () => {
       limitations: [{ code: "deterministic_only", message: "Outputs are fixed for local smoke and contract tests." }],
       placement: {
         local: { support: "supported", reason: "In-process deterministic test adapter." },
-        hosted: { support: "unsupported", reason: "Hosted worker execution is not shipped in R3." },
-        connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+        hosted: { support: "supported", reason: "Hosted-safe deterministic fake worker mode for R10 smoke execution." },
+        connectedLocalNode: { support: "supported", reason: "Connected local node fake execution for R10 hybrid smoke flows." }
       },
       availability: {
         state: "available",
@@ -600,6 +604,55 @@ describe("Switchyard contracts", () => {
   it("includes debate_not_found and evidence_not_found in HTTP error schemas", () => {
     expect(httpErrorCodeSchema.parse("debate_not_found")).toBe("debate_not_found");
     expect(httpErrorCodeSchema.parse("evidence_not_found")).toBe("evidence_not_found");
+    expect(httpErrorCodeSchema.parse("placement_denied")).toBe("placement_denied");
+    expect(httpErrorCodeSchema.parse("node_auth_failed")).toBe("node_auth_failed");
+    expect(httpErrorCodeSchema.parse("assignment_claim_conflict")).toBe("assignment_claim_conflict");
+    expect(httpErrorCodeSchema.parse("hosted_runtime_not_allowed")).toBe("hosted_runtime_not_allowed");
+  });
+
+  it("parses R10 assignment and node sync request contracts", () => {
+    expect(
+      assignmentSchema.parse({
+        id: "assignment_123",
+        runId: "run_123",
+        nodeId: "node_123",
+        status: "pending",
+        retryCount: 0,
+        lastEventSequence: 0,
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }).status
+    ).toBe("pending");
+
+    expect(
+      nodeRegisterRequestSchema.parse({
+        capabilities: ["runtime.fake.deterministic"],
+        policy: {
+          allowRuntimeModes: ["fake.deterministic"],
+          denyAdapterTypes: [],
+          allowCwdPrefixes: ["/repo"],
+          allowEventTypes: ["runtime.output"],
+          artifactSync: "full"
+        }
+      }).policy?.allowRuntimeModes[0]
+    ).toBe("fake.deterministic");
+
+    expect(assignmentEventSyncRequestSchema.parse({ cursor: 0, events: [] }).events).toEqual([]);
+
+    expect(
+      assignmentArtifactManifestRequestSchema.parse({
+        artifacts: [
+          {
+            id: "artifact_123",
+            type: "transcript",
+            path: "runs/run_123/transcript.jsonl",
+            contentType: "application/x-ndjson",
+            sizeBytes: 0,
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            syncContent: true
+          }
+        ]
+      }).artifacts[0]?.id
+    ).toBe("artifact_123");
   });
 
   it("parses debate participant and limits", () => {

@@ -22,6 +22,18 @@ export type HttpErrorCode =
   | "invalid_input"
   | "invalid_query"
   | "adapter_protocol_failed"
+  | "placement_denied"
+  | "node_auth_failed"
+  | "node_not_found"
+  | "assignment_not_found"
+  | "assignment_claim_conflict"
+  | "node_policy_denied"
+  | "queue_unavailable"
+  | "event_sync_gap"
+  | "event_sync_conflict"
+  | "artifact_digest_mismatch"
+  | "artifact_sync_failed"
+  | "hosted_runtime_not_allowed"
   | "internal_error";
 
 export interface HttpErrorDetail {
@@ -58,6 +70,18 @@ const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   invalid_input: 400,
   invalid_query: 400,
   adapter_protocol_failed: 409,
+  placement_denied: 409,
+  node_auth_failed: 401,
+  node_not_found: 404,
+  assignment_not_found: 404,
+  assignment_claim_conflict: 409,
+  node_policy_denied: 403,
+  queue_unavailable: 503,
+  event_sync_gap: 409,
+  event_sync_conflict: 409,
+  artifact_digest_mismatch: 409,
+  artifact_sync_failed: 500,
+  hosted_runtime_not_allowed: 409,
   internal_error: 500
 };
 

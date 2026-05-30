@@ -21,8 +21,8 @@ export class FakeRuntimeAdapter implements RuntimeAdapter {
     ],
     placement: {
       local: { support: "supported", reason: "In-process deterministic test adapter." },
-      hosted: { support: "unsupported", reason: "Hosted worker execution is not shipped in R3." },
-      connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+      hosted: { support: "supported", reason: "Hosted-safe deterministic fake worker mode for R10 smoke execution." },
+      connectedLocalNode: { support: "supported", reason: "Connected local node fake execution for R10 hybrid smoke flows." }
     },
     docsPath: "docs/development/API.md",
     check: {

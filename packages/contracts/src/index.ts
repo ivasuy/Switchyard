@@ -1,4 +1,5 @@
 export * from "./approval.js";
+export * from "./assignment.js";
 export * from "./artifact.js";
 export * from "./budget.js";
 export * from "./context.js";

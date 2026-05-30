@@ -2,6 +2,31 @@
 
 This is the current local daemon API contract. It documents what an app can call today.
 
+## R10 Hosted And Hybrid Execution (Safe Slice)
+
+R10 adds hosted-like and connected-node execution surfaces while preserving the public run contract shape (`POST /runs`, `GET /runs`, `GET /runs/:id`, events/artifacts/cancel).
+
+Safety boundaries in this shipped slice:
+
+- Hosted worker execution is restricted to `fake.deterministic` only.
+- Hosted worker must reject non-fake runtime rows at claim time using durable run-state validation.
+- No hosted arbitrary subprocess, PTY, Codex, Claude, OpenCode, browser/search/repo/GitHub/fetch tooling, hosted debate participant execution, or model judging is shipped.
+
+Node endpoints added in R10:
+
+- `POST /nodes/register`
+- `POST /nodes/:id/heartbeat`
+- `GET /nodes`
+- `GET /nodes/:id`
+- `POST /nodes/:id/assignments/claim`
+- `POST /nodes/:id/assignments/:assignmentId/reject`
+- `POST /nodes/:id/assignments/:assignmentId/events`
+- `POST /nodes/:id/assignments/:assignmentId/artifacts/manifest`
+- `PUT /nodes/:id/assignments/:assignmentId/artifacts/:artifactId/content`
+- `POST /nodes/:id/assignments/:assignmentId/complete`
+
+When `SWITCHYARD_NODE_SHARED_TOKEN` is set, every `/nodes/*` route requires `x-switchyard-node-token`.
+
 Base URL:
 
 ```text

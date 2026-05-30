@@ -6,6 +6,7 @@ import type {
   RegistryService,
   RegistryStore,
   ContextBuilder,
+  HostedRunService,
   RunLauncherService,
   RunService,
   RunStore
@@ -31,6 +32,7 @@ import { resolveProviderIds } from "./registry-helpers.js";
 
 export interface RunRouteDependencies {
   runService: RunService;
+  hostedRuns?: HostedRunService;
   runs: RunStore;
   events: EventStore;
   contextBuilder?: ContextBuilder;
@@ -72,21 +74,48 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       if (runtimeMode !== undefined) {
         createInput.runtimeMode = runtimeMode;
       }
-      const run = await deps.runService.createRun(createInput);
+      let placementFacts;
+      if (runtimeMode && deps.registry) {
+        const mode = await deps.registry.getRuntimeMode(runtimeMode);
+        placementFacts = mode?.placement;
+      }
+
+      const runResult = deps.hostedRuns && placementFacts
+        ? await deps.hostedRuns.createRun({
+          ...createInput,
+          placementFacts
+        }, { wait })
+        : { run: await deps.runService.createRun(createInput) };
+
+      const run = runResult.run;
       if (wait) {
+        if (runResult.response) {
+          return reply.code(201).send({ run: runResult.run, response: runResult.response });
+        }
         const completed = await deps.runService.startRun(run.id);
         const events = await deps.events.listByRun(run.id);
         return reply.code(201).send({ run: completed, response: collectRunResponse(events) });
       }
-      if (deps.launcher) {
+      if (!deps.hostedRuns && deps.launcher) {
         deps.launcher.launch(run);
-      } else {
+      } else if (!deps.hostedRuns) {
         queueMicrotask(() => {
           void deps.runService.startRun(run.id).catch(() => {});
         });
       }
       return reply.code(202).send({ run });
     } catch (error) {
+      if (isHostedRunServiceError(error)) {
+        if (error.code === "queue_unavailable") {
+          return sendHttpError(reply, "queue_unavailable", error.message);
+        }
+        if (error.code === "hosted_runtime_not_allowed") {
+          return sendHttpError(reply, "placement_denied", "hosted_runtime_not_allowed", [
+            { path: "placement", issue: "hosted_runtime_not_allowed" }
+          ]);
+        }
+        return sendHttpError(reply, "placement_denied", error.message);
+      }
       if (error instanceof HttpProblem) {
         return sendHttpError(reply, error.code, error.message, error.details);
       }
@@ -420,7 +449,7 @@ function parseCreateRunBody(value: unknown): CreateRunBody {
     adapterType,
     cwd: requiredString(body, "cwd"),
     task: requiredString(body, "task"),
-    placement: typeof body["placement"] === "string" ? body["placement"] as CreateRunBody["placement"] : undefined,
+    placement: parsePlacement(body["placement"]),
     approvalPolicy: typeof body["approvalPolicy"] === "string" ? body["approvalPolicy"] : undefined,
     timeoutSeconds: typeof body["timeoutSeconds"] === "number" ? body["timeoutSeconds"] : undefined,
     metadata: isRecord(body["metadata"]) ? body["metadata"] : undefined,
@@ -437,6 +466,18 @@ function requiredString(body: Record<string, unknown>, key: string): string {
     ]);
   }
   return value;
+}
+
+function parsePlacement(value: unknown): CreateRunBody["placement"] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    throw new HttpProblem("invalid_input", "placement must be a non-empty string", [
+      { path: "placement", issue: "must be local, hosted, or connected_local_node" }
+    ]);
+  }
+  return value as CreateRunBody["placement"];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -637,4 +678,12 @@ function adapterProtocolDetails(error: AdapterProtocolError): Array<{ path: stri
     return undefined;
   }
   return [{ path: "reasonCode", issue: error.reasonCode }];
+}
+
+function isHostedRunServiceError(error: unknown): error is { code: "placement_denied" | "queue_unavailable" | "hosted_runtime_not_allowed"; message: string } {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return code === "placement_denied" || code === "queue_unavailable" || code === "hosted_runtime_not_allowed";
 }

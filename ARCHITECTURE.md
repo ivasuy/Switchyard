@@ -944,3 +944,20 @@ Each phase should produce a runnable proof rather than only internal scaffolding
 For the current owner-facing release roadmap, use [PRODUCT.md](./PRODUCT.md). Historical implementation plans under `docs/superpowers/plans/` are references, not current truth.
 
 For the diagram-to-module checklist, use [the module coverage audit](./docs/decisions/2026-05-11-module-coverage-audit.md).
+
+## R10 Architecture Update (Shipped Slice)
+
+R10 now includes the previously planned hosted/hybrid surfaces in a safety-first shape:
+
+- `apps/server` is the hosted-like API gateway.
+- `apps/worker` is the hosted queue consumer and executes only hosted-safe fake runtime mode.
+- `apps/node` is the connected local-node executor with policy-gated assignment execution and sync.
+- `packages/queue` provides memory/BullMQ queue adapters.
+- `packages/protocol-node` provides hosted<->node routes/client.
+- `packages/storage` includes Postgres-shaped metadata stores and object/memory artifact content stores.
+
+Current safety posture:
+
+- Hosted worker execution is restricted to `fake.deterministic`.
+- Hosted server/worker do not run arbitrary subprocess/PTY/Codex/Claude/OpenCode runtimes.
+- Hybrid connected nodes are explicit trust boundaries and enforce local policy before execution and sync.

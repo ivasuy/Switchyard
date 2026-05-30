@@ -951,3 +951,23 @@ Use these files for details:
 - Adapter research: `docs/adapters/`
 - Historical specs: `docs/superpowers/specs/`
 - Historical implementation plans: `docs/superpowers/plans/`
+
+## R10 Hosted And Hybrid Execution (Shipped Safe Slice)
+
+Shipped in this phase:
+
+- `apps/server` hosted-like API gateway preserving public run/artifact envelopes.
+- `apps/worker` hosted worker path with strict fake-only runtime validation (`fake.deterministic`).
+- `apps/node` connected local-node registration/heartbeat/claim/sync loop.
+- Placement decisions across `local`, `hosted`, and `connected_local_node` with inspectable denial reasons.
+- Queue abstraction with deterministic memory default and BullMQ/Redis implementation package.
+- Postgres-shaped hosted metadata stores and object/memory artifact-content stores.
+- Node protocol routes and client.
+
+Explicitly not shipped in R10:
+
+- Hosted arbitrary subprocess/PTY/Codex/Claude/OpenCode execution.
+- Hosted browser/search/repo/GitHub/fetch tooling.
+- Hosted debate participant runtimes or model-judging workflows.
+- SDK/CLI/TUI/dashboard packaging changes beyond interface boundaries.
+- Enterprise auth/billing/tenant controls.
