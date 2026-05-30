@@ -187,7 +187,62 @@ describe("hosted worker app", () => {
       reasonCode: "ok"
     });
 
-    expect(seen[0]?.details).toEqual({ runId: "run_1", reasonCode: "ok" });
+    expect(seen[0]?.details).toEqual({
+      runId: "run_1",
+      reasonCode: "ok",
+      stdout: "[redacted]",
+      stderr: "[redacted]",
+      task: "[redacted]",
+      cwd: "[redacted]",
+      command: "[redacted]",
+      token: "[redacted]",
+      providerOutput: "[redacted]"
+    });
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("secret");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("top secret");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("/home/user");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("danger");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("abc");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("raw");
+  });
+
+  it("redacts short provider output and signed URL/object key variants", () => {
+    const seen: Array<{ event: string; details?: Record<string, unknown> }> = [];
+    const logger = createHostedSafeLogger({
+      info: (event, details) => seen.push({ event, details }),
+      warn: (event, details) => seen.push({ event, details }),
+      error: (event, details) => seen.push({ event, details })
+    });
+
+    logger?.warn("adapter.log", {
+      runId: "run_short_1",
+      reasonCode: "warn",
+      text: "short stderr chunk",
+      output: "provider output",
+      signed_url: "https://bucket.example.com/path?sig=abc",
+      object_key: "runs/run_short_1/transcript.ndjson",
+      provider_output: {
+        stderr: "tiny",
+        stdout: "tiny2"
+      }
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.details).toEqual({
+      runId: "run_short_1",
+      reasonCode: "warn",
+      text: "[redacted]",
+      output: "[redacted]",
+      signed_url: "[redacted]",
+      object_key: "[redacted]",
+      provider_output: "[redacted]"
+    });
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("short stderr chunk");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("provider output");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("bucket.example.com");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("runs/run_short_1");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("tiny");
+    expect(JSON.stringify(seen[0]?.details)).not.toContain("tiny2");
   });
 
   it("keeps forbidden imports blocked while allowing approved hosted adapters", () => {

@@ -123,41 +123,98 @@ export function createHostedSafeLogger(logger?: RuntimeLogger): RuntimeLogger | 
     return undefined;
   }
 
-  const unsafeKeys = new Set([
+  const unsafeExactKeys = new Set([
     "stdout",
     "stderr",
+    "text",
+    "output",
+    "provideroutput",
     "task",
     "cwd",
     "argv",
     "args",
     "command",
+    "commandargs",
     "env",
     "token",
-    "secret",
+    "tokens",
+    "apikey",
+    "authorization",
     "password",
-    "providerOutput",
-    "output",
-    "signedUrl",
-    "objectKey",
+    "secret",
+    "signedurl",
+    "objectkey",
     "home",
     "path"
   ]);
+
+  const normalizeKey = (key: string): string => key.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  const isUnsafeDetailKey = (key: string): boolean => {
+    const normalized = normalizeKey(key);
+    if (unsafeExactKeys.has(normalized)) {
+      return true;
+    }
+    if (normalized.includes("token")
+      || normalized.includes("secret")
+      || normalized.includes("password")
+      || normalized.includes("apikey")
+      || normalized.includes("authorization")) {
+      return true;
+    }
+    if (normalized.includes("stdout")
+      || normalized.includes("stderr")
+      || normalized.includes("text")
+      || normalized.includes("provideroutput")) {
+      return true;
+    }
+    if (normalized.includes("signed") && normalized.includes("url")) {
+      return true;
+    }
+    if (normalized.includes("object") && normalized.includes("key")) {
+      return true;
+    }
+    if (normalized.includes("command")
+      && (normalized.includes("arg") || normalized.includes("argv"))) {
+      return true;
+    }
+    return false;
+  };
+
+  const sanitizeValue = (value: unknown, seen: WeakSet<object>): unknown => {
+    if (Array.isArray(value)) {
+      return value.map((entry) => sanitizeValue(entry, seen));
+    }
+    if (value && typeof value === "object") {
+      if (seen.has(value)) {
+        return "[redacted]";
+      }
+      seen.add(value);
+      const nested: Record<string, unknown> = {};
+      for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+        if (isUnsafeDetailKey(key)) {
+          nested[key] = "[redacted]";
+          continue;
+        }
+        nested[key] = sanitizeValue(nestedValue, seen);
+      }
+      return nested;
+    }
+    return value;
+  };
 
   const sanitize = (details?: Record<string, unknown>): Record<string, unknown> | undefined => {
     if (!details) {
       return undefined;
     }
     const safe: Record<string, unknown> = {};
+    const seen = new WeakSet<object>();
     for (const [key, value] of Object.entries(details)) {
-      const normalized = key.toLowerCase();
-      if (unsafeKeys.has(key) || unsafeKeys.has(normalized) || normalized.includes("token") || normalized.includes("secret") || normalized.includes("password")) {
+      if (isUnsafeDetailKey(key)) {
+        safe[key] = "[redacted]";
         continue;
       }
-      if (typeof value === "string" && value.length > 160 && normalized.includes("text")) {
-        safe[key] = `[redacted:${Buffer.byteLength(value, "utf8")} bytes]`;
-        continue;
-      }
-      safe[key] = value;
+      safe[key] = sanitizeValue(value, seen);
     }
     return safe;
   };
