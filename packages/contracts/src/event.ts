@@ -17,6 +17,9 @@ export const eventTypeSchema = z.enum([
   "debate.judge.summary",
   "debate.consensus",
   "approval.requested",
+  "approval.approved",
+  "approval.rejected",
+  "approval.expired",
   "run.completed",
   "run.cancelled",
   "run.failed"

@@ -82,6 +82,45 @@ export const approvals = sqliteTable("approvals", {
   resolvedAt: text("resolved_at")
 });
 
+export const memoryItems = sqliteTable("memory_items", {
+  id: text("id").primaryKey(),
+  scope: text("scope").notNull(),
+  projectId: text("project_id"),
+  runId: text("run_id"),
+  debateId: text("debate_id"),
+  provider: text("provider"),
+  model: text("model"),
+  content: text("content").notNull(),
+  metadataJson: text("metadata_json").notNull(),
+  embeddingJson: text("embedding_json"),
+  createdAt: text("created_at").notNull()
+});
+
+export const evidenceItems = sqliteTable("evidence_items", {
+  id: text("id").primaryKey(),
+  debateId: text("debate_id"),
+  sourceType: text("source_type").notNull(),
+  url: text("url"),
+  title: text("title").notNull(),
+  snippet: text("snippet"),
+  fetchedContentPath: text("fetched_content_path"),
+  reliability: text("reliability").notNull(),
+  createdAt: text("created_at").notNull()
+});
+
+export const toolInvocations = sqliteTable("tool_invocations", {
+  id: text("id").primaryKey(),
+  runId: text("run_id"),
+  type: text("type").notNull(),
+  status: text("status").notNull(),
+  approvalId: text("approval_id"),
+  inputJson: text("input_json").notNull(),
+  outputJson: text("output_json"),
+  errorJson: text("error_json"),
+  createdAt: text("created_at").notNull(),
+  completedAt: text("completed_at")
+});
+
 export const providers = sqliteTable("providers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -147,6 +186,9 @@ export const schema = {
   artifacts,
   messages,
   approvals,
+  memoryItems,
+  evidenceItems,
+  toolInvocations,
   providers,
   runtimes,
   models,

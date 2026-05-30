@@ -1,0 +1,369 @@
+import { describe, expect, it } from "vitest";
+import type { Approval, EvidenceItem, MemoryItem, RoutedMessage, Run, SwitchyardEvent, ToolInvocation } from "@switchyard/contracts";
+import type {
+  ApprovalStore,
+  EvidenceStore,
+  ListApprovalsFilter,
+  ListApprovalsResult,
+  ListEvidenceFilter,
+  ListEvidenceResult,
+  ListMemoryFilter,
+  ListMemoryResult,
+  ListMessagesFilter,
+  ListMessagesResult,
+  ListToolInvocationsFilter,
+  ListToolInvocationsResult,
+  MemoryStore,
+  MessageStore,
+  RunStore,
+  ToolInvocationStore
+} from "../src/index.js";
+import { EventBus } from "../src/services/event-bus.js";
+import { ApprovalService } from "../src/services/approval-service.js";
+import { ContextBuilder } from "../src/services/context-builder.js";
+import { EvidenceService } from "../src/services/evidence-service.js";
+import { LocalPolicyGate } from "../src/services/local-policy-gate.js";
+import { MemoryService } from "../src/services/memory-service.js";
+import { MessageRouter } from "../src/services/message-router.js";
+import { ToolRouter } from "../src/services/tool-router.js";
+import type { EventStore } from "../src/ports/event-store.js";
+import type { ToolAdapter } from "../src/ports/tool-adapter.js";
+
+function makeRun(id: string, approvalPolicy = "default"): Run {
+  return {
+    id,
+    runtime: "fake",
+    provider: "test",
+    model: "test-model",
+    adapterType: "process",
+    cwd: "/repo",
+    task: "task",
+    status: "queued",
+    placement: "local",
+    approvalPolicy,
+    timeoutSeconds: 60,
+    metadata: {},
+    createdAt: "2026-05-30T00:00:00.000Z"
+  };
+}
+
+class InMemoryRunStore implements RunStore {
+  readonly items = new Map<string, Run>();
+  async create(run: Run): Promise<Run> {
+    this.items.set(run.id, run);
+    return run;
+  }
+  async get(id: string): Promise<Run | undefined> {
+    return this.items.get(id);
+  }
+  async update(run: Run): Promise<Run> {
+    this.items.set(run.id, run);
+    return run;
+  }
+  async list(): Promise<never> {
+    throw new Error("unused");
+  }
+}
+
+class InMemoryEventStore implements EventStore {
+  readonly items: SwitchyardEvent[] = [];
+  async append(event: SwitchyardEvent): Promise<SwitchyardEvent> {
+    this.items.push(event);
+    return event;
+  }
+  async listByRun(runId: string): Promise<SwitchyardEvent[]> {
+    return this.items.filter((event) => event.runId === runId);
+  }
+}
+
+class InMemoryMessageStore implements MessageStore {
+  readonly items = new Map<string, RoutedMessage>();
+  async create(value: RoutedMessage): Promise<RoutedMessage> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async get(id: string): Promise<RoutedMessage | undefined> {
+    return this.items.get(id);
+  }
+  async update(value: RoutedMessage): Promise<RoutedMessage> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async list(filter: ListMessagesFilter): Promise<ListMessagesResult> {
+    const messages = [...this.items.values()].filter((item) => {
+      if (filter.runId && item.fromRunId !== filter.runId && item.toRunId !== filter.runId) return false;
+      if (filter.channel && item.channel !== filter.channel) return false;
+      if (filter.deliveryStatus && item.deliveryStatus !== filter.deliveryStatus) return false;
+      return true;
+    });
+    return { messages, nextCursor: null };
+  }
+}
+
+class InMemoryMemoryStore implements MemoryStore {
+  readonly items = new Map<string, MemoryItem>();
+  async create(value: MemoryItem): Promise<MemoryItem> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async get(id: string): Promise<MemoryItem | undefined> {
+    return this.items.get(id);
+  }
+  async update(value: MemoryItem): Promise<MemoryItem> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async list(filter: ListMemoryFilter): Promise<ListMemoryResult> {
+    const memory = [...this.items.values()].filter((item) => {
+      if (filter.scope && item.scope !== filter.scope) return false;
+      return true;
+    });
+    return { memory, nextCursor: null };
+  }
+  async search(filter: ListMemoryFilter & { q: string }): Promise<ListMemoryResult> {
+    const q = filter.q.toLowerCase();
+    const memory = [...this.items.values()].filter((item) => item.content.toLowerCase().includes(q));
+    return { memory, nextCursor: null };
+  }
+}
+
+class InMemoryEvidenceStore implements EvidenceStore {
+  readonly items = new Map<string, EvidenceItem>();
+  async create(value: EvidenceItem): Promise<EvidenceItem> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async get(id: string): Promise<EvidenceItem | undefined> {
+    return this.items.get(id);
+  }
+  async update(value: EvidenceItem): Promise<EvidenceItem> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async list(_filter: ListEvidenceFilter): Promise<ListEvidenceResult> {
+    return { evidence: [...this.items.values()], nextCursor: null };
+  }
+}
+
+class InMemoryApprovalStore implements ApprovalStore {
+  readonly items = new Map<string, Approval>();
+  async create(value: Approval): Promise<Approval> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async get(id: string): Promise<Approval | undefined> {
+    return this.items.get(id);
+  }
+  async update(value: Approval): Promise<Approval> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async list(_filter: ListApprovalsFilter): Promise<ListApprovalsResult> {
+    return { approvals: [...this.items.values()], nextCursor: null };
+  }
+}
+
+class InMemoryToolInvocationStore implements ToolInvocationStore {
+  readonly items = new Map<string, ToolInvocation>();
+  async create(value: ToolInvocation): Promise<ToolInvocation> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async get(id: string): Promise<ToolInvocation | undefined> {
+    return this.items.get(id);
+  }
+  async update(value: ToolInvocation): Promise<ToolInvocation> {
+    this.items.set(value.id, value);
+    return value;
+  }
+  async list(_filter: ListToolInvocationsFilter): Promise<ListToolInvocationsResult> {
+    return { invocations: [...this.items.values()], nextCursor: null };
+  }
+  async listByApproval(approvalId: string): Promise<ToolInvocation[]> {
+    return [...this.items.values()].filter((item) => item.approvalId === approvalId);
+  }
+}
+
+class FakeEchoToolAdapter implements ToolAdapter {
+  readonly id = "fake_echo";
+  invocationCount = 0;
+  async check() {
+    return { ok: true };
+  }
+  async invoke(input: Record<string, unknown>) {
+    this.invocationCount += 1;
+    if (typeof input["text"] !== "string") {
+      throw new Error("missing text");
+    }
+    return { echo: input["text"] as string };
+  }
+  async cancel(): Promise<void> {}
+  async artifacts() {
+    return [];
+  }
+}
+
+describe("middleware services", () => {
+  it("routes messages, validates destination runs, and emits message.sent", async () => {
+    const runs = new InMemoryRunStore();
+    await runs.create(makeRun("run_from"));
+    await runs.create(makeRun("run_to"));
+    const messages = new InMemoryMessageStore();
+    const events = new InMemoryEventStore();
+    const eventBus = new EventBus();
+    const seen: string[] = [];
+    eventBus.subscribe(async (event) => {
+      seen.push(event.type);
+    });
+
+    const router = new MessageRouter({ runs, messages, events, eventBus });
+    const created = await router.create({
+      fromRunId: "run_from",
+      toRunId: "run_to",
+      content: "hello",
+      attachments: []
+    });
+
+    expect(created.deliveryStatus).toBe("delivered");
+    expect(created.deliveredAt).toBeDefined();
+    expect((await router.list({ limit: 50 })).messages).toHaveLength(1);
+    expect(seen).toContain("message.sent");
+  });
+
+  it("supports substring-only memory search", async () => {
+    const memory = new InMemoryMemoryStore();
+    const service = new MemoryService({ memory });
+    await service.create({ scope: "project", content: "Switchyard Middleware Foundation", metadata: {} });
+    await service.create({ scope: "project", content: "Other", metadata: {} });
+
+    const result = await service.search({ q: "middleWARE", limit: 50 });
+    expect(result.memory).toHaveLength(1);
+    expect(result.memory[0]?.content).toContain("Middleware");
+  });
+
+  it("builds deterministic context sections in explicit/memory/evidence/messages order", async () => {
+    const memory = new InMemoryMemoryStore();
+    const evidence = new InMemoryEvidenceStore();
+    const messages = new InMemoryMessageStore();
+
+    const memoryRecord = await memory.create({
+      id: "memory_123",
+      scope: "project",
+      content: "memory one",
+      metadata: {},
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    const evidenceRecord = await evidence.create({
+      id: "evidence_123",
+      sourceType: "manual",
+      title: "evidence one",
+      snippet: "snippet",
+      reliability: "primary",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    const messageRecord = await messages.create({
+      id: "message_123",
+      content: "message one",
+      deliveryStatus: "delivered",
+      attachments: [],
+      createdAt: "2026-05-30T00:00:00.000Z",
+      deliveredAt: "2026-05-30T00:00:00.000Z"
+    });
+
+    const builder = new ContextBuilder({ memory, evidence, messages });
+    const built = await builder.build({
+      target: "run",
+      sections: [{ name: "operator", content: "explicit section" }],
+      memoryIds: [memoryRecord.id],
+      evidenceIds: [evidenceRecord.id],
+      messageIds: [messageRecord.id]
+    });
+
+    expect(built.context.sections.map((section) => section.name)).toEqual(["operator", "memory", "evidence", "messages"]);
+    expect(built.rendered.length).toBeGreaterThan(0);
+  });
+
+  it("denies real tools before adapter dispatch", async () => {
+    const runs = new InMemoryRunStore();
+    const run = makeRun("run_real_tool");
+    await runs.create(run);
+    const events = new InMemoryEventStore();
+    const approvals = new InMemoryApprovalStore();
+    const invocations = new InMemoryToolInvocationStore();
+    const fakeEcho = new FakeEchoToolAdapter();
+    const policy = new LocalPolicyGate();
+
+    const router = new ToolRouter({
+      runs,
+      events,
+      approvals,
+      invocations,
+      adapters: new Map([["fake_echo", fakeEcho]]),
+      policy
+    });
+
+    await expect(
+      router.invoke({
+        runId: run.id,
+        type: "shell",
+        input: { text: "rm -rf" }
+      })
+    ).rejects.toMatchObject({ code: "tool_policy_denied" });
+
+    expect(fakeEcho.invocationCount).toBe(0);
+  });
+
+  it("resolves approval-gated fake tool exactly once", async () => {
+    const runs = new InMemoryRunStore();
+    const run = makeRun("run_approval");
+    await runs.create(run);
+    const events = new InMemoryEventStore();
+    const approvals = new InMemoryApprovalStore();
+    const invocations = new InMemoryToolInvocationStore();
+    const fakeEcho = new FakeEchoToolAdapter();
+    const policy = new LocalPolicyGate();
+    const toolRouter = new ToolRouter({
+      runs,
+      events,
+      approvals,
+      invocations,
+      adapters: new Map([["fake_echo", fakeEcho]]),
+      policy
+    });
+    const approvalService = new ApprovalService({ approvals, runs, events, toolRouter });
+
+    const queued = await toolRouter.invoke({
+      runId: run.id,
+      type: "fake_echo",
+      input: {
+        text: "secret",
+        requiresApproval: true,
+        token: "abc"
+      }
+    });
+    expect(queued.statusCode).toBe(202);
+    expect(queued.approval?.status).toBe("pending");
+    expect(queued.invocation.status).toBe("queued");
+
+    const firstApprovalId = queued.approval?.id;
+    if (!firstApprovalId) {
+      throw new Error("approval id missing");
+    }
+
+    const approved = await approvalService.approve(firstApprovalId, {
+      actor: "local-user",
+      reason: "ok"
+    });
+    expect(approved.invocation?.status).toBe("completed");
+
+    await expect(approvalService.approve(firstApprovalId, { actor: "local-user" })).rejects.toMatchObject({
+      code: "approval_not_pending"
+    });
+
+    const runEvents = await events.listByRun(run.id);
+    const toolResultEvents = runEvents.filter((event) => event.type === "tool.result");
+    expect(toolResultEvents).toHaveLength(1);
+    expect(JSON.stringify(queued.invocation.input)).not.toContain("abc");
+    expect(JSON.stringify(queued.invocation.input)).toContain("[REDACTED]");
+  });
+});

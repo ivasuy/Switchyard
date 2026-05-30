@@ -5,3 +5,5 @@ export * from "./fake-http-runtime-server.js";
 export * from "./fake-agentfield-server.js";
 export * from "./fake-acp-runtime.js";
 export * from "./runtime-adapter-contract-harness.js";
+export * from "./middleware-stores.js";
+export * from "./fake-echo-tool-adapter.js";

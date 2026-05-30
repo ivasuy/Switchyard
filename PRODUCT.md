@@ -47,11 +47,11 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/phase-4-r5-acp-foundation-and-opencode`.
+Snapshot source: `agent/phase-6-r7-middleware-foundation`.
 
-Current product state: local daemon MVP with shipped runtime modes `fake.deterministic`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`, plus shipped local middleware foundation APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations.
 
-The product is usable locally for one-shot agent runs, event inspection, artifact listing, cancellation, and registry lookups. It is not yet a hosted gateway, debate system, approval system, SDK, dashboard, or multi-runtime production platform.
+The product is usable locally for one-shot agent runs, event inspection, artifact listing, cancellation, registry lookups, and durable middleware records. It is not yet a hosted gateway, debate system, SDK, dashboard, or multi-runtime production platform.
 
 Important runtime wording: `codex.exec_json` exists as a one-shot non-interactive runtime mode. A full interactive Codex runtime is not shipped yet.
 
@@ -79,6 +79,7 @@ The local daemon can:
 - Store local state in SQLite.
 - Store artifact content on the filesystem.
 - Wire REST routes, event bus, storage, fake runtime, and Codex runtime together.
+- Wire middleware services for local messages/memory/evidence/context/approvals/tools through the same SQLite-backed daemon.
 - Reconcile persisted `running` runs to `failed` on restart.
 - Log run start/completion, Codex process PID, stderr snippets, first stdout detection, runtime output, timeout, and startup reconciliation.
 
@@ -136,6 +137,12 @@ Implemented local endpoints:
 - `GET /runs/:id/artifacts`
 - `POST /runs/:id/input`
 - `POST /runs/:id/cancel`
+- `POST /messages`, `GET /messages`, `GET /messages/:id`
+- `POST /memory`, `GET /memory`, `GET /memory/search`, `GET /memory/:id`
+- `POST /evidence`, `GET /evidence`, `GET /evidence/:id`
+- `POST /context`
+- `POST /approvals`, `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, `POST /approvals/:id/reject`
+- `POST /tools/invocations`, `GET /tools/invocations`, `GET /tools/invocations/:id`
 - `GET /providers`, `GET /providers/:id`
 - `GET /runtimes`, `GET /runtimes/:id`
 - `GET /models`, `GET /models/:id`
@@ -157,6 +164,12 @@ Current events include:
 - `run.started`
 - `runtime.status`
 - `runtime.output`
+- `tool.call`
+- `tool.result`
+- `message.sent`
+- `approval.requested`
+- `approval.approved`
+- `approval.rejected`
 - `artifact.created`
 - `run.completed`
 - `run.cancelled`
@@ -215,9 +228,8 @@ These are planned or designed in docs, but not shipped product:
 - Generic process adapter.
 - PTY adapter.
 - Debate engine.
-- Approval workflow beyond contracts/ports/storage.
-- Memory APIs.
-- Tool APIs.
+- Runtime-specific approval bridges (Codex/OpenCode/AgentField/Generic HTTP) are not shipped.
+- Real browser/search/fetch/repo/shell/GitHub tool execution is not shipped; R7 executes only deterministic `fake_echo`.
 - Trace endpoint.
 - OpenAPI generation.
 - Dashboard.
@@ -578,7 +590,7 @@ Promotion criteria:
 
 ### R7: Middleware Foundation
 
-Status: planned.
+Status: shipped on `agent/phase-6-r7-middleware-foundation`.
 
 Goal: build the missing internal layers that debate, research, tools, approvals, and memory need.
 
@@ -612,9 +624,11 @@ Usable after this release:
 
 Not included:
 
-- vector memory unless explicitly scoped.
+- vector memory and embedding search (memory search is case-insensitive substring on `content` only).
+- remote evidence fetching (evidence records store metadata and optional relative `fetchedContentPath` pointers only).
 - full debate engine.
-- real browser/search/GitHub/shell tool execution unless separately scoped.
+- real browser/search/GitHub/fetch/repo/shell tool execution (known real tools are denied with `tool_policy_denied` before adapter dispatch).
+- persisted first-class reusable context packets (R7 stores context packets only in `run.metadata.contextPacket` when `POST /runs` includes `context`).
 
 Local verification:
 

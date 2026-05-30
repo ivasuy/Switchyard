@@ -1,8 +1,8 @@
 import type { Approval } from "@switchyard/contracts";
-import type { ApprovalStore } from "@switchyard/core";
+import type { ApprovalStore, ListApprovalsFilter, ListApprovalsResult } from "@switchyard/core";
 import type { SwitchyardSqliteDatabase } from "./database.js";
 import { approvals } from "./schema.js";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 
 type ApprovalRow = typeof approvals.$inferSelect;
 type ApprovalInsertRow = Omit<typeof approvals.$inferInsert, "runId" | "resolvedAt"> & {
@@ -77,5 +77,44 @@ export class SqliteApprovalStore implements ApprovalStore {
   async update(approval: Approval): Promise<Approval> {
     await this.db.update(approvals).set(toUpdateRow(approval)).where(eq(approvals.id, approval.id));
     return approval;
+  }
+
+  async list(filter: ListApprovalsFilter): Promise<ListApprovalsResult> {
+    const conditions: Array<ReturnType<typeof eq> | ReturnType<typeof or>> = [];
+    if (filter.runId) {
+      conditions.push(eq(approvals.runId, filter.runId));
+    }
+    if (filter.status) {
+      conditions.push(eq(approvals.status, filter.status));
+    }
+    if (filter.approvalType) {
+      conditions.push(eq(approvals.approvalType, filter.approvalType));
+    }
+    if (filter.before) {
+      const cursorCondition = or(
+        lt(approvals.createdAt, filter.before.createdAt),
+        and(eq(approvals.createdAt, filter.before.createdAt), lt(approvals.id, filter.before.id))
+      );
+      if (cursorCondition) {
+        conditions.push(cursorCondition);
+      }
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const overFetch = filter.limit + 1;
+    const baseQuery = this.db
+      .select()
+      .from(approvals)
+      .orderBy(desc(approvals.createdAt), desc(sql`${approvals.id}`))
+      .limit(overFetch);
+    const query = whereClause ? baseQuery.where(whereClause) : baseQuery;
+    const rows = await query;
+    const page = rows.slice(0, filter.limit).map(fromRow);
+    const hasMore = rows.length > filter.limit;
+    const last = page.at(-1);
+    return {
+      approvals: page,
+      nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null
+    };
   }
 }

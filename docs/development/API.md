@@ -10,9 +10,9 @@ http://127.0.0.1:4545
 
 Current implementation status:
 
-- Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing).
+- Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), and middleware foundation routes (messages, memory, evidence, context, approvals, tools).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
-- Not implemented yet: trace endpoint, OpenAPI generation, debates, approvals expansion, memory, tools expansion, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex sessions, webhooks, per-run HTTP base URL overrides, and remote artifact URL fetching.
+- Not implemented yet: trace endpoint, OpenAPI generation, debate orchestration, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex sessions, webhooks, per-run HTTP base URL overrides, and remote artifact URL fetching.
 
 ## Error Contract
 
@@ -43,9 +43,16 @@ Closed code set:
 | `runtime_not_found` | 404 | Unknown runtime id or slug. |
 | `runtime_mode_not_found` | 404 | Unknown runtime mode id or slug. |
 | `model_not_found` | 404 | Unknown model id or slug. |
+| `message_not_found` | 404 | Unknown message id. |
+| `memory_not_found` | 404 | Unknown memory id. |
+| `evidence_not_found` | 404 | Unknown evidence id. |
+| `approval_not_found` | 404 | Unknown approval id. |
+| `tool_invocation_not_found` | 404 | Unknown tool invocation id. |
 | `invalid_input` | 400 | Malformed body. |
 | `invalid_query` | 400 | Malformed or out-of-range query parameter. |
+| `tool_policy_denied` | 403 | Policy denied known real tools or denied risky action. |
 | `adapter_protocol_failed` | 409 | Adapter cannot perform the requested action. |
+| `approval_not_pending` | 409 | Approval was already resolved and cannot transition again. |
 | `internal_error` | 500 | Unexpected server failure. |
 
 All success bodies (`{run, events}`, `{accepted: true}`, etc.) are unchanged.
@@ -61,6 +68,14 @@ All success bodies (`{run, events}`, `{accepted: true}`, etc.) are unchanged.
 | `404` | Requested run/artifact/provider/runtime/model is not found. |
 | `409` | Request is valid, but the selected adapter cannot perform it. |
 | `500` | Unexpected server failure. |
+
+## R7 Middleware Constraints
+
+- Memory search is substring-only (`GET /memory/search`) and case-insensitive over `content`; no vector or embedding search is shipped.
+- Evidence routes store metadata only; R7 does not fetch remote evidence content.
+- Tool execution is limited to local deterministic `fake_echo`.
+- Known real tool types (`web_search`, `fetch`, `browser`, `repo`, `shell`, `github`) are denied before adapter dispatch with `403 tool_policy_denied`.
+- Context packets are not first-class persisted records in R7; they are persisted only inside `run.metadata.contextPacket` when `POST /runs` includes `context`.
 
 ## Run Object
 
@@ -145,6 +160,8 @@ curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
 ```
 
 `POST /runs?wait=1` returns `{run, response}` where `response.text` is the last normalized `runtime.output`. Async create returns `{run}` and the daemon launches the run in the background.
+
+`POST /runs` also accepts optional `context` (`sections`, `memoryIds`, `evidenceIds`, `messageIds`). When present, the daemon builds a deterministic context packet (`target: "run"`), persists the rendered task in `run.task`, stores `metadata.originalTask`, and stores `metadata.contextPacket`. When `context` is absent, run behavior is unchanged from R6. Callers cannot provide `metadata.originalTask` or `metadata.contextPacket` when `context` is supplied.
 
 `runtimeMode` is optional. If omitted, the daemon infers shipped runtime modes:
 

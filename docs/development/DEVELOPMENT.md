@@ -204,6 +204,63 @@ Expected:
 
 Use the [API contract](API.md#create-run) for the real Codex request body.
 
+## R7 Middleware Smoke
+
+```bash
+BASE=http://127.0.0.1:4545
+
+MEMORY_ID=$(curl -s -X POST "$BASE/memory" \
+  -H 'content-type: application/json' \
+  -d '{"scope":"project","content":"R7 fake_echo is the only executable tool.","metadata":{"source":"r7-smoke"}}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["memory"]["id"])')
+
+EVIDENCE_ID=$(curl -s -X POST "$BASE/evidence" \
+  -H 'content-type: application/json' \
+  -d '{"sourceType":"manual","title":"Local R7 smoke evidence","snippet":"fake tool path exercised","reliability":"primary"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["evidence"]["id"])')
+
+MESSAGE_ID=$(curl -s -X POST "$BASE/messages" \
+  -H 'content-type: application/json' \
+  -d '{"channel":"r7-smoke","content":"middleware message"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["message"]["id"])')
+
+curl -s "$BASE/memory/search?q=fake_echo" | python3 -m json.tool
+
+curl -s -X POST "$BASE/context" \
+  -H 'content-type: application/json' \
+  -d "{\"target\":\"run\",\"memoryIds\":[\"$MEMORY_ID\"],\"evidenceIds\":[\"$EVIDENCE_ID\"],\"messageIds\":[\"$MESSAGE_ID\"]}" \
+  | python3 -m json.tool
+
+RUN_ID=$(curl -s -X POST "$BASE/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d "{\"runtime\":\"fake\",\"provider\":\"test\",\"model\":\"test-model\",\"adapterType\":\"process\",\"cwd\":\"/repo\",\"task\":\"Use middleware context\",\"context\":{\"memoryIds\":[\"$MEMORY_ID\"],\"evidenceIds\":[\"$EVIDENCE_ID\"],\"messageIds\":[\"$MESSAGE_ID\"]}}" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["run"]["id"])')
+
+SAFE=$(curl -s -X POST "$BASE/tools/invocations" \
+  -H 'content-type: application/json' \
+  -d "{\"runId\":\"$RUN_ID\",\"type\":\"fake_echo\",\"input\":{\"text\":\"hello\"}}")
+echo "$SAFE" | python3 -m json.tool
+
+APPROVAL_JSON=$(curl -s -X POST "$BASE/tools/invocations" \
+  -H 'content-type: application/json' \
+  -d "{\"runId\":\"$RUN_ID\",\"type\":\"fake_echo\",\"input\":{\"text\":\"needs approval\",\"requiresApproval\":true}}")
+APPROVAL_ID=$(echo "$APPROVAL_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["approval"]["id"])')
+curl -s -X POST "$BASE/approvals/$APPROVAL_ID/approve" -H 'content-type: application/json' -d '{"actor":"local-user","reason":"ok"}' | python3 -m json.tool
+
+curl -s -X POST "$BASE/tools/invocations" \
+  -H 'content-type: application/json' \
+  -d "{\"runId\":\"$RUN_ID\",\"type\":\"shell\",\"input\":{\"text\":\"echo blocked\"}}" \
+  | python3 -m json.tool
+```
+
+R7 middleware boundaries:
+
+- Memory search is substring-only and case-insensitive; no vector memory or embedding search.
+- Evidence APIs do not fetch remote content.
+- Only `fake_echo` executes in R7.
+- Known real tools are denied with `tool_policy_denied` before adapter dispatch.
+- Context packets persist only under `run.metadata.contextPacket` on run creation with `context`.
+
 ## Inspect A Run
 
 ```bash

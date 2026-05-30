@@ -138,6 +138,44 @@ describe("run routes", () => {
     expect(storedRun?.metadata).toEqual(metadata);
   });
 
+  it("keeps existing run task and metadata behavior when context is absent", async () => {
+    const harness = createRouteHarness();
+    const payload = {
+      ...fakeRunPayload("No context task"),
+      metadata: { custom: "value" }
+    };
+
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+    expect(createResponse.json().run.task).toBe("No context task");
+    expect(createResponse.json().run.metadata).toEqual({ custom: "value" });
+    expect(createResponse.json().run.metadata.originalTask).toBeUndefined();
+    expect(createResponse.json().run.metadata.contextPacket).toBeUndefined();
+  });
+
+  it("rejects reserved metadata keys when context is supplied", async () => {
+    const harness = createRouteHarness();
+    const createResponse = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: {
+        ...fakeRunPayload("With context"),
+        metadata: { originalTask: "spoofed" },
+        context: {
+          memoryIds: []
+        }
+      }
+    });
+
+    expect(createResponse.statusCode).toBe(400);
+    expect(createResponse.json().error.code).toBe("invalid_input");
+  });
+
   it("returns run events as an SSE-compatible stream", async () => {
     const harness = createRouteHarness();
 

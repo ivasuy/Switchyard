@@ -17,6 +17,24 @@ All notable changes to Switchyard will be documented in this file.
 - Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.
 
+## 2026-05-30 - Roadmap Release Train R7 Middleware Foundation
+
+### Added
+
+- Added durable local middleware APIs: `messages`, `memory`, `evidence`, `context`, `approvals`, and `tools/invocations`.
+- Added SQLite middleware tables/indexes and stores for `memory_items`, `evidence_items`, and `tool_invocations`; extended message/approval stores with list filters and cursor pagination.
+- Added in-memory middleware stores in `@switchyard/testkit` and deterministic `FakeEchoToolAdapter`.
+- Added core middleware services: `MessageRouter`, `MemoryService`, `EvidenceService`, `ContextBuilder`, `ApprovalService`, `ToolRouter`, and `LocalPolicyGate`.
+- Added optional `POST /runs` context path that stores rendered task plus `metadata.originalTask` and `metadata.contextPacket`.
+
+### Changed
+
+- Updated tool contracts to include `fake_echo`, invocation `approvalId`, and invocation `error` payloads.
+- Updated event contracts with approval lifecycle events (`approval.approved`, `approval.rejected`, `approval.expired`).
+- Updated HTTP error surface for middleware not-found/conflict/policy-denied outcomes.
+- Updated approval/tool flow to one-shot transitions so duplicate approve/reject does not duplicate terminal tool events.
+- Updated docs/product truth to mark R7 as shipped and document boundaries: substring-only memory search, no remote evidence fetch, fake_echo-only execution, real-tool policy denial before adapter dispatch, and context packet persistence limits.
+
 ## 2026-05-30 - Roadmap Release Train R6 Wrapper Runtime Integration
 
 ### Added

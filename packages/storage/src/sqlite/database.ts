@@ -92,6 +92,45 @@ CREATE TABLE IF NOT EXISTS approvals (
   resolved_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS memory_items (
+  id TEXT PRIMARY KEY NOT NULL,
+  scope TEXT NOT NULL,
+  project_id TEXT,
+  run_id TEXT,
+  debate_id TEXT,
+  provider TEXT,
+  model TEXT,
+  content TEXT NOT NULL,
+  metadata_json TEXT NOT NULL,
+  embedding_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evidence_items (
+  id TEXT PRIMARY KEY NOT NULL,
+  debate_id TEXT,
+  source_type TEXT NOT NULL,
+  url TEXT,
+  title TEXT NOT NULL,
+  snippet TEXT,
+  fetched_content_path TEXT,
+  reliability TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tool_invocations (
+  id TEXT PRIMARY KEY NOT NULL,
+  run_id TEXT,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  approval_id TEXT,
+  input_json TEXT NOT NULL,
+  output_json TEXT,
+  error_json TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS providers (
   id TEXT PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
@@ -158,6 +197,78 @@ CREATE UNIQUE INDEX IF NOT EXISTS runtime_sessions_run_id_idx
 
 CREATE INDEX IF NOT EXISTS artifacts_run_id_idx
   ON artifacts (run_id);
+
+CREATE INDEX IF NOT EXISTS messages_from_run_id_idx
+  ON messages (from_run_id);
+
+CREATE INDEX IF NOT EXISTS messages_to_run_id_idx
+  ON messages (to_run_id);
+
+CREATE INDEX IF NOT EXISTS messages_channel_idx
+  ON messages (channel);
+
+CREATE INDEX IF NOT EXISTS messages_created_at_idx
+  ON messages (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS approvals_run_id_idx
+  ON approvals (run_id);
+
+CREATE INDEX IF NOT EXISTS approvals_status_idx
+  ON approvals (status);
+
+CREATE INDEX IF NOT EXISTS approvals_type_idx
+  ON approvals (approval_type);
+
+CREATE INDEX IF NOT EXISTS approvals_created_at_idx
+  ON approvals (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS memory_items_scope_idx
+  ON memory_items (scope);
+
+CREATE INDEX IF NOT EXISTS memory_items_project_id_idx
+  ON memory_items (project_id);
+
+CREATE INDEX IF NOT EXISTS memory_items_run_id_idx
+  ON memory_items (run_id);
+
+CREATE INDEX IF NOT EXISTS memory_items_debate_id_idx
+  ON memory_items (debate_id);
+
+CREATE INDEX IF NOT EXISTS memory_items_provider_idx
+  ON memory_items (provider);
+
+CREATE INDEX IF NOT EXISTS memory_items_model_idx
+  ON memory_items (model);
+
+CREATE INDEX IF NOT EXISTS memory_items_created_at_idx
+  ON memory_items (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS evidence_items_debate_id_idx
+  ON evidence_items (debate_id);
+
+CREATE INDEX IF NOT EXISTS evidence_items_source_type_idx
+  ON evidence_items (source_type);
+
+CREATE INDEX IF NOT EXISTS evidence_items_reliability_idx
+  ON evidence_items (reliability);
+
+CREATE INDEX IF NOT EXISTS evidence_items_created_at_idx
+  ON evidence_items (created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS tool_invocations_run_id_idx
+  ON tool_invocations (run_id);
+
+CREATE INDEX IF NOT EXISTS tool_invocations_type_idx
+  ON tool_invocations (type);
+
+CREATE INDEX IF NOT EXISTS tool_invocations_status_idx
+  ON tool_invocations (status);
+
+CREATE INDEX IF NOT EXISTS tool_invocations_approval_id_idx
+  ON tool_invocations (approval_id);
+
+CREATE INDEX IF NOT EXISTS tool_invocations_created_at_idx
+  ON tool_invocations (created_at DESC, id DESC);
 
 CREATE INDEX IF NOT EXISTS placement_decisions_run_id_idx
   ON placement_decisions (run_id);

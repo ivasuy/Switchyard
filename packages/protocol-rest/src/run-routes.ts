@@ -5,6 +5,7 @@ import type {
   EventStore,
   RegistryService,
   RegistryStore,
+  ContextBuilder,
   RunLauncherService,
   RunService,
   RunStore
@@ -32,6 +33,7 @@ export interface RunRouteDependencies {
   runService: RunService;
   runs: RunStore;
   events: EventStore;
+  contextBuilder?: ContextBuilder;
   artifacts?: ArtifactStore;
   eventBus?: EventBus;
   launcher?: RunLauncherService;
@@ -44,18 +46,28 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     try {
       const wait = shouldWaitForCompletion(request.query);
       const body = parseCreateRunBody(request.body);
+      const renderedContext = body.context
+        ? await buildRunContext(body, deps.contextBuilder)
+        : undefined;
       const runtimeMode = await inferRuntimeMode(body, deps.registryService);
+      const metadata = body.metadata ?? {};
       const createInput: Parameters<RunService["createRun"]>[0] = {
         runtime: body.runtime,
         provider: body.provider,
         model: body.model,
         adapterType: body.adapterType,
         cwd: body.cwd,
-        task: body.task,
+        task: renderedContext ? renderRunTask(body.task, renderedContext.rendered) : body.task,
         placement: body.placement ?? "local",
         approvalPolicy: body.approvalPolicy ?? "default",
         timeoutSeconds: body.timeoutSeconds ?? 600,
-        metadata: body.metadata ?? {}
+        metadata: renderedContext
+          ? {
+            ...metadata,
+            originalTask: body.task,
+            contextPacket: renderedContext.context
+          }
+          : metadata
       };
       if (runtimeMode !== undefined) {
         createInput.runtimeMode = runtimeMode;
@@ -376,6 +388,12 @@ interface CreateRunBody {
   timeoutSeconds?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
   runtimeMode?: string | undefined;
+  context?: {
+    sections?: Array<{ name: string; content: string }>;
+    memoryIds?: string[];
+    evidenceIds?: string[];
+    messageIds?: string[];
+  } | undefined;
 }
 
 function parseCreateRunBody(value: unknown): CreateRunBody {
@@ -406,7 +424,8 @@ function parseCreateRunBody(value: unknown): CreateRunBody {
     approvalPolicy: typeof body["approvalPolicy"] === "string" ? body["approvalPolicy"] : undefined,
     timeoutSeconds: typeof body["timeoutSeconds"] === "number" ? body["timeoutSeconds"] : undefined,
     metadata: isRecord(body["metadata"]) ? body["metadata"] : undefined,
-    runtimeMode: typeof body["runtimeMode"] === "string" ? body["runtimeMode"] : undefined
+    runtimeMode: typeof body["runtimeMode"] === "string" ? body["runtimeMode"] : undefined,
+    context: parseRunContext(body["context"])
   };
 }
 
@@ -431,6 +450,75 @@ function parseInputBody(value: unknown): Record<string, unknown> {
   return value;
 }
 
+function parseRunContext(value: unknown): CreateRunBody["context"] {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new HttpProblem("invalid_input", "context must be an object");
+  }
+  const sectionsRaw = value["sections"];
+  const memoryIdsRaw = value["memoryIds"];
+  const evidenceIdsRaw = value["evidenceIds"];
+  const messageIdsRaw = value["messageIds"];
+
+  const sections = parseContextSections(sectionsRaw);
+  const memoryIds = parseContextIdList(memoryIdsRaw, "memoryIds");
+  const evidenceIds = parseContextIdList(evidenceIdsRaw, "evidenceIds");
+  const messageIds = parseContextIdList(messageIdsRaw, "messageIds");
+
+  return {
+    sections,
+    memoryIds,
+    evidenceIds,
+    messageIds
+  };
+}
+
+function parseContextSections(value: unknown): Array<{ name: string; content: string }> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new HttpProblem("invalid_input", "context.sections must be an array", [
+      { path: "context.sections", issue: "must be an array" }
+    ]);
+  }
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new HttpProblem("invalid_input", "context.sections entries must be objects", [
+        { path: `context.sections.${index}`, issue: "must be an object" }
+      ]);
+    }
+    const section = entry as Record<string, unknown>;
+    const name = section["name"];
+    const content = section["content"];
+    if (typeof name !== "string" || name.trim().length === 0) {
+      throw new HttpProblem("invalid_input", "context section name must be a non-empty string", [
+        { path: `context.sections.${index}.name`, issue: "must be a non-empty string" }
+      ]);
+    }
+    if (typeof content !== "string") {
+      throw new HttpProblem("invalid_input", "context section content must be a string", [
+        { path: `context.sections.${index}.content`, issue: "must be a string" }
+      ]);
+    }
+    return { name, content };
+  });
+}
+
+function parseContextIdList(value: unknown, path: string): string[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new HttpProblem("invalid_input", `${path} must be a string array`, [
+      { path: `context.${path}`, issue: "must be an array of strings" }
+    ]);
+  }
+  return value;
+}
+
 function shouldWaitForCompletion(query: unknown): boolean {
   if (!query || typeof query !== "object") {
     return false;
@@ -443,6 +531,54 @@ function shouldWaitForCompletion(query: unknown): boolean {
     return wait.some((value) => value === "1");
   }
   return false;
+}
+
+async function buildRunContext(
+  body: CreateRunBody,
+  contextBuilder: ContextBuilder | undefined
+): Promise<{ context: Record<string, unknown>; rendered: string }> {
+  if (!body.context) {
+    throw new HttpProblem("internal_error", "context is required");
+  }
+  if (body.metadata && ("originalTask" in body.metadata || "contextPacket" in body.metadata)) {
+    throw new HttpProblem("invalid_input", "metadata contains reserved keys", [
+      { path: "metadata", issue: "originalTask/contextPacket are reserved when context is provided" }
+    ]);
+  }
+  if (!contextBuilder) {
+    throw new HttpProblem("internal_error", "context builder is not configured");
+  }
+  try {
+    const built = await contextBuilder.build({
+      target: "run",
+      sections: body.context.sections ?? [],
+      memoryIds: body.context.memoryIds ?? [],
+      evidenceIds: body.context.evidenceIds ?? [],
+      messageIds: body.context.messageIds ?? []
+    });
+    return built;
+  } catch (error) {
+    if (!error || typeof error !== "object") {
+      throw error;
+    }
+    const err = error as { code?: string; message?: string; details?: Array<{ path: string; issue: string }> };
+    if (typeof err.code === "string" && typeof err.message === "string") {
+      if (err.code === "memory_not_found" || err.code === "evidence_not_found" || err.code === "message_not_found") {
+        throw new HttpProblem(err.code, err.message, err.details);
+      }
+      if (err.code === "invalid_input" || err.code === "invalid_query") {
+        throw new HttpProblem(err.code, err.message, err.details);
+      }
+    }
+    throw error;
+  }
+}
+
+function renderRunTask(task: string, renderedContext: string): string {
+  if (renderedContext.length === 0) {
+    return task;
+  }
+  return `${task}\n\n${renderedContext}`;
 }
 
 async function inferRuntimeMode(

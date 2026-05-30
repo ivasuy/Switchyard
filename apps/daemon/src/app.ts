@@ -12,6 +12,13 @@ import {
   EventBus,
   RegistryService,
   RuntimeCapabilityService,
+  LocalPolicyGate,
+  MessageRouter,
+  MemoryService,
+  EvidenceService,
+  ContextBuilder,
+  ApprovalService,
+  ToolRouter,
   type RuntimeAdapter,
   RuntimeDoctorService,
   type RuntimeLogger,
@@ -19,6 +26,11 @@ import {
   RunService,
   RuntimeRunnerService,
   type EventStore,
+  type MessageStore,
+  type MemoryStore,
+  type EvidenceStore,
+  type ApprovalStore,
+  type ToolInvocationStore,
   type RunStore,
   type RegistryStore,
   type SessionStore
@@ -27,25 +39,37 @@ import {
   contentTypeForArtifact,
   registerArtifactRoutes,
   registerErrorEnvelope,
+  registerMiddlewareRoutes,
   registerRegistryRoutes,
   registerRunRoutes,
   type ArtifactContentReader
 } from "@switchyard/protocol-rest";
 import {
   FakeRuntimeAdapter,
+  FakeEchoToolAdapter,
+  InMemoryApprovalStore,
+  InMemoryEvidenceStore,
   InMemoryArtifactStore,
   InMemoryEventStore,
+  InMemoryMemoryStore,
+  InMemoryMessageStore,
   InMemoryRegistryStore,
   InMemoryRunStore,
-  InMemorySessionStore
+  InMemorySessionStore,
+  InMemoryToolInvocationStore
 } from "@switchyard/testkit";
 import {
   openSqliteStorage,
+  SqliteApprovalStore,
   SqliteArtifactStore,
+  SqliteEvidenceStore,
   SqliteEventStore,
+  SqliteMemoryStore,
+  SqliteMessageStore,
   SqliteRegistryStore,
   SqliteRunStore,
   SqliteSessionStore,
+  SqliteToolInvocationStore,
   FilesystemArtifactContentStore
 } from "@switchyard/storage";
 import { type DaemonConfig } from "./config.js";
@@ -56,6 +80,11 @@ interface DaemonStores {
   sessions: SessionStore;
   artifacts: ArtifactStore;
   registry: RegistryStore;
+  messages: MessageStore;
+  memory: MemoryStore;
+  evidence: EvidenceStore;
+  approvals: ApprovalStore;
+  toolInvocations: ToolInvocationStore;
   artifactContent?: {
     writeText(path: string, content: string): Promise<string>;
     readBuffer?(path: string): Promise<Buffer>;
@@ -288,8 +317,48 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     eventBus,
     launcher,
     runService,
+    contextBuilder: new ContextBuilder({
+      memory: stores.memory,
+      evidence: stores.evidence,
+      messages: stores.messages
+    }),
     registry: stores.registry,
     registryService
+  });
+  const middlewareEventBus = eventBus;
+  const policy = new LocalPolicyGate();
+  const toolRouter = new ToolRouter({
+    runs: stores.runs,
+    events: stores.events,
+    approvals: stores.approvals,
+    invocations: stores.toolInvocations,
+    eventBus: middlewareEventBus,
+    adapters: new Map([["fake_echo", new FakeEchoToolAdapter()]]),
+    policy
+  });
+  const approvalService = new ApprovalService({
+    approvals: stores.approvals,
+    runs: stores.runs,
+    events: stores.events,
+    eventBus: middlewareEventBus,
+    toolRouter
+  });
+  registerMiddlewareRoutes(app, {
+    messageRouter: new MessageRouter({
+      runs: stores.runs,
+      messages: stores.messages,
+      events: stores.events,
+      eventBus: middlewareEventBus
+    }),
+    memoryService: new MemoryService({ memory: stores.memory }),
+    evidenceService: new EvidenceService({ evidence: stores.evidence }),
+    contextBuilder: new ContextBuilder({
+      memory: stores.memory,
+      evidence: stores.evidence,
+      messages: stores.messages
+    }),
+    approvalService,
+    toolRouter
   });
   registerRegistryRoutes(app, {
     registry: stores.registry,
@@ -334,7 +403,12 @@ function createInMemoryStores(): DaemonStores {
     events: new InMemoryEventStore(),
     sessions: new InMemorySessionStore(),
     artifacts: new InMemoryArtifactStore(),
-    registry: new InMemoryRegistryStore()
+    registry: new InMemoryRegistryStore(),
+    messages: new InMemoryMessageStore(),
+    memory: new InMemoryMemoryStore(),
+    evidence: new InMemoryEvidenceStore(),
+    approvals: new InMemoryApprovalStore(),
+    toolInvocations: new InMemoryToolInvocationStore()
   };
 }
 
@@ -351,6 +425,11 @@ function createStorageStores(config: DaemonConfig): DaemonStoreResult {
     sessions: new SqliteSessionStore(storage.db),
     artifacts: new SqliteArtifactStore(storage.db),
     registry: new SqliteRegistryStore(storage.db),
+    messages: new SqliteMessageStore(storage.db),
+    memory: new SqliteMemoryStore(storage.db),
+    evidence: new SqliteEvidenceStore(storage.db),
+    approvals: new SqliteApprovalStore(storage.db),
+    toolInvocations: new SqliteToolInvocationStore(storage.db),
     artifactContent,
     sqlite: storage.sqlite,
     close: () => {

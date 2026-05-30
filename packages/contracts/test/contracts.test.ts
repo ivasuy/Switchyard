@@ -581,6 +581,39 @@ describe("Switchyard contracts", () => {
     expect(event.sequence).toBe(1);
   });
 
+  it("includes R7 approval lifecycle event types", () => {
+    expect(
+      eventSchema.parse({
+        id: "event_approval_approved",
+        type: "approval.approved",
+        runId: "run_123",
+        sequence: 2,
+        payload: { approvalId: "approval_123" },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }).type
+    ).toBe("approval.approved");
+    expect(
+      eventSchema.parse({
+        id: "event_approval_rejected",
+        type: "approval.rejected",
+        runId: "run_123",
+        sequence: 3,
+        payload: { approvalId: "approval_124" },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }).type
+    ).toBe("approval.rejected");
+    expect(
+      eventSchema.parse({
+        id: "event_approval_expired",
+        type: "approval.expired",
+        runId: "run_123",
+        sequence: 4,
+        payload: { approvalId: "approval_125" },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }).type
+    ).toBe("approval.expired");
+  });
+
   it("parses message routing records", () => {
     const message = messageSchema.parse({
       id: "message_123",
@@ -641,12 +674,17 @@ describe("Switchyard contracts", () => {
     expect(
       toolInvocationSchema.parse({
         id: "tool_123",
-        type: "web_search",
+        type: "fake_echo",
         status: "queued",
         input: {},
+        approvalId: "approval_123",
+        error: {
+          code: "tool_policy_denied",
+          message: "real tools are denied in R7"
+        },
         createdAt: "2026-05-11T00:00:00.000Z"
       }).type
-    ).toBe("web_search");
+    ).toBe("fake_echo");
 
     expect(providerSchema.parse({ id: "provider_123", name: "OpenCode", authMode: "local", status: "available" }).status).toBe("available");
     expect(runtimeSchema.parse({ id: "runtime_123", name: "OpenCode", adapterType: "acpx", status: "available" }).adapterType).toBe("acpx");

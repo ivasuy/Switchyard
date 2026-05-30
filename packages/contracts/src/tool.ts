@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { isoDateSchema, runIdSchema, toolInvocationIdSchema } from "./ids.js";
+import { approvalIdSchema, isoDateSchema, runIdSchema, toolInvocationIdSchema } from "./ids.js";
 
-export const toolTypeSchema = z.enum(["web_search", "fetch", "browser", "repo", "shell", "github"]);
+export const toolTypeSchema = z.enum(["web_search", "fetch", "browser", "repo", "shell", "github", "fake_echo"]);
 export const toolInvocationStatusSchema = z.enum(["queued", "running", "completed", "failed", "cancelled", "denied"]);
 
 export const toolInvocationSchema = z.object({
@@ -9,8 +9,10 @@ export const toolInvocationSchema = z.object({
   runId: runIdSchema.optional(),
   type: toolTypeSchema,
   status: toolInvocationStatusSchema,
+  approvalId: approvalIdSchema.optional(),
   input: z.record(z.string(), z.unknown()),
   output: z.record(z.string(), z.unknown()).optional(),
+  error: z.object({ code: z.string().min(1), message: z.string().min(1) }).optional(),
   createdAt: isoDateSchema,
   completedAt: isoDateSchema.optional()
 });

@@ -1,6 +1,40 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { ZodError } from "zod";
-import type { HttpErrorCode, HttpErrorDetail, HttpErrorEnvelope } from "@switchyard/contracts";
+
+export type HttpErrorCode =
+  | "run_not_found"
+  | "artifact_not_found"
+  | "missing_artifact_content"
+  | "provider_not_found"
+  | "runtime_not_found"
+  | "runtime_mode_not_found"
+  | "model_not_found"
+  | "message_not_found"
+  | "memory_not_found"
+  | "evidence_not_found"
+  | "approval_not_found"
+  | "tool_invocation_not_found"
+  | "approval_not_pending"
+  | "tool_policy_denied"
+  | "approval_required"
+  | "unsupported_tool"
+  | "invalid_input"
+  | "invalid_query"
+  | "adapter_protocol_failed"
+  | "internal_error";
+
+export interface HttpErrorDetail {
+  path: string;
+  issue: string;
+}
+
+export interface HttpErrorEnvelope {
+  error: {
+    code: HttpErrorCode;
+    message: string;
+    details?: HttpErrorDetail[];
+  };
+}
 
 const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   run_not_found: 404,
@@ -10,6 +44,15 @@ const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   runtime_not_found: 404,
   runtime_mode_not_found: 404,
   model_not_found: 404,
+  message_not_found: 404,
+  memory_not_found: 404,
+  evidence_not_found: 404,
+  approval_not_found: 404,
+  tool_invocation_not_found: 404,
+  approval_not_pending: 409,
+  tool_policy_denied: 403,
+  approval_required: 409,
+  unsupported_tool: 409,
   invalid_input: 400,
   invalid_query: 400,
   adapter_protocol_failed: 409,

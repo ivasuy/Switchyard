@@ -133,6 +133,150 @@ describe("daemon app", () => {
     }
   });
 
+  it("runs the R7 middleware smoke path with context, approvals, fake_echo, and real-tool denial", async () => {
+    const config = tempDaemonConfig("switchyard-daemon-r7-middleware-");
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+    try {
+      const memory = await app.inject({
+        method: "POST",
+        url: "/memory",
+        payload: {
+          scope: "project",
+          content: "R7 uses fake_echo only"
+        }
+      });
+      expect(memory.statusCode).toBe(201);
+
+      const evidence = await app.inject({
+        method: "POST",
+        url: "/evidence",
+        payload: {
+          sourceType: "manual",
+          title: "local evidence",
+          reliability: "primary"
+        }
+      });
+      expect(evidence.statusCode).toBe(201);
+
+      const message = await app.inject({
+        method: "POST",
+        url: "/messages",
+        payload: {
+          channel: "r7-smoke",
+          content: "message context"
+        }
+      });
+      expect(message.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "fake",
+          provider: "test",
+          model: "test-model",
+          adapterType: "process",
+          cwd: "/repo",
+          task: "Use middleware context",
+          context: {
+            memoryIds: [memory.json().memory.id],
+            evidenceIds: [evidence.json().evidence.id],
+            messageIds: [message.json().message.id]
+          }
+        }
+      });
+      expect(run.statusCode).toBe(201);
+      expect(run.json().run.metadata.originalTask).toBe("Use middleware context");
+      expect(run.json().run.metadata.contextPacket).toBeTruthy();
+
+      const safeTool = await app.inject({
+        method: "POST",
+        url: "/tools/invocations",
+        payload: {
+          runId: run.json().run.id,
+          type: "fake_echo",
+          input: { text: "hello" }
+        }
+      });
+      expect(safeTool.statusCode).toBe(201);
+      expect(safeTool.json().invocation.output.echo).toBe("hello");
+
+      const approvalTool = await app.inject({
+        method: "POST",
+        url: "/tools/invocations",
+        payload: {
+          runId: run.json().run.id,
+          type: "fake_echo",
+          input: { text: "approve me", requiresApproval: true }
+        }
+      });
+      expect(approvalTool.statusCode).toBe(202);
+      const approvalId = approvalTool.json().approval.id as string;
+
+      const approved = await app.inject({
+        method: "POST",
+        url: `/approvals/${approvalId}/approve`,
+        payload: { actor: "local-user", reason: "ok" }
+      });
+      expect(approved.statusCode).toBe(200);
+      expect(approved.json().invocation.status).toBe("completed");
+
+      const rejectedTool = await app.inject({
+        method: "POST",
+        url: "/tools/invocations",
+        payload: {
+          runId: run.json().run.id,
+          type: "fake_echo",
+          input: { text: "reject me", requiresApproval: true }
+        }
+      });
+      expect(rejectedTool.statusCode).toBe(202);
+      const rejectedApprovalId = rejectedTool.json().approval.id as string;
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/approvals/${rejectedApprovalId}/reject`,
+        payload: { actor: "local-user", reason: "no" }
+      });
+      expect(rejected.statusCode).toBe(200);
+      expect(rejected.json().invocation.status).toBe("denied");
+
+      const deniedTool = await app.inject({
+        method: "POST",
+        url: "/tools/invocations",
+        payload: {
+          runId: run.json().run.id,
+          type: "shell",
+          input: { text: "echo should fail" }
+        }
+      });
+      expect(deniedTool.statusCode).toBe(403);
+      expect(deniedTool.json().error.code).toBe("tool_policy_denied");
+
+      await app.close();
+      const reopened = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+      try {
+        const memoryList = await reopened.inject({ method: "GET", url: "/memory" });
+        const evidenceList = await reopened.inject({ method: "GET", url: "/evidence" });
+        const messageList = await reopened.inject({ method: "GET", url: "/messages" });
+        expect(memoryList.statusCode).toBe(200);
+        expect(evidenceList.statusCode).toBe(200);
+        expect(messageList.statusCode).toBe(200);
+        expect(memoryList.json().memory.length).toBeGreaterThan(0);
+        expect(evidenceList.json().evidence.length).toBeGreaterThan(0);
+        expect(messageList.json().messages.length).toBeGreaterThan(0);
+      } finally {
+        await reopened.close();
+      }
+    } finally {
+      try {
+        await app.close();
+      } catch {
+        // best effort
+      }
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("persists fake run events and artifacts when configured with local storage", async () => {
     const dir = mkdtempSync(join(tmpdir(), "switchyard-daemon-"));
     const config: DaemonConfig = {
