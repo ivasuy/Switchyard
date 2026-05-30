@@ -2,55 +2,48 @@
 
 Date: 2026-05-30
 Phase: 9 / R10 Hosted And Hybrid Execution
-Iteration: 1
+Iteration: 2
 Verdict: NEEDS_REVISION
+Revision audited: `f3f97df77e5c9fa53960f4bc1063f9f3a9010805`
 
 ## Summary
 
-The worktree is committed clean and the automated suite passes, but the shipped implementation does not meet the R10 acceptance boundary in three blocking areas:
+Pass 2 closes two of the three prior blockers:
 
-1. Hosted enqueue failure leaves orphaned hosted runs after returning `queue_unavailable`.
-2. Event sync accepts events for assignments that were never successfully claimed.
-3. The hosted/server/worker/storage/queue stack is still fake-only in several places where the plan/spec require opt-in real Postgres/Redis/object-store wiring.
+1. Hosted enqueue failure now correctly terminalizes the durable run with `run.failed` / `queue_enqueue_failed`.
+2. Event sync now rejects `pending` / terminal assignments and wrong-owner or stale-cursor attempts.
+
+The remaining blocker is narrowed to product truth in `ARCHITECTURE.md`: older hosted-storage sections still describe shipped R10 as `S3/R2`-backed, while the implementation and updated shipped-slice docs now correctly scope R10 to filesystem-backed object-compatible storage with S3/R2 network wiring explicitly not shipped.
 
 ## Checks
 
 - `git status --short` -> clean
 - `git diff --check` -> clean
-- `pnpm typecheck` -> passed
+- `pnpm --filter @switchyard/core test` -> passed
+- `pnpm --filter @switchyard/queue test` -> passed
+- `pnpm --filter @switchyard/storage test` -> passed
+- `pnpm --filter @switchyard/server test` -> passed
+- `pnpm --filter @switchyard/worker test` -> passed
 - `pnpm test` -> passed
-- Root repo current branch check:
-  - root branch: `codex/product-truth-cleanup`
-  - root HEAD: `94b6f32788ec18d1e13a12723deeb6226df243c6`
-  - no merge into the root/current branch was performed during this audit
+- Direct repro: hosted enqueue failure -> passed
+- Direct repro: event sync on pending assignment -> passed
 
-## Blocking Findings
+## Remaining Blocking Finding
 
-### 1. Hosted queue failure handling violates the run contract
+### 3. `ARCHITECTURE.md` still overclaims shipped hosted storage as `S3/R2`
 
-- Ref: `packages/core/src/services/hosted-run-service.ts:71-90`
-- The code creates a hosted run and placement record before enqueue, then throws `queue_unavailable` on enqueue failure without terminalizing the run.
-- Direct repro showed a persisted hosted `queued` run plus placement record after the error.
-
-### 2. Event sync bypasses durable claim-state validation
-
-- Ref: `packages/core/src/services/event-sync-service.ts:24-79`
-- The service accepts and appends events for `pending` assignments because it does not require `claimed` / `running` state before sync.
-- Direct repro showed a `pending` assignment advancing its cursor and storing a `runtime.output` event.
-
-### 3. Real opt-in hosted infra wiring is not implemented
-
-- Refs:
-  - `apps/server/src/config.ts:1-23`
-  - `apps/server/src/app.ts:42-52`
-  - `apps/server/src/app.ts:88-150`
-  - `apps/worker/src/worker.ts:18-52`
-  - `packages/queue/src/bullmq-run-queue.ts:9-45`
-  - `packages/storage/src/postgres/node-store.ts:4-40`
-  - `packages/storage/src/postgres/assignment-store.ts:4-70`
-  - `packages/storage/test/postgres-storage.test.ts:14-24`
-- The shipped "Postgres" stores and "BullMQ" queue are still in-memory shims, and the hosted app config does not consume Postgres/Redis/object-store env vars.
-- This fails the task acceptance for real opt-in production-shaped integrations with deterministic substitutes.
+- Resolved portions:
+  - real opt-in env parsing and wiring now exist in `apps/server` and `apps/worker`
+  - BullMQ/Redis queue path is no longer a memory-only shim
+  - Postgres stores use real `pg` handles when configured
+  - product/dev/changelog sections inspected for R10 shipped truth are aligned with filesystem-backed object-compatible storage
+- Remaining conflicting refs:
+  - `ARCHITECTURE.md:130-153`
+  - `ARCHITECTURE.md:691-709`
+  - `ARCHITECTURE.md:788-812`
+  - `ARCHITECTURE.md:878-880`
+- Correct shipped-slice ref already present:
+  - `ARCHITECTURE.md:948-964`
 
 ## Per-Task Log
 

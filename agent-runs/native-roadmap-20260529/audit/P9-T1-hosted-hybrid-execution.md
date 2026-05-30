@@ -91,3 +91,81 @@ Verdict: NEEDS_REVISION
 - Fix hosted enqueue failure semantics so no orphan queued hosted runs remain after a queue error.
 - Enforce assignment-state validation in event sync before accepting any batch.
 - Replace the current fake-only server/worker/storage/queue wiring with real opt-in Postgres/Redis/object-store implementations plus deterministic substitutes.
+
+---
+
+Date: 2026-05-30
+Iteration: 2
+Verdict: NEEDS_REVISION
+Revision audited: `f3f97df77e5c9fa53960f4bc1063f9f3a9010805`
+
+## Re-Audit Scope
+
+Per pass-2 discipline, only the three pass-1 redflags were re-checked.
+
+## Checks Run
+
+- `git status --short`
+- `git diff --check`
+- `pnpm --filter @switchyard/core test`
+- `pnpm --filter @switchyard/queue test`
+- `pnpm --filter @switchyard/storage test`
+- `pnpm --filter @switchyard/server test`
+- `pnpm --filter @switchyard/worker test`
+- `pnpm test`
+- Direct repro: hosted enqueue failure after durable run creation
+- Direct repro: event sync against a `pending` assignment
+
+## Re-Audit Results
+
+### 1. Hosted enqueue failure semantics
+
+Verdict: RESOLVED
+
+- `HostedRunService.createRun()` now terminalizes the created run with `run.failed` / `reasonCode: "queue_enqueue_failed"` before surfacing `queue_unavailable` (`packages/core/src/services/hosted-run-service.ts:78-131`).
+- Focused regression coverage added in `packages/core/test/hosted-placement-service.test.ts:67-158`.
+- Direct repro now shows:
+  - error: `queue_unavailable enqueue_failed`
+  - durable run state: `failed`
+  - durable terminal event: `run.failed` with `reasonCode: "queue_enqueue_failed"`
+  - no orphan `queued` hosted run remains.
+
+### 2. Event sync assignment-state validation
+
+Verdict: RESOLVED
+
+- `EventSyncService.appendBatch()` now rejects assignments unless status is `claimed` or `running` (`packages/core/src/services/event-sync-service.ts:24-37`).
+- Focused regression coverage added in `packages/core/test/sync-services.test.ts:125-154`, alongside wrong-run and stale-cursor checks (`lines 74-123`).
+- Direct repro now shows:
+  - error: `assignment_not_found Assignment is not accepting event sync`
+  - assignment remains `pending`
+  - no events are appended.
+
+### 3. Opt-in hosted infra wiring and product/docs truth
+
+Verdict: PARTIALLY RESOLVED
+
+Implementation status:
+
+- `apps/server` now parses `SWITCHYARD_POSTGRES_URL`, `SWITCHYARD_REDIS_URL`, `SWITCHYARD_QUEUE_NAME`, and `SWITCHYARD_OBJECT_STORE_DIR` and wires Postgres/BullMQ/filesystem-object implementations when configured (`apps/server/src/config.ts:1-33`, `apps/server/src/app.ts:54-80`).
+- `apps/worker` now parses the same hosted infra config and wires the same opt-in implementations (`apps/worker/src/config.ts:1-25`, `apps/worker/src/worker.ts:37-88`).
+- `BullMqRunQueue` now uses real BullMQ + Redis primitives instead of delegating to `MemoryRunQueue` (`packages/queue/src/bullmq-run-queue.ts:1-140`).
+- Postgres stores now use a real `pg` handle when provided, while preserving deterministic in-memory fallback when no DB handle is passed (`packages/storage/src/postgres/database.ts:1-180`, `packages/storage/src/postgres/run-store.ts:1-133`, `packages/storage/src/postgres/assignment-store.ts:1-183`).
+- Focused coverage exists for env parsing and opt-in real-service behavior/skip semantics in:
+  - `apps/server/test/hosted-server.test.ts:53-65`
+  - `apps/worker/test/hosted-worker.test.ts:47-59`
+  - `packages/queue/test/run-queue.test.ts:46-69`
+  - `packages/storage/test/postgres-storage.test.ts:114-157`
+
+Remaining blocker:
+
+- `ARCHITECTURE.md` still contains older shipped-state language that says hosted execution uses `S3/R2` artifacts rather than the current R10 shipped filesystem-backed object-compatible store:
+  - `ARCHITECTURE.md:130-153`
+  - `ARCHITECTURE.md:691-709`
+  - `ARCHITECTURE.md:788-812`
+  - `ARCHITECTURE.md:878-880`
+- The updated shipped-slice section near the end of the document is correct (`ARCHITECTURE.md:948-964`), but the earlier sections still conflict with it.
+
+## Required Change Before Green
+
+- Align the stale `ARCHITECTURE.md` hosted-storage sections with the shipped R10 truth: Postgres + Redis/BullMQ + filesystem-backed object-compatible artifact storage, with S3/R2 network object-store wiring explicitly future/not shipped.
