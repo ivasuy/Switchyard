@@ -49,7 +49,7 @@ When a release ships:
 
 Snapshot source: `agent/phase-11-r12-production-hosting-foundation` at commit `2b025ed18450ffe97403bb37422b0ef72df61024`.
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like fake worker and connected-node safe slice; shipped SDK/CLI/OpenAPI packaging and hardening; and shipped self-hosted staging foundation for the fake-only hosted/connected-node slice.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like fake worker and connected-node safe slice; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for the fake-only hosted/connected-node slice; and shipped S3/R2-compatible object-store client wiring for hosted artifact content.
 
 The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like fake/hybrid node slice, and the R12 self-hosted staging deployment foundation. It is not yet a managed hosted platform with real hosted runtimes, dashboard, or TUI.
 
@@ -250,7 +250,7 @@ These are planned or designed in docs, but not shipped product:
 - Managed production hosted platform deployment with tenant isolation, cloud networking, production secrets, and operator controls.
 - Hosted real-runtime worker deployment for Codex, Claude Code, OpenCode, arbitrary process, or PTY execution.
 - Production sandboxing for arbitrary subprocess/PTY workloads.
-- S3/R2 network object storage backing. R12 ships a shared local object-volume backend for self-hosted smoke; real S3/R2 clients remain unwired.
+- Presigned direct upload/download URLs, bucket provisioning automation, lifecycle policy management, provider-managed encryption setup, and CDN integration.
 - WebSocket protocol package.
 - Policy package beyond current contracts/ports.
 - Cursor adapter.
@@ -988,7 +988,7 @@ Explicitly not shipped in R10:
 - Hosted debate participant runtimes or model-judging workflows.
 - TUI/dashboard packaging changes.
 - Enterprise auth/billing/tenant controls.
-- S3/R2 network object-store client wiring.
+- S3/R2 network object-store client wiring (shipped later in R13).
 
 ## R11 SDK, CLI, And Hardening (Shipped)
 
@@ -1028,9 +1028,27 @@ Explicitly not shipped in R12:
 
 - Managed hosted platform deployment.
 - Hosted arbitrary subprocess/PTY/Codex/Claude/OpenCode execution.
-- S3/R2 network object-store client wiring.
+- S3/R2 network object-store client wiring (shipped later in R13).
 - Enterprise auth, billing, or tenant controls.
 - Cursor, OpenClaw, Paperclip, browser/search, generic process, PTY, GitHub, fetch, repo, or real shell adapters/tools.
 - Runtime-specific approval bridges for Codex/OpenCode/AgentField/Generic HTTP.
 - Hosted debate with real participant runtimes or model judging.
 - Dashboard or TUI.
+
+## R13 S3/R2 Object-Store Client Wiring (Shipped)
+
+Shipped in this phase:
+
+- Real S3-compatible artifact content client in `packages/storage` using official AWS SDK v3 S3 primitives with explicit static Switchyard credentials.
+- Shared server/worker object-store resolver with explicit `SWITCHYARD_OBJECT_STORE_BACKEND=memory|local|s3-compatible`, key prefix validation, endpoint validation/redaction, timeout parsing, and probe-mode controls.
+- Hosted server/worker wiring for network object storage with preserved fake-only worker runtime boundary (`fake.deterministic` only).
+- Artifact metadata preservation for runtime-produced content: `contentStored`, `storageBackend`, `objectKey`, `sizeBytes`, `sha256`, and `contentType`.
+- Artifact route error mapping for missing object content, object-store availability/auth/bucket/timeout/read failures, and integrity mismatches.
+- `/ready` object-store probe coverage and low-cardinality hosted metrics for object-store reads/writes/failures/probe/auth/unavailable/integrity counters.
+
+Explicitly not shipped in R13:
+
+- Hosted real-runtime execution for Codex/Claude/OpenCode or arbitrary subprocess/PTY.
+- Presigned direct upload/download URLs.
+- Automated bucket provisioning/lifecycle policy/KMS/CDN management.
+- Enterprise auth, billing, tenant controls, dashboard, or TUI.

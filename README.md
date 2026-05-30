@@ -298,17 +298,13 @@ Switchyard Hosted Gateway
  ▼
 Workers
  │
- ├── hosted-safe runtimes
- ├── HTTP wrappers
- ├── AgentField
- ├── Paperclip
- └── browser/search agents
+ └── fake.deterministic (shipped hosted-safe runtime)
 
 Storage:
-  Postgres + Redis/BullMQ + S3/R2
+  Postgres + Redis/BullMQ + local object volume or S3/R2-compatible object store
 ```
 
-Best for teams, SaaS products, automation APIs, shared state, and cloud-safe workflows.
+Best for teams that need hosted orchestration while keeping the shipped hosted execution boundary fake-only.
 
 ### Hybrid Mode
 

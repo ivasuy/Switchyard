@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { MemoryRunQueue } from "@switchyard/queue";
+import { resolveObjectStoreConfig } from "@switchyard/storage";
 import { InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
 import { createHostedWorker } from "../src/worker.js";
 import { loadWorkerConfig } from "../src/config.js";
@@ -28,7 +29,13 @@ describe("hosted worker app", () => {
     });
     await queue.enqueue({ runId: "run_worker_1", placement: "hosted", runtimeMode: "fake.deterministic" });
 
-    const worker = createHostedWorker({ deploymentMode: "test", hostedRuntimeAllowlist: ["fake.deterministic"], idleIntervalMs: 1, redactedSummary: {} }, { queue, runs, events });
+    const worker = createHostedWorker({
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      idleIntervalMs: 1,
+      redactedSummary: {}
+    }, { queue, runs, events });
     const worked = await worker.tick();
 
     expect(worked).toBe(true);
@@ -52,11 +59,49 @@ describe("hosted worker app", () => {
     expect(source).not.toContain("repo");
   });
 
+  it("denies non-fake hosted runtime before execution and marks run failed", async () => {
+    const queue = new MemoryRunQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    await runs.create({
+      id: "run_worker_denied",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "blocked",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await queue.enqueue({ runId: "run_worker_denied", placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    const worker = createHostedWorker({
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      idleIntervalMs: 1,
+      redactedSummary: {}
+    }, { queue, runs, events });
+
+    const worked = await worker.tick();
+    expect(worked).toBe(true);
+    expect((await runs.get("run_worker_denied"))?.status).toBe("failed");
+    expect(events.items.some((event) => event.type === "run.started")).toBe(false);
+    expect(events.items.at(-1)?.payload).toMatchObject({ reasonCode: "hosted_runtime_not_allowed" });
+  });
+
   it("parses opt-in hosted infrastructure config", () => {
     const config = loadWorkerConfig({
       SWITCHYARD_POSTGRES_URL: "postgres://user:pass@localhost:5432/switchyard",
       SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
       SWITCHYARD_QUEUE_NAME: "switchyard-worker",
+      SWITCHYARD_OBJECT_STORE_BACKEND: "local",
       SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-worker-objects",
       SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic",
       SWITCHYARD_DEPLOYMENT_MODE: "staging"
@@ -65,7 +110,7 @@ describe("hosted worker app", () => {
     expect(config.postgresUrl).toContain("postgres://");
     expect(config.redisUrl).toBe("redis://localhost:6379/0");
     expect(config.queueName).toBe("switchyard-worker");
-    expect(config.objectStoreDir).toBe("/tmp/switchyard-worker-objects");
+    expect(config.objectStore.backend).toBe("local");
     expect(config.deploymentMode).toBe("staging");
   });
 
@@ -74,6 +119,7 @@ describe("hosted worker app", () => {
       loadWorkerConfig({
         SWITCHYARD_DEPLOYMENT_MODE: "staging",
         SWITCHYARD_POSTGRES_URL: "postgres://localhost/db",
+        SWITCHYARD_OBJECT_STORE_BACKEND: "local",
         SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store",
         SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic"
       })
@@ -86,6 +132,7 @@ describe("hosted worker app", () => {
         SWITCHYARD_DEPLOYMENT_MODE: "staging",
         SWITCHYARD_POSTGRES_URL: "postgres://localhost/db",
         SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
+        SWITCHYARD_OBJECT_STORE_BACKEND: "local",
         SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store"
       })
     ).toThrow("config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST");
@@ -96,5 +143,6 @@ describe("hosted worker app", () => {
       SWITCHYARD_DEPLOYMENT_MODE: "local"
     });
     expect(config.hostedRuntimeAllowlist).toEqual(["fake.deterministic"]);
+    expect(config.objectStore.backend).toBe("memory");
   });
 });

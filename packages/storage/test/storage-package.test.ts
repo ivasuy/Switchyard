@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { rmSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
@@ -27,6 +28,62 @@ import {
 } from "../src/index.js";
 
 describe("storage package", () => {
+  it("scopes AWS SDK dependencies to storage package only", () => {
+    const rootPackageJson = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const storagePackageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    const serverPackageJson = JSON.parse(readFileSync(new URL("../../../apps/server/package.json", import.meta.url), "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    const workerPackageJson = JSON.parse(readFileSync(new URL("../../../apps/worker/package.json", import.meta.url), "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    const corePackageJson = JSON.parse(readFileSync(new URL("../../../packages/core/package.json", import.meta.url), "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    const protocolRestPackageJson = JSON.parse(readFileSync(new URL("../../../packages/protocol-rest/package.json", import.meta.url), "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    const contractsPackageJson = JSON.parse(readFileSync(new URL("../../../packages/contracts/package.json", import.meta.url), "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    const lockfile = readFileSync(new URL("../../../pnpm-lock.yaml", import.meta.url), "utf8");
+
+    expect(storagePackageJson.dependencies?.["@aws-sdk/client-s3"]).toBeTruthy();
+    expect(storagePackageJson.dependencies?.["@smithy/node-http-handler"]).toBeTruthy();
+
+    const disallowed = [
+      rootPackageJson.dependencies,
+      rootPackageJson.devDependencies,
+      serverPackageJson.dependencies,
+      workerPackageJson.dependencies,
+      corePackageJson.dependencies,
+      protocolRestPackageJson.dependencies,
+      contractsPackageJson.dependencies
+    ];
+    for (const section of disallowed) {
+      expect(section?.["@aws-sdk/client-s3"]).toBeFalsy();
+      expect(section?.["@smithy/node-http-handler"]).toBeFalsy();
+    }
+
+    const storageImporterStart = lockfile.indexOf("  packages/storage:");
+    expect(storageImporterStart).toBeGreaterThan(-1);
+    const importersBlockEnd = lockfile.indexOf("\npackages:", storageImporterStart);
+    const importersBlock = lockfile.slice(storageImporterStart, importersBlockEnd > -1 ? importersBlockEnd : undefined);
+    expect(importersBlock).toContain("@aws-sdk/client-s3");
+    expect(importersBlock).toContain("@smithy/node-http-handler");
+
+    expect(lockfile).not.toMatch(/apps\/server:[\\s\\S]*@aws-sdk\/client-s3/);
+    expect(lockfile).not.toMatch(/apps\/worker:[\\s\\S]*@aws-sdk\/client-s3/);
+    expect(lockfile).not.toMatch(/packages\/core:[\\s\\S]*@aws-sdk\/client-s3/);
+    expect(lockfile).not.toMatch(/packages\/protocol-rest:[\\s\\S]*@aws-sdk\/client-s3/);
+    expect(lockfile).not.toMatch(/packages\/contracts:[\\s\\S]*@aws-sdk\/client-s3/);
+  });
+
   it("opens sqlite storage and executes a query", () => {
     const opened = openSqliteStorage(":memory:");
 

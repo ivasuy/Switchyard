@@ -99,6 +99,53 @@ describe("artifact routes", () => {
     expect(response.json().error.code).toBe("missing_artifact_content");
   });
 
+  it("maps object store availability/auth/bucket/timeout/read failures to 503", async () => {
+    const codes = [
+      "object_store_unavailable",
+      "object_store_timeout",
+      "object_store_auth_failed",
+      "object_store_bucket_not_found",
+      "object_store_read_failed"
+    ];
+    for (const code of codes) {
+      const artifacts = new InMemoryArtifactStore();
+      await artifacts.create(baseArtifact);
+      const app = buildApp(artifacts, {
+        async read() {
+          throw new Error(code);
+        }
+      });
+      const response = await app.inject({ method: "GET", url: "/artifacts/artifact_test/content" });
+      expect(response.statusCode, code).toBe(503);
+      expect(response.json().error.code, code).toBe(code);
+      expect(response.body, code).not.toContain("Authorization");
+      expect(response.body, code).not.toContain("AKIA");
+    }
+  });
+
+  it("maps integrity failures to 409", async () => {
+    const artifacts = new InMemoryArtifactStore();
+    await artifacts.create(baseArtifact);
+    const app = buildApp(artifacts, {
+      async read() {
+        throw new Error("artifact_digest_mismatch");
+      }
+    });
+
+    const digestResponse = await app.inject({ method: "GET", url: "/artifacts/artifact_test/content" });
+    expect(digestResponse.statusCode).toBe(409);
+    expect(digestResponse.json().error.code).toBe("artifact_digest_mismatch");
+
+    const app2 = buildApp(artifacts, {
+      async read() {
+        throw new Error("artifact_content_empty");
+      }
+    });
+    const emptyResponse = await app2.inject({ method: "GET", url: "/artifacts/artifact_test/content" });
+    expect(emptyResponse.statusCode).toBe(409);
+    expect(emptyResponse.json().error.code).toBe("artifact_content_empty");
+  });
+
   it("picks the right content type for known artifact types", () => {
     expect(contentTypeForArtifact("transcript")).toBe("application/x-ndjson");
     expect(contentTypeForArtifact("raw_log")).toBe("text/plain; charset=utf-8");

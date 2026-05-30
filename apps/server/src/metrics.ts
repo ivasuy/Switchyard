@@ -16,7 +16,15 @@ export interface HostedMetricsSnapshot {
     claimed: number;
   };
   worker: { attempts: number; exhausted: number };
-  objectStore: { reads: number; writes: number; failures: number };
+  objectStore: {
+    reads: number;
+    writes: number;
+    failures: number;
+    probeFailures: number;
+    authFailures: number;
+    unavailable: number;
+    digestMismatches: number;
+  };
   node: { register: number; heartbeat: number; claim: number; sync: number; complete: number; reject: number };
   dependencies: { ready: number; notReady: number };
   config: { failures: number };
@@ -29,7 +37,7 @@ export class HostedMetrics {
     placement: { accepted: 0, denied: 0 },
     queue: { available: true, enqueue: 0, claim: 0, ack: 0, retry: 0, failed: 0, exhausted: 0, queued: 0, claimed: 0 },
     worker: { attempts: 0, exhausted: 0 },
-    objectStore: { reads: 0, writes: 0, failures: 0 },
+    objectStore: { reads: 0, writes: 0, failures: 0, probeFailures: 0, authFailures: 0, unavailable: 0, digestMismatches: 0 },
     node: { register: 0, heartbeat: 0, claim: 0, sync: 0, complete: 0, reject: 0 },
     dependencies: { ready: 0, notReady: 0 },
     config: { failures: 0 }

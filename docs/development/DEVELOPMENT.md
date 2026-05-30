@@ -547,11 +547,17 @@ R10 storage/queue scope in this shipped slice:
 - Hosted/hybrid verification defaults to deterministic memory substitutes.
 - `SWITCHYARD_POSTGRES_URL` opts `apps/server` and `apps/worker` into real Postgres stores.
 - `SWITCHYARD_REDIS_URL` opts `apps/server` and `apps/worker` into Redis/BullMQ queueing. `SWITCHYARD_QUEUE_NAME` overrides the queue name.
-- `SWITCHYARD_OBJECT_STORE_DIR` opts into durable filesystem-backed object-compatible artifact content storage.
-- S3/R2 network object-store client wiring is not shipped in R10.
+- `SWITCHYARD_OBJECT_STORE_BACKEND` selects `memory`, `local`, or `s3-compatible`.
+- `SWITCHYARD_OBJECT_STORE_DIR` is required when backend is `local`.
+- S3/R2-compatible artifact storage is shipped in R13 using explicit endpoint/region/bucket/static credential env vars (`SWITCHYARD_OBJECT_STORE_ENDPOINT`, `SWITCHYARD_OBJECT_STORE_REGION`, `SWITCHYARD_OBJECT_STORE_BUCKET`, `SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID`, `SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY`).
 
 R10 non-goals reminder:
 
 - No hosted Codex/Claude/OpenCode/PTY/arbitrary subprocess execution.
 - No hosted browser/search/repo/GitHub/fetch tooling.
 - No hosted debate participant execution or model judging.
+
+R13 object-store smoke posture:
+
+- Required CI tests stay no-spend and use fake/in-memory seams only.
+- Optional live S3/R2/MinIO smoke is operator-owned and never part of required checks.

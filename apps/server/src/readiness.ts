@@ -1,17 +1,19 @@
 import { access, constants } from "node:fs/promises";
 import type { RunQueuePort } from "@switchyard/core";
+import type { ProbeableArtifactContentStore } from "@switchyard/storage";
 import { probePostgresDatabase, type PostgresDatabaseHandle } from "@switchyard/storage";
 import type { ServerConfig } from "./config.js";
 
 export interface ReadinessReport {
   ok: boolean;
-  checks: Record<string, { ok: boolean; code?: string }>;
+  checks: Record<string, { ok: boolean; code?: string; diagnostics?: Record<string, unknown> }>;
 }
 
 export async function probeServerReadiness(input: {
   config: ServerConfig;
   postgres: PostgresDatabaseHandle | undefined;
   queue: RunQueuePort;
+  artifactContent: ProbeableArtifactContentStore;
 }): Promise<ReadinessReport> {
   const checks: ReadinessReport["checks"] = {};
 
@@ -33,15 +35,45 @@ export async function probeServerReadiness(input: {
     checks.queue = { ok: false, code: "queue_unavailable" };
   }
 
-  if (input.config.objectStoreDir) {
+  if (input.config.objectStore.backend === "local") {
     try {
-      await access(input.config.objectStoreDir, constants.R_OK | constants.W_OK);
+      await access(input.config.objectStore.directory, constants.R_OK | constants.W_OK);
+      if (input.config.objectStore.probe !== "disabled") {
+        await input.artifactContent.probe();
+      }
       checks.objectStore = { ok: true };
-    } catch {
-      checks.objectStore = { ok: false, code: "object_store_unavailable" };
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "object_store_unavailable";
+      checks.objectStore = {
+        ok: false,
+        code: code.startsWith("object_store_") || code.startsWith("artifact_")
+          ? code
+          : "object_store_unavailable",
+        diagnostics: {
+          backend: input.config.objectStore.backend,
+          summary: input.config.objectStore.redactedSummary
+        }
+      };
+    }
+  } else if (input.config.objectStore.backend === "s3-compatible") {
+    try {
+      await input.artifactContent.probe();
+      checks.objectStore = { ok: true };
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "object_store_unavailable";
+      checks.objectStore = {
+        ok: false,
+        code: code.startsWith("object_store_") || code.startsWith("artifact_")
+          ? code
+          : "object_store_unavailable",
+        diagnostics: {
+          backend: input.config.objectStore.backend,
+          summary: input.config.objectStore.redactedSummary
+        }
+      };
     }
   } else {
-    checks.objectStore = { ok: input.config.deploymentMode === "local" || input.config.deploymentMode === "test", code: "object_store_not_configured" };
+    checks.objectStore = { ok: true };
   }
 
   if (input.config.deploymentMode === "staging" || input.config.deploymentMode === "production") {

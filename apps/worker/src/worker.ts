@@ -12,9 +12,8 @@ import {
 } from "@switchyard/core";
 import { BullMqRunQueue, MemoryRunQueue } from "@switchyard/queue";
 import {
+  createArtifactContentStoreFromObjectConfig,
   ensurePostgresSchema,
-  LocalObjectArtifactContentStore,
-  MemoryArtifactContentStore,
   PostgresArtifactStore,
   PostgresEventStore,
   PostgresRunStore,
@@ -50,9 +49,8 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   const events: EventStore = deps?.events ?? new PostgresEventStore(postgres);
   const sessions: SessionStore = new PostgresSessionStore(postgres);
   const artifacts: ArtifactStore = new PostgresArtifactStore(postgres);
-  const artifactContent: ArtifactContentStore = config.objectStoreDir
-    ? new LocalObjectArtifactContentStore(config.objectStoreDir)
-    : new MemoryArtifactContentStore();
+  const artifactContent: ArtifactContentStore & { probe: () => Promise<{ ok: true }> } =
+    createArtifactContentStoreFromObjectConfig(config.objectStore);
 
   const adapters = new Map<string, RuntimeAdapter>([["fake", new FakeRuntimeAdapter()]]);
   const runner = new RuntimeRunnerService({
@@ -63,8 +61,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     artifacts,
     artifactContent: {
       writeText: async (path, content) => {
-        const stored = await artifactContent.writeText(path, content, { contentType: "application/x-ndjson" });
-        return stored.path;
+        return artifactContent.writeText(path, content, { contentType: "application/x-ndjson" });
       }
     }
   });
@@ -90,6 +87,9 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
           await probePostgresDatabase(postgres);
         }
         await queue.stats();
+        if (config.objectStore.backend !== "memory" || config.objectStore.probe !== "disabled") {
+          await artifactContent.probe();
+        }
         return { ok: true };
       } catch (error) {
         return { ok: false, reason: error instanceof Error ? error.message : String(error) };

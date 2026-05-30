@@ -15,6 +15,8 @@ export * from "./filesystem-artifact-content-store.js";
 export * from "./memory-artifact-content-store.js";
 export * from "./local-object-artifact-content-store.js";
 export * from "./object-artifact-content-store.js";
+export * from "./s3-compatible-object-client.js";
+export * from "./object-store-config.js";
 export * from "./postgres/database.js";
 export * from "./postgres/schema.js";
 export * from "./postgres/run-store.js";

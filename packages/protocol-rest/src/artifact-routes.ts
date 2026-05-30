@@ -58,9 +58,29 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ArtifactRoute
     try {
       payload = await deps.artifactContent.read(artifact);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       const code = (error as { code?: string }).code;
-      if (code === "ENOENT" || (error as Error).message?.includes("not found")) {
+      if (
+        code === "ENOENT" ||
+        message.includes("not found") ||
+        message === "artifact_content_not_found"
+      ) {
         return sendHttpError(reply, "missing_artifact_content", `Artifact has no stored content: ${id}`);
+      }
+      if (message === "artifact_digest_mismatch") {
+        return sendHttpError(reply, "artifact_digest_mismatch", `Artifact digest mismatch: ${id}`);
+      }
+      if (message === "artifact_content_empty") {
+        return sendHttpError(reply, "artifact_content_empty", `Artifact content integrity mismatch: ${id}`);
+      }
+      if (
+        message === "object_store_unavailable" ||
+        message === "object_store_timeout" ||
+        message === "object_store_auth_failed" ||
+        message === "object_store_bucket_not_found" ||
+        message === "object_store_read_failed"
+      ) {
+        return sendHttpError(reply, message, `Artifact content store unavailable: ${id}`);
       }
       throw error;
     }

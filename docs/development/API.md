@@ -2,7 +2,7 @@
 
 This is the current local daemon API contract. It documents what an app can call today.
 
-## R10 Hosted And Hybrid Execution (Safe Slice)
+## R10-R13 Hosted And Hybrid Execution (Safe Slice)
 
 R10 adds hosted-like and connected-node execution surfaces while preserving the public run contract shape (`POST /runs`, `GET /runs`, `GET /runs/:id`, events/artifacts/cancel).
 
@@ -27,7 +27,11 @@ Node endpoints added in R10:
 
 When `SWITCHYARD_NODE_SHARED_TOKEN` is set, every `/nodes/*` route requires `x-switchyard-node-token`.
 
-R10 hosted-like app infrastructure defaults to deterministic memory substitutes. `SWITCHYARD_POSTGRES_URL` opts into real Postgres stores, `SWITCHYARD_REDIS_URL` opts into Redis/BullMQ queueing, `SWITCHYARD_QUEUE_NAME` overrides the queue name, and `SWITCHYARD_OBJECT_STORE_DIR` opts into durable filesystem-backed object-compatible artifact content storage.
+Hosted app infrastructure defaults to deterministic memory substitutes in local/test. `SWITCHYARD_POSTGRES_URL` opts into real Postgres stores, `SWITCHYARD_REDIS_URL` opts into Redis/BullMQ queueing, `SWITCHYARD_QUEUE_NAME` overrides the queue name, and object-store behavior is selected through:
+
+- `SWITCHYARD_OBJECT_STORE_BACKEND=memory|local|s3-compatible`
+- `SWITCHYARD_OBJECT_STORE_DIR` when backend is `local`
+- `SWITCHYARD_OBJECT_STORE_ENDPOINT`, `SWITCHYARD_OBJECT_STORE_REGION`, `SWITCHYARD_OBJECT_STORE_BUCKET`, `SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID`, `SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY` when backend is `s3-compatible`
 
 Base URL:
 
@@ -40,7 +44,7 @@ Current implementation status:
 - Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
-- Not implemented yet: trace endpoint, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, model-based debate judging, and S3/R2 network object storage.
+- Not implemented yet: trace endpoint, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, and model-based debate judging.
 
 ## Error Contract
 
@@ -83,6 +87,13 @@ Closed code set:
 | `tool_policy_denied` | 403 | Policy denied known real tools or denied risky action. |
 | `adapter_protocol_failed` | 409 | Adapter cannot perform the requested action. |
 | `approval_not_pending` | 409 | Approval was already resolved and cannot transition again. |
+| `object_store_unavailable` | 503 | Artifact object store is unavailable. |
+| `object_store_timeout` | 503 | Artifact object store operation timed out. |
+| `object_store_auth_failed` | 503 | Artifact object store authentication failed. |
+| `object_store_bucket_not_found` | 503 | Artifact object store bucket does not exist or is inaccessible. |
+| `object_store_read_failed` | 503 | Artifact object store read failed. |
+| `artifact_digest_mismatch` | 409 | Retrieved artifact content digest mismatch. |
+| `artifact_content_empty` | 409 | Retrieved artifact content length/integrity mismatch. |
 | `internal_error` | 500 | Unexpected server failure. |
 
 All success bodies (`{run, events}`, `{accepted: true}`, etc.) are unchanged.

@@ -1,6 +1,7 @@
 import type { Artifact, Run, RuntimeSession, RunStatus, SwitchyardEvent } from "@switchyard/contracts";
 import { AdapterProtocolError } from "../errors.js";
 import type { ArtifactStore } from "../ports/artifact-store.js";
+import type { StoredArtifactContent } from "../ports/artifact-content-store.js";
 import type { EventStore } from "../ports/event-store.js";
 import type { RunStore } from "../ports/run-store.js";
 import type { RuntimeAdapter } from "../ports/runtime-adapter.js";
@@ -28,7 +29,7 @@ export interface RuntimeRunnerDependencies {
   eventBus?: EventBus;
   logger?: RuntimeLogger | undefined;
   artifactContent?: {
-    writeText(path: string, content: string): Promise<string>;
+    writeText(path: string, content: string): Promise<string | StoredArtifactContent>;
   };
   runtimeApprovals?: RuntimeApprovalBridge;
 }
@@ -455,7 +456,17 @@ export class RuntimeRunnerService {
       let storedPath = safePath;
       let contentStored = false;
       if (hasContent && this.deps.artifactContent) {
-        storedPath = await this.deps.artifactContent.writeText(safePath, content);
+        const stored = await this.deps.artifactContent.writeText(safePath, content);
+        if (typeof stored === "string") {
+          storedPath = stored;
+        } else {
+          storedPath = stored.path;
+          metadata.storageBackend = stored.storageBackend;
+          if (stored.objectKey) metadata.objectKey = stored.objectKey;
+          metadata.sizeBytes = stored.sizeBytes;
+          metadata.sha256 = stored.sha256;
+          metadata.contentType = stored.contentType;
+        }
         contentStored = true;
       }
       if (hasContent) {

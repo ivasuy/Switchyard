@@ -1,3 +1,9 @@
+import {
+  ObjectStoreConfigError,
+  resolveObjectStoreConfig,
+  type ResolvedObjectStoreConfig
+} from "@switchyard/storage";
+
 export type DeploymentMode = "local" | "test" | "staging" | "production";
 
 export class ConfigError extends Error {
@@ -19,7 +25,7 @@ export interface ServerConfig {
   postgresUrl?: string;
   redisUrl?: string;
   queueName?: string;
-  objectStoreDir?: string;
+  objectStore: ResolvedObjectStoreConfig;
   redactedSummary: Record<string, unknown>;
 }
 
@@ -33,22 +39,31 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     deploymentMode,
     hostedRuntimeAllowlist: allowlist,
     queueName: requiredOrDefault(env["SWITCHYARD_QUEUE_NAME"], "switchyard-hosted-runs"),
+    objectStore: {} as ResolvedObjectStoreConfig,
     redactedSummary: {}
   };
 
   const nodeSharedToken = optional(env["SWITCHYARD_NODE_SHARED_TOKEN"]);
   const postgresUrl = optional(env["SWITCHYARD_POSTGRES_URL"]);
   const redisUrl = optional(env["SWITCHYARD_REDIS_URL"]);
-  const objectStoreDir = optional(env["SWITCHYARD_OBJECT_STORE_DIR"]);
   if (nodeSharedToken) config.nodeSharedToken = nodeSharedToken;
   if (postgresUrl) config.postgresUrl = postgresUrl;
   if (redisUrl) config.redisUrl = redisUrl;
-  if (objectStoreDir) config.objectStoreDir = objectStoreDir;
+  try {
+    config.objectStore = resolveObjectStoreConfig({ env, deploymentMode: config.deploymentMode });
+  } catch (error) {
+    if (error instanceof ObjectStoreConfigError) {
+      throw new ConfigError(error.code, error.variable, {
+        ...buildSummary(config),
+        objectStore: error.redactedConfig["objectStore"] ?? {}
+      });
+    }
+    throw error;
+  }
 
   if (config.deploymentMode === "staging" || config.deploymentMode === "production") {
     requireVar(config.postgresUrl, "SWITCHYARD_POSTGRES_URL", config);
     requireVar(config.redisUrl, "SWITCHYARD_REDIS_URL", config);
-    requireVar(config.objectStoreDir, "SWITCHYARD_OBJECT_STORE_DIR", config);
     requireVar(config.nodeSharedToken, "SWITCHYARD_NODE_SHARED_TOKEN", config);
     requireVar(hostedRuntimeAllowlistEnv, "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST", config);
     if (config.hostedRuntimeAllowlist.length === 0) {
@@ -109,6 +124,6 @@ function buildSummary(config: ServerConfig): Record<string, unknown> {
     hasNodeSharedToken: Boolean(config.nodeSharedToken),
     hasPostgresUrl: Boolean(config.postgresUrl),
     hasRedisUrl: Boolean(config.redisUrl),
-    objectStoreDir: config.objectStoreDir ? "[set]" : "[unset]"
+    objectStore: config.objectStore?.redactedSummary ?? {}
   };
 }

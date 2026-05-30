@@ -706,7 +706,7 @@ Postgres stores durable metadata and events.
 
 Redis/BullMQ handles queues and background jobs.
 
-The filesystem-backed object-compatible content store durably stores large artifact payloads when `SWITCHYARD_OBJECT_STORE_DIR` is configured. S3/R2 network object stores are not shipped in R10 and remain future adapter work.
+The filesystem-backed object-compatible content store durably stores large artifact payloads when `SWITCHYARD_OBJECT_STORE_DIR` is configured. R13 also ships an S3/R2-compatible object-store client path selected by explicit `SWITCHYARD_OBJECT_STORE_BACKEND=s3-compatible` plus endpoint/region/bucket/static credential env vars.
 
 ### Hybrid Mode
 
@@ -883,9 +883,9 @@ Redis/BullMQ provide practical hosted job orchestration for run execution, debat
 
 ### Filesystem and Object-Compatible Artifacts
 
-Artifacts should have one logical model regardless of backend. Local mode maps logical artifact paths to files. R10 hosted-like mode maps them to object-compatible keys persisted under a configured local filesystem root.
+Artifacts should have one logical model regardless of backend. Local mode maps logical artifact paths to files. Hosted-like mode maps them to object-compatible keys persisted either under a configured local filesystem root or an explicitly configured S3/R2-compatible object store.
 
-R10 ships the hosted-like artifact content backend as a local filesystem-backed object-compatible store selected by `SWITCHYARD_OBJECT_STORE_DIR`. S3/R2 network object storage is not shipped and remains future adapter work.
+R10 shipped the hosted-like artifact content backend as a local filesystem-backed object-compatible store selected by `SWITCHYARD_OBJECT_STORE_DIR`. R13 extends that model with shipped S3/R2-compatible object-store client wiring while preserving fake-only hosted execution.
 
 ### acpx
 
@@ -969,4 +969,4 @@ Current safety posture:
 - Hosted worker execution is restricted to `fake.deterministic`.
 - Hosted server/worker do not run arbitrary subprocess/PTY/Codex/Claude/OpenCode runtimes.
 - Hybrid connected nodes are explicit trust boundaries and enforce local policy before execution and sync.
-- S3/R2 network object-store backing remains a future hardening step; R10 default verification stays deterministic and local.
+- S3/R2-compatible object-store backing is shipped in R13; required verification remains deterministic and local/no-spend by default.

@@ -32,7 +32,13 @@ export type HttpErrorCode =
   | "queue_unavailable"
   | "event_sync_gap"
   | "event_sync_conflict"
+  | "object_store_unavailable"
+  | "object_store_timeout"
+  | "object_store_auth_failed"
+  | "object_store_bucket_not_found"
+  | "object_store_read_failed"
   | "artifact_digest_mismatch"
+  | "artifact_content_empty"
   | "artifact_sync_failed"
   | "hosted_runtime_not_allowed"
   | "payload_too_large"
@@ -83,7 +89,13 @@ const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   queue_unavailable: 503,
   event_sync_gap: 409,
   event_sync_conflict: 409,
+  object_store_unavailable: 503,
+  object_store_timeout: 503,
+  object_store_auth_failed: 503,
+  object_store_bucket_not_found: 503,
+  object_store_read_failed: 503,
   artifact_digest_mismatch: 409,
+  artifact_content_empty: 409,
   artifact_sync_failed: 500,
   hosted_runtime_not_allowed: 409,
   payload_too_large: 413,

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import {
   AdapterProtocolError,
   createNotImplementedError,
@@ -516,9 +517,14 @@ describe("core service shells", () => {
     const [storedArtifact] = await artifacts.listByRun(run.id);
     expect(storedArtifact).toMatchObject({
       metadata: {
-        contentStored: true
+        contentStored: true,
+        storageBackend: "object",
+        objectKey: `artifacts/${adapter.artifactPath}`,
+        contentType: "application/x-ndjson"
       }
     });
+    expect(typeof storedArtifact?.metadata["sizeBytes"]).toBe("number");
+    expect(typeof storedArtifact?.metadata["sha256"]).toBe("string");
     expect(storedArtifact?.path).toBe(`stored/${adapter.artifactPath}`);
     expect(storedArtifact?.metadata).not.toHaveProperty("content");
     expect(artifactContent.writes.at(-1)).toEqual({
@@ -550,9 +556,14 @@ describe("core service shells", () => {
     expect(storedArtifact).toMatchObject({
       path: `stored/${adapter.artifactPath}`,
       metadata: {
-        contentStored: true
+        contentStored: true,
+        storageBackend: "object",
+        objectKey: `artifacts/${adapter.artifactPath}`,
+        contentType: "application/x-ndjson"
       }
     });
+    expect(typeof storedArtifact?.metadata["sizeBytes"]).toBe("number");
+    expect(typeof storedArtifact?.metadata["sha256"]).toBe("string");
     expect(storedArtifact?.metadata).not.toHaveProperty("content");
     expect(artifactContent.writes.at(-1)).toEqual({
       path: adapter.artifactPath,
@@ -1471,9 +1482,24 @@ class BlockingArtifactStore extends MemoryArtifactStore {
 class InMemoryArtifactContentStore {
   readonly writes: Array<{ path: string; content: string }> = [];
 
-  async writeText(path: string, content: string): Promise<string> {
+  async writeText(path: string, content: string): Promise<{
+    path: string;
+    storageBackend: "object";
+    objectKey: string;
+    sizeBytes: number;
+    sha256: string;
+    contentType: string;
+  }> {
     this.writes.push({ path, content });
-    return `stored/${path}`;
+    const bytes = Buffer.from(content, "utf8");
+    return {
+      path: `stored/${path}`,
+      storageBackend: "object",
+      objectKey: `artifacts/${path}`,
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      contentType: "application/x-ndjson"
+    };
   }
 }
 

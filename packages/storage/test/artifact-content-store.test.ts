@@ -52,6 +52,9 @@ describe("artifact content stores", () => {
           const hit = objects.get(`${input.bucket}/${input.key}`);
           if (!hit) throw new Error("not found");
           return hit;
+        },
+        async deleteObject(input) {
+          objects.delete(`${input.bucket}/${input.key}`);
         }
       }
     );
@@ -68,6 +71,103 @@ describe("artifact content stores", () => {
       createdAt: "2026-05-30T00:00:00.000Z"
     });
     expect(read.body.toString("utf8")).toBe("content");
+  });
+
+  it("prefers metadata objectKey and validates object digest/size", async () => {
+    const objects = new Map<string, { body: Buffer; contentType: string }>();
+    const store = new ObjectArtifactContentStore(
+      {
+        endpoint: "https://example.test",
+        region: "auto",
+        bucket: "switchyard",
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        forcePathStyle: true,
+        keyPrefix: "artifacts"
+      },
+      {
+        async putObject(input) {
+          objects.set(`${input.bucket}/${input.key}`, { body: input.body, contentType: input.contentType });
+        },
+        async getObject(input) {
+          const hit = objects.get(`${input.bucket}/${input.key}`);
+          if (!hit) throw new Error("not found");
+          return hit;
+        },
+        async deleteObject() {
+          return undefined;
+        }
+      }
+    );
+    const saved = await store.writeText("runs/run_1/path.txt", "payload", { contentType: "text/plain" });
+    const baseArtifact = {
+      id: "artifact_obj_1",
+      runId: "run_1",
+      type: "raw_log" as const,
+      path: "runs/run_1/path.txt",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    };
+
+    await expect(store.read({
+      ...baseArtifact,
+      metadata: {
+        objectKey: saved.objectKey,
+        sha256: saved.sha256,
+        sizeBytes: saved.sizeBytes,
+        contentType: "text/plain"
+      }
+    })).resolves.toMatchObject({ body: Buffer.from("payload") });
+
+    await expect(store.read({
+      ...baseArtifact,
+      metadata: {
+        objectKey: saved.objectKey,
+        sha256: "0".repeat(64),
+        sizeBytes: saved.sizeBytes,
+        contentType: "text/plain"
+      }
+    })).rejects.toThrow("artifact_digest_mismatch");
+
+    await expect(store.read({
+      ...baseArtifact,
+      metadata: {
+        objectKey: saved.objectKey,
+        sha256: saved.sha256,
+        sizeBytes: 999,
+        contentType: "text/plain"
+      }
+    })).rejects.toThrow("object_store_read_failed");
+  });
+
+  it("supports object store probe write/read/delete roundtrip", async () => {
+    const objects = new Map<string, Buffer>();
+    const store = new ObjectArtifactContentStore(
+      {
+        endpoint: "https://example.test",
+        region: "auto",
+        bucket: "switchyard",
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        forcePathStyle: true,
+        keyPrefix: "artifacts"
+      },
+      {
+        async putObject(input) {
+          objects.set(`${input.bucket}/${input.key}`, input.body);
+        },
+        async getObject(input) {
+          const hit = objects.get(`${input.bucket}/${input.key}`);
+          if (!hit) throw new Error("not found");
+          return { body: hit, contentType: "application/octet-stream" };
+        },
+        async deleteObject(input) {
+          objects.delete(`${input.bucket}/${input.key}`);
+        }
+      }
+    );
+
+    await expect(store.probe()).resolves.toEqual({ ok: true });
+    expect(objects.size).toBe(0);
   });
 
   it("supports opt-in local object-compatible persistence", async () => {

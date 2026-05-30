@@ -1,3 +1,9 @@
+import {
+  ObjectStoreConfigError,
+  resolveObjectStoreConfig,
+  type ResolvedObjectStoreConfig
+} from "@switchyard/storage";
+
 export type DeploymentMode = "local" | "test" | "staging" | "production";
 
 export class ConfigError extends Error {
@@ -12,7 +18,7 @@ export interface WorkerConfig {
   postgresUrl?: string;
   redisUrl?: string;
   queueName?: string;
-  objectStoreDir?: string;
+  objectStore: ResolvedObjectStoreConfig;
   idleIntervalMs: number;
   redactedSummary: Record<string, unknown>;
 }
@@ -25,14 +31,24 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     hostedRuntimeAllowlist: parseCsv(hostedRuntimeAllowlistEnv, "fake.deterministic"),
     queueName: optional(env["SWITCHYARD_QUEUE_NAME"]) ?? "switchyard-hosted-runs",
     idleIntervalMs: Number(optional(env["SWITCHYARD_WORKER_IDLE_MS"]) ?? "200"),
+    objectStore: {} as ResolvedObjectStoreConfig,
     redactedSummary: {}
   };
   const postgresUrl = optional(env["SWITCHYARD_POSTGRES_URL"]);
   const redisUrl = optional(env["SWITCHYARD_REDIS_URL"]);
-  const objectStoreDir = optional(env["SWITCHYARD_OBJECT_STORE_DIR"]);
   if (postgresUrl) config.postgresUrl = postgresUrl;
   if (redisUrl) config.redisUrl = redisUrl;
-  if (objectStoreDir) config.objectStoreDir = objectStoreDir;
+  try {
+    config.objectStore = resolveObjectStoreConfig({ env, deploymentMode: config.deploymentMode });
+  } catch (error) {
+    if (error instanceof ObjectStoreConfigError) {
+      throw new ConfigError(error.code, error.variable, {
+        ...buildSummary(config),
+        objectStore: error.redactedConfig["objectStore"] ?? {}
+      });
+    }
+    throw error;
+  }
 
   if (!Number.isFinite(config.idleIntervalMs) || config.idleIntervalMs < 1) {
     throw new ConfigError("config_invalid:SWITCHYARD_WORKER_IDLE_MS", "SWITCHYARD_WORKER_IDLE_MS", buildSummary(config));
@@ -41,7 +57,6 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   if (config.deploymentMode === "staging" || config.deploymentMode === "production") {
     requireVar(config.postgresUrl, "SWITCHYARD_POSTGRES_URL", config);
     requireVar(config.redisUrl, "SWITCHYARD_REDIS_URL", config);
-    requireVar(config.objectStoreDir, "SWITCHYARD_OBJECT_STORE_DIR", config);
     requireVar(hostedRuntimeAllowlistEnv, "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST", config);
     if (config.hostedRuntimeAllowlist.length === 0) {
       throw new ConfigError(
@@ -93,7 +108,7 @@ function buildSummary(config: WorkerConfig): Record<string, unknown> {
     hostedRuntimeAllowlist: config.hostedRuntimeAllowlist,
     hasPostgresUrl: Boolean(config.postgresUrl),
     hasRedisUrl: Boolean(config.redisUrl),
-    objectStoreDir: config.objectStoreDir ? "[set]" : "[unset]",
+    objectStore: config.objectStore?.redactedSummary ?? {},
     idleIntervalMs: config.idleIntervalMs
   };
 }

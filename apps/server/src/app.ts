@@ -10,7 +10,6 @@ import {
   RunService,
   RuntimeCapabilityService,
   RuntimeRunnerService,
-  type ArtifactContentStore,
   type ArtifactStore,
   type EventStore,
   type NodeAssignmentStore,
@@ -31,9 +30,9 @@ import {
 import { registerNodeRoutes } from "@switchyard/protocol-node";
 import { BullMqRunQueue, MemoryRunQueue } from "@switchyard/queue";
 import {
+  createArtifactContentStoreFromObjectConfig,
+  type ProbeableArtifactContentStore,
   ensurePostgresSchema,
-  LocalObjectArtifactContentStore,
-  MemoryArtifactContentStore,
   PostgresAssignmentStore,
   PostgresArtifactStore,
   PostgresEventStore,
@@ -88,13 +87,10 @@ export async function createServerApp(config: ServerConfig) {
   const placements: PlacementStore = new PostgresPlacementStore(postgres);
   const nodes: NodeStore = new PostgresNodeStore(postgres);
   const assignments: NodeAssignmentStore = new PostgresAssignmentStore(postgres);
-  const artifactContent: ArtifactContentStore = config.objectStoreDir
-    ? new LocalObjectArtifactContentStore(config.objectStoreDir)
-    : forcePersistent
-      ? (() => {
-        throw new Error("config_required:SWITCHYARD_OBJECT_STORE_DIR");
-      })()
-      : new MemoryArtifactContentStore();
+  const artifactContent = instrumentArtifactContent(
+    createArtifactContentStoreFromObjectConfig(config.objectStore),
+    metrics
+  );
 
   const fakeAdapter = new FakeRuntimeAdapter();
   const adapters = new Map<string, RuntimeAdapter>([["fake", fakeAdapter]]);
@@ -108,8 +104,7 @@ export async function createServerApp(config: ServerConfig) {
     eventBus,
     artifactContent: {
       writeText: async (path, content) => {
-        const stored = await artifactContent.writeText(path, content, { contentType: "application/x-ndjson" });
-        return stored.path;
+        return artifactContent.writeText(path, content, { contentType: "application/x-ndjson" });
       }
     }
   });
@@ -174,7 +169,7 @@ export async function createServerApp(config: ServerConfig) {
 
   app.get("/health", async () => ({ ok: true }));
   app.get("/ready", async (_request, reply) => {
-    const ready = await probeServerReadiness({ config, postgres, queue });
+    const ready = await probeServerReadiness({ config, postgres, queue, artifactContent });
     if (!ready.ok) {
       metrics.inc("dependencies.notReady");
       return reply.code(503).send(ready);
@@ -321,6 +316,68 @@ function instrumentQueue(
     wrapped.close = queue.close.bind(queue);
   }
   return wrapped;
+}
+
+function instrumentArtifactContent(
+  store: ProbeableArtifactContentStore,
+  metrics: HostedMetrics
+): ProbeableArtifactContentStore {
+  return {
+    ...store,
+    async writeText(path, text, options) {
+      try {
+        const result = await store.writeText(path, text, options);
+        metrics.inc("objectStore.writes");
+        return result;
+      } catch (error) {
+        captureObjectStoreErrorMetrics(error, metrics);
+        throw error;
+      }
+    },
+    async writeBytes(path, bytes, options) {
+      try {
+        const result = await store.writeBytes(path, bytes, options);
+        metrics.inc("objectStore.writes");
+        return result;
+      } catch (error) {
+        captureObjectStoreErrorMetrics(error, metrics);
+        throw error;
+      }
+    },
+    async read(artifact) {
+      try {
+        const result = await store.read(artifact);
+        metrics.inc("objectStore.reads");
+        return result;
+      } catch (error) {
+        captureObjectStoreErrorMetrics(error, metrics);
+        throw error;
+      }
+    },
+    async probe() {
+      try {
+        return await store.probe();
+      } catch (error) {
+        metrics.inc("objectStore.probeFailures");
+        captureObjectStoreErrorMetrics(error, metrics);
+        throw error;
+      }
+    }
+  };
+}
+
+function captureObjectStoreErrorMetrics(error: unknown, metrics: HostedMetrics): void {
+  metrics.inc("objectStore.failures");
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "object_store_auth_failed") {
+    metrics.inc("objectStore.authFailures");
+  }
+  if (message === "object_store_unavailable" || message === "object_store_bucket_not_found" || message === "object_store_timeout") {
+    metrics.inc("objectStore.unavailable");
+  }
+  if (message === "artifact_digest_mismatch" || message === "artifact_content_empty") {
+    metrics.inc("objectStore.digestMismatches");
+  }
 }
 
 async function seedFakeRegistry(registry: RegistryStore): Promise<void> {

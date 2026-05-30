@@ -28,6 +28,28 @@ All notable changes to Switchyard will be documented in this file.
 - Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.
 
+## 2026-05-30 - Roadmap Release Train R13 S3/R2 Object-Store Client Wiring
+
+### Added
+
+- Added real S3-compatible object client wiring in `@switchyard/storage` using official AWS SDK v3 S3 primitives with explicit static Switchyard credentials.
+- Added shared server/worker object-store resolver and factory with `SWITCHYARD_OBJECT_STORE_BACKEND=memory|local|s3-compatible`, endpoint/prefix/timeout/probe validation, and redacted summaries.
+- Added object-store probe support (`write_read_delete`) for local and S3-compatible backends and readiness integration.
+- Added deterministic storage tests for S3 client command mapping, body-shape conversion, timeout/auth/bucket/read failure mapping, and config parsing behavior.
+
+### Changed
+
+- Updated runtime artifact persistence to preserve `contentStored`, `storageBackend`, `objectKey`, `sizeBytes`, `sha256`, and `contentType` metadata for runtime-produced artifacts.
+- Updated hosted server and worker wiring to consume shared object-store config/factory while preserving fake-only hosted runtime boundaries.
+- Updated artifact content route error mapping to return safe public 503 object-store errors and 409 integrity errors without secret-bearing diagnostics.
+- Updated hosted metrics to include low-cardinality object-store counters (`reads`, `writes`, `failures`, `probeFailures`, `authFailures`, `unavailable`, `digestMismatches`).
+- Updated product/development docs and self-hosted `.env.example` with explicit S3/R2-compatible configuration guidance.
+
+### Safety Boundaries
+
+- Hosted worker execution remains fake-only (`fake.deterministic`); non-fake hosted runtime/mode requests are denied and do not execute work.
+- Required checks remain no-spend; no required test contacts AWS, Cloudflare R2, MinIO, Docker, or external paid networks.
+
 ## 2026-05-30 - Roadmap Release Train R9 Debate V1
 
 ### Added
