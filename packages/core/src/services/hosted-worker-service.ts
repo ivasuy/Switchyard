@@ -84,7 +84,6 @@ export class HostedWorkerService {
     }
 
     await this.deps.queue.retry(job.id);
-    await this.deps.queue.fail(job.id, { reasonCode, message: reasonCode });
     return true;
   }
 

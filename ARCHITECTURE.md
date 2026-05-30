@@ -952,12 +952,13 @@ R10 now includes the previously planned hosted/hybrid surfaces in a safety-first
 - `apps/server` is the hosted-like API gateway.
 - `apps/worker` is the hosted queue consumer and executes only hosted-safe fake runtime mode.
 - `apps/node` is the connected local-node executor with policy-gated assignment execution and sync.
-- `packages/queue` provides memory/BullMQ queue adapters.
+- `packages/queue` provides deterministic memory queue behavior plus BullMQ-shaped adapter surfaces.
 - `packages/protocol-node` provides hosted<->node routes/client.
-- `packages/storage` includes Postgres-shaped metadata stores and object/memory artifact content stores.
+- `packages/storage` includes Postgres/object-shaped metadata and artifact-content interfaces backed by deterministic in-memory substitutes in this shipped slice.
 
 Current safety posture:
 
 - Hosted worker execution is restricted to `fake.deterministic`.
 - Hosted server/worker do not run arbitrary subprocess/PTY/Codex/Claude/OpenCode runtimes.
 - Hybrid connected nodes are explicit trust boundaries and enforce local policy before execution and sync.
+- Real Postgres/Redis/S3 backing remains a future hardening step; R10 default verification stays deterministic and local.

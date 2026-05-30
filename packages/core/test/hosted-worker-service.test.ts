@@ -17,14 +17,43 @@ class InMemoryEventStore {
 }
 
 class MemoryQueue {
-  jobs: any[] = [];
-  async enqueue(payload: any) { const job = { id: `job_${this.jobs.length + 1}`, payload: { ...payload, jobId: `job_${this.jobs.length + 1}`, createdAt: "2026-05-30T00:00:00.000Z" }, attempts: 1, maxAttempts: 3 }; this.jobs.push(job); return job.payload; }
-  async claim() { return this.jobs[0]; }
-  async ack() { this.jobs.shift(); }
-  async fail() {}
-  async retry() {}
-  async discard() { this.jobs.shift(); }
-  async getJob(id: string) { return this.jobs.find((j) => j.id === id); }
+  jobs: Array<{ id: string; payload: any; attempts: number; maxAttempts: number; state: "queued" | "claimed" | "failed" }> = [];
+  async enqueue(payload: any) {
+    const id = `job_${this.jobs.length + 1}`;
+    const job = {
+      id,
+      payload: { ...payload, jobId: id, createdAt: "2026-05-30T00:00:00.000Z" },
+      attempts: 0,
+      maxAttempts: 3,
+      state: "queued" as const
+    };
+    this.jobs.push(job);
+    return job.payload;
+  }
+  async claim() {
+    const job = this.jobs.find((item) => item.state === "queued");
+    if (!job) return undefined;
+    job.state = "claimed";
+    job.attempts += 1;
+    return { id: job.id, payload: job.payload, attempts: job.attempts, maxAttempts: job.maxAttempts };
+  }
+  async ack(jobId: string) { this.jobs = this.jobs.filter((job) => job.id !== jobId); }
+  async fail(jobId: string) {
+    const job = this.jobs.find((item) => item.id === jobId);
+    if (!job) return;
+    job.state = "failed";
+  }
+  async retry(jobId: string) {
+    const job = this.jobs.find((item) => item.id === jobId);
+    if (!job) return;
+    job.state = "queued";
+  }
+  async discard(jobId: string) { this.jobs = this.jobs.filter((job) => job.id !== jobId); }
+  async getJob(id: string) {
+    const job = this.jobs.find((j) => j.id === id);
+    if (!job) return undefined;
+    return { id: job.id, payload: job.payload, attempts: job.attempts, maxAttempts: job.maxAttempts };
+  }
 }
 
 describe("HostedWorkerService", () => {
@@ -102,5 +131,58 @@ describe("HostedWorkerService", () => {
 
     await svc.processNext();
     expect((await runs.get("run_2"))?.status).toBe("failed");
+  });
+
+  it("retries non-exhausted job and succeeds on next tick", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const run = await runs.create({
+      id: "run_retry_1",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    const queued = await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "fake.deterministic" });
+    let calls = 0;
+
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      startRun: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error("transient");
+        }
+        const completed = { ...run, status: "completed", endedAt: "2026-05-30T00:00:01.000Z" };
+        await runs.update(completed);
+        return completed as any;
+      },
+      now: () => "2026-05-30T00:00:00.000Z"
+    });
+
+    const first = await svc.processNext();
+    expect(first).toBe(true);
+    expect((await runs.get(run.id))?.status).toBe("queued");
+    const retriedJob = await queue.getJob(queued.jobId);
+    expect(retriedJob).toBeDefined();
+    expect(retriedJob?.attempts).toBe(1);
+
+    const second = await svc.processNext();
+    expect(second).toBe(true);
+    expect((await runs.get(run.id))?.status).toBe("completed");
+    expect(await queue.getJob(queued.jobId)).toBeUndefined();
   });
 });

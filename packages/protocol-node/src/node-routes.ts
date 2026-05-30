@@ -80,9 +80,15 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
     const nodeId = (request.params as { id: string }).id;
     const body = assignmentClaimRequestSchema.parse(request.body ?? {});
     try {
-      const assignment = await deps.coordinator.claim(nodeId, body.assignmentId);
-      return reply.send({ assignment: assignment ?? null });
+      const claimed = await deps.coordinator.claim(nodeId, body.assignmentId);
+      return reply.send({
+        assignment: claimed?.assignment ?? null,
+        run: claimed?.run ?? null
+      });
     } catch (error) {
+      if ((error as { code?: string }).code === "assignment_not_found") {
+        return sendHttpError(reply, "assignment_not_found", "Assignment run not found");
+      }
       if ((error as { code?: string }).code === "assignment_claim_conflict") {
         return sendHttpError(reply, "assignment_claim_conflict", "Assignment is already claimed");
       }

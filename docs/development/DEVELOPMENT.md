@@ -518,6 +518,11 @@ curl -s -X POST "http://127.0.0.1:4646/runs" \
 
 Expected: `409 placement_denied` (or `400 invalid_input` if runtimeMode mapping is invalid before placement evaluation), and no hosted job execution occurs.
 
+R10 storage/queue scope in this shipped slice:
+
+- Hosted/hybrid verification defaults to deterministic memory substitutes.
+- Postgres/Redis/BullMQ/S3-shaped integrations are interface boundaries here, not production backing stores.
+
 R10 non-goals reminder:
 
 - No hosted Codex/Claude/OpenCode/PTY/arbitrary subprocess execution.

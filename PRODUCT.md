@@ -229,12 +229,12 @@ The current workspace has passing package coverage for:
 
 These are planned or designed in docs, but not shipped product:
 
-- Hosted server app.
-- Hosted worker app.
-- Hybrid local node app.
-- Postgres storage.
-- Redis/BullMQ queue.
-- S3/R2 artifact storage.
+- Production-grade hosted server deployment.
+- Production-grade hosted worker deployment.
+- Production-grade hybrid local node deployment.
+- Real Postgres-backed storage (R10 ships Postgres-shaped in-memory substitutes).
+- Real Redis/BullMQ queue backing (R10 ships deterministic in-process queue behavior).
+- Real S3/R2 object storage backing (R10 ships memory/object-shape substitutes).
 - WebSocket protocol package.
 - SDK package.
 - CLI package.
@@ -960,8 +960,8 @@ Shipped in this phase:
 - `apps/worker` hosted worker path with strict fake-only runtime validation (`fake.deterministic`).
 - `apps/node` connected local-node registration/heartbeat/claim/sync loop.
 - Placement decisions across `local`, `hosted`, and `connected_local_node` with inspectable denial reasons.
-- Queue abstraction with deterministic memory default and BullMQ/Redis implementation package.
-- Postgres-shaped hosted metadata stores and object/memory artifact-content stores.
+- Queue abstraction with deterministic memory default and BullMQ/Redis-shaped interface package.
+- Postgres/object-shaped hosted metadata and artifact-content interfaces using deterministic memory substitutes in this slice.
 - Node protocol routes and client.
 
 Explicitly not shipped in R10:
@@ -971,3 +971,4 @@ Explicitly not shipped in R10:
 - Hosted debate participant runtimes or model-judging workflows.
 - SDK/CLI/TUI/dashboard packaging changes beyond interface boundaries.
 - Enterprise auth/billing/tenant controls.
+- Real Postgres/Redis/S3-backed production persistence and queue wiring.

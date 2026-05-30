@@ -63,11 +63,63 @@ describe("sync services", () => {
           payload: { text: "hello" },
           createdAt: "2026-05-30T00:00:00.000Z"
         }
-      ]
+      ],
+      cursor: 0
     });
 
     expect(result.appended).toBe(1);
     expect(result.nextCursor).toBe(1);
+  });
+
+  it("rejects event batch with mismatched runId", async () => {
+    const assignments = new MemoryAssignments();
+    await assignments.create({ id: "assignment_3", runId: "run_3", nodeId: "node_1", status: "claimed", retryCount: 0, lastEventSequence: 0, createdAt: "2026-05-30T00:00:00.000Z" });
+    const svc = new EventSyncService({
+      assignments: assignments as any,
+      events: new InMemoryEventStore()
+    });
+
+    await expect(svc.appendBatch("node_1", "assignment_3", {
+      cursor: 0,
+      events: [
+        {
+          id: "event_wrong_run",
+          type: "runtime.output",
+          runId: "run_other",
+          sequence: 1,
+          payload: { text: "bad" },
+          createdAt: "2026-05-30T00:00:00.000Z"
+        }
+      ]
+    })).rejects.toMatchObject({ code: "event_sync_conflict" });
+  });
+
+  it("rejects stale cursor retries", async () => {
+    const assignments = new MemoryAssignments();
+    await assignments.create({ id: "assignment_4", runId: "run_4", nodeId: "node_1", status: "running", retryCount: 0, lastEventSequence: 2, createdAt: "2026-05-30T00:00:00.000Z" });
+    const events = new InMemoryEventStore();
+    await events.append({
+      id: "event_seed_1",
+      type: "runtime.output",
+      runId: "run_4",
+      sequence: 1,
+      payload: { text: "a" },
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await events.append({
+      id: "event_seed_2",
+      type: "runtime.output",
+      runId: "run_4",
+      sequence: 2,
+      payload: { text: "b" },
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+
+    const svc = new EventSyncService({ assignments: assignments as any, events });
+    await expect(svc.appendBatch("node_1", "assignment_4", {
+      cursor: 1,
+      events: []
+    })).rejects.toMatchObject({ code: "event_sync_conflict" });
   });
 
   it("accepts artifact manifest and content", async () => {

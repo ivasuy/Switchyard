@@ -31,6 +31,7 @@ import {
   httpErrorEnvelopeSchema,
   assignmentSchema,
   nodeRegisterRequestSchema,
+  assignmentClaimResponseSchema,
   assignmentEventSyncRequestSchema,
   assignmentArtifactManifestRequestSchema
 } from "../src/index.js";
@@ -637,6 +638,35 @@ describe("Switchyard contracts", () => {
     ).toBe("fake.deterministic");
 
     expect(assignmentEventSyncRequestSchema.parse({ cursor: 0, events: [] }).events).toEqual([]);
+    expect(
+      assignmentClaimResponseSchema.parse({
+        assignment: {
+          id: "assignment_123",
+          runId: "run_123",
+          nodeId: "node_123",
+          status: "claimed",
+          retryCount: 0,
+          lastEventSequence: 0,
+          createdAt: "2026-05-30T00:00:00.000Z"
+        },
+        run: {
+          id: "run_123",
+          runtime: "fake",
+          provider: "test",
+          model: "test-model",
+          adapterType: "process",
+          cwd: "/repo",
+          task: "assignment task",
+          status: "running",
+          placement: "connected_local_node",
+          approvalPolicy: "default",
+          timeoutSeconds: 60,
+          metadata: {},
+          runtimeMode: "fake.deterministic",
+          createdAt: "2026-05-30T00:00:00.000Z"
+        }
+      }).assignment?.id
+    ).toBe("assignment_123");
 
     expect(
       assignmentArtifactManifestRequestSchema.parse({

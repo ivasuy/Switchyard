@@ -192,8 +192,8 @@ All notable changes to Switchyard will be documented in this file.
 
 - Added hosted-like `@switchyard/server`, hosted `@switchyard/worker`, and connected local `@switchyard/node` apps.
 - Added node protocol package (`@switchyard/protocol-node`) with register/heartbeat/claim/reject/event-sync/artifact-sync/complete endpoints and client helper.
-- Added queue package (`@switchyard/queue`) with deterministic `MemoryRunQueue` and BullMQ-backed adapter.
-- Added Postgres-shaped storage classes for runs/events/sessions/artifacts/registry/placement/nodes/assignments plus object/memory artifact-content stores.
+- Added queue package (`@switchyard/queue`) with deterministic `MemoryRunQueue` and BullMQ-shaped adapter surface.
+- Added Postgres-shaped storage classes for runs/events/sessions/artifacts/registry/placement/nodes/assignments plus object/memory artifact-content substitutes.
 - Added core hosted/hybrid services: placement, hosted run orchestration, hosted worker safety checks, node coordination, local node policy gating, event sync, and artifact sync.
 
 ### Changed

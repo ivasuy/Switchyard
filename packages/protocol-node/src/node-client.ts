@@ -1,4 +1,5 @@
 import type {
+  AssignmentClaimResponse,
   AssignmentArtifactManifestRequest,
   AssignmentCompleteRequest,
   AssignmentEventSyncRequest,
@@ -28,7 +29,7 @@ export class NodeClient {
     return this.post(`/nodes/${nodeId}/heartbeat`, input);
   }
 
-  async claim(nodeId: string, assignmentId?: string): Promise<any> {
+  async claim(nodeId: string, assignmentId?: string): Promise<AssignmentClaimResponse> {
     return this.post(`/nodes/${nodeId}/assignments/claim`, assignmentId ? { assignmentId } : {});
   }
 

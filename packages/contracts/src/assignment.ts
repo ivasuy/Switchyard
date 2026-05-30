@@ -2,6 +2,7 @@ import { z } from "zod";
 import { artifactIdSchema, isoDateSchema, nodeIdSchema, runIdSchema } from "./ids.js";
 import { eventSchema } from "./event.js";
 import { artifactTypeSchema } from "./artifact.js";
+import { runSchema } from "./run.js";
 
 export const assignmentStatusSchema = z.enum([
   "pending",
@@ -60,6 +61,11 @@ export const assignmentRejectRequestSchema = z.object({
   reason: z.string().min(1)
 });
 
+export const assignmentClaimResponseSchema = z.object({
+  assignment: assignmentSchema.nullable(),
+  run: runSchema.nullable()
+});
+
 export const assignmentEventSyncRequestSchema = z.object({
   cursor: z.number().int().nonnegative().optional(),
   events: z.array(eventSchema).default([])
@@ -113,6 +119,7 @@ export type AssignmentStatus = z.infer<typeof assignmentStatusSchema>;
 export type NodeRegisterRequest = z.infer<typeof nodeRegisterRequestSchema>;
 export type NodeHeartbeatRequest = z.infer<typeof nodeHeartbeatRequestSchema>;
 export type AssignmentClaimRequest = z.infer<typeof assignmentClaimRequestSchema>;
+export type AssignmentClaimResponse = z.infer<typeof assignmentClaimResponseSchema>;
 export type AssignmentEventSyncRequest = z.infer<typeof assignmentEventSyncRequestSchema>;
 export type AssignmentEventSyncResponse = z.infer<typeof assignmentEventSyncResponseSchema>;
 export type AssignmentArtifactManifestRequest = z.infer<typeof assignmentArtifactManifestRequestSchema>;

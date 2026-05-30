@@ -26,6 +26,12 @@ export class EventSyncService {
     if (!assignment || assignment.nodeId !== nodeId) {
       throw new EventSyncError("assignment_not_found", `Assignment not found: ${assignmentId}`);
     }
+    if (input.cursor !== undefined && input.cursor !== assignment.lastEventSequence) {
+      throw new EventSyncError(
+        "event_sync_conflict",
+        `Cursor ${input.cursor} does not match assignment cursor ${assignment.lastEventSequence}`
+      );
+    }
 
     if (input.events.length === 0) {
       return { accepted: true, appended: 0, nextCursor: assignment.lastEventSequence };
@@ -36,6 +42,12 @@ export class EventSyncService {
     const existingEvents = await this.deps.events.listByRun(assignment.runId);
 
     for (const event of input.events) {
+      if (!event.runId || event.runId !== assignment.runId) {
+        throw new EventSyncError(
+          "event_sync_conflict",
+          `Event runId must equal assignment runId: ${assignment.runId}`
+        );
+      }
       if (event.sequence > expected) {
         throw new EventSyncError("event_sync_gap", `Expected sequence ${expected} but got ${event.sequence}`);
       }

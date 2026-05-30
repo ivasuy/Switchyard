@@ -15,6 +15,11 @@ export class NodeCoordinatorError extends Error {
   }
 }
 
+export interface ClaimedNodeAssignment {
+  assignment: Assignment;
+  run: Run;
+}
+
 export interface NodeCoordinatorDependencies {
   nodes: NodeStore;
   assignments: NodeAssignmentStore;
@@ -93,14 +98,14 @@ export class NodeCoordinatorService {
     return this.deps.assignments.create(assignment);
   }
 
-  async claim(nodeId: string, assignmentId?: string): Promise<Assignment | undefined> {
+  async claim(nodeId: string, assignmentId?: string): Promise<ClaimedNodeAssignment | undefined> {
     const now = this.now();
     if (assignmentId) {
       const claimed = await this.deps.assignments.claim({ assignmentId, nodeId, now });
       if (!claimed) {
         throw new NodeCoordinatorError("assignment_claim_conflict", `Assignment already claimed: ${assignmentId}`);
       }
-      return claimed;
+      return this.hydrateClaimed(claimed);
     }
 
     const claimable = await this.deps.assignments.listClaimable(nodeId, now);
@@ -112,7 +117,7 @@ export class NodeCoordinatorService {
     if (!claimed) {
       throw new NodeCoordinatorError("assignment_claim_conflict", `Assignment already claimed: ${first.id}`);
     }
-    return claimed;
+    return this.hydrateClaimed(claimed);
   }
 
   async reject(nodeId: string, assignmentId: string, reason: string): Promise<Assignment> {
@@ -163,5 +168,13 @@ export class NodeCoordinatorService {
       }
     }
     await this.deps.assignments.expireStale(now);
+  }
+
+  private async hydrateClaimed(assignment: Assignment): Promise<ClaimedNodeAssignment> {
+    const run = await this.deps.runs.get(assignment.runId);
+    if (!run) {
+      throw new NodeCoordinatorError("assignment_not_found", `Run not found for assignment: ${assignment.id}`);
+    }
+    return { assignment, run };
   }
 }

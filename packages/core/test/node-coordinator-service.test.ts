@@ -67,8 +67,10 @@ describe("NodeCoordinatorService", () => {
     } as any;
 
     const assignment = await svc.createAssignment(run, node.id);
+    await (svc as any).deps.runs.create(run);
     const claimed = await svc.claim(node.id, assignment.id);
-    expect(claimed?.status).toBe("claimed");
+    expect(claimed?.assignment.status).toBe("claimed");
+    expect(claimed?.run.id).toBe("run_1");
   });
 
   it("throws claim conflict", async () => {
