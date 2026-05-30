@@ -72,6 +72,7 @@ export async function checkOpenCodeAcpAvailability(
     ...(options.processFactory ? { processFactory: options.processFactory } : {})
   });
 
+  let stage: "initialize" | "session_new" = "initialize";
   try {
     await client.start();
     const initialize = await client.request("initialize", {
@@ -103,6 +104,7 @@ export async function checkOpenCodeAcpAvailability(
       });
     }
 
+    stage = "session_new";
     const sessionNew = await client.request("session/new", {
       cwd: options.cwd,
       mcpServers: []
@@ -178,16 +180,7 @@ export async function checkOpenCodeAcpAvailability(
       });
     }
     if (error instanceof AcpProtocolError && (error.reasonCode === "acp_invalid_json" || error.reasonCode === "acp_invalid_message")) {
-      return customCheck({
-        state: "unavailable",
-        canRun: false,
-        installed: true,
-        auth: "unknown",
-        version: version.version,
-        checkedAt,
-        reasonCode: "opencode_acp_initialize_failed",
-        message: error.message
-      });
+      return stageFailureCheck(stage, version.version, checkedAt, error.message);
     }
     if (error instanceof Error && /session\/new|auth|required|permission/i.test(error.message)) {
       return customCheck({
@@ -201,20 +194,29 @@ export async function checkOpenCodeAcpAvailability(
         message: error.message
       });
     }
-    return customCheck({
-      state: "unavailable",
-      canRun: false,
-      installed: true,
-      auth: "unknown",
-      version: version.version,
-      checkedAt,
-      reasonCode: "opencode_acp_session_new_failed",
-      message: error instanceof Error ? error.message : String(error)
-    });
+    return stageFailureCheck(stage, version.version, checkedAt, error instanceof Error ? error.message : String(error));
   } finally {
     await client.close();
     client.kill();
   }
+}
+
+function stageFailureCheck(
+  stage: "initialize" | "session_new",
+  version: string,
+  checkedAt: string,
+  message: string
+): RuntimeAdapterCheck {
+  return customCheck({
+    state: "unavailable",
+    canRun: false,
+    installed: true,
+    auth: "unknown",
+    version,
+    checkedAt,
+    reasonCode: stage === "initialize" ? "opencode_acp_initialize_failed" : "opencode_acp_session_new_failed",
+    message
+  });
 }
 
 function customCheck(

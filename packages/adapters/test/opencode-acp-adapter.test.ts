@@ -63,7 +63,15 @@ describe("OpenCodeAcpAdapter", () => {
       checkCwd: "/repo"
     });
     const unavailable = await invalidInitialize.check();
-    expect((unavailable.details?.["availability"] as Record<string, unknown>)["reasonCode"]).toBe("opencode_acp_session_new_failed");
+    expect((unavailable.details?.["availability"] as Record<string, unknown>)["reasonCode"]).toBe("opencode_acp_initialize_failed");
+
+    const invalidSessionNew = new OpenCodeAcpAdapter({
+      processFactory: createFakeAcpProcessFactory({ scenario: "invalid_session_new" }),
+      probeVersion: async () => ({ status: "ok", version: "1.3.15" }),
+      checkCwd: "/repo"
+    });
+    const sessionUnavailable = await invalidSessionNew.check();
+    expect((sessionUnavailable.details?.["availability"] as Record<string, unknown>)["reasonCode"]).toBe("opencode_acp_session_new_failed");
 
     const stderrWarning = new OpenCodeAcpAdapter({
       processFactory: createFakeAcpProcessFactory({ scenario: "stderr_warning" }),
