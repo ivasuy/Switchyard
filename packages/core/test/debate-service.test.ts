@@ -166,7 +166,7 @@ class InMemoryArtifactStore implements ArtifactStore {
 
 class FakeRunService {
   constructor(
-    private readonly runs: InMemoryRunStore
+    protected readonly runs: InMemoryRunStore
   ) {}
 
   async createRun(input: {
@@ -214,7 +214,44 @@ class FakeRunService {
   }
 }
 
-function createHarness() {
+class FailingRunService extends FakeRunService {
+  override async startRun(runId: string): Promise<Run> {
+    const run = await this.runs.get(runId);
+    if (!run) {
+      throw new Error(`Run not found: ${runId}`);
+    }
+    const failed: Run = {
+      ...run,
+      status: "failed",
+      startedAt: "2026-05-30T00:00:01.000Z",
+      endedAt: "2026-05-30T00:00:02.000Z"
+    };
+    await this.runs.update(failed);
+    return failed;
+  }
+}
+
+class ThrowingMessageRouter {
+  constructor(private readonly inner: MessageRouter) {}
+
+  async createWithEvent(): Promise<never> {
+    throw new Error("message router failure");
+  }
+
+  async get(id: string): Promise<RoutedMessage | undefined> {
+    return this.inner.get(id);
+  }
+}
+
+interface CreateHarnessOptions {
+  runServiceFactory?: (runs: InMemoryRunStore) => Pick<ConstructorParameters<typeof DebateService>[0]["runService"], "createRun" | "startRun">;
+  wrapMessageRouter?: (
+    router: MessageRouter
+  ) => Pick<ConstructorParameters<typeof DebateService>[0]["messageRouter"], "createWithEvent" | "get">;
+  artifactContent?: { writeText(path: string, content: string): Promise<string> } | undefined;
+}
+
+function createHarness(options: CreateHarnessOptions = {}) {
   const debates = new InMemoryDebateStore();
   const runs = new InMemoryRunStore();
   const events = new InMemoryEventStore();
@@ -222,31 +259,37 @@ function createHarness() {
   const evidence = new InMemoryEvidenceStore();
   const artifacts = new InMemoryArtifactStore();
   const eventBus = new EventBus();
-  const messageRouter = new MessageRouter({ runs, messages, events, eventBus });
+  const baseMessageRouter = new MessageRouter({ runs, messages, events, eventBus });
+  const messageRouter = options.wrapMessageRouter?.(baseMessageRouter) ?? baseMessageRouter;
   const contextBuilder = new ContextBuilder({ memory: { get: async () => undefined, create: async () => { throw new Error("unused"); }, update: async () => { throw new Error("unused"); }, list: async () => ({ memory: [], nextCursor: null }), search: async () => ({ memory: [], nextCursor: null }) }, evidence, messages });
-  const runService = new FakeRunService(runs);
+  const runService = options.runServiceFactory?.(runs) ?? new FakeRunService(runs);
   const artifactWrites: Array<{ path: string; content: string }> = [];
+  const defaultArtifactContent = {
+    async writeText(path: string, content: string): Promise<string> {
+      artifactWrites.push({ path, content });
+      return path;
+    }
+  };
+  const artifactContent = options.artifactContent ?? defaultArtifactContent;
 
-  const service = new DebateService({
+  const serviceOptions: ConstructorParameters<typeof DebateService>[0] = {
     debates,
     runs,
     runService: runService as unknown as ConstructorParameters<typeof DebateService>[0]["runService"],
     contextBuilder,
-    messageRouter,
+    messageRouter: messageRouter as ConstructorParameters<typeof DebateService>[0]["messageRouter"],
     evidence,
     events,
     artifacts,
-    artifactContent: {
-      async writeText(path, content) {
-        artifactWrites.push({ path, content });
-        return path;
-      }
-    },
     eventBus,
     defaultCwd: "/repo"
-  });
+  };
+  if (artifactContent !== undefined) {
+    serviceOptions.artifactContent = artifactContent;
+  }
+  const service = new DebateService(serviceOptions);
 
-  return { service, debates, runs, events, messages, evidence, artifacts, artifactWrites };
+  return { service, debates, runs, events, messages, evidence, artifacts, artifactWrites, baseMessageRouter };
 }
 
 describe("debate service", () => {
@@ -275,6 +318,9 @@ describe("debate service", () => {
     expect(result.debate.messageIds.length).toBeGreaterThan(0);
     expect(result.debate.judge?.consensus).toBe("no_consensus");
     expect(result.finalReportArtifact?.type).toBe("summary");
+    const replay = await harness.service.listEvents(result.debate.id);
+    expect(new Set(result.debate.eventIds)).toEqual(new Set(replay.map((event) => event.id)));
+    expect(replay.some((event) => event.type === "debate.round.started")).toBe(true);
   });
 
   it("stops before over-limit message creation and records max_total_messages", async () => {
@@ -342,5 +388,72 @@ describe("debate service", () => {
     expect(inspected.messages.map((message) => message.id)).toEqual(inspected.debate.messageIds);
     expect(inspected.events.every((event) => event.debateId === created.debate.id)).toBe(true);
     expect(inspected.artifacts.every((artifact) => artifact.debateId === created.debate.id)).toBe(true);
+  });
+
+  it("records failure judge event and failure report when participant run fails", async () => {
+    const harness = createHarness({
+      runServiceFactory: (runs) =>
+        new FailingRunService(runs) as unknown as ConstructorParameters<typeof DebateService>[0]["runService"]
+    });
+
+    await expect(
+      harness.service.create({
+        topic: "Participant run failure",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }]
+      }, { wait: true })
+    ).rejects.toMatchObject({ code: "internal_error" });
+
+    const debate = [...harness.debates.items.values()][0]!;
+    const events = await harness.service.listEvents(debate.id);
+    expect(debate.status).toBe("failed");
+    expect(events.some((event) => event.type === "debate.judge.summary" && event.payload["status"] === "failed")).toBe(true);
+    expect(debate.finalReportArtifactId).toBeDefined();
+  });
+
+  it("records failure judge event and failure report when message router fails", async () => {
+    const failingHarness = createHarness({
+      wrapMessageRouter: (router) =>
+        new ThrowingMessageRouter(router) as unknown as ConstructorParameters<typeof DebateService>[0]["messageRouter"]
+    });
+
+    await expect(
+      failingHarness.service.create({
+        topic: "Message router failure",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }]
+      }, { wait: true })
+    ).rejects.toMatchObject({ code: "debate_execution_failed" });
+
+    const debate = [...failingHarness.debates.items.values()][0]!;
+    const events = await failingHarness.service.listEvents(debate.id);
+    expect(debate.status).toBe("failed");
+    expect(events.some((event) => event.type === "debate.judge.summary" && event.payload["status"] === "failed")).toBe(true);
+    expect(debate.finalReportArtifactId).toBeDefined();
+  });
+
+  it("falls back to metadata-only failure report when final report write fails", async () => {
+    const harness = createHarness({
+      artifactContent: {
+        async writeText(): Promise<string> {
+          throw new Error("report write failed");
+        }
+      }
+    });
+
+    await expect(
+      harness.service.create({
+        topic: "Report write failure",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }]
+      }, { wait: true })
+    ).rejects.toMatchObject({ code: "debate_execution_failed" });
+
+    const debate = [...harness.debates.items.values()][0]!;
+    const events = await harness.service.listEvents(debate.id);
+    const artifact = debate.finalReportArtifactId
+      ? await harness.artifacts.get(debate.finalReportArtifactId)
+      : undefined;
+    expect(debate.status).toBe("failed");
+    expect(events.some((event) => event.type === "debate.judge.summary" && event.payload["status"] === "failed")).toBe(true);
+    expect(artifact).toBeDefined();
+    expect(artifact?.metadata["contentStored"]).toBe(false);
   });
 });

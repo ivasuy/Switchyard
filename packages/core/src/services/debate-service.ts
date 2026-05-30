@@ -179,8 +179,9 @@ export class DebateService {
       await this.finishJudgingAndReport(debate, evidence);
       return await this.requireDebate(debate.id);
     } catch (error) {
-      await this.markFailed(debate, toServiceError(error, "debate_execution_failed"));
-      throw error;
+      const serviceError = toServiceError(error, "debate_execution_failed");
+      await this.finalizeFailedDebate(debate, evidence, serviceError);
+      throw serviceError;
     }
   }
 
@@ -447,11 +448,14 @@ export class DebateService {
 
       const phase = round === 1 ? "arguing" : "rebuttal";
       debate.status = phase;
-      await this.appendDebateEvent(debate, "debate.round.started", {
+      const roundStartedEvent = await this.appendDebateEvent(debate, "debate.round.started", {
         round,
         phase,
         limitsSnapshot: debate.limits
       });
+      debate.eventIds.push(roundStartedEvent.id);
+      debate.updatedAt = new Date().toISOString();
+      await this.deps.debates.update(debate);
 
       for (let index = 0; index < debate.participants.length; index += 1) {
         const stopBeforeTurn = determineStopReason(debate, round, startedAt);
@@ -554,15 +558,24 @@ export class DebateService {
   private async writeFinalReport(
     debate: Debate,
     evidence: EvidenceItem[],
-    messages: RoutedMessage[]
+    messages: RoutedMessage[],
+    options: { allowMetadataFallbackOnWriteFailure?: boolean } = {}
   ): Promise<Artifact> {
     const reportPath = `debates/${debate.id}/final-report.md`;
     const report = renderFinalReport(debate, evidence, messages);
     let storedPath = reportPath;
     let contentStored = false;
     if (this.deps.artifactContent) {
-      storedPath = await this.deps.artifactContent.writeText(reportPath, report);
-      contentStored = true;
+      try {
+        storedPath = await this.deps.artifactContent.writeText(reportPath, report);
+        contentStored = true;
+      } catch (error) {
+        if (!options.allowMetadataFallbackOnWriteFailure) {
+          throw error;
+        }
+        storedPath = reportPath;
+        contentStored = false;
+      }
     }
 
     const artifact: Artifact = {
@@ -663,6 +676,56 @@ export class DebateService {
     } catch {
       // best effort
     }
+  }
+
+  private async finalizeFailedDebate(
+    debate: Debate,
+    evidence: EvidenceItem[],
+    error: DebateServiceError
+  ): Promise<void> {
+    const messages = await this.loadMessages(debate.messageIds);
+    debate.status = "failed";
+    debate.stopReason = "failed";
+    debate.error = { code: error.code, message: error.message };
+    debate.judge = buildFailureJudge(debate, messages, error);
+    debate.completedAt = new Date().toISOString();
+    debate.updatedAt = debate.completedAt;
+
+    try {
+      const judgeEvent = await this.appendDebateEvent(debate, "debate.judge.summary", {
+        status: "failed",
+        consensus: debate.judge.consensus,
+        winner: debate.judge.winner,
+        summary: debate.judge.summary,
+        disagreementSummary: debate.judge.disagreementSummary,
+        stopReason: debate.stopReason,
+        error: debate.error
+      });
+      debate.eventIds.push(judgeEvent.id);
+    } catch (eventError) {
+      this.deps.logger?.warn("debate.failure_judge_event_failed", {
+        debateId: debate.id,
+        reason: eventError instanceof Error ? eventError.message : String(eventError)
+      });
+    }
+
+    try {
+      const artifact = await this.writeFinalReport(
+        debate,
+        evidence,
+        messages,
+        { allowMetadataFallbackOnWriteFailure: true }
+      );
+      debate.finalReportArtifactId = artifact.id;
+      debate.finalReportPath = artifact.path;
+    } catch (artifactError) {
+      this.deps.logger?.warn("debate.failure_report_failed", {
+        debateId: debate.id,
+        reason: artifactError instanceof Error ? artifactError.message : String(artifactError)
+      });
+    }
+
+    await this.markFailed(debate, error);
   }
 }
 
@@ -770,6 +833,21 @@ function judgeDebate(debate: Debate, messages: RoutedMessage[]): NonNullable<Deb
     winner: "none",
     evidenceIds: [...debate.evidenceIds],
     messageIds: [...debate.messageIds]
+  };
+}
+
+function buildFailureJudge(
+  debate: Debate,
+  messages: RoutedMessage[],
+  error: DebateServiceError
+): NonNullable<Debate["judge"]> {
+  return {
+    consensus: "no_consensus",
+    winner: "none",
+    summary: `Debate failed before successful completion: ${error.code}. ${error.message}`,
+    disagreementSummary: "Debate ended in failure before deterministic completion.",
+    evidenceIds: [...debate.evidenceIds],
+    messageIds: messages.map((message) => message.id)
   };
 }
 
