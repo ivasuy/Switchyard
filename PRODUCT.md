@@ -47,11 +47,11 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/phase-10-r11-sdk-cli-and-hardening` at commit `995dfccfb7fa21e597ccf2529a61df2dd81507c7`.
+Snapshot source: `agent/phase-11-r12-production-hosting-foundation` at commit `2b025ed18450ffe97403bb37422b0ef72df61024`.
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like fake worker and connected-node safe slice; and shipped SDK/CLI/OpenAPI packaging and hardening.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like fake worker and connected-node safe slice; shipped SDK/CLI/OpenAPI packaging and hardening; and shipped self-hosted staging foundation for the fake-only hosted/connected-node slice.
 
-The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, and the R10 hosted-like fake/hybrid node slice. It is not yet a production-grade hosted platform, dashboard, or TUI.
+The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like fake/hybrid node slice, and the R12 self-hosted staging deployment foundation. It is not yet a managed hosted platform with real hosted runtimes, dashboard, or TUI.
 
 Important runtime wording: `codex.exec_json` exists as a one-shot non-interactive runtime mode. A full interactive Codex runtime is not shipped yet.
 
@@ -77,6 +77,7 @@ The repository is a TypeScript pnpm/Turborepo monorepo with these shipped packag
 - `packages/protocol-acpx`: outbound ACP/acpx protocol framing, schemas, stdio client, and transcript helpers.
 - `packages/sdk`: TypeScript SDK for the local daemon contract.
 - `packages/cli`: `switchyard` CLI for doctor, daemon start, fake run, runtime test, debug, contract export, and release smoke.
+- `deploy/self-hosted`: Docker Compose based self-hosted staging stack for server, worker, connected node, Postgres, Redis, and shared local object volume.
 
 ### Local Daemon
 
@@ -240,15 +241,16 @@ The current workspace has passing package coverage for:
 - CLI doctor, daemon start, fake run, runtime/runtimes test, debug, contract export, and clean local packaging smoke behavior.
 - adapter compatibility matrix no-spend pass/skip/fail reporting.
 - SQLite schema metadata, additive migration policy, representative pre-R3/pre-R7/pre-R9/pre-R11 fixture preservation, and corrupt/zero-byte database rejection.
+- self-hosted staging config fail-closed behavior, readiness/metrics dependency reporting, queue stale-claim exhaustion handling, local object-store named errors, node protocol hardening, and compose smoke prerequisite diagnostics.
 
 ## What Does Not Exist Yet
 
 These are planned or designed in docs, but not shipped product:
 
-- Production-grade hosted server deployment.
-- Production-grade hosted worker deployment.
-- Production-grade hybrid local node deployment.
-- S3/R2 network object storage backing. R10 ships memory and filesystem-backed object-compatible artifact stores.
+- Managed production hosted platform deployment with tenant isolation, cloud networking, production secrets, and operator controls.
+- Hosted real-runtime worker deployment for Codex, Claude Code, OpenCode, arbitrary process, or PTY execution.
+- Production sandboxing for arbitrary subprocess/PTY workloads.
+- S3/R2 network object storage backing. R12 ships a shared local object-volume backend for self-hosted smoke; real S3/R2 clients remain unwired.
 - WebSocket protocol package.
 - Policy package beyond current contracts/ports.
 - Cursor adapter.
@@ -268,6 +270,8 @@ These are planned or designed in docs, but not shipped product:
 - Codex approval bridging.
 - Codex interactive runtime mode promotion and session-resume runtime mode.
 - Hosted Codex execution.
+- Hosted Claude Code/OpenCode execution.
+- Runtime approval/session-resume bridge for interactive Codex.
 
 ## Release Roadmap
 
@@ -934,8 +938,8 @@ For releases that claim Codex behavior, verify:
 
 Current release readiness:
 
-- R0-R11 have audit-green phase branches.
-- Local daemon, hosted-like fake worker slice, connected-node safe slice, SDK, CLI, OpenAPI, compatibility matrix, migrations, and packaging smoke are locally testable.
+- R0-R12 have audit-green phase branches.
+- Local daemon, hosted-like fake worker slice, connected-node safe slice, self-hosted staging foundation, SDK, CLI, OpenAPI, compatibility matrix, migrations, and packaging smoke are locally testable.
 - Codex `exec --json` remains usable for one-shot local runs.
 - Claude Code SDK mode is the shipped bounded interactive coding path.
 - API docs, generated OpenAPI, SDK, CLI, and development docs exist for the local daemon surface.
@@ -947,7 +951,7 @@ Known release risks:
 - Local open-ended SSE (`GET /runs/:id/events?live=1`) is shipped for daemon use, but hosted production streaming remains unshipped.
 - Runtime capability and doctor reporting are shipped for `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; external/provider-backed modes still require local binaries/configuration or remain no-spend skipped in CI.
 - Artifact metadata/content endpoints are shipped (`GET /artifacts/:id`, `GET /artifacts/:id/content`), but HTTP `HEAD` and `Range` support is not implemented.
-- Hosted-like execution exists only as a safety-first fake-worker/connected-node slice. Production-grade hosted deployment, arbitrary hosted subprocess execution, and hosted real-runtime execution remain unshipped.
+- Hosted-like execution exists only as a safety-first fake-worker/connected-node slice with R12 self-hosted staging foundations. Managed hosted deployment, arbitrary hosted subprocess execution, and hosted real-runtime execution remain unshipped.
 
 ## Source Map
 
@@ -1006,3 +1010,27 @@ Explicitly not shipped in R11:
 - External provider spend in required checks.
 - Production-grade hosted deployment.
 - Enterprise auth, billing, or tenant controls.
+
+## R12 Production Hosting Foundation (Shipped)
+
+Shipped in this phase:
+
+- Self-hosted Docker Compose stack for the hosted fake-worker and connected-node slice with Postgres, Redis, server, worker, node, and a shared local object volume.
+- Fail-closed staging/production config validation for server, worker, and node required env vars, including hosted runtime allowlists, node tokens, node capabilities, runtime-mode allowlists, CWD prefixes, Postgres, Redis, and object-store paths.
+- `/ready` dependency reporting for Postgres, Redis, local object store, hosted allowlist, and node token posture.
+- JSON `/metrics` dependency availability reporting for server and queue state.
+- Worker lifecycle hardening for queue stale-claim recovery, retry exhaustion, and durable run failure propagation.
+- Local object-volume artifact backend hardening with named errors for unavailable store, write failure, missing content, empty content, and digest mismatch.
+- Connected-node protocol/client hardening around auth, body limits, HTTP error details, and staging policy.
+- Compose-backed `pnpm self-hosted:smoke` that exercises hosted fake runs, external HTTP checks, restart/persistence verification, connected-node assignment, diagnostics preservation, and named Docker prerequisite failure when the daemon is unavailable.
+
+Explicitly not shipped in R12:
+
+- Managed hosted platform deployment.
+- Hosted arbitrary subprocess/PTY/Codex/Claude/OpenCode execution.
+- S3/R2 network object-store client wiring.
+- Enterprise auth, billing, or tenant controls.
+- Cursor, OpenClaw, Paperclip, browser/search, generic process, PTY, GitHub, fetch, repo, or real shell adapters/tools.
+- Runtime-specific approval bridges for Codex/OpenCode/AgentField/Generic HTTP.
+- Hosted debate with real participant runtimes or model judging.
+- Dashboard or TUI.

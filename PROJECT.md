@@ -139,3 +139,19 @@ R11 is now shipped on the phase branch. Switchyard adds the consumable local pro
 
 ### Deferred Concerns
 - None.
+
+## Phase 11: R12 Production Hosting Foundation
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-11-r12-production-hosting-foundation.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-11-r12-production-hosting-foundation.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-11-report.md
+**Branch:** agent/phase-11-r12-production-hosting-foundation (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R12 is now shipped on the phase branch. Switchyard has a self-hosted staging foundation for the fake-only hosted worker and connected-node slice: Docker Compose artifacts for server, worker, node, Postgres, Redis, and a shared local object volume; fail-closed staging/production config validation; `/ready` dependency checks; JSON metrics dependency reporting; queue stale-claim and retry-exhaustion recovery; local object-volume artifact error mapping and digest checks; connected-node auth/body/client hardening; and a compose-backed self-hosted smoke command. The smoke command could not start Docker in this audit environment, but it emitted the required named `self_hosted_smoke_docker_unavailable` prerequisite failure with diagnostics preserved.
+
+The shipped boundary remains explicit: R12 does not ship managed hosted deployment, hosted Codex/Claude/OpenCode execution, arbitrary hosted subprocess/PTY execution, S3/R2 network object-store clients, enterprise auth/billing/tenant controls, broad adapters/tools, hosted real-runtime debate/model judging, dashboard, or TUI.
+
+### Deferred Concerns
+- None.
