@@ -75,7 +75,14 @@ export class AcpStdioClient {
   private closePromise: Promise<void> | undefined;
 
   constructor(options: AcpStdioClientOptions) {
-    this.command = options.command ?? "opencode";
+    const command = options.command?.trim();
+    if (!options.processFactory && (!command || command.length === 0)) {
+      throw new AcpProtocolError(
+        "acp_command_required",
+        "ACP stdio command is required when processFactory is not provided."
+      );
+    }
+    this.command = command ?? "";
     this.args = options.args ?? ["acp"];
     this.cwd = options.cwd;
     this.env = options.env ?? process.env;

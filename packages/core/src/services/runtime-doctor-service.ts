@@ -159,8 +159,9 @@ export class RuntimeDoctorService {
       }, []);
     }
 
-    if (isRecord(details["availability"]) || mode.slug === "generic_http.async_rest" || mode.slug === "opencode.acp") {
-      return mapAvailabilityCheck(mode, checkResult, details, checkedAt, this.maxDiagnosticBytes);
+    const checkStrategy = adapter.manifest.check.strategy;
+    if (isRecord(details["availability"]) || checkStrategy === "custom" || checkStrategy === "http_health") {
+      return mapAvailabilityCheck(mode, checkResult, details, checkedAt, this.maxDiagnosticBytes, checkStrategy);
     }
 
     const version = typeof details["version"] === "string" && details["version"].length > 0
@@ -314,12 +315,13 @@ function mapAvailabilityCheck(
   checkResult: RuntimeAdapterCheck,
   details: Record<string, unknown>,
   checkedAt: string,
-  maxDiagnosticBytes: number
+  maxDiagnosticBytes: number,
+  checkStrategy: string
 ): RuntimeDoctorCheck {
   const availability = isRecord(details["availability"]) ? details["availability"] : undefined;
   const diagnostics = sanitizeDiagnostics(details["diagnostics"], maxDiagnosticBytes);
-  const invalidReasonCode = mode.slug === "generic_http.async_rest" ? "generic_http_health_invalid" : "custom_check_invalid";
-  const invalidMessage = mode.slug === "generic_http.async_rest"
+  const invalidReasonCode = checkStrategy === "http_health" ? "generic_http_health_invalid" : "custom_check_invalid";
+  const invalidMessage = checkStrategy === "http_health"
     ? "Invalid Generic HTTP health response."
     : "Invalid custom adapter availability response.";
 

@@ -1036,6 +1036,57 @@ describe("core service shells", () => {
     expect(JSON.stringify(loggerEntries)).not.toContain(token);
   });
 
+  it("maps custom strategy checks generically without runtime-mode slug special-casing", async () => {
+    const registry = new MemoryRegistryStore();
+    const capabilityService = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+    await capabilityService.seedManifests([customRuntimeManifest]);
+
+    const invalidCustom = new ManifestTestAdapter(customRuntimeManifest, async () => ({
+      ok: false,
+      message: "missing availability payload"
+    }));
+    const invalidDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["custom_runtime", invalidCustom]]),
+      clock: () => "2026-05-29T00:00:00.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 256
+    });
+    const invalid = await invalidDoctor.checkRuntimeMode("custom.runtime");
+    expect(invalid.state).toBe("unknown");
+    expect(invalid.reasonCode).toBe("custom_check_invalid");
+
+    const availableCustom = new ManifestTestAdapter(customRuntimeManifest, async () => ({
+      ok: true,
+      details: {
+        availability: {
+          state: "available",
+          canRun: true,
+          installed: true,
+          auth: "configured",
+          reasonCode: null,
+          message: null,
+          version: "custom-v1"
+        },
+        diagnostics: [{ code: "custom_ok", severity: "info", message: "custom check ok" }]
+      }
+    }));
+    const availableDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["custom_runtime", availableCustom]]),
+      clock: () => "2026-05-29T00:00:01.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 256
+    });
+    const available = await availableDoctor.checkRuntimeMode("runtime_mode_custom_runtime");
+    expect(available.state).toBe("available");
+    expect(available.reasonCode).toBeNull();
+    expect(available.version).toBe("custom-v1");
+  });
+
   it("validates runtime mode inference and rejects runtime mode ids/mismatches", async () => {
     const registry = new MemoryRegistryStore();
     const capabilityService = new RuntimeCapabilityService({
@@ -1699,6 +1750,37 @@ const genericHttpRuntimeManifest: RuntimeAdapterManifest = {
     strategy: "http_health",
     required: ["base_url_configured", "http_health"],
     optional: ["auth_token_present"]
+  }
+};
+
+const customRuntimeManifest: RuntimeAdapterManifest = {
+  adapterId: "custom_runtime",
+  providerId: "provider_custom_runtime",
+  runtimeId: "runtime_custom_runtime",
+  runtimeModeId: "runtime_mode_custom_runtime",
+  runtimeModeSlug: "custom.runtime",
+  name: "Custom Runtime",
+  adapterType: "acpx",
+  kind: "acp",
+  capabilities: [
+    "run.start",
+    "run.cancel",
+    "event.normalized",
+    "event.streaming",
+    "artifact.transcript",
+    "auth.local"
+  ],
+  limitations: [{ code: "custom_only", message: "Custom strategy test manifest." }],
+  placement: {
+    local: { support: "conditional", reason: "Requires local custom runtime." },
+    hosted: { support: "future", reason: "Hosted execution is not shipped." },
+    connectedLocalNode: { support: "future", reason: "Hybrid execution is not shipped." }
+  },
+  docsPath: "docs/development/adapters/CUSTOM.md",
+  check: {
+    strategy: "custom",
+    required: ["custom_probe"],
+    optional: []
   }
 };
 

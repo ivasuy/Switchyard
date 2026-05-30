@@ -10,6 +10,12 @@ import {
 } from "../src/index.js";
 
 describe("AcpStdioClient", () => {
+  it("fails fast when command is missing for built-in spawn path", () => {
+    expect(() => new AcpStdioClient({
+      cwd: "/repo"
+    })).toThrowError(/command/i);
+  });
+
   it("resolves requests and records transcript entries", async () => {
     const harness = createHarness((message, process) => {
       if (isRequest(message) && message.method === "initialize") {
