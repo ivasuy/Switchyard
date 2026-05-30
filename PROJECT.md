@@ -55,3 +55,17 @@ R5 is now shipped on the phase branch. Switchyard adds the reusable `@switchyard
 
 ### Deferred Concerns
 - None.
+
+## Phase 5: R6 Wrapper Runtime Integration
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-29-phase-5-r6-wrapper-runtime-integration.md
+**Plan:** docs/superpowers/plans/phase-5-r6-wrapper-runtime-integration.md
+**Audit:** agent-runs/native-roadmap-20260529/audit/phase-5-report.md
+**Branch:** agent/phase-5-r6-wrapper-runtime-integration (audit GREEN; merge pending native runtime)
+**PR:** not created - native audit workflow requested; branch retained locally
+
+### What changed
+R6 is now shipped on the phase branch. Switchyard adds the configured `agentfield.async_rest` wrapper runtime mode, deterministic fake AgentField server and CLI verification path, AgentField daemon config and doctor reporting, runtime-mode inference, async create/poll/result mapping, sanitized transcript and result artifacts, and REST/daemon coverage for artifact retrieval, unsupported input, unsupported active cancel, timeout persistence, and secret redaction. The shipped boundary remains narrow: AgentField is a wrapper runtime behind Switchyard's existing control plane, and R6 does not claim OpenClaw, Paperclip, hosted workers, debate orchestration, SDK/CLI/TUI/dashboard work, or verified upstream cancellation.
+
+### Deferred Concerns
+- None.
