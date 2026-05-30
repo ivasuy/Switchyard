@@ -52,6 +52,10 @@ The fake executor is deterministic and scenario-driven. It returns lifecycle fra
 
 Readiness checks validate sandbox config and policy allowlist only. They do not execute jobs. Metrics are counters only: no labels, command args, cwd, env keys/values, bucket names, endpoints, run ids, prompts, output text, or artifact content. Docs must describe the result as a fake/no-spend safety substrate and keep production sandboxing and real hosted execution explicitly unshipped.
 
+CPU and memory are validation-only declarations in R14. The service must validate that `cpuMs` and `memoryMiB` are positive and within configured/spec maximums, then carry them as metadata for future real isolation work. The fake executor must not claim CPU or memory enforcement, must not simulate `sandbox_cpu_limit_exceeded` or `sandbox_memory_limit_exceeded`, and tests must assert only bounds validation for those two fields.
+
+R14 must not add a public sandbox execution surface. There is no `/sandbox`, `/exec`, `/pty`, `/terminal`, or equivalent route, and no public OpenAPI route is added for sandbox jobs. Existing public readiness and metrics responses may include sandbox fields through server tests/docs; if the local daemon OpenAPI is generated or checked, it must remain deterministic and must not include a sandbox execution operation.
+
 ## File Structure
 
 - `packages/contracts/src/sandbox.ts` - new Zod schemas, typed constants, lifecycle state enum, fake command allowlist, resource-limit contract, result contract, captured artifact contract, policy decision contract, and closed named-error enum.
@@ -182,6 +186,11 @@ const SECRET_KEY_PATTERN = /(token|apikey|authorization|password|secret)/i;
 - `apps/server/src/readiness.ts` - existing readiness shape to extend with `checks.sandbox`.
 - `apps/server/src/metrics.ts` - existing nested metrics counter shape to extend with a sandbox group.
 - `packages/core/src/services/local-policy-gate.ts` - existing redaction helper and special `runtimeApprovalToken` exception to preserve.
+- `PRODUCT.md` - owner-facing shipped/not-shipped truth; preserve fake-only hosted boundary and avoid production sandbox overclaim.
+- `ARCHITECTURE.md` - architecture safety posture for hosted subprocess/PTY work; add the fake substrate without claiming kernel/container isolation.
+- `docs/development/API.md` - public API truth; update readiness/metrics shape only and do not document a sandbox execution API.
+- `docs/development/DEVELOPMENT.md` - local no-spend smoke guidance; add the sandbox smoke and keep required checks fake-only.
+- `CHANGELOG.md` - user-facing release entry; say fake/no-spend substrate shipped and real hosted execution remains unshipped.
 
 **Instructions:**
 
@@ -190,11 +199,21 @@ Internal checkpoint order:
 1. Contracts first. Add `packages/contracts/src/sandbox.ts` with Zod schemas and exported types/constants for sandbox job request, normalized resource limits, policy decision, lifecycle event, result, captured artifact, PTY frame/input, fake command ids, lifecycle states, terminal states, and named errors. Export it from `packages/contracts/src/index.ts`. Run `pnpm --filter @switchyard/contracts test`.
 2. Core service second. Add `HostedSandboxService`, `HostedSandboxExecutorPort`, `HostedSandboxPolicy`, `resolveHostedSandboxConfig`, `checkHostedSandboxReadiness`, `redactSandboxValue`, and transcript/artifact helpers in `packages/core/src/services/hosted-sandbox-service.ts`. Export from `packages/core/src/index.ts`. Extend the shared redaction key pattern in `local-policy-gate.ts` to include `credential`, `cookie`, `session`, `privateKey`, `accessKey`, `refreshToken`, and `idToken`.
 3. Fake executor third. Add `FakeHostedSandboxExecutor` in testkit. It must implement deterministic scenarios for every allowed fake command id and must not import `child_process`, `node:child_process`, `node-pty`, `@switchyard/adapters`, shell wrappers, browser automation, fetch clients, GitHub clients, or repo tooling.
-4. Resource limits and lifecycle fourth. Enforce default and max limits from config for wall time, stdout, stderr, combined output, artifact bytes, stdin bytes, argv count, argv entry bytes, env keys, env value bytes, PTY cols/rows, CPU declaration, and memory declaration. Terminal states are monotonic. Late output, late timeout, late cancel, and late artifact writes must not overwrite a terminal result.
+4. Resource limits and lifecycle fourth. Enforce default and max limits from config for wall time, stdout, stderr, combined output, artifact bytes, stdin bytes, argv count, argv entry bytes, env keys, env value bytes, and PTY cols/rows. Treat CPU and memory as validation-only declarations: validate positive values and max bounds, persist/carry them as safe metadata, and do not simulate CPU or memory breach outcomes in R14. Terminal states are monotonic. Late output, late timeout, late cancel, and late artifact writes must not overwrite a terminal result.
 5. Artifact capture fifth. When transcript capture is enabled and an artifact content store is present, write a JSONL transcript with redacted lifecycle/output records and metadata from `StoredArtifactContent`. When no artifact content store is provided, return `contentStored: false`. Fake artifacts obey `artifactBytes` and fail with `sandbox_artifact_too_large` before persistence when oversized.
-6. App wiring sixth. Add `sandbox` config to server and worker config with env names from the spec. Server `/ready` adds `checks.sandbox`. Server `/metrics` adds a sandbox group with counters from the spec. Server and worker construct the fake sandbox substrate internally but do not expose a sandbox route and do not pass it into hosted run execution in R14.
-7. Hosted execution boundary seventh. Preserve `HostedWorkerService` behavior: hosted durable rows for `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `generic_http.async_rest`, `agentfield.async_rest`, `process`, `pty`, browser, search, fetch, GitHub, repo, and shell fail before `startRun` and before any sandbox executor dispatch.
-8. Smoke and docs last. Add `pnpm sandbox:smoke`, update product/development/API/changelog/architecture docs, and do not edit `PROJECT.md`.
+6. App wiring sixth. Add `sandbox` config to server and worker config with env names from the spec. Server `/ready` adds `checks.sandbox`. Server `/metrics` adds a sandbox group with counters from the spec. Worker `ready()` must preserve compatibility with existing callers by returning `{ ok: boolean; reason?: string; checks?: { sandbox?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> } } }`; existing tests that read only `.ok` must continue passing. Add worker tests for sandbox ok, disabled, policy-invalid, and config-invalid readiness states.
+7. Public hosted denial seventh. Add explicit `POST /runs` tests for public hosted real-runtime denial, separate from worker durable-row denial. These tests must assert a safe error envelope, no queue enqueue, no sandbox executor call, no artifact writes, and no run/event side effects beyond the safe rejected response path.
+8. Hosted worker boundary eighth. Preserve `HostedWorkerService` behavior: hosted durable rows for `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `generic_http.async_rest`, `agentfield.async_rest`, `process`, `pty`, browser, search, fetch, GitHub, repo, and shell fail before `startRun` and before any sandbox executor dispatch.
+9. Public API boundary ninth. Add a no-public-route/OpenAPI check: injected calls to `/sandbox`, `/exec`, `/pty`, and `/terminal` return not found; no route registration contains those paths; `pnpm --filter @switchyard/contracts openapi:check` remains deterministic and contains no sandbox execution operation.
+10. Smoke and docs last. Add `pnpm sandbox:smoke`, update product/development/API/changelog/architecture docs, and do not edit `PROJECT.md`.
+
+Mandatory implementation/review checkpoints:
+
+1. **Contracts checkpoint:** contracts schemas and malformed request tests pass with `pnpm --filter @switchyard/contracts test`.
+2. **Core checkpoint:** policy, validation, resource-limit, redaction, lifecycle, artifact, timeout/cancel, and failure-injection tests pass with `pnpm --filter @switchyard/core test`.
+3. **Testkit checkpoint:** deterministic fake executor scenarios and forbidden-import checks pass with `pnpm --filter @switchyard/testkit test`.
+4. **App wiring checkpoint:** public `POST /runs` denial, worker durable-row denial, worker readiness shape, server readiness/metrics, no public route, and hosted fake compatibility pass with `pnpm --filter @switchyard/server test` and `pnpm --filter @switchyard/worker test`.
+5. **OpenAPI and smoke/docs checkpoint:** `pnpm --filter @switchyard/contracts openapi:check`, `pnpm sandbox:smoke`, `pnpm typecheck`, and `git diff --check` pass after docs are updated.
 
 Contract shape to implement:
 
@@ -228,19 +247,22 @@ Expected result properties for that request: policy decision `allow`, terminal s
 **Acceptance criteria:**
 
 - [ ] `@switchyard/contracts` exports sandbox schemas/types for job requests, policy decisions, lifecycle events, results, captured artifacts, resource limits, fake command ids, lifecycle states, and named errors.
-- [ ] Sandbox request validation covers nil, empty, malformed, oversized, and valid process/PTY requests with named reason codes.
+- [ ] Sandbox request validation covers nil, empty, malformed, wrong-type, oversized, and valid process/PTY requests with named reason codes before policy/executor, including wrong-type `env`, `argv`, `artifactPolicy`, `createdAt`, `adapterType`, and invalid `adapterType`/`pty` combinations.
 - [ ] Sandbox policy is deny-by-default and allows only the seven deterministic fake command ids listed in the spec.
 - [ ] Explicit real command/tool/runtime ids are denied with `sandbox_command_denied` before executor dispatch.
 - [ ] `HostedSandboxService` applies config defaults, validates resource limits, invokes policy before executor, tracks terminal lifecycle monotonicity, handles timeout/cancel idempotently, redacts all safe surfaces, and captures transcript/artifact metadata.
 - [ ] `FakeHostedSandboxExecutor` deterministically simulates stdout, stderr, empty output, nonzero exit, output flood, timeout, cancel before start, cancel while running, cancel after terminal, fake artifact, artifact too large, and PTY input/resize/echo without OS process execution.
-- [ ] Resource-limit config parses `SWITCHYARD_SANDBOX_*` env vars, rejects invalid values, rejects empty/non-fake allowlists, and reports redacted config summaries.
+- [ ] Resource-limit config parses `SWITCHYARD_SANDBOX_*` env vars, rejects invalid values, rejects empty/non-fake allowlists, validates CPU/memory declaration bounds only, and reports redacted config summaries.
 - [ ] Server `/ready` includes `checks.sandbox` with `ok=true`, `sandbox_disabled`, `sandbox_policy_invalid`, or `sandbox_config_invalid` without running commands.
 - [ ] Server `/metrics` includes the sandbox counters from the spec and no high-cardinality or secret-bearing fields.
+- [ ] Worker `ready()` returns `ok`, optional `reason`, and optional `checks.sandbox`, preserving existing callers that read only `ok`.
 - [ ] Worker constructs the fake sandbox substrate but still registers only `FakeRuntimeAdapter` for actual hosted run execution.
 - [ ] Existing hosted fake runs remain backward compatible.
 - [ ] Hosted non-fake runtime/mode requests remain denied before `startRun` and before sandbox executor dispatch.
+- [ ] Public `POST /runs` hosted real-runtime requests are denied before enqueue, sandbox executor dispatch, artifact writes, and event side effects.
 - [ ] Static tests prove the hosted sandbox path and worker path do not import `child_process`, `node:child_process`, `node-pty`, `@switchyard/adapters`, browser automation, fetch clients, GitHub clients, repo tooling, or shell execution wrappers.
 - [ ] No public `/sandbox`, `/exec`, `/pty`, `/terminal`, or equivalent arbitrary execution route is added.
+- [ ] OpenAPI remains deterministic when checked and contains no public sandbox execution operation.
 - [ ] `pnpm sandbox:smoke` exercises allowed fake job, denied real command, timeout, cancellation idempotency, transcript artifact capture/redaction, readiness, and metrics with no external spend.
 - [ ] Docs and product truth say R14 ships only a fake/no-spend hosted sandbox substrate, while real hosted subprocess/PTY, production sandboxing, hosted Codex/Claude/OpenCode, real tools, managed platform, enterprise controls, dashboard, and TUI remain unshipped.
 
@@ -251,6 +273,7 @@ Expected result properties for that request: policy decision `allow`, terminal s
 - `pnpm --filter @switchyard/testkit test`
 - `pnpm --filter @switchyard/server test`
 - `pnpm --filter @switchyard/worker test`
+- `pnpm --filter @switchyard/contracts openapi:check`
 - `pnpm sandbox:smoke`
 - `pnpm typecheck`
 - `git diff --check`
@@ -281,7 +304,8 @@ No required check may run Docker, AWS, R2, live model providers, browser binarie
 | `HostedSandboxService.captureArtifacts` | artifact content write fails | result reason `sandbox_artifact_capture_failed` or existing object-store code | Do not include content, preserve named error, log safe code only | Internal caller sees named artifact capture failure |
 | `redactSandboxValue` | unserializable value or redaction utility throws | result reason `sandbox_redaction_failed` | Fail closed before persistence/logging when detected before execution; after start, terminalize failed and omit raw value | Internal caller sees redaction failure without raw payload |
 | `apps/worker HostedWorkerService` | durable row is hosted non-fake runtime/mode/adapter | existing reason `hosted_runtime_not_allowed` | Fail run and queue job before `startRun`; no sandbox executor dispatch | Run event has `hosted_runtime_not_allowed`, no run started |
-| `apps/server HostedRunService` | public hosted real runtime request | `HostedRunServiceError("placement_denied"|"hosted_runtime_not_allowed")` | Deny before enqueueing and before worker execution | Client sees safe placement denial |
+| `apps/server HostedRunService` | public hosted real runtime request | `HostedRunServiceError("placement_denied"|"hosted_runtime_not_allowed")` | Deny before enqueueing, before sandbox executor dispatch, before artifact writes, and before run/event side effects | Client sees safe placement denial and no queued job exists |
+| `apps/server route table/OpenAPI` | sandbox execution route accidentally added | route registration or OpenAPI drift test failure | Remove the public route/operation; keep sandbox substrate internal | `/sandbox`, `/exec`, `/pty`, and `/terminal` are not found |
 
 **Observability:**
 
@@ -309,12 +333,21 @@ No required check may run Docker, AWS, R2, live model providers, browser binarie
 - `{ "name": "contract accepts complete pty job", "lens": "happy", "given": "sandboxJobRequestSchema.parse(pty request with cols 80 rows 24 and switchyard.fake.pty_echo)", "expect": "valid request with PTY frame contract" }`
 - `{ "name": "missing request fails", "lens": "happy_shadow_nil", "given": "HostedSandboxService.execute(undefined)", "expect": "failed result reasonCode sandbox_request_missing and executor calls 0" }`
 - `{ "name": "empty command and cwd fail", "lens": "happy_shadow_empty", "given": "request with empty commandId or empty cwd", "expect": "sandbox_request_invalid before policy/executor" }`
+- `{ "name": "malformed env wrong type", "lens": "error_path", "given": "request env is string, array, null, or contains non-string value", "expect": "sandbox_request_invalid before policy/executor and executor calls 0" }`
+- `{ "name": "malformed argv wrong type", "lens": "error_path", "given": "request argv is string, object, null, or contains non-string entries", "expect": "sandbox_request_invalid before policy/executor and executor calls 0" }`
+- `{ "name": "malformed artifact policy wrong type", "lens": "error_path", "given": "artifactPolicy is string, null, or has non-boolean capture flags", "expect": "sandbox_request_invalid before policy/executor and executor calls 0" }`
+- `{ "name": "malformed createdAt wrong type", "lens": "error_path", "given": "createdAt missing, number, or non-ISO string", "expect": "sandbox_request_invalid before policy/executor and executor calls 0" }`
+- `{ "name": "malformed adapter type", "lens": "error_path", "given": "adapterType is browser, http, native, object, null, or empty string", "expect": "sandbox_request_invalid before policy/executor and executor calls 0" }`
+- `{ "name": "invalid adapter pty combinations", "lens": "error_path", "given": "adapterType process with pty input, adapterType pty without pty config, or pty command with process adapter", "expect": "sandbox_pty_invalid or sandbox_request_invalid before policy/executor and executor calls 0" }`
 - `{ "name": "invalid cwd normalization fails", "lens": "error_path", "given": "cwd relative path, Windows drive, or path with traversal", "expect": "sandbox_request_invalid before executor" }`
 - `{ "name": "argv too large", "lens": "error_path", "given": "33 argv entries or one arg over 256 bytes", "expect": "sandbox_argv_too_large before executor" }`
 - `{ "name": "env too large", "lens": "error_path", "given": "33 env keys or env value over 4096 bytes", "expect": "sandbox_env_too_large before executor" }`
 - `{ "name": "stdin too large", "lens": "error_path", "given": "stdin over 64 KiB", "expect": "sandbox_stdin_too_large before executor" }`
 - `{ "name": "pty dimensions invalid", "lens": "error_path", "given": "cols below 20 or above 240, rows below 5 or above 80", "expect": "sandbox_pty_invalid before executor" }`
 - `{ "name": "resource limit invalid", "lens": "error_path", "given": "wallTimeMs 0 or over configured max", "expect": "sandbox_resource_limit_invalid before executor" }`
+- `{ "name": "cpu memory declarations validate bounds only", "lens": "edge_resource_limits", "given": "cpuMs and memoryMiB within bounds, then below/above bounds", "expect": "valid bounds pass as metadata; invalid bounds return sandbox_resource_limit_invalid; no fake CPU or memory breach simulation exists" }`
+- `{ "name": "policy service failure", "lens": "error_path", "given": "policy dependency throws while deciding an otherwise valid request", "expect": "sandbox_policy_failed, executor calls 0, safe log only" }`
+- `{ "name": "policy decision missing", "lens": "error_path", "given": "dispatch path receives no allow/deny decision through explicit test seam", "expect": "sandbox_policy_missing, executor calls 0" }`
 - `{ "name": "allow every fake command id", "lens": "happy", "given": "policy decisions for seven switchyard.fake.* ids", "expect": "allow decisions and executor dispatch permitted" }`
 - `{ "name": "deny every real command id", "lens": "error_path", "given": "sh, bash, zsh, node, python3, npm, pnpm, codex, claude, opencode, git, gh, curl, wget, ssh, browser, web_search, fetch, repo, github, shell", "expect": "sandbox_command_denied and executor calls 0" }`
 - `{ "name": "empty allowlist invalid", "lens": "happy_shadow_empty", "given": "SWITCHYARD_SANDBOX_FAKE_COMMAND_ALLOWLIST empty", "expect": "readiness code sandbox_policy_invalid" }`
@@ -334,6 +367,7 @@ No required check may run Docker, AWS, R2, live model providers, browser binarie
 - `{ "name": "cancel during running", "lens": "edge_cancel", "given": "start fake sleep then call cancel(jobId)", "expect": "cancelled result, active job cleared, transcript preserved" }`
 - `{ "name": "cancel after terminal idempotent", "lens": "edge_cancel", "given": "cancel(jobId) after completed result", "expect": "same terminal result returned without new events" }`
 - `{ "name": "cancel missing job", "lens": "happy_shadow_nil", "given": "cancel unknown job id", "expect": "sandbox_job_not_found" }`
+- `{ "name": "cancel acknowledgement failure", "lens": "error_path", "given": "executor test seam rejects or ignores cancellation acknowledgement", "expect": "sandbox_cancel_failed, active job cleared, terminal failed result" }`
 - `{ "name": "fake pty echo", "lens": "happy", "given": "switchyard.fake.pty_echo with input and resize frame", "expect": "PTY output frames preserve dimensions within bounds and redacted text" }`
 - `{ "name": "secret redaction env argv stdin output errors", "lens": "error_path", "given": "secret-looking token/apiKey/authorization/password/secret/credential/cookie/session/privateKey/accessKey/refreshToken/idToken values in env, argv metadata, stdin, stdout, stderr, PTY frames, errors, policy traces, artifact metadata", "expect": "persisted/logged/result metadata uses [REDACTED] and no raw sentinel appears" }`
 - `{ "name": "bearer and signed URL redaction", "lens": "error_path", "given": "output contains Bearer token and URL with userinfo/query signature", "expect": "redacted output in transcript and metadata" }`
@@ -345,11 +379,17 @@ No required check may run Docker, AWS, R2, live model providers, browser binarie
 - `{ "name": "server readiness sandbox ok", "lens": "integration", "given": "test server config with default sandbox", "expect": "GET /ready returns checks.sandbox.ok true" }`
 - `{ "name": "server readiness sandbox disabled", "lens": "integration", "given": "server config sandbox enabled false", "expect": "GET /ready 503 with checks.sandbox.code sandbox_disabled" }`
 - `{ "name": "server metrics sandbox counters", "lens": "integration", "given": "server metrics snapshot after sandbox smoke/service increments", "expect": "sandbox group includes jobs allowed denied completed failed timeout cancelled outputTruncated artifactTruncated redactions and no labels" }`
+- `{ "name": "worker readiness shape remains compatible", "lens": "integration", "given": "createHostedWorker default config and existing tests that read ready().ok", "expect": "ready returns ok true, optional checks.sandbox.ok true, and existing ok-only callers still pass" }`
+- `{ "name": "worker readiness sandbox disabled", "lens": "integration", "given": "worker config sandbox enabled false", "expect": "ready returns ok false or reason plus checks.sandbox.code sandbox_disabled without running commands" }`
+- `{ "name": "worker readiness policy invalid", "lens": "integration", "given": "worker config fake command allowlist empty or non-fake", "expect": "ready returns checks.sandbox.code sandbox_policy_invalid and no execution" }`
+- `{ "name": "worker readiness config invalid", "lens": "integration", "given": "worker config invalid sandbox numeric/env values", "expect": "loadWorkerConfig or ready path reports sandbox_config_invalid with redacted diagnostics" }`
 - `{ "name": "worker constructs sandbox but keeps fake adapter only", "lens": "integration", "given": "createHostedWorker default config", "expect": "ready ok with sandbox check and source contains only FakeRuntimeAdapter registration" }`
 - `{ "name": "hosted fake run still works", "lens": "integration", "given": "queued hosted fake.deterministic run", "expect": "worker tick completes existing fake run" }`
 - `{ "name": "hosted real runtime denied before execution", "lens": "error_path", "given": "queued hosted codex.exec_json, claude_code.sdk, opencode.acp, generic_http.async_rest, agentfield.async_rest, process, pty, browser, search, fetch, github, repo, shell rows", "expect": "hosted_runtime_not_allowed, no run.started event, startRun not called, sandbox executor calls 0" }`
+- `{ "name": "public post runs hosted real runtime denied before enqueue", "lens": "error_path", "given": "POST /runs placement hosted with codex.exec_json, claude_code.sdk, opencode.acp, generic_http.async_rest, agentfield.async_rest, process, pty, browser, search, fetch, github, repo, or shell", "expect": "safe placement_denied or hosted_runtime_not_allowed error, queue enqueue count 0, sandbox executor calls 0, artifact writes 0, no run/event side effects" }`
 - `{ "name": "static forbidden imports", "lens": "error_path", "given": "read worker, hosted sandbox service, and fake executor source files", "expect": "no child_process, node:child_process, node-pty, @switchyard/adapters, shell wrapper, browser automation, fetch client, GitHub client, or repo tooling imports" }`
 - `{ "name": "no public sandbox route", "lens": "integration", "given": "server route table or injected calls to /sandbox /exec /pty /terminal", "expect": "404 and no route registration" }`
+- `{ "name": "openapi has no sandbox execution operation", "lens": "integration", "given": "pnpm --filter @switchyard/contracts openapi:check and generated local daemon OpenAPI JSON", "expect": "OpenAPI remains deterministic and contains no /sandbox, /exec, /pty, /terminal, or sandbox execution operationId" }`
 - `{ "name": "sandbox smoke", "lens": "integration", "given": "pnpm sandbox:smoke", "expect": "allowed fake completes, real command denied before executor, timeout terminal, cancel idempotent, transcript redacted, readiness ok, metrics updated" }`
 - `{ "name": "docs product truth", "lens": "integration", "given": "PRODUCT ARCHITECTURE DEVELOPMENT API CHANGELOG", "expect": "fake/no-spend sandbox substrate marked shipped and real hosted execution/non-goals remain unshipped" }`
 
@@ -412,7 +452,7 @@ No required check may run Docker, AWS, R2, live model providers, browser binarie
 - **Redaction gaps:** Output and artifact content can carry secret-like strings. Mitigation: redaction tests cover env, argv metadata, stdin metadata, stdout, stderr, PTY frames, policy traces, errors, logs, metrics, events, and artifact metadata with unique sentinels.
 - **Static import tests can be brittle:** Denied command ids include words like shell and fetch, while import tests need to target execution imports. Mitigation: static tests should scan import declarations and known adapter class/package names, not fail on policy-deny string constants.
 - **Readiness ambiguity:** Readiness must not run commands. Mitigation: readiness validates config and fake allowlist only; the smoke command exercises execution separately.
-- **Resource limits are not isolation:** CPU and memory fields are declarations only in R14. Mitigation: result/docs must say limits are contract/fake behavior, not kernel-enforced production isolation.
+- **CPU and memory declarations can be overclaimed:** CPU and memory fields are validation-only declarations in R14, while wall time/output/input/artifact/PTY dimensions have fake behavior. Mitigation: result/docs/tests must say CPU and memory are bounded metadata only, with no fake or real enforcement in this phase.
 
 ## Integration Points
 
@@ -421,9 +461,11 @@ The one-task internal order is part of the implementation contract:
 1. Contracts establish stable names and Zod schemas.
 2. Core service consumes contracts and owns policy, config, redaction, lifecycle, limits, artifact capture, logs, and metric sink increments.
 3. Testkit fake executor implements the core executor port and remains the only executor used in R14 app wiring and smoke.
-4. Server and worker parse the same sandbox env contract and construct the fake substrate. Server exposes readiness/metrics; worker exposes readiness through its app object. Neither exposes a public sandbox execution API.
-5. Existing hosted run execution remains `RunService` plus `RuntimeRunnerService` with a map containing only `FakeRuntimeAdapter`.
-6. Docs are updated only after behavior and tests are stable.
+4. Server and worker parse the same sandbox env contract and construct the fake substrate. Server exposes readiness/metrics; worker exposes `ready()` as `{ ok, reason?, checks? }`. Neither exposes a public sandbox execution API.
+5. Public `POST /runs` hosted real-runtime denial is tested before enqueue and separately from worker durable-row denial.
+6. Existing hosted run execution remains `RunService` plus `RuntimeRunnerService` with a map containing only `FakeRuntimeAdapter`.
+7. OpenAPI remains deterministic and contains no sandbox execution operation.
+8. Docs are updated only after behavior and tests are stable.
 
 No task imports from another task because this phase intentionally uses one coherent task.
 
@@ -433,10 +475,12 @@ No task imports from another task because this phase intentionally uses one cohe
 - [ ] Sandbox policy is deny-by-default and allows only deterministic fake command ids.
 - [ ] Real command/tool/runtime ids are explicitly denied before execution.
 - [ ] The R14 fake executor performs deterministic no-spend stdout/stderr/PTY/artifact/failure/timeout/cancel scenarios without OS process execution.
-- [ ] Resource limits are validated and enforced in fake execution behavior, including output/artifact truncation or named failure.
+- [ ] Resource limits are validated and enforced in fake execution behavior for wall time, output, input, env, argv, artifact, and PTY dimensions, while CPU/memory are validation-only declarations.
 - [ ] Logs, metrics, events, policy traces, errors, and artifact metadata are redacted and bounded.
 - [ ] Timeout and cancellation produce terminal, idempotent lifecycle outcomes and preserve transcripts when capture is enabled.
 - [ ] Hosted worker still registers only the fake runtime adapter and still rejects hosted real runtimes before execution.
+- [ ] Public `POST /runs` hosted real-runtime denial is verified before queue enqueue and separate from worker durable-row denial.
+- [ ] Worker readiness preserves `ok` compatibility and adds optional `checks.sandbox`.
 - [ ] `/ready` and `/metrics` include sandbox diagnostics/counters without running real commands or leaking secrets.
 - [ ] Existing hosted fake run behavior remains backward compatible.
 - [ ] Normal CI and smoke coverage are no-spend and deterministic.
@@ -444,17 +488,17 @@ No task imports from another task because this phase intentionally uses one cohe
 
 ## Self-Review
 
-1. Spec coverage: pass. The single task covers contracts, deny-by-default policy, fake executor scenarios, resource-limit config/validation, redaction, artifact capture, readiness/metrics, hosted worker fake-only boundary, no public API, no-spend smoke, and docs truth.
+1. Spec coverage: pass. The single task covers contracts, deny-by-default policy, fake executor scenarios, malformed request validation, resource-limit config/validation with CPU/memory validation-only semantics, redaction, artifact capture, readiness/metrics, worker readiness shape, public hosted denial before enqueue, hosted worker fake-only boundary, no public API/OpenAPI route, no-spend smoke, and docs truth.
 2. Placeholder scan: pass. No placeholder work items remain.
 3. Type consistency: pass. Contracts export the schemas consumed by core, core exports the executor/service/config contracts consumed by testkit and apps, and testkit implements the executor port.
 4. Ownership disjoint: pass. There is one task, so there is no cross-task file overlap.
 5. Context files real: pass. All context files listed for the task exist in this worktree.
 6. Acceptance testable: pass. Every acceptance item maps to package tests, smoke, static scans, or docs checks.
-7. Dependency order sane: pass. One task has explicit checkpoints from contracts to core to testkit to apps to smoke/docs.
-8. Checks runnable: pass. Commands are existing package test/typecheck commands plus the new root smoke script created by the task.
-9. Error/rescue map present: pass. Config, validation, policy, executor, cancellation, timeout, output, artifact, redaction, hosted worker, and placement failures are enumerated.
+7. Dependency order sane: pass. One task has explicit implementation/review checkpoints from contracts to core to testkit to apps to OpenAPI/smoke/docs.
+8. Checks runnable: pass. Commands are existing package test/typecheck/openapi commands plus the new root smoke script created by the task.
+9. Error/rescue map present: pass. Config, validation, malformed request, policy, policy missing, executor, cancellation, timeout, output, artifact, redaction, public hosted denial, worker durable denial, and route/OpenAPI failures are enumerated.
 10. Observability present: pass. Logs, readiness, and metrics counters are specified with no secret-bearing or high-cardinality fields.
-11. Test cases enumerate acceptance: pass. Happy, nil, empty, error, edge, and integration lenses cover the acceptance criteria and rescue paths.
+11. Test cases enumerate acceptance: pass. Happy, nil, empty, malformed, error, edge, and integration lenses cover the acceptance criteria and rescue paths, including architect iteration 1 additions.
 12. Integration contracts walk: pass. There are no cross-task imports; all exports are internal to the one task and consumed by files owned by the same task.
 13. Contract types match: pass. `SandboxJobRequest`, `SandboxJobResult`, `ResolvedHostedSandboxConfig`, `HostedSandboxExecutorPort`, and fake executor signatures are consistent across contracts, core, testkit, apps, and smoke.
 
