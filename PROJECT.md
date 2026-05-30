@@ -155,3 +155,19 @@ The shipped boundary remains explicit: R12 does not ship managed hosted deployme
 
 ### Deferred Concerns
 - None.
+
+## Phase 12: R13 S3/R2 Network Object Store Client Wiring
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-12-r13-s3-r2-object-store-client.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-12-r13-s3-r2-object-store-client.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-12-report.md
+**Branch:** agent/phase-12-r13-s3-r2-object-store-client (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R13 is now shipped on the phase branch. Switchyard can use an explicitly configured S3-compatible artifact content backend for the fake-only hosted server/worker slice, including AWS S3 and Cloudflare R2-style endpoint configuration. The release adds a storage-scoped AWS SDK v3 S3 client wrapper, shared object-store config resolver/factory, fail-closed staging/production backend rules, redacted config summaries, bounded S3 put/get/delete/probe operations, S3 body conversion and timeout handling, artifact metadata preservation, safe REST object-store error mapping, server/worker readiness probing, and low-cardinality object-store metrics. Normal CI remains no-spend and uses deterministic fake clients; local object-volume and memory behavior remain available where allowed.
+
+The shipped boundary remains explicit: R13 does not ship managed hosted deployment, hosted Codex/Claude/OpenCode execution, arbitrary hosted subprocess/PTY execution, enterprise auth/billing/tenant controls, broad adapters/tools, runtime-specific approval bridges, hosted real-runtime debate/model judging, dashboard, or TUI.
+
+### Deferred Concerns
+- None.
