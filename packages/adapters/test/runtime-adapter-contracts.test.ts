@@ -1,9 +1,10 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "vitest";
-import { AgentFieldAsyncRestAdapter, CodexExecJsonAdapter, GenericHttpAsyncRestAdapter, OpenCodeAcpAdapter } from "../src/index.js";
+import { AgentFieldAsyncRestAdapter, ClaudeCodeAdapter, CodexExecJsonAdapter, GenericHttpAsyncRestAdapter, OpenCodeAcpAdapter } from "../src/index.js";
 import {
   FakeRuntimeAdapter,
+  createFakeClaudeCodeClient,
   createFakeAcpProcessFactory,
   runRuntimeAdapterContract,
   startFakeAgentFieldServer,
@@ -90,6 +91,21 @@ describe("runtime adapter contract suite", () => {
       provider: "opencode",
       model: "opencode-default",
       adapterType: "acpx"
+    });
+  });
+
+  it("passes for claude code adapter with fake client", async () => {
+    const fake = createFakeClaudeCodeClient({
+      initialEvents: [{ type: "assistant_text_delta", text: "hello" }]
+    });
+    await runRuntimeAdapterContract({
+      adapter: new ClaudeCodeAdapter({ client: fake.client }),
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code-default",
+      adapterType: "native",
+      cwd: "/repo",
+      task: "contract test run"
     });
   });
 });

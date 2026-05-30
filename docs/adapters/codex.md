@@ -37,4 +37,4 @@ For prebuilt local curls, focused verification commands, PID checks, SQLite quer
 
 ## Status
 
-Implemented for non-interactive local `codex exec --json` runs. Interactive sessions, approval bridging, PTY support, and hosted process execution are not implemented yet.
+Implemented for non-interactive local `codex exec --json` runs. Post-start input, approval bridging, PTY support, and hosted process execution are not implemented. Codex interactive/resume runtime promotion remains deferred in R8.

@@ -60,7 +60,8 @@ export function codexEventToSwitchyardEvent(
     payload: {
       status: statusForCodexType(codexType),
       codexType,
-      threadId: readThreadId(event)
+      threadId: readThreadId(event),
+      ...(readThreadId(event) ? { sessionStatePatch: { codexThreadId: readThreadId(event) } } : {})
     }
   };
 }

@@ -28,6 +28,7 @@ import { MessageRouter } from "../src/services/message-router.js";
 import { ToolRouter } from "../src/services/tool-router.js";
 import type { EventStore } from "../src/ports/event-store.js";
 import type { ToolAdapter } from "../src/ports/tool-adapter.js";
+import { AdapterProtocolError } from "../src/errors.js";
 
 function makeRun(id: string, approvalPolicy = "default"): Run {
   return {
@@ -475,5 +476,81 @@ describe("middleware services", () => {
     const runEvents = await events.listByRun(run.id);
     const toolResults = runEvents.filter((event) => event.type === "tool.result");
     expect(toolResults).toHaveLength(1);
+  });
+
+  it("sends runtime approval_resolution payloads through optional runtime sender", async () => {
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const approvals = new InMemoryApprovalStore();
+    const run = makeRun("run_runtime_approval");
+    await runs.create(run);
+    const sent: Array<Record<string, unknown>> = [];
+    const service = new ApprovalService({
+      approvals,
+      runs,
+      events,
+      runtimeResolutionSender: async (input) => {
+        sent.push(input);
+      }
+    });
+
+    const created = await service.create({
+      runId: run.id,
+      approvalType: "before_external_message",
+      payload: {
+        runtimeApprovalToken: "pause-1",
+        responseFormat: "ask_user_question"
+      }
+    });
+
+    const resolved = await service.approve(created.id, {
+      actor: "local-user",
+      reason: "Option A",
+      answers: { option: "A" }
+    });
+
+    expect(resolved.approval.status).toBe("approved");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: "approval_resolution",
+      approvalId: created.id,
+      runId: run.id,
+      runtimeApprovalToken: "pause-1",
+      decision: "approved",
+      message: "Option A",
+      answers: { option: "A" }
+    });
+  });
+
+  it("keeps runtime approvals resolved even when runtime resolution sender fails", async () => {
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const approvals = new InMemoryApprovalStore();
+    const run = makeRun("run_runtime_approval_failed_sender");
+    await runs.create(run);
+    const service = new ApprovalService({
+      approvals,
+      runs,
+      events,
+      runtimeResolutionSender: async () => {
+        throw new AdapterProtocolError("pause closed", {
+          reasonCode: "runtime_approval_pause_not_active"
+        });
+      }
+    });
+
+    const created = await service.create({
+      runId: run.id,
+      approvalType: "before_external_message",
+      payload: { runtimeApprovalToken: "pause-1" }
+    });
+
+    await expect(service.reject(created.id, { actor: "local-user" })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_approval_pause_not_active"
+    });
+    await expect(service.reject(created.id, { actor: "local-user" })).rejects.toMatchObject({
+      code: "approval_not_pending"
+    });
   });
 });

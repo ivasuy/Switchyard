@@ -9,6 +9,12 @@ export interface DaemonConfig {
   opencode: {
     command: string;
   };
+  claudeCode: {
+    command: string;
+    liveProbe: boolean;
+    maxBudgetUsd: number;
+    requestTimeoutMs: number;
+  };
   acp: {
     requestTimeoutMs: number;
     cancelTimeoutMs: number;
@@ -39,6 +45,10 @@ export function loadDaemonConfig(env: NodeJS.ProcessEnv = process.env): DaemonCo
   const agentfieldApiKey = env["SWITCHYARD_AGENTFIELD_API_KEY"]?.trim();
   const agentfieldTarget = env["SWITCHYARD_AGENTFIELD_TARGET"]?.trim();
   const opencodeCommand = env["SWITCHYARD_OPENCODE_COMMAND"]?.trim();
+  const claudeCommand = env["SWITCHYARD_CLAUDE_CODE_COMMAND"]?.trim();
+  const claudeLiveProbe = env["SWITCHYARD_CLAUDE_CODE_LIVE_PROBE"]?.trim() === "1";
+  const claudeMaxBudgetUsd = Number(env["SWITCHYARD_CLAUDE_CODE_MAX_BUDGET_USD"] ?? 0.05);
+  const claudeRequestTimeoutMs = Number(env["SWITCHYARD_CLAUDE_CODE_REQUEST_TIMEOUT_MS"] ?? 5000);
 
   return {
     host: env["SWITCHYARD_HOST"] ?? "127.0.0.1",
@@ -48,6 +58,12 @@ export function loadDaemonConfig(env: NodeJS.ProcessEnv = process.env): DaemonCo
     artifactDir: env["SWITCHYARD_ARTIFACT_DIR"] ?? join(dataDir, "artifacts"),
     opencode: {
       command: opencodeCommand && opencodeCommand.length > 0 ? opencodeCommand : "opencode"
+    },
+    claudeCode: {
+      command: claudeCommand && claudeCommand.length > 0 ? claudeCommand : "claude",
+      liveProbe: claudeLiveProbe,
+      maxBudgetUsd: claudeMaxBudgetUsd,
+      requestTimeoutMs: claudeRequestTimeoutMs
     },
     acp: {
       requestTimeoutMs: Number(env["SWITCHYARD_ACP_REQUEST_TIMEOUT_MS"] ?? 5000),

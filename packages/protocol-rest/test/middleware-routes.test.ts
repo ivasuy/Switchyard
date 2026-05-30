@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  AdapterProtocolError,
   ApprovalService,
   ContextBuilder,
   EventBus,
@@ -43,6 +44,7 @@ function makeRun(id: string, approvalPolicy = "default") {
 type Harness = {
   app: FastifyInstance;
   fakeEcho: FakeEchoToolAdapter;
+  approvalService: ApprovalService;
 };
 
 function createHarness(): Harness {
@@ -85,7 +87,7 @@ function createHarness(): Harness {
     toolRouter
   });
 
-  return { app, fakeEcho };
+  return { app, fakeEcho, approvalService };
 }
 
 describe("middleware routes", () => {
@@ -306,6 +308,55 @@ describe("middleware routes", () => {
       });
       expect(second.statusCode).toBe(409);
       expect(second.json().error.code).toBe("approval_not_pending");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("maps runtime sender adapter protocol failures on approve/reject to 409 adapter_protocol_failed", async () => {
+    const { app, approvalService } = createHarness();
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/approvals",
+        payload: {
+          runId: "run_1",
+          approvalType: "before_external_message",
+          payload: { runtimeApprovalToken: "pause-1" }
+        }
+      });
+      expect(created.statusCode).toBe(201);
+      const approvalId = created.json().approval.id as string;
+
+      const protocolError = new AdapterProtocolError("pause closed", {
+        reasonCode: "runtime_approval_pause_not_active"
+      });
+      const approveSpy = vi.spyOn(approvalService, "approve").mockRejectedValueOnce(protocolError);
+      const rejectSpy = vi.spyOn(approvalService, "reject").mockRejectedValueOnce(protocolError);
+
+      const approve = await app.inject({
+        method: "POST",
+        url: `/approvals/${approvalId}/approve`,
+        payload: { actor: "local-user" }
+      });
+      const reject = await app.inject({
+        method: "POST",
+        url: `/approvals/${approvalId}/reject`,
+        payload: { actor: "local-user" }
+      });
+
+      expect(approveSpy).toHaveBeenCalledTimes(1);
+      expect(rejectSpy).toHaveBeenCalledTimes(1);
+      expect(approve.statusCode).toBe(409);
+      expect(approve.json().error).toMatchObject({
+        code: "adapter_protocol_failed",
+        details: [{ path: "reasonCode", issue: "runtime_approval_pause_not_active" }]
+      });
+      expect(reject.statusCode).toBe(409);
+      expect(reject.json().error).toMatchObject({
+        code: "adapter_protocol_failed",
+        details: [{ path: "reasonCode", issue: "runtime_approval_pause_not_active" }]
+      });
     } finally {
       await app.close();
     }

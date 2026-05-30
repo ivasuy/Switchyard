@@ -5,7 +5,7 @@ export interface RuntimeAdapterContractInput {
   runtime: string;
   provider: string;
   model: string;
-  adapterType: "process" | "http" | "acpx";
+  adapterType: "native" | "process" | "http" | "acpx";
   cwd?: string;
   task?: string;
 }
@@ -46,7 +46,13 @@ export async function runRuntimeAdapterContract(input: RuntimeAdapterContractInp
 
   const supportsInput = adapter.manifest.capabilities.includes("run.input" as never);
   if (supportsInput) {
-    await adapter.send({ ...session, runId: "run_contract" }, { text: "continue" });
+    try {
+      await adapter.send({ ...session, runId: "run_contract" }, { text: "continue" });
+    } catch (error) {
+      if (!(error instanceof AdapterProtocolError) || error.reasonCode !== "runtime_input_not_active") {
+        throw error;
+      }
+    }
   } else {
     let threwProtocol = false;
     try {

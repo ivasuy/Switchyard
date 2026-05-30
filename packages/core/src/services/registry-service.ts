@@ -84,6 +84,9 @@ function inferRuntimeMode(input: { runtime: string; adapterType: AdapterType }):
   if (input.runtime === "opencode" && input.adapterType === "acpx") {
     return "opencode.acp";
   }
+  if (input.runtime === "claude_code" && input.adapterType === "native") {
+    return "claude_code.sdk";
+  }
   return undefined;
 }
 

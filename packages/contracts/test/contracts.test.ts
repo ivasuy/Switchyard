@@ -259,14 +259,79 @@ describe("Switchyard contracts", () => {
 
   it("accepts auth.api_key capability and rejects unsupported future capabilities", () => {
     expect(runtimeCapabilitySchema.parse("auth.api_key")).toBe("auth.api_key");
+    expect(runtimeCapabilitySchema.parse("run.input")).toBe("run.input");
+    expect(runtimeCapabilitySchema.parse("session.state")).toBe("session.state");
+    expect(runtimeCapabilitySchema.parse("session.resume")).toBe("session.resume");
+    expect(runtimeCapabilitySchema.parse("approval.bridge")).toBe("approval.bridge");
+    expect(runtimeCapabilitySchema.parse("tool.call.normalized")).toBe("tool.call.normalized");
+    expect(runtimeCapabilitySchema.parse("tool.result.normalized")).toBe("tool.result.normalized");
+    expect(runtimeCapabilitySchema.parse("user.question")).toBe("user.question");
 
-    expect(() => runtimeCapabilitySchema.parse("run.input")).toThrow();
-    expect(() => runtimeCapabilitySchema.parse("session.resume")).toThrow();
     expect(() => runtimeCapabilitySchema.parse("approval.request")).toThrow();
     expect(() => runtimeCapabilitySchema.parse("webhook.callback")).toThrow();
     expect(() => runtimeCapabilitySchema.parse("tool.invoke")).toThrow();
     expect(() => runtimeCapabilitySchema.parse("hosted.run")).toThrow();
     expect(() => runtimeCapabilitySchema.parse("mcp.server")).toThrow();
+  });
+
+  it("parses claude_code.sdk runtime mode record with interactive capabilities", () => {
+    const mode = runtimeModeSchema.parse({
+      id: "runtime_mode_claude_code_sdk",
+      slug: "claude_code.sdk",
+      name: "Claude Code SDK",
+      providerId: "provider_anthropic",
+      runtimeId: "runtime_claude_code",
+      adapterId: "claude_code",
+      adapterType: "native",
+      kind: "sdk",
+      status: "unknown",
+      capabilities: [
+        "run.start",
+        "run.input",
+        "run.cancel",
+        "run.timeout",
+        "session.state",
+        "session.resume",
+        "approval.bridge",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "artifact.raw_transcript",
+        "tool.call.normalized",
+        "tool.result.normalized",
+        "user.question",
+        "auth.local"
+      ],
+      limitations: [
+        { code: "no_hosted_support", message: "Hosted subprocess execution is not shipped in R8." }
+      ],
+      placement: {
+        local: { support: "conditional", reason: "Requires local Claude Code tooling and auth." },
+        hosted: { support: "unsupported", reason: "Hosted execution is not shipped in R8." },
+        connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for a future release." }
+      },
+      availability: {
+        state: "unknown",
+        canRun: false,
+        installed: false,
+        auth: "unknown",
+        version: null,
+        checkedAt: "2026-05-30T00:00:00.000Z",
+        reasonCode: "live_probe_disabled",
+        message: "Live probe is disabled by default."
+      },
+      docsPath: "docs/development/adapters/CLAUDE_CODE.md",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      updatedAt: "2026-05-30T00:00:00.000Z"
+    });
+
+    expect(mode.slug).toBe("claude_code.sdk");
+    expect(mode.kind).toBe("sdk");
+    expect(mode.capabilities).toContain("run.input");
+    expect(mode.capabilities).toContain("approval.bridge");
+    expect(mode.capabilities).toContain("tool.call.normalized");
+    expect(mode.capabilities).toContain("tool.result.normalized");
+    expect(mode.capabilities).toContain("user.question");
   });
 
   it("parses generic_http.async_rest runtime mode record", () => {

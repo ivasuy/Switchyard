@@ -21,6 +21,7 @@ Implemented:
 Not implemented yet:
 
 - Interactive Codex sessions.
+- Codex interactive runtime-mode promotion and resume-mode workflow.
 - Post-start input for Codex `exec --json`.
 - PTY fallback.
 - Approval bridging.

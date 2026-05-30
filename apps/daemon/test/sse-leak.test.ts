@@ -25,6 +25,12 @@ function tempConfig(prefix: string): DaemonConfig {
     opencode: {
       command: "opencode"
     },
+    claudeCode: {
+      command: "claude",
+      liveProbe: false,
+      maxBudgetUsd: 0.05,
+      requestTimeoutMs: 5000
+    },
     acp: {
       requestTimeoutMs: 250,
       cancelTimeoutMs: 250,

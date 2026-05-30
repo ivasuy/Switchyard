@@ -145,10 +145,13 @@ describe("core service shells", () => {
     });
     await service.startRun(run.id);
 
-    await service.sendInput(run.id, { text: "continue" });
+    await expect(service.sendInput(run.id, { text: "continue" })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_input_not_active"
+    });
     const cancelled = await service.cancelRun(run.id);
 
-    expect(adapter.sentInput).toEqual({ text: "continue" });
+    expect(adapter.sentInput).toBeUndefined();
     expect(cancelled.status).toBe("completed");
   });
 
@@ -204,7 +207,164 @@ describe("core service shells", () => {
     const events = new MemoryEventStore();
     const sessions = new MemorySessionStore();
     const adapter = new EventfulAdapter();
+    const run = await createStoredRun(runs, { status: "running" });
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]])
+    });
+    await sessions.create({
+      id: "session_1",
+      runId: run.id,
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      protocol: "process",
+      status: "active",
+      state: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+
+    await runner.sendInput(run.id, { text: "continue" });
+
+    expect(adapter.sentInput).toEqual({ text: "continue" });
+    expect(adapter.sentSession?.["runId"]).toBe(run.id);
+  });
+
+  it("runtime runner persists waiting statuses and resumes to running on output", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
     const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new WaitingForInputAdapter()]])
+    });
+
+    await runner.start(run);
+
+    expect(events.items.some((event) => event.type === "runtime.status" && event.payload["status"] === "waiting_for_input")).toBe(true);
+    expect((await runs.get(run.id))?.status).toBe("completed");
+    expect((await sessions.getByRunId(run.id))?.status).toBe("completed");
+  });
+
+  it("runtime runner applies bounded sessionStatePatch and sets external session key once", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new SessionPatchAdapter()]])
+    });
+
+    await runner.start(run);
+
+    const stored = await sessions.getByRunId(run.id);
+    expect(stored?.state["claudeSessionId"]).toBe("claude-session-1");
+    expect(stored?.state["nested"]).toEqual({ safe: true });
+    expect(stored?.externalSessionKey).toBe("claude-session-1");
+  });
+
+  it("runtime runner fails run when sessionStatePatch is invalid", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new InvalidSessionPatchAdapter()]])
+    });
+
+    const result = await runner.start(run);
+
+    expect(result.status).toBe("failed");
+    expect(events.items.at(-1)).toMatchObject({
+      type: "run.failed",
+      payload: { reasonCode: "session_state_patch_rejected" }
+    });
+  });
+
+  it("runtime runner rejects sessionStatePatch entries with secret-like keys", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new SecretSessionPatchAdapter()]])
+    });
+
+    const result = await runner.start(run);
+
+    expect(result.status).toBe("failed");
+    expect(events.items.at(-1)).toMatchObject({
+      type: "run.failed",
+      payload: { reasonCode: "session_state_patch_rejected" }
+    });
+  });
+
+  it("runtime runner fails run when runtime approval bridge is missing", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new RuntimeApprovalAdapter()]])
+    });
+
+    const result = await runner.start(run);
+
+    expect(result.status).toBe("failed");
+    expect(events.items.at(-1)).toMatchObject({
+      type: "run.failed",
+      payload: { reasonCode: "runtime_approval_bridge_unconfigured" }
+    });
+  });
+
+  it("runtime runner creates runtime approvals and moves run/session to waiting_for_approval", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const approvals: Array<{ runId: string; approvalType: string; payload: Record<string, unknown> }> = [];
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new RuntimeApprovalAdapter()]]),
+      runtimeApprovals: {
+        create: async (input) => {
+          approvals.push(input);
+        }
+      }
+    });
+
+    const result = await runner.start(run);
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.payload["runtimeApprovalToken"]).toBe("pause-1");
+    expect(result.status).toBe("completed");
+  });
+
+  it("runtime runner sendInput rejects terminal, missing-session, empty, and oversized text bodies", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const adapter = new EventfulAdapter();
     const runner = new RuntimeRunnerService({
       runs,
       events,
@@ -213,10 +373,38 @@ describe("core service shells", () => {
     });
     await runner.start(run);
 
-    await runner.sendInput(run.id, { text: "continue" });
+    await expect(runner.sendInput(run.id, { text: "after completion" })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_input_not_active"
+    });
 
-    expect(adapter.sentInput).toEqual({ text: "continue" });
-    expect(adapter.sentSession?.["runId"]).toBe(run.id);
+    const activeRun = await createStoredRun(runs, { id: "run_missing_session" });
+    await expect(runner.sendInput(activeRun.id, { text: "x" })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_session_missing"
+    });
+
+    const liveRun = await createStoredRun(runs, { id: "run_live_input", status: "running" });
+    await sessions.create({
+      id: "session_live_input",
+      runId: liveRun.id,
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      protocol: "process",
+      status: "active",
+      state: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+
+    await expect(runner.sendInput(liveRun.id, { text: "   " })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_input_empty"
+    });
+    await expect(runner.sendInput(liveRun.id, { text: "x".repeat(65537) })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_input_too_large"
+    });
   });
 
   it("runtime runner stores adapter artifacts and emits artifact events", async () => {
@@ -1398,6 +1586,129 @@ class EventfulAdapter extends NoopAdapter {
         type: "run.completed",
         runId: String(session["runId"]),
         sequence: 101,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class WaitingForInputAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_waiting_input",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: { status: "waiting_for_input" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_waiting_output",
+        type: "runtime.output",
+        runId: String(session["runId"]),
+        sequence: 2,
+        payload: { text: "waiting resolved" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_waiting_done",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 3,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class SessionPatchAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_patch",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: {
+          status: "running",
+          sessionStatePatch: {
+            claudeSessionId: "claude-session-1",
+            nested: { safe: true }
+          }
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_patch_done",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 2,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class InvalidSessionPatchAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_patch_invalid",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: {
+          status: "running",
+          sessionStatePatch: ["bad"]
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class SecretSessionPatchAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_patch_secret",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: {
+          status: "running",
+          sessionStatePatch: { apiKey: "leak" }
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class RuntimeApprovalAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_approval_requested",
+        type: "approval.requested",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: {
+          runtimeApprovalToken: "pause-1",
+          approvalType: "before_destructive_command",
+          toolName: "Bash"
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_approval_done",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 2,
         payload: { status: "completed" },
         createdAt: "2026-05-11T00:00:00.000Z"
       };

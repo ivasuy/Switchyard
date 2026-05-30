@@ -18,7 +18,7 @@ import type {
 import type { RegistryStore } from "../src/index.js";
 
 describe("RegistryService runtime mode inference and validation", () => {
-  it("infers fake, codex, generic_http, agentfield, and opencode runtime modes when omitted", async () => {
+  it("infers fake, codex, generic_http, agentfield, claude_code, and opencode runtime modes when omitted", async () => {
     const service = new RegistryService({ registry: new InMemoryRegistryStore() });
 
     await expect(
@@ -52,6 +52,14 @@ describe("RegistryService runtime mode inference and validation", () => {
         adapterType: "http"
       })
     ).resolves.toBe("agentfield.async_rest");
+
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "claude_code",
+        provider: "anthropic",
+        adapterType: "native"
+      })
+    ).resolves.toBe("claude_code.sdk");
 
     await expect(
       service.inferAndValidateRuntimeMode({

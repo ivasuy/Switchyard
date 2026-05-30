@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import { mkdirSync } from "node:fs";
 import {
   AgentFieldAsyncRestAdapter,
+  ClaudeCodeAdapter,
   CodexExecJsonAdapter,
   GenericHttpAsyncRestAdapter,
   OpenCodeAcpAdapter,
@@ -9,6 +10,7 @@ import {
 } from "@switchyard/adapters";
 import {
   type ArtifactStore,
+  AdapterProtocolError,
   EventBus,
   RegistryService,
   RuntimeCapabilityService,
@@ -122,6 +124,10 @@ interface CreateDaemonAppOptions {
   logger?: RuntimeLogger | undefined;
   checkTimeoutMs?: number;
   maxDiagnosticBytes?: number;
+  claudeClient?: ConstructorParameters<typeof ClaudeCodeAdapter>[0]["client"];
+  claudeVersionProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["probeVersion"];
+  claudeAuthProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["probeAuth"];
+  claudeLiveProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["runLiveProbe"];
 }
 
 export async function createDaemonApp(config?: DaemonConfig, options: CreateDaemonAppOptions = {}) {
@@ -142,6 +148,12 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   const opencodeConfig = config?.opencode ?? {
     command: "opencode"
   };
+  const claudeCodeConfig = config?.claudeCode ?? {
+    command: "claude",
+    liveProbe: false,
+    maxBudgetUsd: 0.05,
+    requestTimeoutMs: 5000
+  };
   const acpConfig = config?.acp ?? {
     requestTimeoutMs: 5000,
     cancelTimeoutMs: 5000,
@@ -161,6 +173,16 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     checkedAt: now,
     reasonCode: "not_checked",
     message: "Run POST /runtime-modes/opencode.acp/check to verify local OpenCode ACP availability."
+  };
+  const claudeAvailability: DaemonRuntimeAvailability = {
+    state: "unknown",
+    canRun: false,
+    installed: false,
+    auth: "unknown",
+    version: null,
+    checkedAt: now,
+    reasonCode: "live_probe_disabled",
+    message: "Live probe is disabled by default."
   };
   const fakeAvailability: DaemonRuntimeAvailability = {
     state: "available",
@@ -216,17 +238,48 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     opencodeAdapterOptions.probeVersion = options.opencodeProbeVersion;
   }
   const opencodeAdapter = new OpenCodeAcpAdapter(opencodeAdapterOptions);
+  const claudeAdapter = new ClaudeCodeAdapter({
+    client: options.claudeClient ?? createUnavailableClaudeClient(),
+    command: claudeCodeConfig.command,
+    liveProbe: claudeCodeConfig.liveProbe,
+    maxBudgetUsd: claudeCodeConfig.maxBudgetUsd,
+    requestTimeoutMs: claudeCodeConfig.requestTimeoutMs,
+    permissionMode: "read_only",
+    disabledTools: ["Bash", "WebFetch", "WebSearch"],
+    ...(options.logger ? { logger: options.logger } : {}),
+    doctor: {
+      ...(options.claudeVersionProbe ? { probeVersion: options.claudeVersionProbe } : {}),
+      ...(options.claudeAuthProbe ? { probeAuth: options.claudeAuthProbe } : {}),
+      ...(options.claudeLiveProbe ? { runLiveProbe: options.claudeLiveProbe } : {})
+    }
+  });
   const adapters = new Map<string, RuntimeAdapter>([
     ["fake", new FakeRuntimeAdapter()],
+    ["claude_code", claudeAdapter],
     ["codex", new CodexExecJsonAdapter(codexOptions)],
     ["agentfield", agentfieldAdapter],
     ["generic_http", genericHttpAdapter],
     ["opencode", opencodeAdapter]
   ]);
   const eventBus = new EventBus();
+  let approvalServiceRef: ApprovalService | undefined;
   const runnerOptions: ConstructorParameters<typeof RuntimeRunnerService>[0] = {
     adapters,
     eventBus,
+    runtimeApprovals: {
+      create: async (input) => {
+        if (!approvalServiceRef) {
+          throw new AdapterProtocolError("Runtime approval bridge is not configured.", {
+            reasonCode: "runtime_approval_bridge_unconfigured"
+          });
+        }
+        await approvalServiceRef.create({
+          runId: input.runId,
+          approvalType: input.approvalType,
+          payload: input.payload
+        });
+      }
+    },
     ...stores
   };
   if (options.logger) {
@@ -253,6 +306,7 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
 
   try {
     await seedFakeRegistry(stores.registry);
+    await seedClaudeRegistry(stores, claudeAvailability);
     await seedCodexRegistry(stores, codexProbe, codexAvailability);
     await seedAgentFieldRegistry(stores, agentfieldAvailability);
     await seedGenericHttpRegistry(stores, genericHttpAvailability);
@@ -260,6 +314,7 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     await capabilityService.seedManifests(
       [
         adapters.get("fake")!.manifest,
+        adapters.get("claude_code")!.manifest,
         adapters.get("codex")!.manifest,
         adapters.get("agentfield")!.manifest,
         adapters.get("generic_http")!.manifest,
@@ -267,6 +322,7 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
       ],
       {
         "fake.deterministic": fakeAvailability,
+        "claude_code.sdk": claudeAvailability,
         "codex.exec_json": codexAvailability,
         "agentfield.async_rest": agentfieldAvailability,
         "generic_http.async_rest": genericHttpAvailability,
@@ -277,6 +333,11 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
       runtimeMode: "fake.deterministic",
       adapterId: "fake",
       state: fakeAvailability.state
+    });
+    options.logger?.info("runtime_mode.seeded", {
+      runtimeMode: "claude_code.sdk",
+      adapterId: "claude_code",
+      state: claudeAvailability.state
     });
     options.logger?.info("runtime_mode.seeded", {
       runtimeMode: "codex.exec_json",
@@ -341,8 +402,12 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     runs: stores.runs,
     events: stores.events,
     eventBus: middlewareEventBus,
-    toolRouter
+    toolRouter,
+    runtimeResolutionSender: async (input) => {
+      await runService.sendInput(input.runId, input);
+    }
   });
+  approvalServiceRef = approvalService;
   registerMiddlewareRoutes(app, {
     messageRouter: new MessageRouter({
       runs: stores.runs,
@@ -461,6 +526,62 @@ async function seedFakeRegistry(registry: RegistryStore): Promise<void> {
       providerId: "provider_test",
       modelName: "test-model",
       supportsTools: false,
+      supportsStreaming: true,
+      supportsBrowser: false,
+      status: "available"
+    });
+  }
+}
+
+async function seedClaudeRegistry(
+  stores: DaemonStoreResult,
+  availability: DaemonRuntimeAvailability
+): Promise<void> {
+  const registry = stores.registry;
+  const status = statusFromAvailability(availability);
+
+  const existingProvider = await registry.getProvider("provider_anthropic");
+  if (!existingProvider) {
+    await registry.createProvider({
+      id: "provider_anthropic",
+      name: "Anthropic",
+      authMode: "local",
+      status
+    });
+  } else {
+    await updateProviderRecord(stores, {
+      id: "provider_anthropic",
+      name: "Anthropic",
+      authMode: "local",
+      status
+    });
+  }
+
+  const existingRuntime = await registry.getRuntime("runtime_claude_code");
+  if (!existingRuntime) {
+    await registry.createRuntime({
+      id: "runtime_claude_code",
+      name: "Claude Code",
+      adapterType: "native",
+      status,
+      providerId: "provider_anthropic"
+    });
+  } else {
+    await updateRuntimeRecord(stores, {
+      id: "runtime_claude_code",
+      name: "Claude Code",
+      adapterType: "native",
+      status,
+      providerId: "provider_anthropic"
+    });
+  }
+
+  if (!(await registry.getModel("model_claude_code_default"))) {
+    await registry.createModel({
+      id: "model_claude_code_default",
+      providerId: "provider_anthropic",
+      modelName: "claude-code-default",
+      supportsTools: true,
       supportsStreaming: true,
       supportsBrowser: false,
       status: "available"
@@ -855,6 +976,16 @@ function sanitizeMessage(message: string, maxBytes: number): string {
 
 function toCodexModelId(slug: string): string {
   return `model_${slug.replace(/[.-]/g, "_")}`;
+}
+
+function createUnavailableClaudeClient(): ConstructorParameters<typeof ClaudeCodeAdapter>[0]["client"] {
+  return {
+    async start() {
+      throw new AdapterProtocolError("Claude Code client is not configured for this daemon instance.", {
+        reasonCode: "claude_client_unconfigured"
+      });
+    }
+  };
 }
 
 async function updateProviderRecord(

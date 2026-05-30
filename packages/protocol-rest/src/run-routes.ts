@@ -445,9 +445,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseInputBody(value: unknown): Record<string, unknown> {
   if (!isRecord(value)) {
-    throw new HttpProblem("invalid_input", "Input body must be an object");
+    throw new HttpProblem("invalid_input", "Input body must be an object", [
+      { path: "body", issue: "must be an object" }
+    ]);
   }
-  return value;
+  const text = value["text"];
+  if (typeof text !== "string") {
+    throw new HttpProblem("invalid_input", "text is required", [
+      { path: "text", issue: "must be a non-empty string" }
+    ]);
+  }
+  if (text.trim().length === 0) {
+    throw new HttpProblem("invalid_input", "text is required", [
+      { path: "text", issue: "must be a non-empty string" }
+    ]);
+  }
+  if (Buffer.byteLength(text, "utf8") > 64 * 1024) {
+    throw new HttpProblem("invalid_input", "text is too large", [
+      { path: "text", issue: "must be <= 65536 bytes" }
+    ]);
+  }
+  return { text };
 }
 
 function parseRunContext(value: unknown): CreateRunBody["context"] {

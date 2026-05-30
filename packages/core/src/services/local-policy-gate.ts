@@ -10,6 +10,10 @@ export function redactSecrets<T>(value: T): T {
     const record = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(record)) {
+      if (key === "runtimeApprovalToken") {
+        out[key] = entry;
+        continue;
+      }
       if (SECRET_KEY_PATTERN.test(key)) {
         out[key] = "[REDACTED]";
       } else {

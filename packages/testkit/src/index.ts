@@ -7,3 +7,5 @@ export * from "./fake-acp-runtime.js";
 export * from "./runtime-adapter-contract-harness.js";
 export * from "./middleware-stores.js";
 export * from "./fake-echo-tool-adapter.js";
+export * from "./fake-claude-code-client.js";
+export * from "./fake-claude-code-cli.js";

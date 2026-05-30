@@ -15,3 +15,4 @@ export const approvalSchema = z.object({
 });
 
 export type Approval = z.infer<typeof approvalSchema>;
+export type ApprovalType = z.infer<typeof approvalTypeSchema>;

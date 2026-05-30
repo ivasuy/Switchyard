@@ -13,6 +13,7 @@ import {
   toolTypeSchema
 } from "@switchyard/contracts";
 import type {
+  AdapterProtocolError,
   ApprovalService,
   ContextBuilder,
   EvidenceService,
@@ -265,7 +266,8 @@ export function registerMiddlewareRoutes(app: FastifyInstance, deps: MiddlewareR
     try {
       const result = await deps.approvalService.approve(id, {
         actor: optionalString(body, "actor"),
-        reason: optionalString(body, "reason")
+        reason: optionalString(body, "reason"),
+        answers: parseOptionalAnswers(body["answers"])
       });
       return reply.send(result);
     } catch (error) {
@@ -279,7 +281,8 @@ export function registerMiddlewareRoutes(app: FastifyInstance, deps: MiddlewareR
     try {
       const result = await deps.approvalService.reject(id, {
         actor: optionalString(body, "actor"),
-        reason: optionalString(body, "reason")
+        reason: optionalString(body, "reason"),
+        answers: parseOptionalAnswers(body["answers"])
       });
       return reply.send(result);
     } catch (error) {
@@ -465,7 +468,19 @@ function parseSections(value: unknown): Array<{ name: string; content: string }>
   });
 }
 
+function parseOptionalAnswers(value: unknown): Record<string, unknown> | undefined {
+  return ensureOptionalRecord(value, "answers");
+}
+
 function sendFromServiceError(reply: FastifyReply, error: unknown) {
+  if (isAdapterProtocolError(error)) {
+    return sendHttpError(
+      reply,
+      "adapter_protocol_failed",
+      error.message,
+      error.reasonCode ? [{ path: "reasonCode", issue: error.reasonCode }] : undefined
+    );
+  }
   if (error instanceof HttpProblem) {
     return sendHttpError(reply, error.code, error.message, error.details);
   }
@@ -491,4 +506,12 @@ function sendFromServiceError(reply: FastifyReply, error: unknown) {
     }
   }
   throw error;
+}
+
+function isAdapterProtocolError(error: unknown): error is AdapterProtocolError {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const record = error as { code?: unknown; message?: unknown; reasonCode?: unknown };
+  return record.code === "adapter_protocol_failed" && typeof record.message === "string";
 }

@@ -1,4 +1,5 @@
 import type { Artifact, Run, RuntimeSession, RunStatus, SwitchyardEvent } from "@switchyard/contracts";
+import { AdapterProtocolError } from "../errors.js";
 import type { ArtifactStore } from "../ports/artifact-store.js";
 import type { EventStore } from "../ports/event-store.js";
 import type { RunStore } from "../ports/run-store.js";
@@ -7,6 +8,16 @@ import type { RuntimeLogger } from "../ports/runtime-logger.js";
 import type { SessionStore } from "../ports/session-store.js";
 import type { EventBus } from "./event-bus.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { approvalTypeSchema, type ApprovalType } from "@switchyard/contracts";
+import { redactSecrets } from "./local-policy-gate.js";
+
+const MAX_RUNTIME_INPUT_BYTES = 64 * 1024;
+const MAX_SESSION_STATE_PATCH_BYTES = 16 * 1024;
+const SESSION_STATE_SECRET_KEY_PATTERN = /(token|apiKey|authorization|password|secret)/i;
+
+interface RuntimeApprovalBridge {
+  create(input: { runId: string; approvalType: ApprovalType; payload: Record<string, unknown> }): Promise<void>;
+}
 
 export interface RuntimeRunnerDependencies {
   runs: RunStore;
@@ -19,6 +30,7 @@ export interface RuntimeRunnerDependencies {
   artifactContent?: {
     writeText(path: string, content: string): Promise<string>;
   };
+  runtimeApprovals?: RuntimeApprovalBridge;
 }
 
 export class RuntimeRunnerService {
@@ -121,22 +133,54 @@ export class RuntimeRunnerService {
         const normalized = this.normalizeEvent(event, started.id, sequence++);
         this.logEvent(normalized);
 
+        if (!session) {
+          throw new AdapterProtocolError("Runtime session is missing for this run.", {
+            reasonCode: "runtime_session_missing"
+          });
+        }
+
+        let effectiveEvent = normalized;
+        if (effectiveEvent.type === "runtime.status") {
+          const patchResult = await this.applySessionStatePatchIfPresent(started.id, session, effectiveEvent);
+          session = patchResult.session;
+          if (patchResult.reasonCode) {
+            effectiveEvent = this.runtimeFailedEvent(started.id, effectiveEvent.sequence, patchResult.reasonCode);
+          }
+        }
+
+        if (effectiveEvent.type !== "run.completed" && effectiveEvent.type !== "run.failed" && effectiveEvent.type !== "run.cancelled") {
+          const statusResult = await this.applyWaitingStatusTransition(started.id, session, effectiveEvent);
+          latest = statusResult.run ?? latest;
+          session = statusResult.session;
+        }
+
+        if (effectiveEvent.type === "approval.requested") {
+          const approvalResult = await this.handleRuntimeApproval(started.id, session, effectiveEvent);
+          if (approvalResult.reasonCode) {
+            effectiveEvent = this.runtimeFailedEvent(started.id, effectiveEvent.sequence, approvalResult.reasonCode);
+          } else {
+            latest = approvalResult.run ?? latest;
+            session = approvalResult.session ?? session;
+            continue;
+          }
+        }
+
         if (
-          normalized.type === "run.completed" ||
-          normalized.type === "run.failed" ||
-          normalized.type === "run.cancelled"
+          effectiveEvent.type === "run.completed" ||
+          effectiveEvent.type === "run.failed" ||
+          effectiveEvent.type === "run.cancelled"
         ) {
           const terminalSequence = sequence - 1;
-          const terminal = await this.terminalizeRunFromAdapterEvent(started, normalized, terminalSequence, session);
+          const terminal = await this.terminalizeRunFromAdapterEvent(started, effectiveEvent, terminalSequence, session);
           if (!terminal) {
             break;
           }
           latest = terminal;
           terminalized = true;
           const sessionStatus: RuntimeSession["status"] =
-            normalized.type === "run.completed"
+            effectiveEvent.type === "run.completed"
               ? "completed"
-              : normalized.type === "run.cancelled"
+              : effectiveEvent.type === "run.cancelled"
                 ? "cancelled"
                 : "failed";
           session = {
@@ -154,7 +198,7 @@ export class RuntimeRunnerService {
                 started,
                 latest,
                 artifactSequence,
-                normalized.type === "run.cancelled"
+                effectiveEvent.type === "run.cancelled"
               );
               sequence = artifactSequence.value;
             } catch (error) {
@@ -164,7 +208,7 @@ export class RuntimeRunnerService {
           }
           break;
         } else {
-          await this.appendAndPublish(normalized);
+          await this.appendAndPublish(effectiveEvent);
         }
       }
 
@@ -196,8 +240,32 @@ export class RuntimeRunnerService {
 
   async sendInput(runId: string, input: Record<string, unknown>): Promise<void> {
     const run = await this.requireRun(runId);
+    if (this.isTerminal(run.status)) {
+      throw new AdapterProtocolError("Runtime input is only supported for active runs.", {
+        reasonCode: "runtime_input_not_active"
+      });
+    }
     const adapter = this.requireAdapter(run.runtime);
-    const session = await this.requireSession(runId);
+    const session = await this.deps.sessions.getByRunId(runId);
+    if (!session) {
+      throw new AdapterProtocolError("Runtime session is missing for this run.", {
+        reasonCode: "runtime_session_missing"
+      });
+    }
+
+    const text = input["text"];
+    if (typeof text === "string") {
+      if (text.trim().length === 0) {
+        throw new AdapterProtocolError("Runtime input text must be non-empty.", {
+          reasonCode: "runtime_input_empty"
+        });
+      }
+      if (Buffer.byteLength(text, "utf8") > MAX_RUNTIME_INPUT_BYTES) {
+        throw new AdapterProtocolError("Runtime input text exceeds the 64 KiB limit.", {
+          reasonCode: "runtime_input_too_large"
+        });
+      }
+    }
 
     await adapter.send(this.adapterSession(session), input);
   }
@@ -531,6 +599,174 @@ export class RuntimeRunnerService {
     }
   }
 
+  private runtimeFailedEvent(runId: string, sequence: number, reasonCode: string): SwitchyardEvent {
+    return {
+      id: `event_${crypto.randomUUID()}`,
+      type: "run.failed",
+      runId,
+      sequence,
+      payload: {
+        status: "failed",
+        reasonCode
+      },
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  private async applyWaitingStatusTransition(
+    runId: string,
+    session: RuntimeSession,
+    event: SwitchyardEvent
+  ): Promise<{ run?: Run; session: RuntimeSession }> {
+    if (event.type === "runtime.status") {
+      const status = typeof event.payload["status"] === "string" ? event.payload["status"] : undefined;
+      if (status === "waiting_for_input" || status === "waiting_for_approval") {
+        const updated = await this.updateRunAndSessionStatus(runId, status, session);
+        this.log("info", "runtime.status.waiting", { runId, status });
+        return updated;
+      }
+      if (status === "running" || status === "resumed") {
+        const updated = await this.resumeWaitingRunIfNeeded(runId, session);
+        return updated;
+      }
+      return { session };
+    }
+
+    if (event.type === "runtime.output") {
+      return await this.resumeWaitingRunIfNeeded(runId, session);
+    }
+
+    return { session };
+  }
+
+  private async resumeWaitingRunIfNeeded(
+    runId: string,
+    session: RuntimeSession
+  ): Promise<{ run?: Run; session: RuntimeSession }> {
+    const currentRun = await this.deps.runs.get(runId);
+    if (!currentRun || this.isTerminal(currentRun.status)) {
+      return { session };
+    }
+    if (currentRun.status !== "waiting_for_input" && currentRun.status !== "waiting_for_approval") {
+      return { session };
+    }
+    return await this.updateRunAndSessionStatus(runId, "running", session);
+  }
+
+  private async updateRunAndSessionStatus(
+    runId: string,
+    status: "running" | "waiting_for_input" | "waiting_for_approval",
+    session: RuntimeSession
+  ): Promise<{ run?: Run; session: RuntimeSession }> {
+    const currentRun = await this.deps.runs.get(runId);
+    if (!currentRun || this.isTerminal(currentRun.status) || currentRun.status === status) {
+      return { session };
+    }
+    const updatedRun: Run = { ...currentRun, status };
+    const updatedSession: RuntimeSession = {
+      ...session,
+      status: status === "running" ? "active" : status,
+      updatedAt: new Date().toISOString()
+    };
+    await this.deps.runs.update(updatedRun);
+    await this.deps.sessions.update(updatedSession);
+    return { run: updatedRun, session: updatedSession };
+  }
+
+  private async applySessionStatePatchIfPresent(
+    runId: string,
+    session: RuntimeSession,
+    event: SwitchyardEvent
+  ): Promise<{ session: RuntimeSession; reasonCode?: string }> {
+    const rawPatch = event.payload["sessionStatePatch"];
+    if (rawPatch === undefined || rawPatch === null) {
+      return { session };
+    }
+    if (!isPlainObject(rawPatch)) {
+      this.log("warn", "runtime.session_state_rejected", { runId, reasonCode: "session_state_patch_rejected" });
+      return { session, reasonCode: "session_state_patch_rejected" };
+    }
+    if (Object.keys(rawPatch).length === 0) {
+      return { session };
+    }
+    if (!isStatePatchValueSafe(rawPatch) || hasDisallowedSecretKey(rawPatch)) {
+      this.log("warn", "runtime.session_state_rejected", { runId, reasonCode: "session_state_patch_rejected" });
+      return { session, reasonCode: "session_state_patch_rejected" };
+    }
+    const serialized = JSON.stringify(rawPatch);
+    if (Buffer.byteLength(serialized, "utf8") > MAX_SESSION_STATE_PATCH_BYTES) {
+      this.log("warn", "runtime.session_state_rejected", { runId, reasonCode: "session_state_patch_too_large" });
+      return { session, reasonCode: "session_state_patch_too_large" };
+    }
+
+    const redactedPatch = redactSecrets(rawPatch);
+    const nextState = {
+      ...session.state,
+      ...redactedPatch
+    };
+    const updated: RuntimeSession = {
+      ...session,
+      state: nextState,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (!session.externalSessionKey) {
+      const discoveredKey = this.selectExternalSessionKey(redactedPatch);
+      if (discoveredKey) {
+        updated.externalSessionKey = discoveredKey;
+      }
+    }
+
+    await this.deps.sessions.update(updated);
+    this.log("info", "runtime.session_state.updated", { runId, sessionId: session.id });
+    return { session: updated };
+  }
+
+  private selectExternalSessionKey(patch: Record<string, unknown>): string | undefined {
+    const claude = patch["claudeSessionId"];
+    if (typeof claude === "string" && claude.trim().length > 0) {
+      return claude.trim();
+    }
+    const codex = patch["codexThreadId"];
+    if (typeof codex === "string" && codex.trim().length > 0) {
+      return codex.trim();
+    }
+    return undefined;
+  }
+
+  private async handleRuntimeApproval(
+    runId: string,
+    session: RuntimeSession,
+    event: SwitchyardEvent
+  ): Promise<{ run?: Run; session?: RuntimeSession; reasonCode?: string }> {
+    const token = event.payload["runtimeApprovalToken"];
+    if (typeof token !== "string" || token.trim().length === 0) {
+      return { reasonCode: "runtime_approval_token_missing" };
+    }
+    if (!this.deps.runtimeApprovals) {
+      return { reasonCode: "runtime_approval_bridge_unconfigured" };
+    }
+    const rawApprovalType = event.payload["approvalType"];
+    let approvalType: ApprovalType = "before_external_message";
+    if (typeof rawApprovalType === "string") {
+      try {
+        approvalType = approvalTypeSchema.parse(rawApprovalType);
+      } catch {
+        return { reasonCode: "runtime_approval_type_invalid" };
+      }
+    }
+
+    await this.deps.runtimeApprovals.create({
+      runId,
+      approvalType,
+      payload: redactSecrets({
+        ...event.payload
+      })
+    });
+    this.log("info", "runtime.approval.requested", { runId, approvalType });
+    return await this.updateRunAndSessionStatus(runId, "waiting_for_approval", session);
+  }
+
   private logEvent(event: SwitchyardEvent): void {
     if (event.type === "runtime.output") {
       const text = typeof event.payload["text"] === "string" ? event.payload["text"] : undefined;
@@ -645,4 +881,39 @@ export class RuntimeRunnerService {
       state: session.state
     };
   }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStatePatchValueSafe(value: unknown): boolean {
+  if (typeof value === "function" || typeof value === "symbol") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.every((entry) => isStatePatchValueSafe(entry));
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).every((entry) => isStatePatchValueSafe(entry));
+  }
+  return true;
+}
+
+function hasDisallowedSecretKey(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasDisallowedSecretKey(entry));
+  }
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (SESSION_STATE_SECRET_KEY_PATTERN.test(key)) {
+      return true;
+    }
+    if (hasDisallowedSecretKey(entry)) {
+      return true;
+    }
+  }
+  return false;
 }

@@ -50,9 +50,11 @@ Expected:
 BASE=http://127.0.0.1:4545
 curl -s "$BASE/runtime-modes" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/fake.deterministic" | python3 -m json.tool
+curl -s "$BASE/runtime-modes/claude_code.sdk" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/codex.exec_json" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/agentfield.async_rest" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/opencode.acp" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/claude_code.sdk/check" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/codex.exec_json/check" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/agentfield.async_rest/check" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/opencode.acp/check" | python3 -m json.tool
@@ -62,6 +64,8 @@ curl -s "$BASE/doctor" | python3 -m json.tool
 Notes:
 
 - `fake.deterministic` is always locally available.
+- `claude_code.sdk` is seeded in R8 and defaults to no-spend checks (`reasonCode: live_probe_disabled`) unless `SWITCHYARD_CLAUDE_CODE_LIVE_PROBE=1`.
+- Claude live probe, when enabled, remains bounded by `SWITCHYARD_CLAUDE_CODE_MAX_BUDGET_USD` and `SWITCHYARD_CLAUDE_CODE_REQUEST_TIMEOUT_MS`.
 - `codex.exec_json` is `available` only when both `codex --version` and `codex debug models` succeed with at least one model.
 - missing/slow/oversized Codex checks are bounded and reported as sanitized `unavailable`/`unknown`; daemon startup remains up.
 - `opencode.acp` check runs `opencode --version`, ACP `initialize`, and ACP `session/new` only.
@@ -148,6 +152,35 @@ R6 AgentField boundaries:
 - Active cancel is unsupported (`POST /runs/:id/cancel` returns `409 adapter_protocol_failed` with `reasonCode: agentfield_cancel_unsupported`).
 - No per-run base URL/API key/target overrides; endpoint and target config are daemon env only.
 - No webhooks and no AgentField control-plane proxying for memory/admin/node lifecycle APIs.
+
+## Claude Code Local Smoke
+
+Claude-specific details live in [Claude Code Adapter Local Development](adapters/CLAUDE_CODE.md).
+
+No-spend smoke:
+
+```bash
+BASE=http://127.0.0.1:4545
+curl -s "$BASE/runtime-modes/claude_code.sdk" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/claude_code.sdk/check" | python3 -m json.tool
+curl -s "$BASE/doctor" | python3 -m json.tool
+```
+
+Optional live-probe daemon run (manual, can spend budget):
+
+```bash
+SWITCHYARD_CLAUDE_CODE_LIVE_PROBE=1 \
+SWITCHYARD_CLAUDE_CODE_MAX_BUDGET_USD=0.05 \
+SWITCHYARD_CLAUDE_CODE_REQUEST_TIMEOUT_MS=5000 \
+SWITCHYARD_LOG_LEVEL=info \
+pnpm --filter @switchyard/daemon dev
+```
+
+R8 Claude boundaries:
+
+- Supports post-start text input and runtime approval bridging.
+- Uses bounded transcript persistence (1 MiB raw, 1 MiB normalized, 64 KiB normalized record).
+- PTY/TUI automation is not implemented.
 
 ## OpenCode ACP Local Smoke
 

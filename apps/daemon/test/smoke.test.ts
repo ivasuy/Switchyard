@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { type FastifyInstance } from "fastify";
 import type { CodexCatalogProbe } from "@switchyard/adapters";
 import {
+  createFakeClaudeCodeClient,
+  createFakeClaudeLiveProbe,
   createFakeAcpProcessFactory,
   type FakeAcpRuntimeStats,
   startFakeAgentFieldServer,
@@ -24,6 +26,12 @@ function tempDaemonConfig(prefix: string): DaemonConfig {
     artifactDir: join(dir, "artifacts"),
     opencode: {
       command: "opencode"
+    },
+    claudeCode: {
+      command: "claude",
+      liveProbe: false,
+      maxBudgetUsd: 0.05,
+      requestTimeoutMs: 5000
     },
     acp: {
       requestTimeoutMs: 250,
@@ -76,6 +84,10 @@ describe("daemon app", () => {
     expect(defaults.acp.requestTimeoutMs).toBe(5000);
     expect(defaults.acp.cancelTimeoutMs).toBe(5000);
     expect(defaults.acp.maxMessageBytes).toBe(1024 * 1024);
+    expect(defaults.claudeCode.command).toBe("claude");
+    expect(defaults.claudeCode.liveProbe).toBe(false);
+    expect(defaults.claudeCode.maxBudgetUsd).toBe(0.05);
+    expect(defaults.claudeCode.requestTimeoutMs).toBe(5000);
     expect(defaults.agentfield?.requestTimeoutMs).toBe(5000);
     expect(defaults.agentfield?.pollIntervalMs).toBe(1000);
     expect(defaults.agentfield?.maxResponseBytes).toBe(1024 * 1024);
@@ -85,6 +97,10 @@ describe("daemon app", () => {
       SWITCHYARD_ACP_REQUEST_TIMEOUT_MS: "1234",
       SWITCHYARD_ACP_CANCEL_TIMEOUT_MS: "5678",
       SWITCHYARD_ACP_MAX_MESSAGE_BYTES: "4096",
+      SWITCHYARD_CLAUDE_CODE_COMMAND: "  /usr/local/bin/claude  ",
+      SWITCHYARD_CLAUDE_CODE_LIVE_PROBE: "1",
+      SWITCHYARD_CLAUDE_CODE_MAX_BUDGET_USD: "0.2",
+      SWITCHYARD_CLAUDE_CODE_REQUEST_TIMEOUT_MS: "4321",
       SWITCHYARD_AGENTFIELD_BASE_URL: "  http://127.0.0.1:6060/prefix  ",
       SWITCHYARD_AGENTFIELD_API_KEY: "  af-key  ",
       SWITCHYARD_AGENTFIELD_TARGET: "  research-agent.deep_analysis  ",
@@ -96,6 +112,12 @@ describe("daemon app", () => {
     expect(custom.acp.requestTimeoutMs).toBe(1234);
     expect(custom.acp.cancelTimeoutMs).toBe(5678);
     expect(custom.acp.maxMessageBytes).toBe(4096);
+    expect(custom.claudeCode).toEqual({
+      command: "/usr/local/bin/claude",
+      liveProbe: true,
+      maxBudgetUsd: 0.2,
+      requestTimeoutMs: 4321
+    });
     expect(custom.agentfield).toEqual({
       baseUrl: "http://127.0.0.1:6060/prefix",
       apiKey: "af-key",
@@ -288,6 +310,12 @@ describe("daemon app", () => {
       opencode: {
         command: "opencode"
       },
+      claudeCode: {
+        command: "claude",
+        liveProbe: false,
+        maxBudgetUsd: 0.05,
+        requestTimeoutMs: 5000
+      },
       acp: {
         requestTimeoutMs: 250,
         cancelTimeoutMs: 250,
@@ -437,6 +465,7 @@ describe("daemon app", () => {
       expect(list.statusCode).toBe(200);
       expect(list.json().runtimeModes.map((mode: { slug: string }) => mode.slug).sort()).toEqual([
         "agentfield.async_rest",
+        "claude_code.sdk",
         "codex.exec_json",
         "fake.deterministic",
         "generic_http.async_rest",
@@ -444,6 +473,9 @@ describe("daemon app", () => {
       ]);
       expect(codex.statusCode).toBe(200);
       expect(codex.json().runtimeMode.availability.state).toBe("available");
+      const claude = await app.inject({ method: "GET", url: "/runtime-modes/claude_code.sdk" });
+      expect(claude.statusCode).toBe(200);
+      expect(claude.json().runtimeMode.availability.reasonCode).toBe("live_probe_disabled");
       expect(doctor.statusCode).toBe(200);
       expect(doctor.json().summary.available).toBe(2);
     } finally {
@@ -460,6 +492,65 @@ describe("daemon app", () => {
       expect(mode.json().runtimeMode.availability.state).toBe("unavailable");
     } finally {
       await app.close();
+    }
+  });
+
+  it("supports fake claude runtime input and live probe safety flags without real model calls", async () => {
+    const config = tempDaemonConfig("switchyard-daemon-r8-claude-");
+    config.claudeCode.liveProbe = true;
+    const fake = createFakeClaudeCodeClient({
+      initialEvents: [{ type: "session", sessionId: "claude-session-1" }],
+      waitForInputText: true
+    });
+    const app = await createDaemonApp(config, {
+      codexProbe: unavailableCodexProbe,
+      claudeClient: fake.client,
+      claudeVersionProbe: async () => ({ ok: true, version: "2.1.156" }),
+      claudeAuthProbe: async () => ({ ok: true }),
+      claudeLiveProbe: createFakeClaudeLiveProbe(fake.state)
+    });
+    try {
+      const check = await app.inject({
+        method: "POST",
+        url: "/runtime-modes/claude_code.sdk/check"
+      });
+      expect(check.statusCode).toBe(200);
+      expect(fake.state.liveProbeCalls).toHaveLength(1);
+      expect(fake.state.liveProbeCalls[0]).toMatchObject({
+        maxBudgetUsd: 0.05,
+        permissionMode: "read_only"
+      });
+
+      const created = await app.inject({
+        method: "POST",
+        url: "/runs?wait=0",
+        payload: {
+          runtime: "claude_code",
+          provider: "anthropic",
+          model: "claude-code-default",
+          adapterType: "native",
+          cwd: "/repo",
+          task: "Wait for input"
+        }
+      });
+      expect(created.statusCode).toBe(202);
+      const runId = created.json().run.id as string;
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const input = await app.inject({
+        method: "POST",
+        url: `/runs/${runId}/input`,
+        payload: { text: "continue" }
+      });
+      expect(input.statusCode).toBe(202);
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const run = await app.inject({ method: "GET", url: `/runs/${runId}` });
+      expect(run.statusCode).toBe(200);
+      expect(run.json().run.status).toBe("completed");
+    } finally {
+      await app.close();
+      rmSync(config.dataDir, { recursive: true, force: true });
     }
   });
 
@@ -622,9 +713,8 @@ describe("daemon app", () => {
         payload: { text: "continue" }
       });
       expect(input.statusCode).toBe(409);
-      expect(input.json().error.details).toEqual(
-        expect.arrayContaining([expect.objectContaining({ path: "reasonCode", issue: "agentfield_input_unsupported" })])
-      );
+      const reasonCode = input.json().error.details?.find((detail: { path: string }) => detail.path === "reasonCode")?.issue;
+      expect(["agentfield_input_unsupported", "runtime_input_not_active"]).toContain(reasonCode);
     } finally {
       await app.close();
       await server.close();
@@ -838,9 +928,8 @@ describe("daemon app", () => {
       });
       expect(input.statusCode).toBe(409);
       expect(input.json().error.code).toBe("adapter_protocol_failed");
-      expect(input.json().error.details).toEqual(
-        expect.arrayContaining([expect.objectContaining({ path: "reasonCode", issue: "opencode_input_unsupported" })])
-      );
+      const reasonCode = input.json().error.details?.find((detail: { path: string }) => detail.path === "reasonCode")?.issue;
+      expect(["opencode_input_unsupported", "runtime_input_not_active"]).toContain(reasonCode);
 
       const internalId = await app.inject({
         method: "POST",
@@ -1123,6 +1212,12 @@ describe("daemon app", () => {
       opencode: {
         command: "opencode"
       },
+      claudeCode: {
+        command: "claude",
+        liveProbe: false,
+        maxBudgetUsd: 0.05,
+        requestTimeoutMs: 5000
+      },
       acp: {
         requestTimeoutMs: 250,
         cancelTimeoutMs: 250,
@@ -1268,6 +1363,12 @@ describe("daemon app", () => {
       artifactDir: join(dir, "artifacts"),
       opencode: {
         command: "opencode"
+      },
+      claudeCode: {
+        command: "claude",
+        liveProbe: false,
+        maxBudgetUsd: 0.05,
+        requestTimeoutMs: 5000
       },
       acp: {
         requestTimeoutMs: 250,

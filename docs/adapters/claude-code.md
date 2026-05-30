@@ -2,26 +2,34 @@
 
 ## Target
 
-Claude Code should be integrated without PTY first. PTY remains fallback only for interactive workflows that cannot be represented through SDK or headless streaming.
+Claude Code ships in R8 as the first bounded interactive coding runtime through `claude_code.sdk`.
 
 ## Preferred Protocol
 
-- Primary: Claude Agent SDK if the SDK surface is stable.
-- Fallback: `claude -p --output-format stream-json`.
-- Last resort: PTY, local-only by policy.
+- Primary: structured client port behind `claude_code.sdk` (native adapter type).
+- Fallback: no PTY fallback is shipped in R8.
+- Last resort: PTY remains out of scope for this release.
 
 ## Verified Local Facts
 
-- Binary: `/Users/vasuyadav/.local/bin/claude`
-- Version: `2.1.138`
-- Live prompt probe was deferred to avoid model spend.
+- Runtime mode: `claude_code.sdk`.
+- Adapter id: `claude_code` (`native`, `sdk` kind).
+- Default doctor path is no-spend and does not run a live prompt.
+- Live probe is opt-in only (`SWITCHYARD_CLAUDE_CODE_LIVE_PROBE=1`) and bounded by budget/time safeguards.
 
 ## Implementation Notes
 
-- Normalize text deltas, tool calls, tool results, approval pauses, completion, and failures.
-- Preserve the raw SDK/stream-json transcript as an artifact.
-- Doctor must report auth availability without printing secrets.
+- Supports post-start text input for active sessions (`POST /runs/:id/input`).
+- Persists session state patches (for example `claudeSessionId`) through the existing runtime session store.
+- Bridges runtime approval pauses into existing approval records and resolves them back to the active runtime on approve/reject.
+- Normalizes text deltas, tool calls, tool results, approval pauses, ask-user-question pauses, completion, failure, and cancellation.
+- Stores both raw and normalized transcript artifacts with bounds:
+  - raw transcript max: 1 MiB
+  - normalized transcript max: 1 MiB
+  - normalized record max: 64 KiB
+- Unknown provider events are flood-bounded (suppression after the first 100 unknown events).
+- PTY/TUI automation is not implemented.
 
 ## Status
 
-Planned. Requires an approved live probe before implementation.
+Implemented for local bounded interactive sessions in R8. Hosted execution and PTY are not implemented.

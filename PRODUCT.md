@@ -47,9 +47,9 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/phase-6-r7-middleware-foundation`.
+Snapshot source: `agent/phase-7-r8-interactive-coding-runtimes`.
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`, plus shipped local middleware foundation APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`, plus shipped local middleware foundation APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations.
 
 The product is usable locally for one-shot agent runs, event inspection, artifact listing, cancellation, registry lookups, and durable middleware records. It is not yet a hosted gateway, debate system, SDK, dashboard, or multi-runtime production platform.
 
@@ -68,7 +68,7 @@ The repository is a TypeScript pnpm/Turborepo monorepo with these shipped packag
 - `packages/storage`: SQLite stores and filesystem artifact content storage.
 - `packages/protocol-rest`: local REST route groups.
 - `packages/protocol-sse`: SSE event formatting and bounded replay/live collection helpers.
-- `packages/adapters`: Codex, Generic HTTP, and OpenCode adapters.
+- `packages/adapters`: Claude Code, Codex, Generic HTTP, and OpenCode adapters.
 - `packages/protocol-acpx`: outbound ACP/acpx protocol framing, schemas, stdio client, and transcript helpers.
 
 ### Local Daemon
@@ -103,10 +103,22 @@ The run lifecycle supports:
 Shipped runtime modes:
 
 - `fake.deterministic`: deterministic test runtime mode for local smoke tests and contract coverage.
+- `claude_code.sdk`: local bounded interactive Claude Code runtime mode with post-start input, session-state patches, runtime approval bridging, normalized tool events, and dual transcript artifacts.
 - `codex.exec_json`: local non-interactive Codex CLI execution through `codex exec --json`.
 - `agentfield.async_rest`: daemon-configured AgentField async REST wrapper runtime with bounded health/discovery checks, async execute/status polling, normalized events, transcript artifacts, and result payload artifacts.
 - `generic_http.async_rest`: daemon-configured async REST wrapper runtime with bounded health/start/status/events/cancel/artifacts, verified-terminal cancellation, and transcript artifact capture.
 - `opencode.acp`: local OpenCode ACP subprocess runtime with bounded doctor check, one-prompt-per-run behavior, verified cancellation, and raw ACP transcript artifacts.
+
+Claude Code support includes:
+
+- `claude_code.sdk` runtime-mode inference for `runtime: "claude_code"` + `adapterType: "native"`.
+- Post-start text input with 64 KiB public body limit and core protocol guards.
+- Waiting state persistence (`waiting_for_input`, `waiting_for_approval`) through existing run/session statuses.
+- Session state patch persistence with rejection bounds for oversized/non-plain/function/symbol/secret-key patches.
+- Runtime approval bridge through existing approval records and approve/reject endpoints.
+- Raw and normalized transcript artifacts with 1 MiB caps and 64 KiB normalized-record cap.
+- Unknown provider event flood suppression after 100 unknown events.
+- Default no-spend doctor posture (`live_probe_disabled`) with opt-in bounded live probe.
 
 Codex support includes:
 
@@ -123,6 +135,10 @@ Codex support includes:
 R4 shared substrate note:
 
 - Codex and Generic HTTP adapters now share extracted runtime substrates for process/session streaming, JSONL parsing, timeout helpers, and transcript recording while preserving existing public Codex behavior.
+
+R8 Codex boundary note:
+
+- Codex remains one-shot `codex.exec_json`. Interactive mode promotion and resume/runtime-approval bridging are deferred.
 
 ### REST API
 
@@ -184,6 +200,7 @@ Completed, cancelled, failed-after-start, and timeout-after-start runs can expos
 The daemon seeds local registry records for:
 
 - test provider/runtime/model records for the fake runtime.
+- Anthropic provider and Claude Code runtime/model records for `claude_code.sdk`.
 - OpenAI provider and Codex runtime records.
 - AgentField provider/runtime/model records for `agentfield.async_rest`.
 - OpenCode provider/runtime/model records for `opencode.acp`.
@@ -202,9 +219,10 @@ The current workspace has passing package coverage for:
 - REST run and registry routes.
 - SSE formatting and bounded replay/live collection.
 - Codex catalog parsing, JSONL parsing, process adapter behavior, cancellation, transcript capture, and unsupported input.
+- Claude Code adapter checks, event mapping, input/approval resolution handling, transcript bounds, and runtime-adapter contract behavior.
 - ACP framing/correlation/redaction behavior in `@switchyard/protocol-acpx`.
 - OpenCode ACP adapter checks, event mapping, cancellation semantics, and transcript artifacts.
-- daemon smoke behavior including runtime-mode checks, OpenCode ACP run/cancel/failure/timeout artifact retrieval, registry seeding, persistence, and restart reconciliation.
+- daemon smoke behavior including runtime-mode checks (including Claude no-spend defaults and fake live-probe budget flags), OpenCode ACP run/cancel/failure/timeout artifact retrieval, registry seeding, persistence, and restart reconciliation.
 
 ## What Does Not Exist Yet
 
@@ -220,7 +238,6 @@ These are planned or designed in docs, but not shipped product:
 - SDK package.
 - CLI package.
 - Policy package beyond current contracts/ports.
-- Claude Code adapter.
 - Cursor adapter.
 - OpenClaw adapter.
 - Paperclip adapter.
@@ -237,6 +254,7 @@ These are planned or designed in docs, but not shipped product:
 - Hosted (non-local) open-ended SSE streams.
 - Interactive Codex sessions.
 - Codex approval bridging.
+- Codex interactive runtime mode promotion and session-resume runtime mode.
 - Hosted Codex execution.
 
 ## Release Roadmap
@@ -645,7 +663,7 @@ Promotion criteria:
 
 ### R8: Interactive Coding Runtimes
 
-Status: planned.
+Status: shipped.
 
 Goal: add richer coding-runtime behavior after the runtime capability and middleware foundations exist.
 
@@ -655,42 +673,43 @@ One-shot Codex exec-json is useful, but coding agents often need input, approval
 
 Release scope:
 
-- Codex interactive runtime mode decision: structured process if available, PTY only if necessary.
-- post-start input where Codex supports it or explicit unsupported semantics if it cannot.
-- session state and resume behavior where available.
-- approval bridging where exposed by the runtime.
-- Claude Code adapter using SDK or stream-json after an approved live probe.
-- tool-call and approval-pause normalization.
-- richer transcript artifacts.
-- runtime docs and local smoke commands.
+- Claude Code bounded interactive runtime mode via `claude_code.sdk`.
+- post-start input for active Claude sessions with bounded validation and explicit failure reasons.
+- session-state patch persistence with bounded rejection matrix and external session key inference.
+- approval bridging from runtime pauses into existing approvals store and resolution callback path.
+- tool-call/tool-result normalization and ask-user-question mapping into approval flow.
+- richer raw and normalized transcript artifacts with strict size limits.
+- runtime docs and no-spend-first smoke/check behavior.
+- explicit Codex one-shot preservation (`codex.exec_json`) with interactive promotion deferred.
 
 Usable after this release:
 
-- Codex interactive runtime mode if a safe structured/process/PTY strategy is selected.
-- Claude Code adapter through SDK or stream-json after an approved live probe.
-- post-start input where supported.
-- session state and transcript artifacts.
-- approval pause mapping where the runtime exposes it.
-- local coding runtimes can move beyond one-shot execution where the provider supports it.
+- Claude runtime mode `claude_code.sdk` for local bounded interactive sessions.
+- post-start input for active Claude runs and explicit unsupported semantics for non-interactive modes.
+- session state persistence and waiting-state transitions through existing run/session stores.
+- runtime approval pause mapping through normal approval records and resolution endpoints.
+- raw plus normalized transcript artifacts under bounded caps.
 
 Not included:
 
 - Cursor until local auth/keychain behavior is understood.
+- Codex interactive runtime mode promotion.
+- PTY/TUI automation.
 - unbounded autonomous multi-agent execution.
 - hosted arbitrary subprocess execution.
 
 Local verification:
 
-- interactive-capable runtime mode reports distinct capabilities from `codex.exec_json`.
-- post-start input succeeds where supported and returns clear `409` where unsupported.
-- Claude doctor reports auth/config without leaking secrets.
-- Claude or Codex interactive smoke produces normalized output and transcript artifacts.
-- approval pauses are represented consistently if the runtime emits them.
+- `claude_code.sdk` reports interactive capabilities (`run.input`, `session.state`, `approval.bridge`, normalized tools).
+- post-start input succeeds where supported and returns clear `400`/`409` bounds where unsupported or invalid.
+- Claude doctor reports install/auth state without leaking secrets and defaults to `live_probe_disabled`.
+- fake Claude smoke and adapter tests cover normalized output/events, approvals, and transcript artifacts without live prompt spend.
+- Codex remains explicitly one-shot with unsupported post-start input semantics.
 
 Promotion criteria:
 
-- no provider is promoted from one-shot to interactive unless local smoke proves input/session behavior.
-- PTY use, if any, is explicitly local-only and policy-gated.
+- no provider is promoted from one-shot to interactive unless local smoke and tests prove bounded input/session behavior.
+- PTY use remains explicitly out of scope in this phase.
 
 ### R9: Debate V1
 

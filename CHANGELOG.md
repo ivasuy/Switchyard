@@ -17,6 +17,25 @@ All notable changes to Switchyard will be documented in this file.
 - Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.
 
+## 2026-05-30 - Roadmap Release Train R8 Interactive Coding Runtimes
+
+### Added
+
+- Added `claude_code.sdk` runtime mode (`native`, `sdk`) with local conditional placement, post-start input support, session-state patch support, approval bridge capability, normalized tool-call/tool-result capability, and user-question capability.
+- Added Claude Code adapter implementation (`packages/adapters/src/claude-code/*`) with deterministic event mapping, bounded unknown-event suppression, raw and normalized transcript artifacts, and approval-resolution input support.
+- Added Claude Code fake testkit fixtures (`fake-claude-code-client`, `fake-claude-code-cli`) and contract/runtime tests for no-spend-first interactive behavior.
+- Added daemon Claude wiring/config (`SWITCHYARD_CLAUDE_CODE_COMMAND`, `SWITCHYARD_CLAUDE_CODE_LIVE_PROBE`, `SWITCHYARD_CLAUDE_CODE_MAX_BUDGET_USD`, `SWITCHYARD_CLAUDE_CODE_REQUEST_TIMEOUT_MS`) plus runtime-mode registry seeding.
+- Added runtime capability literals for interactive behavior: `run.input`, `session.state`, `session.resume`, `approval.bridge`, `tool.call.normalized`, `tool.result.normalized`, and `user.question`.
+
+### Changed
+
+- Updated `RuntimeRunnerService` to persist waiting states (`waiting_for_input`, `waiting_for_approval`), merge bounded `sessionStatePatch` updates, and bridge runtime approval pauses to the existing approval store.
+- Updated core and REST input behavior with explicit bounded failure reasons (`runtime_input_not_active`, `runtime_session_missing`, `runtime_input_empty`, `runtime_input_too_large`) and public 64 KiB request-body validation for `POST /runs/:id/input`.
+- Updated `ApprovalService` to optionally send runtime `approval_resolution` callbacks for runtime-linked approvals while preserving one-shot approval semantics.
+- Updated middleware approval routes to accept optional `answers` payloads and map runtime callback protocol failures to `409 adapter_protocol_failed`.
+- Updated Codex docs/limitations wording for R8 while preserving `codex.exec_json` one-shot behavior and explicitly deferring interactive runtime promotion.
+- Updated product/development/API adapter docs to reflect shipped R8 boundaries, no-spend doctor defaults, and optional bounded live-probe behavior.
+
 ## 2026-05-30 - Roadmap Release Train R7 Middleware Foundation
 
 ### Added

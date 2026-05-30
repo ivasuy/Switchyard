@@ -10,9 +10,9 @@ http://127.0.0.1:4545
 
 Current implementation status:
 
-- Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), and middleware foundation routes (messages, memory, evidence, context, approvals, tools).
-- Implemented runtimes: fake test runtime (`fake.deterministic`), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
-- Not implemented yet: trace endpoint, OpenAPI generation, debate orchestration, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex sessions, webhooks, per-run HTTP base URL overrides, and remote artifact URL fetching.
+- Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, and middleware foundation routes (messages, memory, evidence, context, approvals, tools).
+- Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code SDK runtime (`claude_code.sdk`), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
+- Not implemented yet: trace endpoint, OpenAPI generation, debate orchestration, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, and remote artifact URL fetching.
 
 ## Error Contract
 
@@ -166,6 +166,7 @@ curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
 `runtimeMode` is optional. If omitted, the daemon infers shipped runtime modes:
 
 - `runtime: "fake"` -> `runtimeMode: "fake.deterministic"`
+- `runtime: "claude_code"` and `adapterType: "native"` -> `runtimeMode: "claude_code.sdk"`
 - `runtime: "codex"` and `adapterType: "process"` -> `runtimeMode: "codex.exec_json"`
 - `runtime: "agentfield"` and `adapterType: "http"` -> `runtimeMode: "agentfield.async_rest"`
 - `runtime: "generic_http"` and `adapterType: "http"` -> `runtimeMode: "generic_http.async_rest"`
@@ -371,6 +372,8 @@ curl -s "http://127.0.0.1:4545/runtime-modes?provider=openai&availability=availa
 curl -s "http://127.0.0.1:4545/runtime-modes/runtime_mode_codex_exec_json"
 curl -s "http://127.0.0.1:4545/runtime-modes/codex.exec_json"
 curl -s -X POST "http://127.0.0.1:4545/runtime-modes/codex.exec_json/check"
+curl -s "http://127.0.0.1:4545/runtime-modes/claude_code.sdk"
+curl -s -X POST "http://127.0.0.1:4545/runtime-modes/claude_code.sdk/check"
 curl -s "http://127.0.0.1:4545/runtime-modes/opencode.acp"
 curl -s -X POST "http://127.0.0.1:4545/runtime-modes/opencode.acp/check"
 curl -s "http://127.0.0.1:4545/doctor"
@@ -388,6 +391,11 @@ OpenCode check behavior:
 
 - runs `opencode --version`, ACP `initialize`, and ACP `session/new`.
 - does not send ACP `session/prompt` (no model-budget spend during doctor checks).
+
+Claude check behavior:
+
+- default active check is no-spend-first and reports `reasonCode: live_probe_disabled`.
+- optional live probe is disabled by default and requires explicit daemon env enablement.
 
 Example `GET /runtime-modes?provider=openai` response:
 
@@ -591,9 +599,50 @@ curl -s -X POST "http://127.0.0.1:4545/runs/$RUN_ID/input" \
   -d '{"text":"continue"}'
 ```
 
-Success returns `{"accepted":true}`. `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp` return `409 adapter_protocol_failed` for post-start input.
+Success returns `{"accepted":true}`.
+
+`POST /runs/:id/input` request body contract:
+
+- object with required non-empty `text` string.
+- max size: 65536 bytes (64 KiB UTF-8).
+- invalid shape/empty/oversized body returns `400 invalid_input` before adapter dispatch.
+
+Mode behavior:
+
+- `claude_code.sdk`: supports post-start input while run/session are active.
+- `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`: return `409 adapter_protocol_failed` for post-start input.
+
+Core protocol safeguards (when REST validation is bypassed) include `runtime_input_not_active`, `runtime_session_missing`, `runtime_input_empty`, and `runtime_input_too_large`.
 
 For OpenCode input failures, response details include `reasonCode: opencode_input_unsupported`.
+
+## Resolve Runtime Approval Pauses
+
+Approvals continue to use the R7 approval store and lifecycle endpoints.
+
+Approve:
+
+```bash
+APPROVAL_ID=approval_replace_me
+curl -s -X POST "http://127.0.0.1:4545/approvals/$APPROVAL_ID/approve" \
+  -H 'content-type: application/json' \
+  -d '{"actor":"local-user","reason":"approved by operator","answers":{"selection":"continue"}}'
+```
+
+Reject:
+
+```bash
+APPROVAL_ID=approval_replace_me
+curl -s -X POST "http://127.0.0.1:4545/approvals/$APPROVAL_ID/reject" \
+  -H 'content-type: application/json' \
+  -d '{"actor":"local-user","reason":"unsafe tool request","answers":{"selection":"deny"}}'
+```
+
+Notes:
+
+- `answers` is optional and forwarded for runtime-linked approvals.
+- If runtime callback delivery fails with an adapter protocol reason, REST returns `409 adapter_protocol_failed` with `reasonCode` details.
+- Approval records remain one-shot: resolving an already-resolved approval returns `409 approval_not_pending`.
 
 ## Cancel Run
 

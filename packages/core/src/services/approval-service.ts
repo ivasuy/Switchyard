@@ -29,6 +29,7 @@ export interface CreateApprovalInput {
 export interface ResolveApprovalInput {
   actor?: string | undefined;
   reason?: string | undefined;
+  answers?: Record<string, unknown> | undefined;
 }
 
 export interface ResolveApprovalResult {
@@ -41,6 +42,15 @@ export interface ApprovalServiceDependencies {
   runs: RunStore;
   events: EventStore;
   toolRouter?: ToolRouter;
+  runtimeResolutionSender?: (input: {
+    type: "approval_resolution";
+    approvalId: string;
+    runId: string;
+    runtimeApprovalToken: string;
+    decision: "approved" | "rejected";
+    message: string;
+    answers?: Record<string, unknown>;
+  }) => Promise<void>;
   eventBus?: EventBus;
   logger?: RuntimeLogger;
 }
@@ -116,6 +126,9 @@ export class ApprovalService {
       if (input.reason && input.reason.trim().length > 0) {
         resolution.reason = input.reason.trim();
       }
+      if (input.answers && Object.keys(input.answers).length > 0) {
+        resolution.answers = redactSecrets(input.answers);
+      }
 
       const now = new Date().toISOString();
       const nextApproval: Approval = {
@@ -139,6 +152,45 @@ export class ApprovalService {
         approvalId: persisted.id,
         status: persisted.status
       }));
+
+      if (this.deps.runtimeResolutionSender) {
+        const runtimeApprovalToken = typeof persisted.payload["runtimeApprovalToken"] === "string"
+          ? persisted.payload["runtimeApprovalToken"]
+          : undefined;
+        const runId = typeof persisted.runId === "string" ? persisted.runId : undefined;
+        if (runtimeApprovalToken && runId) {
+          const resolutionPayload: {
+            type: "approval_resolution";
+            approvalId: string;
+            runId: string;
+            runtimeApprovalToken: string;
+            decision: "approved" | "rejected";
+            message: string;
+            answers?: Record<string, unknown>;
+          } = {
+            type: "approval_resolution",
+            approvalId: persisted.id,
+            runId,
+            runtimeApprovalToken,
+            decision: status,
+            message: input.reason?.trim().length
+              ? input.reason.trim()
+              : `${status} by ${input.actor?.trim() || "local-user"}`
+          };
+          const responseFormat = typeof persisted.payload["responseFormat"] === "string"
+            ? persisted.payload["responseFormat"]
+            : undefined;
+          if (responseFormat === "ask_user_question" && input.answers && Object.keys(input.answers).length > 0) {
+            resolutionPayload.answers = redactSecrets(input.answers);
+          }
+          await this.deps.runtimeResolutionSender(resolutionPayload);
+          this.deps.logger?.info("runtime.approval_resolution.sent", {
+            approvalId: persisted.id,
+            runId,
+            decision: status
+          });
+        }
+      }
 
       let invocation: ToolInvocation | null = null;
       if (this.deps.toolRouter) {

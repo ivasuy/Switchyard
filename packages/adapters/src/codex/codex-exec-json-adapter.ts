@@ -74,13 +74,13 @@ export class CodexExecJsonAdapter implements RuntimeAdapter {
     ],
     limitations: [
       { code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." },
-      { code: "local_only", message: "This mode runs a local Codex CLI process and is not hosted-safe in R3." },
-      { code: "no_approval_bridge", message: "Approval bridge integration is not shipped for codex.exec_json in R3." },
-      { code: "no_session_resume", message: "Session resume is not shipped for codex.exec_json in R3." }
+      { code: "local_only", message: "This mode runs a local Codex CLI process and is not hosted-safe in R8." },
+      { code: "no_approval_bridge", message: "Approval bridge integration is not shipped for codex.exec_json in R8." },
+      { code: "no_session_resume", message: "Session resume remains deferred for codex.exec_json in R8." }
     ],
     placement: {
       local: { support: "supported", reason: "Requires a PATH-reachable local codex binary and local workspace." },
-      hosted: { support: "unsupported", reason: "Hosted subprocess execution is not shipped in R3." },
+      hosted: { support: "unsupported", reason: "Hosted subprocess execution is not shipped in R8." },
       connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
     },
     docsPath: "docs/development/adapters/CODEX.md",

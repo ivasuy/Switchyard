@@ -381,6 +381,57 @@ describe("run routes", () => {
     });
   });
 
+  it("rejects invalid run input payload shapes and size before adapter dispatch", async () => {
+    const harness = createRouteHarness();
+    const created = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Input validation run")
+    });
+    const runId = created.json().run.id as string;
+    const sendSpy = vi.spyOn(harness.runService, "sendInput");
+
+    const invalidBodies = [
+      "not-an-object",
+      [],
+      {},
+      { text: 123 },
+      { text: "   " },
+      { text: "x".repeat(65537) }
+    ];
+    for (const body of invalidBodies) {
+      const response = await harness.app.inject({
+        method: "POST",
+        url: `/runs/${runId}/input`,
+        headers: { "content-type": "application/json" },
+        payload: body
+      });
+      expect(response.statusCode).toBe(400);
+    }
+
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it("infers claude_code runtime mode when omitted", async () => {
+    const harness = createRouteHarness();
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=0",
+      payload: {
+        runtime: "claude_code",
+        provider: "anthropic",
+        model: "claude-code-default",
+        adapterType: "native",
+        cwd: "/repo",
+        task: "infer claude mode"
+      }
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json().run.runtimeMode).toBe("claude_code.sdk");
+  });
+
   it("infers runtimeMode for fake runs when omitted", async () => {
     const harness = createRouteHarness();
     const response = await harness.app.inject({
