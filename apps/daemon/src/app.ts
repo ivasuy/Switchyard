@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs";
 import {
   AgentFieldAsyncRestAdapter,
   ClaudeCodeAdapter,
+  createClaudeCodeCliClient,
+  type ClaudeCodeCliProcessFactory,
   CodexExecJsonAdapter,
   GenericHttpAsyncRestAdapter,
   OpenCodeAcpAdapter,
@@ -125,6 +127,7 @@ interface CreateDaemonAppOptions {
   checkTimeoutMs?: number;
   maxDiagnosticBytes?: number;
   claudeClient?: ConstructorParameters<typeof ClaudeCodeAdapter>[0]["client"];
+  claudeProcessFactory?: ClaudeCodeCliProcessFactory;
   claudeVersionProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["probeVersion"];
   claudeAuthProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["probeAuth"];
   claudeLiveProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["runLiveProbe"];
@@ -239,7 +242,12 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   }
   const opencodeAdapter = new OpenCodeAcpAdapter(opencodeAdapterOptions);
   const claudeAdapter = new ClaudeCodeAdapter({
-    client: options.claudeClient ?? createUnavailableClaudeClient(),
+    client: options.claudeClient ?? createClaudeCodeCliClient({
+      command: claudeCodeConfig.command,
+      permissionMode: "read_only",
+      disabledTools: ["Bash", "WebFetch", "WebSearch"],
+      ...(options.claudeProcessFactory ? { processFactory: options.claudeProcessFactory } : {})
+    }),
     command: claudeCodeConfig.command,
     liveProbe: claudeCodeConfig.liveProbe,
     maxBudgetUsd: claudeCodeConfig.maxBudgetUsd,
@@ -976,16 +984,6 @@ function sanitizeMessage(message: string, maxBytes: number): string {
 
 function toCodexModelId(slug: string): string {
   return `model_${slug.replace(/[.-]/g, "_")}`;
-}
-
-function createUnavailableClaudeClient(): ConstructorParameters<typeof ClaudeCodeAdapter>[0]["client"] {
-  return {
-    async start() {
-      throw new AdapterProtocolError("Claude Code client is not configured for this daemon instance.", {
-        reasonCode: "claude_client_unconfigured"
-      });
-    }
-  };
 }
 
 async function updateProviderRecord(

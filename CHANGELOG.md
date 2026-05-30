@@ -33,6 +33,8 @@ All notable changes to Switchyard will be documented in this file.
 - Updated core and REST input behavior with explicit bounded failure reasons (`runtime_input_not_active`, `runtime_session_missing`, `runtime_input_empty`, `runtime_input_too_large`) and public 64 KiB request-body validation for `POST /runs/:id/input`.
 - Updated `ApprovalService` to optionally send runtime `approval_resolution` callbacks for runtime-linked approvals while preserving one-shot approval semantics.
 - Updated middleware approval routes to accept optional `answers` payloads and map runtime callback protocol failures to `409 adapter_protocol_failed`.
+- Updated daemon default Claude runtime client wiring to a structured local stream-json CLI path instead of an always-unconfigured placeholder client.
+- Updated `claude_code.sdk` runtime claims to remove `session.resume`; session resume remains deferred.
 - Updated Codex docs/limitations wording for R8 while preserving `codex.exec_json` one-shot behavior and explicitly deferring interactive runtime promotion.
 - Updated product/development/API adapter docs to reflect shipped R8 boundaries, no-spend doctor defaults, and optional bounded live-probe behavior.
 

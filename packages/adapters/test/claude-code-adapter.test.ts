@@ -31,6 +31,7 @@ describe("ClaudeCodeAdapter", () => {
       "tool.result.normalized",
       "user.question"
     ]));
+    expect(adapter.manifest.capabilities).not.toContain("session.resume");
     expect(adapter.manifest.placement.hosted.support).toBe("unsupported");
   });
 

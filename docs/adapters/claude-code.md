@@ -6,7 +6,7 @@ Claude Code ships in R8 as the first bounded interactive coding runtime through 
 
 ## Preferred Protocol
 
-- Primary: structured client port behind `claude_code.sdk` (native adapter type).
+- Primary: structured client port behind `claude_code.sdk` (native adapter type). Current daemon default path is `claude -p` with `stream-json` input/output.
 - Fallback: no PTY fallback is shipped in R8.
 - Last resort: PTY remains out of scope for this release.
 
@@ -20,6 +20,7 @@ Claude Code ships in R8 as the first bounded interactive coding runtime through 
 ## Implementation Notes
 
 - Supports post-start text input for active sessions (`POST /runs/:id/input`).
+- Session resume is not shipped for `claude_code.sdk` in R8.
 - Persists session state patches (for example `claudeSessionId`) through the existing runtime session store.
 - Bridges runtime approval pauses into existing approval records and resolves them back to the active runtime on approve/reject.
 - Normalizes text deltas, tool calls, tool results, approval pauses, ask-user-question pauses, completion, failure, and cancellation.

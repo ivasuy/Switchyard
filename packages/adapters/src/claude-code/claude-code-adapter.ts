@@ -18,9 +18,9 @@ import {
 } from "./types.js";
 import { mapClaudeCodeEventToSwitchyardEvent } from "./claude-code-event-mapper.js";
 import { checkClaudeCodeAvailability } from "./claude-code-doctor.js";
+import { finalizeTranscript, serializeNormalizedRecord } from "./transcript-bounds.js";
 
 const MAX_TRANSCRIPT_BYTES = 1024 * 1024;
-const MAX_NORMALIZED_RECORD_BYTES = 64 * 1024;
 
 interface StoredClaudeSession {
   startedAt: string;
@@ -63,7 +63,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       "run.cancel",
       "run.timeout",
       "session.state",
-      "session.resume",
       "approval.bridge",
       "event.normalized",
       "event.streaming",
@@ -76,6 +75,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     ],
     limitations: [
       { code: "local_only", message: "claude_code.sdk is local-only in R8." },
+      { code: "no_session_resume", message: "Session resume is not shipped for claude_code.sdk in R8." },
       { code: "user_question_text_response_only", message: "AskUserQuestion answers default to text-only reason payloads when structured answers are absent." }
     ],
     placement: {
@@ -358,44 +358,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasDangerousBypass(metadata: Record<string, unknown>): boolean {
   const keys = ["dangerously-skip-permissions", "dangerouslySkipPermissions"];
   return keys.some((key) => metadata[key] === true);
-}
-
-function finalizeTranscript(lines: string[], maxBytes: number): string {
-  let bytes = 0;
-  const out: string[] = [];
-  let omittedBytes = 0;
-
-  for (const line of lines) {
-    const lineBytes = Buffer.byteLength(line, "utf8");
-    if (bytes + lineBytes <= maxBytes) {
-      out.push(line);
-      bytes += lineBytes;
-      continue;
-    }
-    omittedBytes += lineBytes;
-  }
-
-  if (omittedBytes > 0) {
-    out.push(`${JSON.stringify({ type: "transcript.truncated", maxBytes, omittedBytes, redacted: true })}\n`);
-  }
-
-  const content = out.join("");
-  if (Buffer.byteLength(content, "utf8") <= maxBytes) {
-    return content;
-  }
-  return content.slice(0, maxBytes);
-}
-
-function serializeNormalizedRecord(record: Record<string, unknown>): string {
-  const serialized = JSON.stringify(redactSecrets(record));
-  const bytes = Buffer.byteLength(serialized, "utf8");
-  if (bytes <= MAX_NORMALIZED_RECORD_BYTES) {
-    return serialized;
-  }
-  return JSON.stringify({
-    type: "transcript.record_truncated",
-    eventType: typeof record["type"] === "string" ? record["type"] : "unknown",
-    originalBytes: bytes,
-    redacted: true
-  });
 }

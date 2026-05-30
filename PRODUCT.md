@@ -103,7 +103,7 @@ The run lifecycle supports:
 Shipped runtime modes:
 
 - `fake.deterministic`: deterministic test runtime mode for local smoke tests and contract coverage.
-- `claude_code.sdk`: local bounded interactive Claude Code runtime mode with post-start input, session-state patches, runtime approval bridging, normalized tool events, and dual transcript artifacts.
+- `claude_code.sdk`: local bounded interactive Claude Code runtime mode with post-start input, session-state patches, runtime approval bridging, normalized tool events, and dual transcript artifacts (daemon default path uses structured `claude -p` stream-json IO).
 - `codex.exec_json`: local non-interactive Codex CLI execution through `codex exec --json`.
 - `agentfield.async_rest`: daemon-configured AgentField async REST wrapper runtime with bounded health/discovery checks, async execute/status polling, normalized events, transcript artifacts, and result payload artifacts.
 - `generic_http.async_rest`: daemon-configured async REST wrapper runtime with bounded health/start/status/events/cancel/artifacts, verified-terminal cancellation, and transcript artifact capture.
@@ -116,6 +116,7 @@ Claude Code support includes:
 - Waiting state persistence (`waiting_for_input`, `waiting_for_approval`) through existing run/session statuses.
 - Session state patch persistence with rejection bounds for oversized/non-plain/function/symbol/secret-key patches.
 - Runtime approval bridge through existing approval records and approve/reject endpoints.
+- Session resume is not shipped for `claude_code.sdk` in R8.
 - Raw and normalized transcript artifacts with 1 MiB caps and 64 KiB normalized-record cap.
 - Unknown provider event flood suppression after 100 unknown events.
 - Default no-spend doctor posture (`live_probe_disabled`) with opt-in bounded live probe.

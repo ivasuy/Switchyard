@@ -291,7 +291,6 @@ describe("Switchyard contracts", () => {
         "run.cancel",
         "run.timeout",
         "session.state",
-        "session.resume",
         "approval.bridge",
         "event.normalized",
         "event.streaming",
@@ -332,6 +331,7 @@ describe("Switchyard contracts", () => {
     expect(mode.capabilities).toContain("tool.call.normalized");
     expect(mode.capabilities).toContain("tool.result.normalized");
     expect(mode.capabilities).toContain("user.question");
+    expect(mode.capabilities).not.toContain("session.resume");
   });
 
   it("parses generic_http.async_rest runtime mode record", () => {

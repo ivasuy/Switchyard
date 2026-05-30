@@ -11,7 +11,7 @@ http://127.0.0.1:4545
 Current implementation status:
 
 - Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, and middleware foundation routes (messages, memory, evidence, context, approvals, tools).
-- Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code SDK runtime (`claude_code.sdk`), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
+- Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Not implemented yet: trace endpoint, OpenAPI generation, debate orchestration, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, and remote artifact URL fetching.
 
 ## Error Contract

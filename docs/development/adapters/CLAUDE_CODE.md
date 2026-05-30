@@ -8,6 +8,7 @@ Implemented:
 
 - Runtime mode slug: `claude_code.sdk`.
 - Adapter type: `native` (`sdk` kind).
+- Runtime client path in daemon defaults to `claude -p` with `--output-format stream-json --input-format stream-json`.
 - Local-only bounded interactive session behavior.
 - Post-start text input for active runs.
 - Session state patch persistence (`claudeSessionId`) through existing runtime session state.
@@ -19,6 +20,7 @@ Not implemented yet:
 
 - PTY or TUI automation.
 - Hosted Claude runtime execution.
+- Session resume for `claude_code.sdk`.
 - Unbounded live-prompt checks in doctor/smoke/CI.
 
 ## Safety Defaults

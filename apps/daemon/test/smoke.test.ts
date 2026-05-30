@@ -6,6 +6,7 @@ import { type FastifyInstance } from "fastify";
 import type { CodexCatalogProbe } from "@switchyard/adapters";
 import {
   createFakeClaudeCodeClient,
+  createFakeClaudeCodeCliProcessFactory,
   createFakeClaudeLiveProbe,
   createFakeAcpProcessFactory,
   type FakeAcpRuntimeStats,
@@ -152,6 +153,41 @@ describe("daemon app", () => {
       } catch {
         // Ensure test cleanup continues if close fails.
       }
+    }
+  });
+
+  it("uses the default Claude CLI client path when no claudeClient override is provided", async () => {
+    const fake = createFakeClaudeCodeCliProcessFactory();
+    const app = await createDaemonApp(undefined, {
+      codexProbe: unavailableCodexProbe,
+      claudeProcessFactory: fake.processFactory
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "claude_code",
+          provider: "anthropic",
+          model: "claude-code-default",
+          adapterType: "native",
+          cwd: "/repo",
+          task: "Return one short sentence."
+        }
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json().run.status).toBe("completed");
+      expect(fake.state.command).toBe("claude");
+      expect(fake.state.args).toEqual(expect.arrayContaining([
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json"
+      ]));
+    } finally {
+      await app.close();
     }
   });
 
