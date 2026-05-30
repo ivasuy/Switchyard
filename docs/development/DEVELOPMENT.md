@@ -521,7 +521,10 @@ Expected: `409 placement_denied` (or `400 invalid_input` if runtimeMode mapping 
 R10 storage/queue scope in this shipped slice:
 
 - Hosted/hybrid verification defaults to deterministic memory substitutes.
-- Postgres/Redis/BullMQ/S3-shaped integrations are interface boundaries here, not production backing stores.
+- `SWITCHYARD_POSTGRES_URL` opts `apps/server` and `apps/worker` into real Postgres stores.
+- `SWITCHYARD_REDIS_URL` opts `apps/server` and `apps/worker` into Redis/BullMQ queueing. `SWITCHYARD_QUEUE_NAME` overrides the queue name.
+- `SWITCHYARD_OBJECT_STORE_DIR` opts into durable filesystem-backed object-compatible artifact content storage.
+- S3/R2 network object-store client wiring is not shipped in R10.
 
 R10 non-goals reminder:
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryRunQueue } from "../src/index.js";
+import { BullMqRunQueue, MemoryRunQueue } from "../src/index.js";
 
 describe("MemoryRunQueue", () => {
   it("enqueues, claims, retries, and acks jobs", async () => {
@@ -41,5 +41,30 @@ describe("MemoryRunQueue", () => {
       return;
     }
     expect(process.env["SWITCHYARD_TEST_REDIS_URL"]).toBeTruthy();
+  });
+
+  it("uses BullMQ when SWITCHYARD_TEST_REDIS_URL is configured", async () => {
+    const redisUrl = process.env["SWITCHYARD_TEST_REDIS_URL"];
+    if (!redisUrl) {
+      expect("SKIPPED_SWITCHYARD_TEST_REDIS_URL_UNSET").toContain("SKIPPED");
+      return;
+    }
+
+    const queue = new BullMqRunQueue({
+      redisUrl,
+      queueName: `switchyard-test-${crypto.randomUUID()}`
+    });
+    try {
+      const enqueued = await queue.enqueue({
+        runId: "run_redis_1",
+        placement: "hosted",
+        runtimeMode: "fake.deterministic"
+      });
+      const claimed = await queue.claim();
+      expect(claimed?.payload.jobId).toBe(enqueued.jobId);
+      await queue.ack(enqueued.jobId);
+    } finally {
+      await queue.close();
+    }
   });
 });

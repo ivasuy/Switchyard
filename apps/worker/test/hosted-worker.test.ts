@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { MemoryRunQueue } from "@switchyard/queue";
 import { InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
 import { createHostedWorker } from "../src/worker.js";
+import { loadWorkerConfig } from "../src/config.js";
 
 describe("hosted worker app", () => {
   it("processes queued hosted fake job", async () => {
@@ -41,5 +42,19 @@ describe("hosted worker app", () => {
     expect(source).not.toContain("OpenCodeAcpAdapter");
     expect(source).not.toContain("GenericHttpAsyncRestAdapter");
     expect(source).not.toContain("AgentFieldAsyncRestAdapter");
+  });
+
+  it("parses opt-in hosted infrastructure config", () => {
+    const config = loadWorkerConfig({
+      SWITCHYARD_POSTGRES_URL: "postgres://user:pass@localhost:5432/switchyard",
+      SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
+      SWITCHYARD_QUEUE_NAME: "switchyard-worker",
+      SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-worker-objects"
+    });
+
+    expect(config.postgresUrl).toContain("postgres://");
+    expect(config.redisUrl).toBe("redis://localhost:6379/0");
+    expect(config.queueName).toBe("switchyard-worker");
+    expect(config.objectStoreDir).toBe("/tmp/switchyard-worker-objects");
   });
 });

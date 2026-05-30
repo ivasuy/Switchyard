@@ -122,6 +122,37 @@ describe("sync services", () => {
     })).rejects.toMatchObject({ code: "event_sync_conflict" });
   });
 
+  it("rejects event sync for pending assignments", async () => {
+    const assignments = new MemoryAssignments();
+    await assignments.create({ id: "assignment_pending", runId: "run_pending", nodeId: "node_1", status: "pending", retryCount: 0, lastEventSequence: 0, createdAt: "2026-05-30T00:00:00.000Z" });
+    const svc = new EventSyncService({ assignments: assignments as any, events: new InMemoryEventStore() });
+
+    await expect(svc.appendBatch("node_1", "assignment_pending", {
+      cursor: 0,
+      events: [
+        {
+          id: "event_pending",
+          type: "runtime.output",
+          runId: "run_pending",
+          sequence: 1,
+          payload: { text: "should reject" },
+          createdAt: "2026-05-30T00:00:00.000Z"
+        }
+      ]
+    })).rejects.toMatchObject({ code: "assignment_not_found" });
+  });
+
+  it("rejects event sync for terminal assignments and wrong owners", async () => {
+    const assignments = new MemoryAssignments();
+    await assignments.create({ id: "assignment_done", runId: "run_done", nodeId: "node_1", status: "completed", retryCount: 0, lastEventSequence: 0, createdAt: "2026-05-30T00:00:00.000Z" });
+    const svc = new EventSyncService({ assignments: assignments as any, events: new InMemoryEventStore() });
+
+    await expect(svc.appendBatch("node_1", "assignment_done", { cursor: 0, events: [] }))
+      .rejects.toMatchObject({ code: "assignment_not_found" });
+    await expect(svc.appendBatch("node_other", "assignment_done", { cursor: 0, events: [] }))
+      .rejects.toMatchObject({ code: "assignment_not_found" });
+  });
+
   it("accepts artifact manifest and content", async () => {
     const assignments = new MemoryAssignments();
     await assignments.create({ id: "assignment_2", runId: "run_2", nodeId: "node_1", status: "claimed", retryCount: 0, lastEventSequence: 0, createdAt: "2026-05-30T00:00:00.000Z" });

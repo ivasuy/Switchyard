@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import {
   MemoryArtifactContentStore,
   ObjectArtifactContentStore,
+  LocalObjectArtifactContentStore,
   PostgresAssignmentStore,
   PostgresArtifactStore,
   PostgresEventStore,
@@ -50,6 +51,7 @@ describe("storage package", () => {
     expect(typeof PostgresAssignmentStore).toBe("function");
     expect(typeof MemoryArtifactContentStore).toBe("function");
     expect(typeof ObjectArtifactContentStore).toBe("function");
+    expect(typeof LocalObjectArtifactContentStore).toBe("function");
   });
 
   it("creates middleware tables and indexes in fresh sqlite databases", () => {

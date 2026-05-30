@@ -10,6 +10,16 @@ import {
   RunService,
   RuntimeCapabilityService,
   RuntimeRunnerService,
+  type ArtifactContentStore,
+  type ArtifactStore,
+  type EventStore,
+  type NodeAssignmentStore,
+  type NodeStore,
+  type PlacementStore,
+  type RegistryStore,
+  type RunQueuePort,
+  type RunStore,
+  type SessionStore,
   type RuntimeAdapter
 } from "@switchyard/core";
 import {
@@ -19,36 +29,55 @@ import {
   registerRunRoutes
 } from "@switchyard/protocol-rest";
 import { registerNodeRoutes } from "@switchyard/protocol-node";
-import { MemoryRunQueue } from "@switchyard/queue";
+import { BullMqRunQueue, MemoryRunQueue } from "@switchyard/queue";
 import {
+  ensurePostgresSchema,
+  LocalObjectArtifactContentStore,
   MemoryArtifactContentStore,
   PostgresAssignmentStore,
-  PostgresNodeStore
+  PostgresArtifactStore,
+  PostgresEventStore,
+  PostgresNodeStore,
+  PostgresPlacementStore,
+  PostgresRegistryStore,
+  PostgresRunStore,
+  PostgresSessionStore,
+  openPostgresDatabase
 } from "@switchyard/storage";
-import {
-  FakeRuntimeAdapter,
-  InMemoryArtifactStore,
-  InMemoryEventStore,
-  InMemoryRegistryStore,
-  InMemoryRunStore,
-  InMemorySessionStore
-} from "@switchyard/testkit";
+import { FakeRuntimeAdapter } from "@switchyard/testkit";
 import type { ServerConfig } from "./config.js";
 
 export async function createServerApp(config: ServerConfig) {
   const app = Fastify({ logger: false });
   registerErrorEnvelope(app);
 
-  const runs = new InMemoryRunStore();
-  const events = new InMemoryEventStore();
-  const sessions = new InMemorySessionStore();
-  const artifacts = new InMemoryArtifactStore();
-  const registry = new InMemoryRegistryStore();
-  const queue = new MemoryRunQueue();
+  const postgres = config.postgresUrl ? openPostgresDatabase(config.postgresUrl) : undefined;
+  if (postgres) {
+    await ensurePostgresSchema(postgres);
+    app.addHook("onClose", async () => {
+      await postgres.close();
+    });
+  }
+
+  const queue: RunQueuePort & { close?: () => Promise<void> } = config.redisUrl
+    ? new BullMqRunQueue({ redisUrl: config.redisUrl, queueName: config.queueName ?? "switchyard-hosted-runs" })
+    : new MemoryRunQueue();
+  app.addHook("onClose", async () => {
+    await queue.close?.();
+  });
+
+  const runs: RunStore = new PostgresRunStore(postgres);
+  const events: EventStore = new PostgresEventStore(postgres);
+  const sessions: SessionStore = new PostgresSessionStore(postgres);
+  const artifacts: ArtifactStore = new PostgresArtifactStore(postgres);
+  const registry: RegistryStore = new PostgresRegistryStore(postgres);
   const eventBus = new EventBus();
-  const nodes = new PostgresNodeStore();
-  const assignments = new PostgresAssignmentStore();
-  const artifactContent = new MemoryArtifactContentStore();
+  const placements: PlacementStore = new PostgresPlacementStore(postgres);
+  const nodes: NodeStore = new PostgresNodeStore(postgres);
+  const assignments: NodeAssignmentStore = new PostgresAssignmentStore(postgres);
+  const artifactContent: ArtifactContentStore = config.objectStoreDir
+    ? new LocalObjectArtifactContentStore(config.objectStoreDir)
+    : new MemoryArtifactContentStore();
 
   const fakeAdapter = new FakeRuntimeAdapter();
   const adapters = new Map<string, RuntimeAdapter>([["fake", fakeAdapter]]);
@@ -90,12 +119,7 @@ export async function createServerApp(config: ServerConfig) {
     runService,
     runs,
     events,
-    placements: {
-      async create(record) { return record; },
-      async get() { return undefined; },
-      async update(record) { return record; },
-      async listByRun() { return []; }
-    },
+    placements,
     queue,
     assignments,
     placementService,
@@ -208,7 +232,7 @@ export async function createServerApp(config: ServerConfig) {
   return app;
 }
 
-async function seedFakeRegistry(registry: InMemoryRegistryStore): Promise<void> {
+async function seedFakeRegistry(registry: RegistryStore): Promise<void> {
   if (!(await registry.getProvider("provider_test"))) {
     await registry.createProvider({ id: "provider_test", name: "Test Provider", authMode: "none", status: "available" });
   }

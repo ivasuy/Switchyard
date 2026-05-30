@@ -51,7 +51,7 @@ Snapshot source: `agent/phase-7-r8-interactive-coding-runtimes`.
 
 Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`, plus shipped local middleware foundation APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations.
 
-The product is usable locally for one-shot agent runs, fake deterministic debate execution, event inspection, artifact listing, cancellation, registry lookups, and durable middleware records. It is not yet a hosted gateway, SDK, dashboard, or multi-runtime production platform.
+The product is usable locally for one-shot agent runs, fake deterministic debate execution, event inspection, artifact listing, cancellation, registry lookups, durable middleware records, and the R10 hosted-like fake/hybrid node slice. It is not yet an SDK, dashboard, or multi-runtime production platform.
 
 Important runtime wording: `codex.exec_json` exists as a one-shot non-interactive runtime mode. A full interactive Codex runtime is not shipped yet.
 
@@ -232,9 +232,7 @@ These are planned or designed in docs, but not shipped product:
 - Production-grade hosted server deployment.
 - Production-grade hosted worker deployment.
 - Production-grade hybrid local node deployment.
-- Real Postgres-backed storage (R10 ships Postgres-shaped in-memory substitutes).
-- Real Redis/BullMQ queue backing (R10 ships deterministic in-process queue behavior).
-- Real S3/R2 object storage backing (R10 ships memory/object-shape substitutes).
+- S3/R2 network object storage backing. R10 ships memory and filesystem-backed object-compatible artifact stores.
 - WebSocket protocol package.
 - SDK package.
 - CLI package.
@@ -960,8 +958,9 @@ Shipped in this phase:
 - `apps/worker` hosted worker path with strict fake-only runtime validation (`fake.deterministic`).
 - `apps/node` connected local-node registration/heartbeat/claim/sync loop.
 - Placement decisions across `local`, `hosted`, and `connected_local_node` with inspectable denial reasons.
-- Queue abstraction with deterministic memory default and BullMQ/Redis-shaped interface package.
-- Postgres/object-shaped hosted metadata and artifact-content interfaces using deterministic memory substitutes in this slice.
+- Queue abstraction with deterministic memory default and opt-in Redis/BullMQ-backed queue when `SWITCHYARD_REDIS_URL` is configured.
+- Postgres metadata stores for runs/events/sessions/artifacts/registry/placement/nodes/assignments when `SWITCHYARD_POSTGRES_URL` is configured; deterministic in-memory substitutes remain the default.
+- Memory artifact-content store by default and filesystem-backed object-compatible artifact store when `SWITCHYARD_OBJECT_STORE_DIR` is configured.
 - Node protocol routes and client.
 
 Explicitly not shipped in R10:
@@ -971,4 +970,4 @@ Explicitly not shipped in R10:
 - Hosted debate participant runtimes or model-judging workflows.
 - SDK/CLI/TUI/dashboard packaging changes beyond interface boundaries.
 - Enterprise auth/billing/tenant controls.
-- Real Postgres/Redis/S3-backed production persistence and queue wiring.
+- S3/R2 network object-store client wiring.

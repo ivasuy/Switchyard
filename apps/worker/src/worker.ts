@@ -1,13 +1,27 @@
-import { HostedWorkerService, RunService, RuntimeRunnerService, type RuntimeAdapter } from "@switchyard/core";
-import { MemoryRunQueue } from "@switchyard/queue";
-import { MemoryArtifactContentStore } from "@switchyard/storage";
 import {
-  FakeRuntimeAdapter,
-  InMemoryArtifactStore,
-  InMemoryEventStore,
-  InMemoryRunStore,
-  InMemorySessionStore
-} from "@switchyard/testkit";
+  HostedWorkerService,
+  RunService,
+  RuntimeRunnerService,
+  type ArtifactContentStore,
+  type ArtifactStore,
+  type EventStore,
+  type RunQueuePort,
+  type RunStore,
+  type SessionStore,
+  type RuntimeAdapter
+} from "@switchyard/core";
+import { BullMqRunQueue, MemoryRunQueue } from "@switchyard/queue";
+import {
+  ensurePostgresSchema,
+  LocalObjectArtifactContentStore,
+  MemoryArtifactContentStore,
+  PostgresArtifactStore,
+  PostgresEventStore,
+  PostgresRunStore,
+  PostgresSessionStore,
+  openPostgresDatabase
+} from "@switchyard/storage";
+import { FakeRuntimeAdapter, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
 import type { WorkerConfig } from "./config.js";
 
 export interface HostedWorkerApp {
@@ -20,12 +34,23 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   runs?: InMemoryRunStore;
   events?: InMemoryEventStore;
 }): HostedWorkerApp {
-  const queue = deps?.queue ?? new MemoryRunQueue();
-  const runs = deps?.runs ?? new InMemoryRunStore();
-  const events = deps?.events ?? new InMemoryEventStore();
-  const sessions = new InMemorySessionStore();
-  const artifacts = new InMemoryArtifactStore();
-  const artifactContent = new MemoryArtifactContentStore();
+  const postgres = config.postgresUrl ? openPostgresDatabase(config.postgresUrl) : undefined;
+  let postgresReady: Promise<void> | undefined;
+  if (postgres) {
+    postgresReady = ensurePostgresSchema(postgres);
+  }
+
+  const queue: RunQueuePort & { close?: () => Promise<void> } = deps?.queue
+    ?? (config.redisUrl
+      ? new BullMqRunQueue({ redisUrl: config.redisUrl, queueName: config.queueName ?? "switchyard-hosted-runs" })
+      : new MemoryRunQueue());
+  const runs: RunStore = deps?.runs ?? new PostgresRunStore(postgres);
+  const events: EventStore = deps?.events ?? new PostgresEventStore(postgres);
+  const sessions: SessionStore = new PostgresSessionStore(postgres);
+  const artifacts: ArtifactStore = new PostgresArtifactStore(postgres);
+  const artifactContent: ArtifactContentStore = config.objectStoreDir
+    ? new LocalObjectArtifactContentStore(config.objectStoreDir)
+    : new MemoryArtifactContentStore();
 
   const adapters = new Map<string, RuntimeAdapter>([["fake", new FakeRuntimeAdapter()]]);
   const runner = new RuntimeRunnerService({
@@ -52,7 +77,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   });
 
   return {
-    tick: async () => service.processNext(),
-    stop: async () => {}
+    tick: async () => {
+      await postgresReady;
+      return service.processNext();
+    },
+    stop: async () => {
+      await postgresReady;
+      await queue.close?.();
+      await postgres?.close();
+    }
   };
 }

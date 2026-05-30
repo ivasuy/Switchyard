@@ -26,6 +26,9 @@ export class EventSyncService {
     if (!assignment || assignment.nodeId !== nodeId) {
       throw new EventSyncError("assignment_not_found", `Assignment not found: ${assignmentId}`);
     }
+    if (assignment.status !== "claimed" && assignment.status !== "running") {
+      throw new EventSyncError("assignment_not_found", `Assignment is not accepting event sync: ${assignmentId}`);
+    }
     if (input.cursor !== undefined && input.cursor !== assignment.lastEventSequence) {
       throw new EventSyncError(
         "event_sync_conflict",

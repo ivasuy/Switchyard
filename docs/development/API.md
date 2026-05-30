@@ -27,6 +27,8 @@ Node endpoints added in R10:
 
 When `SWITCHYARD_NODE_SHARED_TOKEN` is set, every `/nodes/*` route requires `x-switchyard-node-token`.
 
+R10 hosted-like app infrastructure defaults to deterministic memory substitutes. `SWITCHYARD_POSTGRES_URL` opts into real Postgres stores, `SWITCHYARD_REDIS_URL` opts into Redis/BullMQ queueing, `SWITCHYARD_QUEUE_NAME` overrides the queue name, and `SWITCHYARD_OBJECT_STORE_DIR` opts into durable filesystem-backed object-compatible artifact content storage.
+
 Base URL:
 
 ```text
@@ -37,7 +39,7 @@ Current implementation status:
 
 - Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
-- Not implemented yet: trace endpoint, OpenAPI generation, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, model-based debate judging, and real Postgres/Redis/S3-backed hosted persistence.
+- Not implemented yet: trace endpoint, OpenAPI generation, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, model-based debate judging, and S3/R2 network object storage.
 
 ## Error Contract
 

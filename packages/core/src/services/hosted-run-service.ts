@@ -86,6 +86,7 @@ export class HostedRunService {
         }
         await this.deps.queue.enqueue(payload);
       } catch (error) {
+        await this.failCreatedRun(run, "queue_enqueue_failed");
         throw new HostedRunServiceError("queue_unavailable", (error as Error).message);
       }
 
@@ -109,6 +110,25 @@ export class HostedRunService {
     }
 
     return { run };
+  }
+
+  private async failCreatedRun(run: Run, reasonCode: string): Promise<void> {
+    const endedAt = this.now();
+    const failed: Run = {
+      ...run,
+      status: "failed",
+      endedAt
+    };
+    await this.deps.runs.update(failed);
+    const existing = await this.deps.events.listByRun(run.id);
+    await this.deps.events.append({
+      id: `event_${crypto.randomUUID()}`,
+      type: "run.failed",
+      runId: run.id,
+      sequence: existing.length,
+      payload: { reasonCode },
+      createdAt: endedAt
+    });
   }
 }
 

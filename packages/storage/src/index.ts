@@ -13,6 +13,7 @@ export * from "./sqlite/registry-store.js";
 export * from "./sqlite/placement-store.js";
 export * from "./filesystem-artifact-content-store.js";
 export * from "./memory-artifact-content-store.js";
+export * from "./local-object-artifact-content-store.js";
 export * from "./object-artifact-content-store.js";
 export * from "./postgres/database.js";
 export * from "./postgres/schema.js";

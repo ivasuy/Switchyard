@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createServerApp } from "../src/app.js";
+import { loadServerConfig } from "../src/config.js";
 
 describe("hosted server", () => {
   it("completes hosted fake run with wait", async () => {
@@ -47,5 +48,19 @@ describe("hosted server", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("parses opt-in hosted infrastructure config", () => {
+    const config = loadServerConfig({
+      SWITCHYARD_POSTGRES_URL: "postgres://user:pass@localhost:5432/switchyard",
+      SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
+      SWITCHYARD_QUEUE_NAME: "switchyard-hosted",
+      SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-objects"
+    });
+
+    expect(config.postgresUrl).toContain("postgres://");
+    expect(config.redisUrl).toBe("redis://localhost:6379/0");
+    expect(config.queueName).toBe("switchyard-hosted");
+    expect(config.objectStoreDir).toBe("/tmp/switchyard-objects");
   });
 });

@@ -8,6 +8,7 @@ import {
   PostgresRegistryStore,
   PostgresRunStore,
   PostgresSessionStore,
+  ensurePostgresSchema,
   openPostgresDatabase
 } from "../src/index.js";
 
@@ -110,7 +111,7 @@ describe("postgres storage", () => {
     expect((await assignments.listClaimable("node_1", "2026-05-30T00:00:00.000Z")).length).toBe(1);
   });
 
-  it("skips real postgres when SWITCHYARD_TEST_POSTGRES_URL is missing", async () => {
+  it("uses real postgres stores when SWITCHYARD_TEST_POSTGRES_URL is configured", async () => {
     const url = process.env["SWITCHYARD_TEST_POSTGRES_URL"];
     if (!url) {
       expect("SKIPPED_SWITCHYARD_TEST_POSTGRES_URL_UNSET").toContain("SKIPPED");
@@ -119,8 +120,37 @@ describe("postgres storage", () => {
 
     const opened = openPostgresDatabase(url);
     try {
-      const row = await opened.pool.query("SELECT 1 as value");
-      expect(row.rows[0]?.value).toBe(1);
+      await ensurePostgresSchema(opened);
+      const runs = new PostgresRunStore(opened);
+      const events = new PostgresEventStore(opened);
+      const runId = `run_pg_real_${crypto.randomUUID().replaceAll("-", "_")}`;
+      await runs.create({
+        id: runId,
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        cwd: "/repo",
+        task: "real pg",
+        status: "queued",
+        placement: "hosted",
+        approvalPolicy: "default",
+        timeoutSeconds: 60,
+        metadata: {},
+        runtimeMode: "fake.deterministic",
+        createdAt: "2026-05-30T00:00:00.000Z"
+      });
+      await events.append({
+        id: `event_pg_real_${crypto.randomUUID().replaceAll("-", "_")}`,
+        type: "run.queued",
+        runId,
+        sequence: 0,
+        payload: {},
+        createdAt: "2026-05-30T00:00:00.000Z"
+      });
+
+      expect((await runs.get(runId))?.id).toBe(runId);
+      expect((await events.listByRun(runId)).length).toBe(1);
     } finally {
       await opened.close();
     }

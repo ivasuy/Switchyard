@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { MemoryArtifactContentStore, ObjectArtifactContentStore } from "../src/index.js";
+import { LocalObjectArtifactContentStore, MemoryArtifactContentStore, ObjectArtifactContentStore } from "../src/index.js";
 
 describe("artifact content stores", () => {
   it("stores and reads bytes in memory with digest metadata", async () => {
@@ -65,5 +68,26 @@ describe("artifact content stores", () => {
       createdAt: "2026-05-30T00:00:00.000Z"
     });
     expect(read.body.toString("utf8")).toBe("content");
+  });
+
+  it("supports opt-in local object-compatible persistence", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-objects-"));
+    try {
+      const store = new LocalObjectArtifactContentStore(dir);
+      const saved = await store.writeText("runs/run_1/file.txt", "content", { contentType: "text/plain" });
+      expect(saved.storageBackend).toBe("object");
+      expect(saved.objectKey).toBe("artifacts/runs/run_1/file.txt");
+      const read = await store.read({
+        id: "artifact_3",
+        runId: "run_1",
+        type: "raw_log",
+        path: "runs/run_1/file.txt",
+        metadata: { objectKey: saved.objectKey, contentType: saved.contentType },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      });
+      expect(read.body.toString("utf8")).toBe("content");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

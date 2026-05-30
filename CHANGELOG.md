@@ -192,8 +192,8 @@ All notable changes to Switchyard will be documented in this file.
 
 - Added hosted-like `@switchyard/server`, hosted `@switchyard/worker`, and connected local `@switchyard/node` apps.
 - Added node protocol package (`@switchyard/protocol-node`) with register/heartbeat/claim/reject/event-sync/artifact-sync/complete endpoints and client helper.
-- Added queue package (`@switchyard/queue`) with deterministic `MemoryRunQueue` and BullMQ-shaped adapter surface.
-- Added Postgres-shaped storage classes for runs/events/sessions/artifacts/registry/placement/nodes/assignments plus object/memory artifact-content substitutes.
+- Added queue package (`@switchyard/queue`) with deterministic `MemoryRunQueue` and opt-in Redis/BullMQ-backed `BullMqRunQueue`.
+- Added Postgres-backed storage classes for runs/events/sessions/artifacts/registry/placement/nodes/assignments, plus memory and filesystem-backed object-compatible artifact content stores.
 - Added core hosted/hybrid services: placement, hosted run orchestration, hosted worker safety checks, node coordination, local node policy gating, event sync, and artifact sync.
 
 ### Changed
@@ -207,3 +207,4 @@ All notable changes to Switchyard will be documented in this file.
 - Hosted worker execution is fake-only (`fake.deterministic`) and re-validates durable run state at claim time.
 - Local-only runtime modes remain denied for hosted placement.
 - Hosted arbitrary subprocess/PTY/tooling/debate-model-judging execution is not shipped.
+- S3/R2 network object-store wiring is not shipped; `SWITCHYARD_OBJECT_STORE_DIR` provides the opt-in durable object-compatible store for R10.
