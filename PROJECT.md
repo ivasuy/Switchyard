@@ -28,20 +28,6 @@ R3 runtime capability inspection is now shipped on the phase branch. Switchyard 
 ### Deferred Concerns
 - None.
 
-## Phase 6: R7 Middleware Foundation
-**Date:** 2026-05-30
-**Spec:** docs/superpowers/specs/2026-05-30-phase-6-r7-middleware-foundation.md
-**Plan:** docs/superpowers/plans/phase-6-r7-middleware-foundation.md
-**Audit:** agent-runs/native-roadmap-20260529/audit/phase-6-report.md
-**Branch:** agent/phase-6-r7-middleware-foundation (audit GREEN; merge pending native runtime)
-**PR:** not created - native audit workflow requested; branch retained locally
-
-### What changed
-R7 is now shipped on the phase branch. Switchyard adds durable local middleware APIs for messages, substring-only memory, evidence metadata, deterministic context packets, approval lifecycle records/events, and the policy-gated `fake_echo` tool. SQLite migrations add the middleware tables and indexes while preserving pre-R7 data, the daemon wires middleware stores/services/routes, `POST /runs` can optionally render context into the task with original task/context metadata preserved, and real tool types remain policy-denied before adapter dispatch. The shipped surface remains local and deterministic: no vector search, no remote evidence fetching, no real shell/browser/search/GitHub/fetch/repo execution, no debate engine, and no runtime-specific approval bridge.
-
-### Deferred Concerns
-- None.
-
 ## Phase 3: R4 Shared Runtime Substrates And Generic HTTP
 **Date:** 2026-05-30
 **Spec:** docs/superpowers/specs/2026-05-29-phase-3-r4-shared-runtime-substrates-and-generic-http.md
@@ -80,6 +66,20 @@ R5 is now shipped on the phase branch. Switchyard adds the reusable `@switchyard
 
 ### What changed
 R6 is now shipped on the phase branch. Switchyard adds the configured `agentfield.async_rest` wrapper runtime mode, deterministic fake AgentField server and CLI verification path, AgentField daemon config and doctor reporting, runtime-mode inference, async create/poll/result mapping, sanitized transcript and result artifacts, and REST/daemon coverage for artifact retrieval, unsupported input, unsupported active cancel, timeout persistence, and secret redaction. The shipped boundary remains narrow: AgentField is a wrapper runtime behind Switchyard's existing control plane, and R6 does not claim OpenClaw, Paperclip, hosted workers, debate orchestration, SDK/CLI/TUI/dashboard work, or verified upstream cancellation.
+
+### Deferred Concerns
+- None.
+
+## Phase 6: R7 Middleware Foundation
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-6-r7-middleware-foundation.md
+**Plan:** docs/superpowers/plans/phase-6-r7-middleware-foundation.md
+**Audit:** agent-runs/native-roadmap-20260529/audit/phase-6-report.md
+**Branch:** agent/phase-6-r7-middleware-foundation (audit GREEN; merge pending native runtime)
+**PR:** not created - native audit workflow requested; branch retained locally
+
+### What changed
+R7 is now shipped on the phase branch. Switchyard adds durable local middleware APIs for messages, substring-only memory, evidence metadata, deterministic context packets, approval lifecycle records/events, and the policy-gated `fake_echo` tool. SQLite migrations add the middleware tables and indexes while preserving pre-R7 data, the daemon wires middleware stores/services/routes, `POST /runs` can optionally render context into the task with original task/context metadata preserved, and real tool types remain policy-denied before adapter dispatch. The shipped surface remains local and deterministic: no vector search, no remote evidence fetching, no real shell/browser/search/GitHub/fetch/repo execution, no debate engine, and no runtime-specific approval bridge.
 
 ### Deferred Concerns
 - None.
