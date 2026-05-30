@@ -12,7 +12,7 @@ Ship an explicitly configured S3-compatible artifact content backend for hosted 
 
 1. **Existing code already solves part of this:** `ObjectArtifactContentStore` already implements artifact-content write/read shape over an injected object client. `LocalObjectArtifactContentStore` already has object-key metadata, probe, digest, missing-content, and empty-content semantics. `apps/server` and `apps/worker` already choose memory or local object content stores. R13 must extend those seams, not add a second artifact API or a parallel hosted worker.
 2. **Minimum changes:** add one real S3-compatible client/factory in `packages/storage`, one shared object-store env parser/factory exported from `packages/storage`, server/worker config and wiring updates, readiness/metrics/error mapping, core artifact metadata preservation, deterministic fake-client tests, and product docs. Defer direct presigned URLs, bucket provisioning, MinIO compose profiles, managed hosted deployment, hosted real runtimes, broad tools/adapters, dashboard/TUI, enterprise auth, and tenant controls.
-3. **Complexity check:** the phase touches more than 8 files because storage, core artifact metadata, REST error mapping, server, worker, tests, and docs all share one env/error contract. The user requested a per-phase implementer/reviewer loop and asked to prefer one coherent task unless there are truly independent write sets. There are no truly independent write sets: docs depend on final env names, app wiring depends on storage exports, readiness depends on store probes, and metadata preservation depends on core/app wiring. The plan therefore uses one task and records file-count risk under `concerns`.
+3. **Complexity check:** the phase touches more than 8 files because storage, core artifact metadata, REST error mapping, server, worker, tests, and docs all share one env/error contract. The user requested a per-phase implementer/reviewer loop and asked to prefer one coherent task unless there are truly independent write sets. There are no truly independent write sets: docs depend on final env names, app wiring depends on storage exports, readiness depends on store probes, and metadata preservation depends on core/app wiring. The plan therefore uses one task, but the task has an explicit checkpointed internal sequence: storage/client/config first, core metadata second, REST errors third, app readiness/metrics fourth, hosted boundary fifth, docs last.
 4. **Built-in check:** use the official AWS SDK v3 S3 primitives for SigV4, request serialization, endpoint handling, and stream bodies. Hand-rolled SigV4 is too risky for AWS S3 and R2 compatibility, especially around canonical headers, path-style addressing, payload hashes, redirects, and retryable provider errors. Scope new SDK dependencies only to `packages/storage`: `@aws-sdk/client-s3` plus `@smithy/node-http-handler` for bounded Node timeouts. Do not add AWS credential-provider packages and do not use default credential chains.
 5. **Distribution check:** `packages/storage/package.json` and `pnpm-lock.yaml` must be updated so server/worker consumers get the new storage exports through the existing workspace package. Self-hosted compose keeps the local object-volume default. Docs add commented AWS S3 and Cloudflare R2 examples with fake credentials only. No new CLI binary, hosted platform, dashboard, or TUI artifact ships in this phase.
 
@@ -40,11 +40,15 @@ packages/storage object-store config parser
       GET /runs/:id/artifacts, GET /artifacts/:id, GET /artifacts/:id/content
 ```
 
-The S3 client wrapper must use only explicit Switchyard credentials. It must construct `S3Client` with a literal `{ accessKeyId, secretAccessKey }`, explicit `endpoint`, `region`, `forcePathStyle`, and a bounded `NodeHttpHandler`. It must not import `fromEnv`, `fromIni`, `defaultProvider`, shared credential files, profile chains, ECS/EC2 metadata providers, or any ambient AWS discovery. The wrapper maps SDK errors to named Switchyard errors and strips raw provider messages when those messages may include signed material.
+The S3 client wrapper must use only explicit Switchyard credentials. It must construct `S3Client` with a literal `{ accessKeyId, secretAccessKey }`, explicit `endpoint`, `region`, `forcePathStyle`, `maxAttempts`, and a bounded `NodeHttpHandler`. It must also wrap every PutObject/GetObject/DeleteObject/probe operation in a per-operation timeout using `AbortController` or the SDK command abort signal so the total operation finishes within `SWITCHYARD_OBJECT_STORE_REQUEST_TIMEOUT_MS`; retries must not extend the wall-clock operation beyond that bound. It must not import `fromEnv`, `fromIni`, `defaultProvider`, shared credential files, profile chains, ECS/EC2 metadata providers, or any ambient AWS discovery. The wrapper maps SDK errors to named Switchyard errors and strips raw provider messages when those messages may include signed material.
 
-Readiness probes the configured artifact content backend rather than only the local directory. For `s3-compatible`, `probe()` performs a bounded write-read-delete roundtrip under `keyPrefix/probes/<uuid>`, verifies sha256, and treats cleanup failure as `object_store_probe_cleanup_failed`. In staging/production probe disabling is rejected at config time. In local/test, memory is ready without network and probe disabling is allowed only when the resolved backend is not persistent.
+GetObject body handling is a first-class requirement. The wrapper must convert AWS SDK v3 `GetObjectCommand` bodies to `Buffer` for all supported body shapes: Node `Readable` stream, web `ReadableStream`, Blob-like objects with `arrayBuffer()`, SDK stream mixins with `transformToByteArray()`, and raw `Uint8Array`/`Buffer`. Undefined body and stream conversion errors must map to `object_store_read_failed` with redacted diagnostics, not to unhandled exceptions and not to raw SDK error output.
+
+Readiness probes the configured artifact content backend rather than only the local directory. For `s3-compatible`, `probe()` performs a bounded write-read-delete roundtrip under `keyPrefix/probes/<uuid>`, verifies sha256, and treats cleanup failure as `object_store_probe_cleanup_failed`. The readiness response must return promptly within `SWITCHYARD_OBJECT_STORE_REQUEST_TIMEOUT_MS` plus a small in-process scheduling margin used only by tests. In staging/production probe disabling is rejected at config time. In local/test, memory is ready without network and probe disabling is allowed only when the resolved backend is not persistent.
 
 Artifact metadata preservation is part of the data contract. `RuntimeRunnerService` currently accepts an artifact content callback that returns only a path, so `storageBackend`, `objectKey`, `sizeBytes`, `sha256`, and `contentType` are dropped for runtime-produced artifacts. R13 must update that callback contract to return `StoredArtifactContent` or an equivalent object and persist the full metadata shape already used by `ArtifactSyncService`.
+
+Consumer wiring must stay explicit. `apps/server/src/config.ts` and `apps/worker/src/config.ts` consume `resolveObjectStoreConfig`; `apps/server/src/app.ts` and `apps/worker/src/worker.ts` consume `createArtifactContentStoreFromObjectConfig`; `apps/server/src/readiness.ts` consumes the probeable store instance created by the app, not a second copy of config parsing logic.
 
 ## File Structure
 
@@ -201,12 +205,25 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
 
 **Instructions:**
 
-1. Add the storage-only AWS SDK dependencies in `packages/storage/package.json`: `@aws-sdk/client-s3` and `@smithy/node-http-handler`. Update `pnpm-lock.yaml` with pnpm. Do not add AWS SDK dependencies to the root, server, worker, core, protocol-rest, or contracts packages.
+Internal sequence with checkpointed tests because this remains one coherent task for user flow:
+
+1. Checkpoint 1: storage client, object-store config parser, dependency scope, GetObject body conversion, timeout handling, and storage tests. Run `pnpm --filter @switchyard/storage test`.
+2. Checkpoint 2: core runtime artifact metadata preservation. Run `pnpm --filter @switchyard/core test`.
+3. Checkpoint 3: REST and contracts error-code mapping. Run `pnpm --filter @switchyard/protocol-rest test` and `pnpm --filter @switchyard/contracts test`.
+4. Checkpoint 4: server/worker config, app wiring, readiness, metrics, and redaction surfaces. Run `pnpm --filter @switchyard/server test` and `pnpm --filter @switchyard/worker test`.
+5. Checkpoint 5: hosted behavior boundary for non-fake runtime/mode denial with no queued job or work execution. Run the server/worker tests that exercise this denial before docs changes.
+6. Checkpoint 6: product/docs updates after code tests pass. Run `pnpm typecheck`, `pnpm release:smoke-local`, and `git diff --check`.
+
+Implementation steps:
+
+1. Add the storage-only AWS SDK dependencies in `packages/storage/package.json`: `@aws-sdk/client-s3` and `@smithy/node-http-handler`. Update `pnpm-lock.yaml` with pnpm. Do not add AWS SDK dependencies to the root, server, worker, core, protocol-rest, or contracts packages. Add a dependency-scope test/check that verifies those package names appear only in `packages/storage/package.json` and the corresponding `packages/storage` importer section in `pnpm-lock.yaml`, never in root, server, worker, core, protocol-rest, or contracts package manifests.
 2. In `packages/storage`, implement a small S3-compatible object client wrapper around `S3Client`, `PutObjectCommand`, `GetObjectCommand`, and `DeleteObjectCommand`. The wrapper must accept static `accessKeyId` and `secretAccessKey` from Switchyard config only, explicit `endpoint`, `region`, `bucket`, `forcePathStyle`, `keyPrefix`, and `requestTimeoutMs`. It must expose `putObject`, `getObject`, `deleteObject`, and be injectable so tests can use a deterministic fake client without network.
-3. Do not implement custom SigV4. Use official SDK request construction because custom signing is too risky for AWS S3/R2 compatibility. Also do not import SDK credential providers, profile readers, metadata credential providers, or environment credential helpers.
-4. Extend `ObjectArtifactContentStore` rather than replacing it. Preserve the injected-client test path. Add read behavior that prefers `artifact.metadata.objectKey` when present, verifies `sizeBytes` and `sha256` when present, returns zero bytes only when metadata size is `0`, maps missing content to `artifact_content_not_found`, maps integrity mismatches to `artifact_digest_mismatch` or `artifact_content_empty`, and maps write/read/delete/provider failures to named object-store errors.
-5. Add `probe()` to object-backed stores without widening the core `ArtifactContentStore` port unless the app helper needs a local `ProbeableArtifactContentStore` type. `probe()` must write, read, verify digest, and delete `probes/<uuid>` under the configured prefix. Cleanup failure must become `object_store_probe_cleanup_failed`.
-6. Add `packages/storage/src/object-store-config.ts` with a shared resolver for server and worker:
+3. Do not implement custom SigV4. Use official SDK request construction because custom signing is too risky for AWS S3/R2 compatibility. Also do not import SDK credential providers, profile readers, metadata credential providers, or environment credential helpers. Add explicit redaction tests that fail if signed headers, canonical request material, authorization headers, access key id, secret access key, endpoint userinfo/query, artifact content, raw bucket/key where forbidden, or SDK request bodies appear in logs, readiness JSON, metrics JSON, run/event payloads, startup `ConfigError.redactedConfig`, or HTTP error envelopes.
+4. Implement AWS SDK v3 `GetObject` body conversion to `Buffer` for Node streams, web streams, Blob-like `arrayBuffer()` objects, SDK bodies with `transformToByteArray()`, and raw `Uint8Array`/`Buffer`. Undefined body and stream conversion errors must map to `object_store_read_failed` with redacted diagnostics.
+5. Enforce total operation timeout semantics. Configure explicit `maxAttempts` and wrap each Put/Get/Delete/probe operation in a per-operation `AbortController` timeout bounded by `SWITCHYARD_OBJECT_STORE_REQUEST_TIMEOUT_MS`. Add fake-client tests proving timeout maps to `object_store_timeout` and readiness returns promptly within the configured timeout.
+6. Extend `ObjectArtifactContentStore` rather than replacing it. Preserve the injected-client test path. Add read behavior that prefers `artifact.metadata.objectKey` when present, verifies `sizeBytes` and `sha256` when present, returns zero bytes only when metadata size is `0`, maps missing content to `artifact_content_not_found`, maps integrity mismatches to `artifact_digest_mismatch` or `artifact_content_empty`, and maps write/read/delete/provider failures to named object-store errors.
+7. Add `probe()` to object-backed stores without widening the core `ArtifactContentStore` port unless the app helper needs a local `ProbeableArtifactContentStore` type. `probe()` must write, read, verify digest, and delete `probes/<uuid>` under the configured prefix. Cleanup failure must become `object_store_probe_cleanup_failed`.
+8. Add `packages/storage/src/object-store-config.ts` with a shared resolver for server and worker:
    - Allowed backend values: `memory`, `local`, `s3-compatible`.
    - `staging` and `production` require explicit `SWITCHYARD_OBJECT_STORE_BACKEND=local|s3-compatible`; `memory` is rejected.
    - Local/test inference: unset backend plus `SWITCHYARD_OBJECT_STORE_DIR` means `local`; unset backend plus no dir means `memory`.
@@ -216,21 +233,24 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
    - Normalize `SWITCHYARD_OBJECT_STORE_KEY_PREFIX` to default `artifacts` and reject absolute paths, `..`, backslashes, Windows drive prefixes, empty path segments, leading slash, trailing slash ambiguity, and empty normalized prefix.
    - Parse `SWITCHYARD_OBJECT_STORE_PROBE` as `write_read_delete` or `disabled`; reject `disabled` in staging/production.
    - Return a redacted summary containing backend, endpoint scheme/host, region, bucket, keyPrefix, forcePathStyle, hasAccessKeyId, hasSecretAccessKey, requestTimeoutMs, probe, and warning code `object_store_dir_ignored` when S3 wins over a set local dir.
-7. Wire `apps/server/src/config.ts` and `apps/worker/src/config.ts` to the shared resolver. Keep app-specific config fields for Postgres, Redis, host, port, node token, and idle interval. Config errors must use named `config_required:*` or `config_invalid:*` codes and include redacted summaries without raw keys, secrets, full credential-bearing endpoints, or object content.
-8. Wire `apps/server/src/app.ts` and `apps/worker/src/worker.ts` to the shared storage factory. For server and worker runtime runner callbacks, return the full `StoredArtifactContent` result to core rather than only `stored.path`.
-9. Update `RuntimeRunnerService` so the artifact content callback returns stored metadata. Persist `contentStored=true`, `storageBackend`, `objectKey`, `sizeBytes`, `sha256`, and `contentType` into artifact metadata, and keep the artifact path as the normalized logical path unless an older callback explicitly returns a string. Preserve metadata-only artifacts with `contentStored=false`.
-10. Update `packages/protocol-rest` and `packages/contracts` closed error sets for public object-store read/integrity failures: `object_store_unavailable`, `object_store_timeout`, `object_store_auth_failed`, `object_store_bucket_not_found`, `object_store_read_failed`, `artifact_digest_mismatch`, and `artifact_content_empty`. Use 503 for object-store availability/auth/bucket/timeout/read failures and 409 for integrity failures. Keep missing object mapped to public `missing_artifact_content`.
-11. Update `apps/server/src/readiness.ts` to accept a probeable object-store dependency and report `checks.objectStore` with `ok`, `code`, and redacted diagnostics. For memory in local/test, report ok without network. For local and S3-compatible, call the store probe. Do not include endpoint paths, bucket in metrics labels, object keys, credentials, signed headers, request bodies, response bodies, or artifact content.
-12. Keep `HostedMetrics` low-cardinality. Increment object-store writes, reads, failures, probe failures, auth failures, unavailable states, and digest mismatches as bounded counters. The JSON metrics body must not contain bucket names, object keys, endpoints, access key fragments, secret fragments, run ids, or artifact content.
-13. Add deterministic tests. Required tests must use fake S3 clients or local in-memory request seams only. No required test may contact AWS, Cloudflare, MinIO, Docker, or paid/external network.
-14. Preserve hosted worker safety. `apps/worker/src/worker.ts` must still import/register only `FakeRuntimeAdapter`; the existing forbidden-import test must remain and should add checks for any new storage code not importing runtime adapters, PTY, shell, browser, fetch, GitHub, or repo tooling.
-15. Update docs after tests pass. `PRODUCT.md` must mark R13 S3/R2 object-store client wiring as shipped and keep managed hosted deployment, hosted real runtimes, arbitrary subprocess/PTY, enterprise controls, broad adapters/tools, real tools, runtime-specific approval bridges, hosted real-runtime debate/model judging, dashboard, and TUI unshipped. `PROJECT.md` must not be edited by the implementer; CEO phase-close owns it.
+9. Wire `apps/server/src/config.ts` and `apps/worker/src/config.ts` to consume `resolveObjectStoreConfig`. Keep app-specific config fields for Postgres, Redis, host, port, node token, and idle interval. Config errors must use named `config_required:*` or `config_invalid:*` codes and include redacted summaries without raw keys, secrets, full credential-bearing endpoints, or object content.
+10. Wire `apps/server/src/app.ts` and `apps/worker/src/worker.ts` to consume `createArtifactContentStoreFromObjectConfig`. For server and worker runtime runner callbacks, return the full `StoredArtifactContent` result to core rather than only `stored.path`.
+11. Update `RuntimeRunnerService` so the artifact content callback returns stored metadata. Persist `contentStored=true`, `storageBackend`, `objectKey`, `sizeBytes`, `sha256`, and `contentType` into artifact metadata, and keep the artifact path as the normalized logical path unless an older callback explicitly returns a string. Preserve metadata-only artifacts with `contentStored=false`.
+12. Update `packages/protocol-rest` and `packages/contracts` closed error sets for public object-store read/integrity failures: `object_store_unavailable`, `object_store_timeout`, `object_store_auth_failed`, `object_store_bucket_not_found`, `object_store_read_failed`, `artifact_digest_mismatch`, and `artifact_content_empty`. Use 503 for object-store availability/auth/bucket/timeout/read failures and 409 for integrity failures. Keep missing object mapped to public `missing_artifact_content`.
+13. Update `apps/server/src/readiness.ts` to consume the probeable store instance created by the server app and report `checks.objectStore` with `ok`, `code`, and redacted diagnostics. For memory in local/test, report ok without network. For local and S3-compatible, call the store probe. Do not include endpoint paths, bucket in metrics labels, object keys, credentials, signed headers, request bodies, response bodies, or artifact content.
+14. Keep `HostedMetrics` low-cardinality. Increment object-store writes, reads, failures, probe failures, auth failures, unavailable states, and digest mismatches as bounded counters. The JSON metrics body must not contain bucket names, object keys, endpoints, access key fragments, secret fragments, run ids, or artifact content.
+15. Add deterministic tests. Required tests must use fake S3 clients or local in-memory request seams only. No required test may contact AWS, Cloudflare, MinIO, Docker, or paid/external network. Keep optional MinIO/live smoke out of required checks.
+16. Preserve hosted worker safety. `apps/worker/src/worker.ts` must still import/register only `FakeRuntimeAdapter`; the existing forbidden-import test must remain and should add checks for any new storage code not importing runtime adapters, PTY, shell, browser, fetch, GitHub, or repo tooling. Add a hosted behavior boundary test that attempts a non-fake hosted runtime or runtime mode and proves `placement_denied` or `hosted_runtime_not_allowed` with no queued job and no worker execution.
+17. Update docs after tests pass. `PRODUCT.md` must mark R13 S3/R2 object-store client wiring as shipped and keep managed hosted deployment, hosted real runtimes, arbitrary subprocess/PTY, enterprise controls, broad adapters/tools, real tools, runtime-specific approval bridges, hosted real-runtime debate/model judging, dashboard, and TUI unshipped. `PROJECT.md` must not be edited by the implementer; CEO phase-close owns it.
 
 **Acceptance criteria:**
 
 - [ ] `packages/storage` exports a real S3-compatible object client/factory using official AWS SDK v3 primitives and only explicit Switchyard credentials.
 - [ ] AWS SDK dependencies are scoped to `packages/storage`; no server/worker/root dependency receives the SDK directly.
+- [ ] Dependency-scope tests prove `@aws-sdk/client-s3` and `@smithy/node-http-handler` appear only in `packages/storage/package.json` and the `packages/storage` importer section of `pnpm-lock.yaml`.
 - [ ] `ObjectArtifactContentStore` supports put/get/delete/probe through the real client and still supports the existing injected fake client tests.
+- [ ] `GetObject` body conversion handles Node stream, web stream, Blob-like `arrayBuffer()`, SDK `transformToByteArray()`, raw bytes, undefined body, and stream errors with `object_store_read_failed` for conversion failures.
+- [ ] Put/Get/Delete/probe operations are bounded by total operation timeout semantics and timeouts map to `object_store_timeout`; readiness returns promptly within the configured request timeout.
 - [ ] Shared object-store config supports `SWITCHYARD_OBJECT_STORE_BACKEND=memory|local|s3-compatible`, endpoint, region, bucket, access key id, secret access key, force path style, key prefix, request timeout, and probe mode.
 - [ ] Staging/production require explicit `local` or `s3-compatible` backend and reject implicit memory, missing backend, missing fields, insecure endpoints, unsafe prefixes, invalid booleans, invalid timeouts, and disabled probe.
 - [ ] Local/test compatibility remains: unset backend plus object dir infers local; unset backend plus no dir infers memory.
@@ -242,6 +262,8 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
 - [ ] Metrics count object-store reads, writes, failures, auth failures, unavailable states, probe failures, and digest mismatches without high-cardinality or secret-bearing labels.
 - [ ] Required tests are no-spend and use fake S3 clients or deterministic local seams only.
 - [ ] Optional live/MinIO smoke, if documented, is opt-in only and never part of normal CI.
+- [ ] Required checks do not include MinIO, live S3, Cloudflare R2, Docker, or external network object-store smoke.
+- [ ] Attempting a non-fake hosted runtime or runtime mode returns `placement_denied` or `hosted_runtime_not_allowed` and creates no queued job or worker execution.
 - [ ] Hosted worker execution remains fake-only and forbidden adapter/import tests continue to pass.
 - [ ] Product, architecture, README, API, development, self-hosted env, and changelog docs reflect R13 shipped truth and remaining non-goals.
 - [ ] CEO phase-close can append `PROJECT.md` with plan path, audit path, branch/PR status, and deferred concerns because the implementer docs state the shipped boundary clearly.
@@ -258,6 +280,8 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
 - `pnpm release:smoke-local`
 - `git diff --check`
 
+No required check may start MinIO, Docker compose, live AWS S3, live Cloudflare R2, or any external object-store network call.
+
 **Error rescue map:**
 
 | Codepath | Failure | Exception shape | Rescue action | User sees |
@@ -273,8 +297,11 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
 | `S3CompatibleObjectClient.putObject` | provider rejects auth or permission | named error `object_store_auth_failed` | Redact provider details, increment failure/auth metrics, fail required artifact write | Run/job fails visibly with safe object-store code |
 | `S3CompatibleObjectClient.putObject` | bucket missing/inaccessible | named error `object_store_bucket_not_found` | Redact provider details, increment failure metrics, fail required artifact write | Run/job fails visibly with bucket code |
 | `S3CompatibleObjectClient.putObject` | network unavailable or unknown SDK transport failure | named error `object_store_unavailable` or `object_store_write_failed` | Redact provider details, increment failure metrics | Run/job fails with object-store write/unavailable code |
+| `S3CompatibleObjectClient.putObject/getObject/deleteObject/probe` | operation exceeds `SWITCHYARD_OBJECT_STORE_REQUEST_TIMEOUT_MS`, including SDK retry time | named error `object_store_timeout` from abort or timeout guard | Abort the operation, clear timeout handles, redact diagnostics, and increment timeout/failure metrics | Run, artifact route, or `/ready` fails promptly with `object_store_timeout` |
 | `S3CompatibleObjectClient.getObject` | object missing | named error `artifact_content_not_found` | Map route to `missing_artifact_content` | `404 missing_artifact_content` |
 | `S3CompatibleObjectClient.getObject` | auth, bucket, timeout, or network failure | named object-store error | Map route to 503 safe envelope, increment read/failure metrics | `503 object_store_*` without credentials |
+| `S3CompatibleObjectClient.getObject body conversion` | SDK body is undefined | named error `object_store_read_failed` | Treat as invalid provider response and redact response metadata | `503 object_store_read_failed` |
+| `S3CompatibleObjectClient.getObject body conversion` | Node stream, web stream, Blob-like body, or `transformToByteArray()` throws while reading | named error `object_store_read_failed` | Destroy/cancel stream where supported, redact diagnostics, and avoid returning partial bytes | `503 object_store_read_failed` |
 | `ObjectArtifactContentStore.read` | body sha256 differs from artifact metadata | `Error("artifact_digest_mismatch")` | Do not return bytes; increment digest mismatch metric | `409 artifact_digest_mismatch` |
 | `ObjectArtifactContentStore.read` | body empty but metadata expects non-zero size | `Error("artifact_content_empty")` | Do not return bytes; increment failure metric | `409 artifact_content_empty` |
 | `ObjectArtifactContentStore.probe` | write/read/delete probe cannot reach store | named object-store error | `/ready` reports 503 with named code and redacted diagnostics | `checks.objectStore.ok=false` with safe code |
@@ -282,6 +309,7 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
 | `RuntimeRunnerService.persistArtifacts` | content write throws for required artifact | named object-store error or existing write error | Keep existing run failure behavior; do not create artifact metadata claiming stored content | Run/job fails visibly instead of silently losing content |
 | `registerArtifactRoutes` | artifact record exists but stored object read fails | named error from content store | Map to safe closed HTTP code; never include object body or SDK message | Existing artifact API returns safe error envelope |
 | `HostedMetrics.toJSON` | metrics include secret/high-cardinality labels | test snapshot failure | Remove labels and keep bounded counters only | Metrics JSON contains no bucket, key, endpoint, credentials, run id, or content |
+| `Hosted placement boundary` | non-fake hosted runtime or runtime mode is requested | placement error `placement_denied` or worker guard `hosted_runtime_not_allowed` | Deny before enqueue or discard before execution with no worker side effect | Client sees denial and no queued job/work execution exists |
 
 **Observability:**
 
@@ -302,6 +330,7 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
 **Test cases:**
 
 - `{ "name": "s3 client put get delete happy path", "lens": "happy", "given": "S3CompatibleObjectClient with fake SDK client and bucket/key/body/contentType", "expect": "PutObject/GetObject/DeleteObject commands are sent with configured bucket, key, body, content type, endpoint config, and static credentials" }`
+- `{ "name": "aws sdk dependency scope", "lens": "integration", "given": "workspace package manifests and pnpm-lock importers after adding @aws-sdk/client-s3 and @smithy/node-http-handler", "expect": "both dependencies appear only in packages/storage/package.json and the packages/storage importer section in pnpm-lock.yaml, not root/server/worker/core/protocol-rest/contracts manifests or importers" }`
 - `{ "name": "aws endpoint config", "lens": "happy", "given": "endpoint https://s3.us-east-1.amazonaws.com region us-east-1 forcePathStyle false", "expect": "config parses and redacted summary includes scheme https, host s3.us-east-1.amazonaws.com, region us-east-1, no secrets" }`
 - `{ "name": "r2 endpoint config", "lens": "happy", "given": "endpoint https://account.r2.cloudflarestorage.com region auto forcePathStyle true", "expect": "config parses and redacted summary includes region auto and no credentials" }`
 - `{ "name": "local test backend inference memory", "lens": "happy_shadow_nil", "given": "deploymentMode test with no backend and no object dir", "expect": "resolved backend memory and no required persistent config error" }`
@@ -322,6 +351,14 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
 - `{ "name": "auth denied read and write", "lens": "error_path", "given": "fake S3 client rejects with auth-style error", "expect": "named object_store_auth_failed with no access key or secret in error output" }`
 - `{ "name": "bucket missing read and write", "lens": "error_path", "given": "fake S3 client rejects with NoSuchBucket-style error", "expect": "named object_store_bucket_not_found" }`
 - `{ "name": "timeout read and write", "lens": "error_path", "given": "fake S3 client rejects with timeout/abort error", "expect": "named object_store_timeout" }`
+- `{ "name": "total operation timeout bounds retries", "lens": "error_path", "given": "fake S3 client never resolves while requestTimeoutMs is small and maxAttempts would otherwise retry", "expect": "Put/Get/Delete/probe abort within SWITCHYARD_OBJECT_STORE_REQUEST_TIMEOUT_MS and throw object_store_timeout" }`
+- `{ "name": "readiness timeout returns promptly", "lens": "error_path", "given": "server readiness probe backed by fake S3 client that hangs", "expect": "GET /ready returns 503 with object_store_timeout within configured request timeout plus test scheduling margin" }`
+- `{ "name": "get object node stream body", "lens": "happy", "given": "fake GetObject returns a Node Readable stream", "expect": "client converts stream to Buffer and preserves content type" }`
+- `{ "name": "get object web stream body", "lens": "happy", "given": "fake GetObject returns a web ReadableStream", "expect": "client converts stream to Buffer and preserves content type" }`
+- `{ "name": "get object transform byte array body", "lens": "happy", "given": "fake GetObject returns body with transformToByteArray", "expect": "client converts returned bytes to Buffer" }`
+- `{ "name": "get object blob body", "lens": "happy", "given": "fake GetObject returns Blob-like body with arrayBuffer", "expect": "client converts arrayBuffer result to Buffer" }`
+- `{ "name": "get object undefined body", "lens": "error_path", "given": "fake GetObject returns no Body", "expect": "client throws object_store_read_failed with redacted diagnostics" }`
+- `{ "name": "get object stream error", "lens": "error_path", "given": "fake GetObject body stream errors after partial data", "expect": "client throws object_store_read_failed and returns no partial bytes" }`
 - `{ "name": "digest mismatch", "lens": "error_path", "given": "stored bytes sha256 differs from artifact metadata sha256", "expect": "artifact_digest_mismatch and no corrupted body returned" }`
 - `{ "name": "empty mismatch", "lens": "error_path", "given": "downloaded object is empty but metadata sizeBytes is positive", "expect": "artifact_content_empty and no empty body returned" }`
 - `{ "name": "probe happy path", "lens": "happy", "given": "fake S3 client accepts put/get/delete for probe object", "expect": "probe returns ok true and deletes probe key" }`
@@ -336,7 +373,14 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
 - `{ "name": "hosted fake run with fake s3 content", "lens": "integration", "given": "server/worker or wait path configured with fake S3-compatible store", "expect": "run completes, artifacts list transcript, content endpoint returns transcript bytes from object store" }`
 - `{ "name": "restart persistence against same fake s3", "lens": "integration", "given": "artifact metadata persisted and app objects recreated against same fake object map", "expect": "GET /artifacts/:id/content still returns stored bytes" }`
 - `{ "name": "metrics redact object store", "lens": "error_path", "given": "metrics after read/write/probe failures", "expect": "objectStore counters increment and JSON contains no bucket, key, endpoint, credential fragment, run id, or content" }`
+- `{ "name": "redact signed headers and canonical request material", "lens": "error_path", "given": "fake SDK error includes Authorization, X-Amz-Signature, SignedHeaders, Credential, canonical request text, and x-amz-content-sha256", "expect": "logs, readiness JSON, metrics JSON, run/event payloads, ConfigError summaries, and HTTP error envelopes contain none of that material" }`
+- `{ "name": "redact endpoint userinfo and query", "lens": "error_path", "given": "endpoint URL includes user:pass and query before config validation fails", "expect": "ConfigError.redactedConfig, logs, readiness JSON, metrics JSON, and HTTP envelopes omit userinfo and query" }`
+- `{ "name": "redact artifact content everywhere", "lens": "error_path", "given": "artifact body contains unique sentinel text and object-store read/write fails", "expect": "sentinel text appears in no log, readiness JSON, metrics JSON, run/event payload, ConfigError summary, or HTTP error envelope" }`
+- `{ "name": "bucket and key forbidden in metrics logs and readiness", "lens": "error_path", "given": "bucket and object key contain unique sentinels", "expect": "metrics JSON, logs, and readiness JSON omit bucket and object key except artifact metadata may contain objectKey after successful writes" }`
+- `{ "name": "http envelope redaction", "lens": "error_path", "given": "artifact content route catches object_store_auth_failed with provider message containing secret fragments", "expect": "HTTP error envelope has safe code/message/requestId only and no secret fragments" }`
+- `{ "name": "run event payload redaction", "lens": "error_path", "given": "object-store write failure while persisting runtime artifact", "expect": "run/event payload includes safe reason code only and no credentials, signed request material, artifact content, bucket, or object key" }`
 - `{ "name": "worker forbidden imports remain absent", "lens": "error_path", "given": "read apps/worker/src/worker.ts source", "expect": "does not contain adapters package, Codex, Claude, OpenCode, Generic HTTP, AgentField, PTY, shell, browser, fetch, GitHub, or repo imports" }`
+- `{ "name": "hosted non fake runtime denied before work", "lens": "error_path", "given": "POST /runs placement hosted with non-fake runtime or runtimeMode such as codex.exec_json", "expect": "placement_denied or hosted_runtime_not_allowed, no queue job is created, and worker tick performs no execution" }`
 - `{ "name": "docs shipped truth updated", "lens": "integration", "given": "PRODUCT, ARCHITECTURE, README, API, DEVELOPMENT, env example, and CHANGELOG", "expect": "S3/R2 object-store client wiring is shipped, fake-only hosted runtime boundary remains explicit, and PROJECT.md is left for CEO closeout" }`
 
 **Integration contracts:**
@@ -380,13 +424,26 @@ The shipped boundary remains explicit: R12 does not ship S3/R2 network object-st
 - **Single-task breadth:** This one task owns more than 8 files. Splitting would create dependent worktrees that all need the same env/error contract and would increase merge risk. Mitigation: strict internal order, storage-first tests, then core metadata, then app wiring, then docs.
 - **AWS SDK behavior drift:** SDK error names can vary across providers and versions. Mitigation: map by explicit Smithy metadata/status/name patterns in one helper and test with fake SDK errors that cover AWS and R2-style failures.
 - **Credential leakage:** Provider errors can contain request metadata. Mitigation: never surface raw SDK messages from object-store errors, use redacted summaries, and add negative tests for access key, secret, signed headers, userinfo/query endpoint, bucket/key in metrics, and artifact content.
+- **SDK body conversion ambiguity:** AWS SDK v3 can return several body shapes. Mitigation: centralize Body-to-Buffer conversion and test Node stream, web stream, Blob-like, `transformToByteArray()`, raw bytes, undefined body, and stream error cases.
+- **Timeout drift through retries:** SDK retries can exceed operator expectations if only socket timeout is configured. Mitigation: configure explicit `maxAttempts` and a per-operation abort timeout that bounds the full Put/Get/Delete/probe operation.
 - **Readiness probe side effects:** Probe delete failure can leave an object. Mitigation: use a `probes/<uuid>` prefix, fail readiness on cleanup failure in staging/production, and document least-privilege delete permission for probe keys.
 - **Package dependency footprint:** Adding AWS SDK could accidentally bleed into app packages. Mitigation: dependency scoped only to `packages/storage`, with package manifest and lockfile review in acceptance.
 - **Runtime boundary regression:** App wiring changes must not import real adapters into the hosted worker. Mitigation: preserve and expand forbidden-import tests.
 
 ## Integration Points
 
-The implementation order should be storage first, then core metadata preservation, then REST error mapping, then server/worker wiring, then docs. `packages/storage` exports the only object-store config parser and store factory. `apps/server/src/config.ts` and `apps/worker/src/config.ts` consume the parser and store only the resolved object-store config plus redacted summary. `apps/server/src/app.ts` and `apps/worker/src/worker.ts` consume the store factory and pass the resulting store to `RuntimeRunnerService`. `RuntimeRunnerService` consumes `StoredArtifactContent` and writes metadata that `packages/protocol-rest/src/artifact-routes.ts` later uses for safe content reads. `apps/server/src/readiness.ts` consumes the probeable store. Metrics wrap app-level reads/writes/probes and remain separate from storage internals.
+The internal implementation order is mandatory because this one task crosses storage, core, protocol, apps, and docs:
+
+1. Storage client/config/dependency scope first, with storage tests proving SDK scoping, GetObject body conversion, total timeout semantics, redaction helpers, and config parsing.
+2. Core metadata second, with core tests proving `StoredArtifactContent` metadata is preserved for runtime artifacts.
+3. REST/contracts errors third, with route and contract tests proving safe public error mapping and closed error-code drift protection.
+4. App readiness/metrics fourth, with server/worker tests proving shared config, probeable store consumption, readiness promptness, metrics redaction, and fake S3 integration.
+5. Hosted boundary fifth, with tests proving non-fake hosted runtime/mode requests are denied before queue or worker execution.
+6. Docs last, after the checked behavior is stable.
+
+`packages/storage` exports the only object-store config parser and store factory. Consumer notes are part of the contract: `apps/server/src/config.ts` and `apps/worker/src/config.ts` consume `resolveObjectStoreConfig`; `apps/server/src/app.ts` and `apps/worker/src/worker.ts` consume `createArtifactContentStoreFromObjectConfig`; `apps/server/src/readiness.ts` consumes the already-created probeable store instance. The apps must not duplicate object-store env parsing or construct a second readiness-only store.
+
+`RuntimeRunnerService` consumes `StoredArtifactContent` and writes metadata that `packages/protocol-rest/src/artifact-routes.ts` later uses for safe content reads. Metrics wrap app-level reads/writes/probes and remain separate from storage internals.
 
 ```text
 packages/storage exports
@@ -409,10 +466,14 @@ No task imports from another task because this phase intentionally uses one cohe
 ## Phase-Level Acceptance Criteria
 
 - [ ] `packages/storage` exports a real S3-compatible object client/factory that can back `ObjectArtifactContentStore`.
+- [ ] AWS SDK dependencies are scoped only to `packages/storage`, with package manifest and lockfile tests proving no root/app/core/protocol/contract dependency leakage.
 - [ ] `apps/server` and `apps/worker` can select `memory`, `local`, or `s3-compatible` object artifact content storage from the shared env contract.
 - [ ] Staging/production config fails closed when object-store backend/config is missing, invalid, insecure, or implicitly memory-backed.
 - [ ] AWS S3-style and Cloudflare R2-style endpoint configs are represented in tests and docs.
+- [ ] AWS SDK v3 GetObject body handling covers Node streams, web streams, Blob-like bodies, `transformToByteArray()`, raw bytes, undefined bodies, and stream errors.
+- [ ] Put/Get/Delete/probe operations observe total request timeout bounds and readiness returns promptly on object-store timeouts.
 - [ ] Hosted `fake.deterministic` runs can write artifact content to the S3-compatible backend and serve it through existing artifact-content routes.
+- [ ] Non-fake hosted runtime or runtime-mode requests remain denied before queueing or worker execution.
 - [ ] Artifact metadata preserves backend, object key, size, digest, and content type without storing credentials or signed request details.
 - [ ] `/ready` reports object-store dependency status with named redacted failure codes.
 - [ ] Object-store errors are named, visible, and mapped consistently across startup, readiness, artifact write, artifact read, and smoke diagnostics.
@@ -423,17 +484,17 @@ No task imports from another task because this phase intentionally uses one cohe
 
 ## Self-Review
 
-1. Spec coverage: pass. The single task covers storage client, config, server/worker wiring, readiness, metrics, metadata, tests, docs, and non-goals.
+1. Spec coverage: pass. The single task covers storage client, config, server/worker wiring, readiness, metrics, metadata, tests, docs, non-goals, and architect iteration 1 additions for redaction, dependency scope, GetObject body conversion, timeout semantics, hosted boundary, internal sequencing, and consumer contracts.
 2. Placeholder scan: pass. No placeholder work items remain.
 3. Type consistency: pass. `StoredArtifactContent` is the shared return shape for content writes, with legacy string return compatibility explicitly called out.
 4. Ownership disjoint: pass. There is one task, so there is no cross-task file overlap.
 5. Context files real: pass. All context files listed above exist in this worktree.
 6. Acceptance testable: pass. Each acceptance item maps to a command or named test case.
-7. Dependency order sane: pass. One task includes an internal storage-to-docs implementation order.
-8. Checks runnable: pass. Commands are workspace pnpm commands already used by existing packages, plus `git diff --check`.
+7. Dependency order sane: pass. One task includes a checkpointed internal order from storage/client/config to core, REST/contracts, apps, hosted boundary, then docs.
+8. Checks runnable: pass. Commands are workspace pnpm commands already used by existing packages, plus `git diff --check`; required checks explicitly exclude MinIO/live S3/R2/Docker object-store smoke.
 9. Error/rescue map present: pass. Startup, config, network, read/write, probe, integrity, metadata, route, and metrics failures are enumerated.
 10. Observability present: pass. Logs and metrics are specified with redaction boundaries.
-11. Test cases enumerate acceptance: pass. Happy, nil, empty, error, edge, and integration lenses cover the error/rescue map and acceptance criteria.
+11. Test cases enumerate acceptance: pass. Happy, nil, empty, error, edge, and integration lenses cover the error/rescue map, redaction surfaces, dependency scope, body conversion, timeout promptness, hosted denial, and acceptance criteria.
 12. Integration contracts walk: pass. There are no imports from other tasks; internal exports are listed for app/core consumption.
 13. Contract types match: pass. Storage exports use `ResolvedObjectStoreConfig`, `ObjectClient`, and `StoredArtifactContent`; app/core/protocol consumers use those shapes.
 
