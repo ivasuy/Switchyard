@@ -4,6 +4,7 @@ import type {
   AssignmentCompleteRequest,
   AssignmentEventSyncRequest,
   HttpErrorCode,
+  HttpErrorDetail,
   NodeHeartbeatRequest,
   NodeRegisterRequest
 } from "@switchyard/contracts";
@@ -25,7 +26,8 @@ export class NodeClientHttpError extends NodeClientError {
     readonly status: number,
     readonly code: HttpErrorCode,
     message: string,
-    readonly requestId?: string
+    readonly requestId?: string,
+    readonly details?: HttpErrorDetail[]
   ) {
     super(message);
   }
@@ -137,13 +139,19 @@ async function parseHttpError(response: Response): Promise<NodeClientHttpError> 
   let message = `http_${response.status}`;
   let code: HttpErrorCode = "internal_error";
   let requestId: string | undefined;
+  let details: HttpErrorDetail[] | undefined;
   try {
-    const body = await response.json() as { error?: { code?: HttpErrorCode; message?: string; requestId?: string } };
+    const body = await response.json() as {
+      error?: { code?: HttpErrorCode; message?: string; requestId?: string; details?: HttpErrorDetail[] };
+    };
     if (body.error?.code) code = body.error.code;
     if (body.error?.message) message = body.error.message;
     requestId = body.error?.requestId;
+    if (Array.isArray(body.error?.details)) {
+      details = body.error.details;
+    }
   } catch {
     // keep fallback values
   }
-  return new NodeClientHttpError(response.status, code, message, requestId);
+  return new NodeClientHttpError(response.status, code, message, requestId, details);
 }

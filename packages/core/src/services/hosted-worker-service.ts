@@ -20,7 +20,8 @@ export class HostedWorkerService {
   }
 
   async processNext(): Promise<boolean> {
-    await this.deps.queue.recoverStaleClaims();
+    const recovery = await this.deps.queue.recoverStaleClaims();
+    await this.applyStaleClaimExhaustion(recovery.exhaustedClaims);
     const job = await this.deps.queue.claim();
     if (!job) {
       return false;
@@ -86,6 +87,9 @@ export class HostedWorkerService {
   }
 
   private async failRun(run: Run, reasonCode: string): Promise<void> {
+    if (isTerminalRun(run)) {
+      return;
+    }
     const endedAt = this.now();
     const failed: Run = {
       ...run,
@@ -104,6 +108,20 @@ export class HostedWorkerService {
     };
     await this.deps.events.append(event);
   }
+
+  private async applyStaleClaimExhaustion(exhaustedClaims: Array<{ jobId: string; runId: string }>): Promise<void> {
+    for (const claim of exhaustedClaims) {
+      const run = await this.deps.runs.get(claim.runId);
+      if (!run) {
+        continue;
+      }
+      await this.failRun(run, "worker_retry_exhausted");
+      await this.deps.queue.fail(claim.jobId, {
+        reasonCode: "worker_retry_exhausted",
+        message: "stale_claim_exhausted"
+      });
+    }
+  }
 }
 
 function toReasonCode(error: unknown): string {
@@ -112,4 +130,8 @@ function toReasonCode(error: unknown): string {
     return "object_store_write_failed";
   }
   return "worker_job_failed";
+}
+
+function isTerminalRun(run: Run): boolean {
+  return run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "timeout";
 }

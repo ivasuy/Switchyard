@@ -54,6 +54,15 @@ export async function probeServerReadiness(input: {
     checks.nodeToken = { ok: true };
   }
 
+  const allowlist = input.config.hostedRuntimeAllowlist;
+  if (allowlist.length === 0) {
+    checks.hostedAllowlist = { ok: false, code: "hosted_runtime_not_allowed" };
+  } else if (!allowlist.includes("fake.deterministic")) {
+    checks.hostedAllowlist = { ok: false, code: "hosted_runtime_not_allowed" };
+  } else {
+    checks.hostedAllowlist = { ok: true };
+  }
+
   const ok = Object.values(checks).every((check) => check.ok);
   return { ok, checks };
 }

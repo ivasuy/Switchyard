@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -98,7 +98,67 @@ describe("artifact content stores", () => {
       await expect(store.read({
         ...digestMismatchArtifact,
         metadata: { objectKey: saved.objectKey, contentType: saved.contentType, sha256: saved.sha256, sizeBytes: 1 }
-      } as any)).rejects.toThrow("artifact_sync_failed");
+      } as any)).rejects.toThrow("object_store_unavailable");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("maps local object store write failures to object_store_write_failed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-objects-file-root-"));
+    const rootFile = join(dir, "root-as-file");
+    await writeFile(rootFile, "x");
+    const store = new LocalObjectArtifactContentStore(rootFile);
+    await expect(store.writeText("runs/run_1/file.txt", "content")).rejects.toThrow("object_store_write_failed");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("maps unavailable roots and probe failures to object_store_unavailable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-objects-unavailable-"));
+    const rootFile = join(dir, "root-as-file");
+    await writeFile(rootFile, "x");
+    const store = new LocalObjectArtifactContentStore(rootFile);
+    await expect(store.probe()).rejects.toThrow("object_store_unavailable");
+    await expect(store.read({
+      id: "artifact_unavailable",
+      runId: "run_1",
+      type: "raw_log",
+      path: "runs/run_1/file.txt",
+      metadata: { objectKey: "artifacts/runs/run_1/file.txt" },
+      createdAt: "2026-05-30T00:00:00.000Z"
+    })).rejects.toThrow("object_store_unavailable");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("maps missing content and empty-content mismatch errors", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-objects-missing-"));
+    try {
+      const store = new LocalObjectArtifactContentStore(dir);
+      await expect(store.read({
+        id: "artifact_missing",
+        runId: "run_1",
+        type: "raw_log",
+        path: "runs/run_1/missing.txt",
+        metadata: { objectKey: "artifacts/runs/run_1/missing.txt" },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      })).rejects.toThrow("artifact_content_not_found");
+
+      const saved = await store.writeBytes("runs/run_1/empty.txt", Buffer.alloc(0), {
+        contentType: "application/octet-stream"
+      });
+      await expect(store.read({
+        id: "artifact_empty",
+        runId: "run_1",
+        type: "raw_log",
+        path: "runs/run_1/empty.txt",
+        metadata: {
+          objectKey: saved.objectKey,
+          contentType: saved.contentType,
+          sha256: saved.sha256,
+          sizeBytes: 1
+        },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      })).rejects.toThrow("artifact_content_empty");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

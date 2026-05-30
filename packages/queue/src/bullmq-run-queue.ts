@@ -165,6 +165,7 @@ export class BullMqRunQueue implements RunQueuePort {
     let recovered = 0;
     let exhausted = 0;
     let invalid = 0;
+    const exhaustedClaims: RunQueueRecoveryResult["exhaustedClaims"] = [];
     for (const [jobId, raw] of Object.entries(entries)) {
       let claimed: StoredJob;
       try {
@@ -186,6 +187,7 @@ export class BullMqRunQueue implements RunQueuePort {
         claimed.state = "exhausted";
         claimed.failure = { reasonCode: "worker_retry_exhausted", message: "lease_expired" };
         exhausted += 1;
+        exhaustedClaims.push({ jobId, runId: claimed.payload.runId });
         await this.connection.multi().hdel(this.claimedKey, jobId).hset(this.jobsKey, jobId, JSON.stringify(claimed)).exec();
       } else {
         claimed.state = "queued";
@@ -200,7 +202,7 @@ export class BullMqRunQueue implements RunQueuePort {
           .exec();
       }
     }
-    return { recovered, exhausted, invalid };
+    return { recovered, exhausted, invalid, exhaustedClaims };
   }
 
   async stats(): Promise<RunQueueStats> {

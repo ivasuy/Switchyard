@@ -62,7 +62,7 @@ class MemoryQueue {
     if (!job) return undefined;
     return { id: job.id, payload: job.payload, attempts: job.attempts, maxAttempts: job.maxAttempts, state: job.state, failure: job.failure };
   }
-  async recoverStaleClaims() { return { recovered: 0, exhausted: 0, invalid: 0 }; }
+  async recoverStaleClaims() { return { recovered: 0, exhausted: 0, invalid: 0, exhaustedClaims: [] }; }
   async stats() {
     return {
       queued: this.jobs.filter((job) => job.state === "queued").length,
@@ -242,5 +242,51 @@ describe("HostedWorkerService", () => {
     await svc.processNext();
     await svc.processNext();
     expect((await queue.getJob(queued.jobId))?.state).toBe("exhausted");
+  });
+
+  it("fails durable run when stale claimed job is exhausted during recovery", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    await runs.create({
+      id: "run_stale_exhausted_1",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "task",
+      status: "running",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      startedAt: "2026-05-30T00:00:01.000Z"
+    });
+    await queue.enqueue({ runId: "run_stale_exhausted_1", placement: "hosted", runtimeMode: "fake.deterministic" });
+    queue.recoverStaleClaims = async () => ({
+      recovered: 0,
+      exhausted: 1,
+      invalid: 0,
+      exhaustedClaims: [{ jobId: "job_1", runId: "run_stale_exhausted_1" }]
+    });
+
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      startRun: async () => {
+        throw new Error("must_not_start");
+      },
+      now: () => "2026-05-30T00:00:10.000Z"
+    });
+
+    const processed = await svc.processNext();
+    expect(processed).toBe(false);
+    expect((await runs.get("run_stale_exhausted_1"))?.status).toBe("failed");
+    expect(events.items.at(-1)?.payload?.reasonCode).toBe("worker_retry_exhausted");
   });
 });

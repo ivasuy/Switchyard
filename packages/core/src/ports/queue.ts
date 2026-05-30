@@ -37,6 +37,7 @@ export interface RunQueueRecoveryResult {
   recovered: number;
   exhausted: number;
   invalid: number;
+  exhaustedClaims: Array<{ jobId: string; runId: string }>;
 }
 
 export interface RunQueueStats {

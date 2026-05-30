@@ -41,6 +41,10 @@ describe("hosted server", () => {
       redactedSummary: {}
     });
     try {
+      const ready = await app.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(503);
+      expect(ready.json().checks.hostedAllowlist.code).toBe("hosted_runtime_not_allowed");
+
       const response = await app.inject({
         method: "POST",
         url: "/runs",

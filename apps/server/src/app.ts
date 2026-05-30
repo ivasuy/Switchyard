@@ -188,6 +188,7 @@ export async function createServerApp(config: ServerConfig) {
       return metrics.toJSON();
     } catch {
       metrics.inc("errors.metricsCollection");
+      metrics.markComponentUnavailable("queue");
       return metrics.toJSON();
     }
   });

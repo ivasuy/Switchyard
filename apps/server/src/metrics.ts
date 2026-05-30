@@ -5,6 +5,7 @@ export interface HostedMetricsSnapshot {
   errors: { total: number; metricsCollection: number };
   placement: { accepted: number; denied: number };
   queue: {
+    available: boolean;
     enqueue: number;
     claim: number;
     ack: number;
@@ -26,7 +27,7 @@ export class HostedMetrics {
     requests: { total: 0 },
     errors: { total: 0, metricsCollection: 0 },
     placement: { accepted: 0, denied: 0 },
-    queue: { enqueue: 0, claim: 0, ack: 0, retry: 0, failed: 0, exhausted: 0, queued: 0, claimed: 0 },
+    queue: { available: true, enqueue: 0, claim: 0, ack: 0, retry: 0, failed: 0, exhausted: 0, queued: 0, claimed: 0 },
     worker: { attempts: 0, exhausted: 0 },
     objectStore: { reads: 0, writes: 0, failures: 0 },
     node: { register: 0, heartbeat: 0, claim: 0, sync: 0, complete: 0, reject: 0 },
@@ -51,8 +52,15 @@ export class HostedMetrics {
 
   async captureQueue(queue: RunQueuePort): Promise<void> {
     const stats = await queue.stats();
+    this.snapshot.queue.available = true;
     this.snapshot.queue.queued = stats.queued;
     this.snapshot.queue.claimed = stats.claimed;
+  }
+
+  markComponentUnavailable(component: "queue"): void {
+    if (component === "queue") {
+      this.snapshot.queue.available = false;
+    }
   }
 
   toJSON(): HostedMetricsSnapshot {

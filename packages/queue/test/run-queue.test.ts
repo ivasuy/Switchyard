@@ -46,11 +46,16 @@ describe("MemoryRunQueue", () => {
     }, { maxAttempts: 2 });
     await queue.claim();
     const recovered = await queue.recoverStaleClaims({ now: "2026-05-30T00:00:02.000Z" });
-    expect(recovered).toEqual({ recovered: 1, exhausted: 0, invalid: 0 });
+    expect(recovered).toEqual({ recovered: 1, exhausted: 0, invalid: 0, exhaustedClaims: [] });
     const reclaimed = await queue.claim();
     expect(reclaimed?.attempts).toBe(2);
     const exhausted = await queue.recoverStaleClaims({ now: "2026-05-30T00:00:04.000Z" });
-    expect(exhausted).toEqual({ recovered: 0, exhausted: 1, invalid: 0 });
+    expect(exhausted).toEqual({
+      recovered: 0,
+      exhausted: 1,
+      invalid: 0,
+      exhaustedClaims: [{ jobId: first.jobId, runId: "run_recover" }]
+    });
     expect((await queue.getJob(first.jobId))?.state).toBe("exhausted");
   });
 

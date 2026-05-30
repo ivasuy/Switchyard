@@ -121,6 +121,7 @@ export class MemoryRunQueue implements RunQueuePort {
     let recovered = 0;
     let exhausted = 0;
     let invalid = 0;
+    const exhaustedClaims: RunQueueRecoveryResult["exhaustedClaims"] = [];
     for (const job of this.jobs.values()) {
       if (job.state !== "claimed") continue;
       if (!job.leaseUntil) {
@@ -134,6 +135,7 @@ export class MemoryRunQueue implements RunQueuePort {
         job.state = "exhausted";
         job.failure = { reasonCode: "worker_retry_exhausted", message: "lease_expired" };
         exhausted += 1;
+        exhaustedClaims.push({ jobId: job.id, runId: job.payload.runId });
       } else {
         job.state = "queued";
         delete job.claimedAt;
@@ -141,7 +143,7 @@ export class MemoryRunQueue implements RunQueuePort {
         recovered += 1;
       }
     }
-    return { recovered, exhausted, invalid };
+    return { recovered, exhausted, invalid, exhaustedClaims };
   }
 
   async stats(): Promise<RunQueueStats> {

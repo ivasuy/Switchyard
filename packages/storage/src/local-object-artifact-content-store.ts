@@ -22,8 +22,12 @@ export class LocalObjectArtifactContentStore implements ArtifactContentStore {
     const safePath = normalizeLogicalPath(path);
     const objectKey = this.objectKeyFor(safePath);
     const target = this.absoluteObjectPath(objectKey);
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, bytes);
+    try {
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, bytes);
+    } catch (error) {
+      throw mapWriteError(error);
+    }
     return {
       path: safePath,
       storageBackend: "object",
@@ -43,13 +47,14 @@ export class LocalObjectArtifactContentStore implements ArtifactContentStore {
     try {
       body = await readFile(this.absoluteObjectPath(objectKey));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError.code === "ENOENT") {
         throw new Error("artifact_content_not_found");
       }
-      throw new Error("artifact_sync_failed");
+      throw mapReadError(error);
     }
     if (typeof artifact.metadata["sizeBytes"] === "number" && body.byteLength !== artifact.metadata["sizeBytes"]) {
-      throw new Error(body.byteLength === 0 ? "artifact_content_empty" : "artifact_sync_failed");
+      throw new Error(body.byteLength === 0 ? "artifact_content_empty" : "object_store_unavailable");
     }
     if (typeof artifact.metadata["sha256"] === "string") {
       const digest = createHash("sha256").update(body).digest("hex");
@@ -68,14 +73,21 @@ export class LocalObjectArtifactContentStore implements ArtifactContentStore {
   async probe(): Promise<{ ok: true }> {
     const key = this.objectKeyFor(`probe/${randomUUID()}`);
     const target = this.absoluteObjectPath(key);
-    await mkdir(dirname(target), { recursive: true });
-    const body = Buffer.from("probe");
-    await writeFile(target, body);
-    const read = await readFile(target);
-    if (createHash("sha256").update(read).digest("hex") !== createHash("sha256").update(body).digest("hex")) {
-      throw new Error("artifact_digest_mismatch");
+    try {
+      await mkdir(dirname(target), { recursive: true });
+      const body = Buffer.from("probe");
+      await writeFile(target, body);
+      const read = await readFile(target);
+      if (createHash("sha256").update(read).digest("hex") !== createHash("sha256").update(body).digest("hex")) {
+        throw new Error("artifact_digest_mismatch");
+      }
+      await rm(target, { force: true });
+    } catch (error) {
+      if (error instanceof Error && error.message === "artifact_digest_mismatch") {
+        throw error;
+      }
+      throw new Error("object_store_unavailable");
     }
-    await rm(target, { force: true });
     return { ok: true };
   }
 
@@ -92,4 +104,20 @@ export class LocalObjectArtifactContentStore implements ArtifactContentStore {
     }
     return resolved;
   }
+}
+
+function mapWriteError(error: unknown): Error {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "EACCES" || code === "EPERM" || code === "ENOENT" || code === "ENOTDIR") {
+    return new Error("object_store_write_failed");
+  }
+  return new Error("object_store_write_failed");
+}
+
+function mapReadError(error: unknown): Error {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "EACCES" || code === "EPERM" || code === "ENOTDIR") {
+    return new Error("object_store_unavailable");
+  }
+  return new Error("object_store_unavailable");
 }
