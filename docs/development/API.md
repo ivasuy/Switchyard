@@ -595,7 +595,7 @@ Cancellation semantics:
 - `agentfield.async_rest` active cancel returns `409 adapter_protocol_failed` with reason `agentfield_cancel_unsupported`; timeout handling remains Switchyard-owned.
 - OpenCode unverified cancel uses `reasonCode: acp_cancel_unverified`.
 
-Generic HTTP and OpenCode transcripts are exposed through the existing artifact APIs:
+Runtime transcript/result artifacts are exposed through the existing artifact APIs. This includes AgentField transcript/result artifacts, Generic HTTP transcripts, and OpenCode ACP transcripts:
 
 - `GET /runs/:id/artifacts`
 - `GET /artifacts/:id`

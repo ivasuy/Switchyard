@@ -530,48 +530,51 @@ Promotion criteria:
 
 ### R6: Wrapper Runtime Integration
 
-Status: planned.
+Status: shipped on `agent/phase-5-r6-wrapper-runtime-integration`.
 
 Goal: prove Switchyard can coordinate a real wrapper runtime, not only local CLIs.
 
 Why this release exists:
 
-Switchyard is meant to normalize direct runtimes and wrapper runtimes. Generic HTTP proves the wrapper contract in isolation; AgentField proves it against a real wrapper-style provider. This should happen before OpenClaw or Paperclip because AgentField has a clearer verified path.
+Switchyard is meant to normalize direct runtimes and wrapper runtimes. Generic HTTP proves the wrapper contract in isolation; AgentField now proves it against a real wrapper-style provider boundary without turning AgentField into Switchyard's control plane.
 
 Release scope:
 
-- AgentField adapter using async REST execution.
-- create-execution, poll/status, result, and failure mapping.
-- wrapper execution metadata preserved in events and artifacts.
-- wrapper capability and doctor reporting.
-- local or mocked verification path that does not require uncontrolled spend.
-- docs for AgentField setup and local verification.
+- `agentfield.async_rest` adapter using daemon-configured async REST execution.
+- AgentField create-execution, status polling, result capture, and visible failure mapping.
+- wrapper execution metadata preserved in normalized events, transcript artifacts, and result artifacts.
+- AgentField runtime-mode manifest, seeded provider/runtime/model records, runtime-mode inference, and doctor/check reporting.
+- fake AgentField server and local verification script for deterministic CI-safe coverage.
+- local docs for fake verification and optional real AgentField smoke with spend warning.
 
 Usable after this release:
 
-- AgentField adapter using async REST execution.
-- create/poll/result/failure mapping.
-- wrapper execution metadata and artifacts.
-- wrapper-specific doctor and local verification docs.
-- an AgentField workflow can be launched as a Switchyard run when configured.
+- A configured AgentField target can be launched through normal `POST /runs` using `runtime: "agentfield"` and `adapterType: "http"`.
+- `agentfield.async_rest` starts upstream async executions, polls terminal status, emits normalized status/output/completion/failure events, and stores sanitized transcript plus result payload artifacts.
+- `GET /runtime-modes/agentfield.async_rest`, `POST /runtime-modes/agentfield.async_rest/check`, and `GET /doctor` expose configured/unconfigured AgentField availability without exposing API keys.
+- Active cancel is reported truthfully as unsupported with `409 adapter_protocol_failed` and `reasonCode: agentfield_cancel_unsupported`; Switchyard timeouts still persist `timeout`.
 
 Not included:
 
-- OpenClaw or Paperclip until their API boundaries are verified.
-- hosted worker execution.
-- debate orchestration.
+- verified upstream AgentField cancellation.
+- OpenClaw or Paperclip.
+- hosted worker execution or hosted/hybrid placement.
+- debate orchestration, approvals, memory, tools, SDK, CLI, TUI, or dashboard work.
+- AgentField memory, admin, node lifecycle, permissions, or Agentic APIs as Switchyard product surfaces.
 
 Local verification:
 
 - AgentField doctor reports configured/unconfigured states clearly.
-- mocked AgentField flow passes CI.
-- approved local smoke can create an execution, poll it, and normalize completion/failure.
-- artifacts preserve wrapper result payloads.
+- fake AgentField flow passes CI without uncontrolled model spend.
+- local fake smoke can create an execution, poll it, normalize completion/failure, and retrieve transcript/result artifacts.
+- active cancel returns `agentfield_cancel_unsupported`; post-start input returns `agentfield_input_unsupported`.
+- Switchyard timeout persists `timeout` even though upstream cancellation is unsupported.
 
 Promotion criteria:
 
 - wrapper adapters follow Generic HTTP/runtime capability conventions.
 - AgentField does not become a second control plane inside Switchyard.
+- API keys are not exposed in doctor output, events, logs, transcripts, snapshots, or artifacts.
 
 ### R7: Middleware Foundation
 
