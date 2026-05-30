@@ -51,6 +51,7 @@ import {
   registerRunRoutes,
   type ArtifactContentReader
 } from "@switchyard/protocol-rest";
+import type { RunStatus } from "@switchyard/contracts";
 import {
   FakeRuntimeAdapter,
   FakeEchoToolAdapter,
@@ -139,6 +140,32 @@ interface CreateDaemonAppOptions {
   claudeLiveProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["runLiveProbe"];
 }
 
+interface StartupRecoveryStats {
+  recoveredRuns: number;
+  failedSessions: number;
+  alreadyTerminal: number;
+  duplicateStarts: number;
+}
+
+interface DaemonMetricsState {
+  requestsTotal: number;
+  errorsTotal: number;
+  runStatusCounts: Record<RunStatus, number>;
+  startupRecovery: StartupRecoveryStats;
+}
+
+const RUN_STATUSES: readonly RunStatus[] = [
+  "queued",
+  "starting",
+  "running",
+  "waiting_for_input",
+  "waiting_for_approval",
+  "completed",
+  "failed",
+  "cancelled",
+  "timeout"
+];
+
 export async function createDaemonApp(config?: DaemonConfig, options: CreateDaemonAppOptions = {}) {
   const app = Fastify({ logger: false });
   const stores: DaemonStoreResult = config ? createStorageStores(config) : createInMemoryStores();
@@ -203,7 +230,8 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     reasonCode: null,
     message: null
   };
-  reconcileInterruptedRuns(stores, options.logger);
+  const metrics = createDaemonMetricsState();
+  metrics.startupRecovery = reconcileInterruptedRuns(stores, options.logger);
   const codexOptions: ConstructorParameters<typeof CodexExecJsonAdapter>[0] = {
     modelCatalog: codexProbe.models
   };
@@ -386,7 +414,23 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
 
   registerErrorEnvelope(app);
 
+  app.addHook("onResponse", async (_request, reply) => {
+    metrics.requestsTotal += 1;
+    if (reply.statusCode >= 400) {
+      metrics.errorsTotal += 1;
+    }
+  });
+
   app.get("/health", async () => ({ ok: true }));
+  app.get("/metrics", async () => {
+    metrics.runStatusCounts = await collectRunStatusCounts(stores);
+    return {
+      requestsTotal: metrics.requestsTotal,
+      errorsTotal: metrics.errorsTotal,
+      runStatusCounts: metrics.runStatusCounts,
+      startupRecovery: metrics.startupRecovery
+    };
+  });
   const contextBuilder = new ContextBuilder({
     memory: stores.memory,
     evidence: stores.evidence,
@@ -477,7 +521,15 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
 }
 
 const unavailableContentReader: ArtifactContentReader = {
-  async read() {
+  async read(artifact) {
+    const metadata = artifact.metadata as Record<string, unknown> | undefined;
+    const inlineContent = metadata?.["content"];
+    if (typeof inlineContent === "string") {
+      return {
+        body: Buffer.from(inlineContent, "utf8"),
+        contentType: contentTypeForArtifact(artifact.type)
+      };
+    }
     const error = new Error("Artifact content store not configured for this daemon instance");
     (error as Error & { code?: string }).code = "ENOENT";
     throw error;
@@ -628,46 +680,143 @@ async function seedClaudeRegistry(
   }
 }
 
-function reconcileInterruptedRuns(stores: DaemonStoreResult, logger?: RuntimeLogger): void {
+function reconcileInterruptedRuns(
+  stores: DaemonStoreResult,
+  logger?: RuntimeLogger
+): StartupRecoveryStats {
+  const stats: StartupRecoveryStats = {
+    recoveredRuns: 0,
+    failedSessions: 0,
+    alreadyTerminal: 0,
+    duplicateStarts: 0
+  };
   if (!stores.sqlite) {
-    return;
+    return stats;
   }
 
   const staleRuns = stores.sqlite
-    .prepare("SELECT id FROM runs WHERE status = 'running'")
+    .prepare(
+      "SELECT id, status FROM runs WHERE status IN ('starting', 'running', 'waiting_for_input', 'waiting_for_approval')"
+    )
     .all();
 
   for (const staleRun of staleRuns) {
     const runId = typeof staleRun["id"] === "string" ? staleRun["id"] : undefined;
     if (!runId) {
+      logger?.error("daemon.startup.recovery.invalid_run_id", { row: staleRun });
       continue;
     }
 
-    const endedAt = new Date().toISOString();
-    const sequenceRow = stores.sqlite
-      .prepare("SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence FROM run_events WHERE run_id = ?")
-      .get(runId);
-    const sequence = typeof sequenceRow?.["sequence"] === "number" ? sequenceRow["sequence"] : 0;
+    try {
+      const endedAt = new Date().toISOString();
+      const sequenceRow = stores.sqlite
+        .prepare("SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence FROM run_events WHERE run_id = ?")
+        .get(runId);
+      const sequence = typeof sequenceRow?.["sequence"] === "number" ? sequenceRow["sequence"] : 0;
 
-    stores.sqlite
-      .prepare("UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ? AND status = 'running'")
-      .run(endedAt, runId);
-    stores.sqlite
-      .prepare("UPDATE runtime_sessions SET status = 'failed', updated_at = ? WHERE run_id = ? AND status = 'active'")
-      .run(endedAt, runId);
-    stores.sqlite
-      .prepare(
-        "INSERT INTO run_events (id, type, run_id, sequence, payload_json, created_at) VALUES (?, 'run.failed', ?, ?, ?, ?)"
-      )
-      .run(
-        `event_${crypto.randomUUID()}`,
+      const runUpdate = stores.sqlite
+        .prepare(
+          "UPDATE runs SET status = 'failed', ended_at = ? WHERE id = ? AND status IN ('starting', 'running', 'waiting_for_input', 'waiting_for_approval')"
+        )
+        .run(endedAt, runId) as { changes: number };
+      if (runUpdate.changes === 0) {
+        stats.duplicateStarts += 1;
+        continue;
+      }
+
+      stats.recoveredRuns += 1;
+      const sessionUpdate = stores.sqlite
+        .prepare("UPDATE runtime_sessions SET status = 'failed', updated_at = ? WHERE run_id = ? AND status = 'active'")
+        .run(endedAt, runId) as { changes: number };
+      stats.failedSessions += sessionUpdate.changes;
+      stores.sqlite
+        .prepare(
+          "INSERT INTO run_events (id, type, run_id, sequence, payload_json, created_at) VALUES (?, 'run.failed', ?, ?, ?, ?)"
+        )
+        .run(
+          `event_${crypto.randomUUID()}`,
+          runId,
+          sequence,
+          JSON.stringify({ status: "failed", error: "daemon_restarted" }),
+          endedAt
+        );
+      logger?.warn("run.reconciled_interrupted", { runId });
+    } catch (error) {
+      logger?.error("daemon.startup.recovery_failed", {
         runId,
-        sequence,
-        JSON.stringify({ status: "failed", error: "daemon_restarted" }),
-        endedAt
-      );
-    logger?.warn("run.reconciled_interrupted", { runId });
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
   }
+  logger?.info("daemon.startup.recovered_runs", {
+    count: stats.recoveredRuns,
+    failedSessions: stats.failedSessions,
+    duplicateStarts: stats.duplicateStarts
+  });
+  return stats;
+}
+
+function createDaemonMetricsState(): DaemonMetricsState {
+  return {
+    requestsTotal: 0,
+    errorsTotal: 0,
+    runStatusCounts: createEmptyRunStatusCounts(),
+    startupRecovery: {
+      recoveredRuns: 0,
+      failedSessions: 0,
+      alreadyTerminal: 0,
+      duplicateStarts: 0
+    }
+  };
+}
+
+async function collectRunStatusCounts(stores: DaemonStoreResult): Promise<Record<RunStatus, number>> {
+  const counts = createEmptyRunStatusCounts();
+  if (stores.sqlite) {
+    const rows = stores.sqlite
+      .prepare("SELECT status, COUNT(*) AS count FROM runs GROUP BY status")
+      .all();
+    for (const row of rows) {
+      const status = row["status"];
+      const count = row["count"];
+      if (typeof status !== "string") {
+        continue;
+      }
+      if (RUN_STATUSES.includes(status as RunStatus) && typeof count === "number") {
+        counts[status as RunStatus] = count;
+      }
+    }
+    return counts;
+  }
+
+  let cursor: { createdAt: string; id: string } | undefined;
+  do {
+    const page = await stores.runs.list({ limit: 200, ...(cursor ? { before: cursor } : {}) });
+    for (const run of page.runs) {
+      const status = run.status as RunStatus;
+      if (RUN_STATUSES.includes(status)) {
+        counts[status] += 1;
+      }
+    }
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+
+  return counts;
+}
+
+function createEmptyRunStatusCounts(): Record<RunStatus, number> {
+  return {
+    queued: 0,
+    starting: 0,
+    running: 0,
+    waiting_for_input: 0,
+    waiting_for_approval: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    timeout: 0
+  };
 }
 
 async function seedCodexRegistry(

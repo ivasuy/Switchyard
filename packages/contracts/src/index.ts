@@ -14,6 +14,7 @@ export * from "./list-queries.js";
 export * from "./memory.js";
 export * from "./message.js";
 export * from "./node.js";
+export * from "./openapi.js";
 export * from "./placement.js";
 export * from "./registry.js";
 export * from "./run.js";

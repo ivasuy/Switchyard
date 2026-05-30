@@ -6,6 +6,13 @@ All notable changes to Switchyard will be documented in this file.
 
 ### Added
 
+- Added `@switchyard/sdk` package with `SwitchyardClient` methods for health/doctor, run lifecycle, replay/live run events, artifact metadata/content, and registry/runtime-mode discovery/checks.
+- Added SDK typed errors: `SwitchyardHttpError`, `SwitchyardNetworkError`, `SwitchyardDecodeError`, `SwitchyardTimeoutError`, `SwitchyardValidationError`, and `SwitchyardStreamError`.
+- Added `@switchyard/cli` package with `switchyard` commands: `doctor`, `daemon start`, `run fake`, `runtime test`, `debug run`, and `contract export`.
+- Added deterministic local daemon route inventory and OpenAPI generation/check in `@switchyard/contracts` (`openapi:generate`, `openapi:check`).
+- Added `/metrics` endpoint with request/error counters, run-status counts, and startup-recovery counters.
+- Added SQLite schema metadata version recording plus additive-migration policy helpers and zero-byte/corrupt-file guards.
+- Added adapter compatibility matrix generation in no-spend mode through `generateCompatibilityMatrix`.
 - Added shipped runtime-mode endpoints: `GET /runtime-modes`, `GET /runtime-modes/:id`, and `POST /runtime-modes/:id/check`.
 - Added shipped runtime doctor summary endpoint: `GET /doctor`.
 - Added runtime-mode capability and availability contracts for shipped R3 runtime modes `fake.deterministic` and `codex.exec_json`.
@@ -13,6 +20,10 @@ All notable changes to Switchyard will be documented in this file.
 
 ### Changed
 
+- Updated HTTP error envelope contracts to include optional `requestId` and expanded error-code parity with protocol-rest middleware/tool/approval routes.
+- Updated protocol-rest error responses to emit `x-request-id` and include `error.requestId` in structured envelopes.
+- Updated daemon startup reconciliation to cover `starting`, `running`, `waiting_for_input`, and `waiting_for_approval` states with idempotent recovery counters.
+- Updated daemon main entrypoint to export reusable `startDaemon()` helper used by CLI command flows.
 - Updated Codex active runtime checks to forward optional-check probe diagnostics so required-pass plus optional-fail checks surface as `partial` with warning diagnostics.
 - Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.

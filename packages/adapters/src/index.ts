@@ -6,3 +6,4 @@ export * from "./claude-code/index.js";
 export * from "./agentfield/index.js";
 export * from "./generic-http/index.js";
 export * from "./opencode/index.js";
+export * from "./compatibility-matrix.js";

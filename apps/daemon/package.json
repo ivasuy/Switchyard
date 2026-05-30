@@ -3,6 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/main.ts",
+    "./app": "./src/app.ts",
+    "./config": "./src/config.ts"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "node --disable-warning=DEP0205 --import tsx src/main.ts",
@@ -12,6 +17,7 @@
   },
   "dependencies": {
     "@switchyard/adapters": "workspace:*",
+    "@switchyard/contracts": "workspace:*",
     "@switchyard/core": "workspace:*",
     "@switchyard/protocol-rest": "workspace:*",
     "@switchyard/storage": "workspace:*",

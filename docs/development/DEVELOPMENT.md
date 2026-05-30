@@ -44,6 +44,30 @@ Expected:
 {"ok":true}
 ```
 
+## SDK, CLI, And Contract Smoke
+
+OpenAPI generation/check:
+
+```bash
+pnpm --filter @switchyard/contracts openapi:generate
+pnpm --filter @switchyard/contracts openapi:check
+```
+
+CLI doctor and fake run:
+
+```bash
+pnpm --filter @switchyard/cli exec switchyard doctor --base-url http://127.0.0.1:4545
+pnpm --filter @switchyard/cli exec switchyard run fake --wait --base-url http://127.0.0.1:4545
+pnpm --filter @switchyard/cli exec switchyard runtime test
+pnpm --filter @switchyard/cli exec switchyard contract export --output ./openapi.local-daemon.json
+```
+
+SDK quick one-liner:
+
+```bash
+node --import tsx -e 'import {SwitchyardClient} from \"@switchyard/sdk\"; const c=new SwitchyardClient({baseUrl:\"http://127.0.0.1:4545\"}); const r=await c.health(); console.log(r.ok);'
+```
+
 ## Runtime Capability Smoke
 
 ```bash

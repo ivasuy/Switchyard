@@ -9,7 +9,15 @@ export const httpErrorCodeSchema = z.enum([
   "runtime_not_found",
   "runtime_mode_not_found",
   "model_not_found",
+  "message_not_found",
+  "memory_not_found",
   "evidence_not_found",
+  "approval_not_found",
+  "tool_invocation_not_found",
+  "approval_not_pending",
+  "tool_policy_denied",
+  "approval_required",
+  "unsupported_tool",
   "invalid_input",
   "invalid_query",
   "adapter_protocol_failed",
@@ -37,7 +45,8 @@ export const httpErrorEnvelopeSchema = z.object({
   error: z.object({
     code: httpErrorCodeSchema,
     message: z.string().min(1),
-    details: z.array(httpErrorDetailSchema).optional()
+    details: z.array(httpErrorDetailSchema).optional(),
+    requestId: z.string().min(1).optional()
   })
 });
 

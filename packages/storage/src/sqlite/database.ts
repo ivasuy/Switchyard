@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import { existsSync, statSync } from "node:fs";
 import * as schema from "./schema.js";
 
 export type SwitchyardSqliteDatabase = BetterSQLite3Database<typeof schema>;
@@ -8,6 +9,10 @@ export interface OpenSqliteStorageResult {
   sqlite: Database.Database;
   db: SwitchyardSqliteDatabase;
 }
+
+export const SQLITE_SCHEMA_VERSION = 11;
+
+const FORBIDDEN_MIGRATION_TOKENS = ["DROP TABLE", "DROP COLUMN", "ALTER TABLE", "RENAME TO"] as const;
 
 const migrationSql = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -320,6 +325,12 @@ CREATE INDEX IF NOT EXISTS runtime_modes_runtime_id_idx
 
 CREATE INDEX IF NOT EXISTS runtime_modes_status_idx
   ON runtime_modes (status);
+
+CREATE TABLE IF NOT EXISTS schema_metadata (
+  key TEXT PRIMARY KEY NOT NULL,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 const additiveMigrations: Array<{ table: string; column: string; statement: string }> = [
@@ -342,6 +353,7 @@ const additiveMigrations: Array<{ table: string; column: string; statement: stri
 
 function applyAdditiveMigrations(sqlite: Database.Database): void {
   for (const migration of additiveMigrations) {
+    assertAdditiveMigrationStatement(migration.statement);
     const columnInfo = sqlite.prepare(`PRAGMA table_info(${migration.table})`).all() as Array<{ name: string }>;
     const existing = new Set(columnInfo.map((row) => row.name));
     if (existing.has(migration.column)) {
@@ -358,12 +370,64 @@ function migrate(sqlite: Database.Database): void {
 CREATE INDEX IF NOT EXISTS runtimes_provider_id_idx
   ON runtimes (provider_id);
 `);
+  sqlite
+    .prepare("INSERT OR REPLACE INTO schema_metadata (key, value, updated_at) VALUES ('schema_version', ?, ?)")
+    .run(String(SQLITE_SCHEMA_VERSION), new Date().toISOString());
+}
+
+function assertAdditiveMigrationStatement(statement: string): void {
+  const normalized = statement.toUpperCase();
+  if (!normalized.startsWith("ALTER TABLE")) {
+    return;
+  }
+  if (!normalized.includes(" ADD COLUMN ")) {
+    throw new Error(`Destructive migration blocked by policy: ${statement}`);
+  }
+}
+
+function assertExistingFileReadable(path: string): void {
+  if (!existsSync(path)) {
+    return;
+  }
+  const stats = statSync(path);
+  if (stats.size === 0) {
+    throw new Error(`SQLite database is zero-byte and unreadable: ${path}`);
+  }
+}
+
+function assertDatabaseIntegrity(sqlite: Database.Database, path: string): void {
+  const row = sqlite.prepare("PRAGMA quick_check").get() as { quick_check?: string } | undefined;
+  const status = row?.quick_check;
+  if (status !== "ok") {
+    throw new Error(`SQLite integrity check failed for ${path}: ${status ?? "unknown failure"}`);
+  }
 }
 
 export function openSqliteStorage(path: string): OpenSqliteStorageResult {
+  assertExistingFileReadable(path);
   const sqlite = new Database(path);
   sqlite.pragma("journal_mode = WAL");
+  assertDatabaseIntegrity(sqlite, path);
   migrate(sqlite);
   const db = drizzle(sqlite, { schema });
   return { sqlite, db };
+}
+
+export function getSqliteMigrationPolicy(): {
+  destructiveStatementsForbidden: true;
+  forbiddenTokens: readonly string[];
+} {
+  return {
+    destructiveStatementsForbidden: true,
+    forbiddenTokens: FORBIDDEN_MIGRATION_TOKENS
+  };
+}
+
+export function assertSqliteMigrationStatementSafe(statement: string): void {
+  const normalized = statement.toUpperCase();
+  for (const token of FORBIDDEN_MIGRATION_TOKENS) {
+    if (normalized.includes(token) && !normalized.includes(" ADD COLUMN ")) {
+      throw new Error(`Migration statement violates additive policy: ${statement}`);
+    }
+  }
 }

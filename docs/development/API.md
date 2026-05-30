@@ -37,9 +37,10 @@ http://127.0.0.1:4545
 
 Current implementation status:
 
-- Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
+- Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
-- Not implemented yet: trace endpoint, OpenAPI generation, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, model-based debate judging, and S3/R2 network object storage.
+- Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
+- Not implemented yet: trace endpoint, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, model-based debate judging, and S3/R2 network object storage.
 
 ## Error Contract
 
@@ -50,6 +51,7 @@ Every 4xx and 5xx response uses one envelope:
   "error": {
     "code": "snake_case_machine_code",
     "message": "human-readable explanation",
+    "requestId": "req-1",
     "details": [
       { "path": "limit", "issue": "must be <= 200" }
     ]
@@ -57,7 +59,7 @@ Every 4xx and 5xx response uses one envelope:
 }
 ```
 
-`details` is optional and is only present on validation failures.
+`details` is optional and is only present on validation failures. `requestId` is optional but emitted by the daemon when available and echoed in `x-request-id`.
 
 Closed code set:
 
@@ -206,6 +208,12 @@ browser
 
 ```bash
 curl -s http://127.0.0.1:4545/health
+```
+
+## Metrics
+
+```bash
+curl -s http://127.0.0.1:4545/metrics
 ```
 
 ## Create Run

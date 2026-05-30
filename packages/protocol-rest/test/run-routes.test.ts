@@ -372,11 +372,12 @@ describe("run routes", () => {
     });
 
     expect(inputResponse.statusCode).toBe(409);
-    expect(inputResponse.json()).toEqual({
+    expect(inputResponse.json()).toMatchObject({
       error: {
         code: "adapter_protocol_failed",
         message: "Codex exec-json does not support input after start",
-        details: [{ path: "reasonCode", issue: "codex_input_unsupported" }]
+        details: [{ path: "reasonCode", issue: "codex_input_unsupported" }],
+        requestId: expect.any(String)
       }
     });
   });

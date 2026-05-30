@@ -23,12 +23,15 @@ Instead of integrating separately with Claude Code, Codex, OpenCode, OpenClaw, P
 POST /runs
 GET  /runs/:id
 GET  /runs/:id/events
+GET  /metrics
 POST /debates
 POST /runs/:id/approve
-GET  /runs/:id/artifacts (local MVP)
+GET  /runs/:id/artifacts
+GET  /artifacts/:id
+GET  /artifacts/:id/content
 ```
 
-`GET /artifacts/:id` and `/artifacts` are planned for future deployment modes and are not implemented in the local daemon MVP.
+R11 adds a shipped local TypeScript SDK (`@switchyard/sdk`), a shipped local CLI (`@switchyard/cli`), deterministic OpenAPI export/check under `@switchyard/contracts`, and startup/metrics hardening for local operations.
 
 Switchyard lets frontends, backends, CLIs, automations, bots, and internal systems treat every agent runtime like a backend service.
 
@@ -217,6 +220,45 @@ Local setup, test commands, prebuilt curl requests, PID checks, SQLite inspectio
 - [Product truth and release roadmap](PRODUCT.md)
 - [Development docs](docs/development/)
 - [Adapter local debugging guides](docs/development/adapters/)
+
+## SDK And CLI Quickstart
+
+Install workspace dependencies:
+
+```bash
+pnpm install
+```
+
+SDK usage:
+
+```ts
+import { SwitchyardClient } from "@switchyard/sdk";
+
+const client = new SwitchyardClient({ baseUrl: "http://127.0.0.1:4545" });
+const created = await client.createRun(
+  {
+    runtime: "fake",
+    provider: "test",
+    model: "test-model",
+    adapterType: "process",
+    cwd: "/repo",
+    task: "sdk smoke",
+    timeoutSeconds: 30
+  },
+  { wait: true }
+);
+console.log(created.run.status);
+```
+
+CLI usage:
+
+```bash
+pnpm --filter @switchyard/cli exec switchyard doctor --base-url http://127.0.0.1:4545
+pnpm --filter @switchyard/cli exec switchyard run fake --wait --base-url http://127.0.0.1:4545
+pnpm --filter @switchyard/cli exec switchyard runtime test
+pnpm --filter @switchyard/cli exec switchyard contract export --output ./openapi.local-daemon.json
+pnpm --filter @switchyard/cli exec switchyard debug run <run_id> --base-url http://127.0.0.1:4545
+```
 
 ## Deployment Modes
 

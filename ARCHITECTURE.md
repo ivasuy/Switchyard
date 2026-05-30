@@ -813,6 +813,12 @@ switchyard/
 - `packages/sdk`: typed client for frontend, backend, CLI, automation, and third-party consumers.
 - `packages/cli`: developer/admin commands for doctor, local launch, runtime test, adapter verification, and debugging.
 
+R11 shipped note:
+
+- `@switchyard/sdk` is now implemented and tested against the local daemon with typed run/event/artifact/registry methods and typed HTTP/network/decode/timeout/validation/stream errors.
+- `@switchyard/cli` is now implemented with local no-spend commands for `doctor`, `daemon start`, `run fake`, `runtime test`, `debug run`, and `contract export`.
+- `@switchyard/contracts` now ships deterministic route inventory and OpenAPI 3.1 generation/check for the local daemon surface.
+
 ### Important File Responsibilities
 
 - `apps/*/src/config.ts`: reads deployment-specific configuration.

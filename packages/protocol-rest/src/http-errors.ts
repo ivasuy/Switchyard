@@ -46,6 +46,7 @@ export interface HttpErrorEnvelope {
     code: HttpErrorCode;
     message: string;
     details?: HttpErrorDetail[];
+    requestId?: string;
   };
 }
 
@@ -103,7 +104,8 @@ export class HttpProblem extends Error {
 export function buildErrorEnvelope(
   code: HttpErrorCode,
   message: string,
-  details?: HttpErrorDetail[]
+  details?: HttpErrorDetail[],
+  requestId?: string
 ): HttpErrorEnvelope {
   const envelope: HttpErrorEnvelope = {
     error: {
@@ -114,6 +116,9 @@ export function buildErrorEnvelope(
   if (details && details.length > 0) {
     envelope.error.details = details;
   }
+  if (requestId && requestId.length > 0) {
+    envelope.error.requestId = requestId;
+  }
   return envelope;
 }
 
@@ -123,7 +128,11 @@ export function sendHttpError(
   message: string,
   details?: HttpErrorDetail[]
 ): FastifyReply {
-  return reply.code(STATUS_BY_CODE[code]).send(buildErrorEnvelope(code, message, details));
+  const requestId = reply.request.id;
+  if (requestId) {
+    reply.header("x-request-id", requestId);
+  }
+  return reply.code(STATUS_BY_CODE[code]).send(buildErrorEnvelope(code, message, details, requestId));
 }
 
 export function zodIssuesToDetails(error: ZodError): HttpErrorDetail[] {
@@ -174,8 +183,18 @@ export function registerErrorEnvelope(app: FastifyInstance): void {
   });
 
   app.setNotFoundHandler((request, reply) => {
+    if (request.id) {
+      reply.header("x-request-id", request.id);
+    }
     return reply
       .code(404)
-      .send(buildErrorEnvelope("internal_error", `Route ${request.method} ${request.url} not found`));
+      .send(
+        buildErrorEnvelope(
+          "internal_error",
+          `Route ${request.method} ${request.url} not found`,
+          undefined,
+          request.id
+        )
+      );
   });
 }
