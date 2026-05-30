@@ -82,6 +82,37 @@ function insertActiveRun(sqlite: ReturnType<typeof openSqliteStorage>["sqlite"],
 }
 
 describe("daemon hardening", () => {
+  it("honors bounded inbound request ids and normalizes invalid request-id headers", async () => {
+    const app = await createDaemonApp(undefined, { codexProbe: unavailableCodexProbe });
+    try {
+      const accepted = await app.inject({
+        method: "GET",
+        url: "/runs/run_missing",
+        headers: {
+          "x-request-id": "req_valid-123"
+        }
+      });
+      expect(accepted.statusCode).toBe(404);
+      expect(accepted.headers["x-request-id"]).toBe("req_valid-123");
+      const acceptedBody = accepted.json() as { error?: { requestId?: string } };
+      expect(acceptedBody.error?.requestId).toBe("req_valid-123");
+
+      const rejected = await app.inject({
+        method: "GET",
+        url: "/runs/run_missing",
+        headers: {
+          "x-request-id": "invalid request id with spaces"
+        }
+      });
+      expect(rejected.statusCode).toBe(404);
+      expect(rejected.headers["x-request-id"]).toMatch(/^req_[0-9a-f-]{36}$/);
+      const rejectedBody = rejected.json() as { error?: { requestId?: string } };
+      expect(rejectedBody.error?.requestId).toBe(rejected.headers["x-request-id"]);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("exposes request/error metrics and run status counts", async () => {
     const app = await createDaemonApp(undefined, { codexProbe: unavailableCodexProbe });
     try {

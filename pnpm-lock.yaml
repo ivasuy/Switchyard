@@ -114,10 +114,10 @@ importers:
       '@switchyard/protocol-acpx':
         specifier: workspace:*
         version: link:../protocol-acpx
-    devDependencies:
       '@switchyard/testkit':
         specifier: workspace:*
         version: link:../testkit
+    devDependencies:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -172,7 +172,7 @@ importers:
         specifier: workspace:*
         version: link:../contracts
       zod:
-        specifier: ^4.1.12
+        specifier: ^4.1.13
         version: 4.4.3
     devDependencies:
       typescript:
@@ -312,9 +312,6 @@ importers:
       '@switchyard/protocol-acpx':
         specifier: workspace:*
         version: link:../protocol-acpx
-      fastify:
-        specifier: ^5.8.5
-        version: 5.8.5
     devDependencies:
       typescript:
         specifier: ^5.9.3

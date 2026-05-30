@@ -335,6 +335,31 @@ CREATE TABLE IF NOT EXISTS schema_metadata (
 
 const additiveMigrations: Array<{ table: string; column: string; statement: string }> = [
   {
+    table: "run_events",
+    column: "debate_id",
+    statement: "ALTER TABLE run_events ADD COLUMN debate_id TEXT"
+  },
+  {
+    table: "run_events",
+    column: "participant_id",
+    statement: "ALTER TABLE run_events ADD COLUMN participant_id TEXT"
+  },
+  {
+    table: "run_events",
+    column: "provider",
+    statement: "ALTER TABLE run_events ADD COLUMN provider TEXT"
+  },
+  {
+    table: "run_events",
+    column: "model",
+    statement: "ALTER TABLE run_events ADD COLUMN model TEXT"
+  },
+  {
+    table: "artifacts",
+    column: "debate_id",
+    statement: "ALTER TABLE artifacts ADD COLUMN debate_id TEXT"
+  },
+  {
     table: "runtimes",
     column: "provider_id",
     statement: "ALTER TABLE runtimes ADD COLUMN provider_id TEXT"
@@ -354,6 +379,12 @@ const additiveMigrations: Array<{ table: string; column: string; statement: stri
 function applyAdditiveMigrations(sqlite: Database.Database): void {
   for (const migration of additiveMigrations) {
     assertAdditiveMigrationStatement(migration.statement);
+    const tableExists = sqlite
+      .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(migration.table) as { present?: number } | undefined;
+    if (!tableExists?.present) {
+      continue;
+    }
     const columnInfo = sqlite.prepare(`PRAGMA table_info(${migration.table})`).all() as Array<{ name: string }>;
     const existing = new Set(columnInfo.map((row) => row.name));
     if (existing.has(migration.column)) {
@@ -364,6 +395,9 @@ function applyAdditiveMigrations(sqlite: Database.Database): void {
 }
 
 function migrate(sqlite: Database.Database): void {
+  // Additive column migrations must run before index creation so very old
+  // snapshots can gain required columns first.
+  applyAdditiveMigrations(sqlite);
   sqlite.exec(migrationSql);
   applyAdditiveMigrations(sqlite);
   sqlite.exec(`

@@ -1,12 +1,35 @@
+import { type RuntimeAdapter } from "@switchyard/core";
+import { FakeRuntimeAdapter, runRuntimeAdapterContract } from "@switchyard/testkit";
+import { ClaudeCodeAdapter, createClaudeCodeCliClient } from "./claude-code/index.js";
+import { CodexExecJsonAdapter } from "./codex/codex-exec-json-adapter.js";
 import { AgentFieldAsyncRestAdapter } from "./agentfield/agentfield-async-rest-adapter.js";
 import { GenericHttpAsyncRestAdapter } from "./generic-http/generic-http-adapter.js";
+import { OpenCodeAcpAdapter } from "./opencode/opencode-acp-adapter.js";
 
 export type CompatibilityStatus = "pass" | "skip" | "fail";
 
 export interface AdapterCompatibilityRow {
-  runtimeMode: string;
+  runtimeModeId: string;
+  runtimeModeSlug: string;
   adapterId: string;
-  status: CompatibilityStatus;
+  providerId: string;
+  runtimeId: string;
+  adapterType: string;
+  kind: string;
+  capabilities: string[];
+  limitations: string[];
+  placementSupport: {
+    local: string;
+    hosted: string;
+    connectedLocalNode: string;
+  };
+  doctorStrategy: string;
+  noSpendHarness: {
+    type: string;
+    mode?: string;
+  };
+  coveredScenarios: string[];
+  ciStatus: CompatibilityStatus;
   reason: string;
 }
 
@@ -20,47 +43,53 @@ export interface AdapterCompatibilityMatrix {
   };
 }
 
+interface MatrixSeed {
+  adapter: RuntimeAdapter;
+  noSpendHarness: {
+    type: string;
+    mode?: string;
+  };
+  coveredScenarios: string[];
+  evaluate: (adapter: RuntimeAdapter) => Promise<{ ciStatus: CompatibilityStatus; reason: string }>;
+}
+
 export async function generateCompatibilityMatrix(): Promise<AdapterCompatibilityMatrix> {
+  const seeds = buildMatrixSeeds();
   const rows: AdapterCompatibilityRow[] = [];
 
-  rows.push({
-    runtimeMode: "fake.deterministic",
-    adapterId: "fake",
-    status: "pass",
-    reason: "Deterministic in-process fake runtime contract is covered by local test harness."
-  });
+  for (const seed of seeds) {
+    const manifest = seed.adapter.manifest;
+    assertManifestCompleteness(seed.adapter.id, manifest);
+    const evaluation = await seed.evaluate(seed.adapter);
+    rows.push({
+      runtimeModeId: manifest.runtimeModeId,
+      runtimeModeSlug: manifest.runtimeModeSlug,
+      adapterId: manifest.adapterId,
+      providerId: manifest.providerId,
+      runtimeId: manifest.runtimeId,
+      adapterType: manifest.adapterType,
+      kind: manifest.kind,
+      capabilities: [...manifest.capabilities],
+      limitations: manifest.limitations.map((limitation) => `${limitation.code}: ${limitation.message}`),
+      placementSupport: {
+        local: manifest.placement.local.support,
+        hosted: manifest.placement.hosted.support,
+        connectedLocalNode: manifest.placement.connectedLocalNode.support
+      },
+      doctorStrategy: manifest.check.strategy,
+      noSpendHarness: seed.noSpendHarness,
+      coveredScenarios: [...seed.coveredScenarios],
+      ciStatus: evaluation.ciStatus,
+      reason: evaluation.reason
+    });
+  }
 
-  rows.push({
-    runtimeMode: "codex.exec_json",
-    adapterId: "codex",
-    status: "skip",
-    reason: "ci_no_spend"
-  });
-
-  rows.push({
-    runtimeMode: "claude_code.sdk",
-    adapterId: "claude_code",
-    status: "skip",
-    reason: "ci_no_spend"
-  });
-
-  const genericHttp = new GenericHttpAsyncRestAdapter();
-  rows.push(await evaluateCheck("generic_http.async_rest", genericHttp.id, () => genericHttp.check()));
-
-  const agentfield = new AgentFieldAsyncRestAdapter();
-  rows.push(await evaluateCheck("agentfield.async_rest", agentfield.id, () => agentfield.check()));
-
-  rows.push({
-    runtimeMode: "opencode.acp",
-    adapterId: "opencode",
-    status: "skip",
-    reason: "ci_no_spend"
-  });
+  validateCompatibilityRows(rows);
 
   const summary = {
-    pass: rows.filter((row) => row.status === "pass").length,
-    skip: rows.filter((row) => row.status === "skip").length,
-    fail: rows.filter((row) => row.status === "fail").length
+    pass: rows.filter((row) => row.ciStatus === "pass").length,
+    skip: rows.filter((row) => row.ciStatus === "skip").length,
+    fail: rows.filter((row) => row.ciStatus === "fail").length
   };
 
   return {
@@ -70,36 +99,159 @@ export async function generateCompatibilityMatrix(): Promise<AdapterCompatibilit
   };
 }
 
-async function evaluateCheck(
-  runtimeMode: string,
-  adapterId: string,
-  check: () => Promise<{ ok: boolean; message?: string; details?: Record<string, unknown> }>
-): Promise<AdapterCompatibilityRow> {
+export function validateCompatibilityRows(rows: readonly AdapterCompatibilityRow[]): void {
+  const seenSlugs = new Set<string>();
+  for (const row of rows) {
+    if (!row.runtimeModeSlug || !row.runtimeModeId || !row.adapterId || !row.providerId || !row.runtimeId) {
+      throw new Error("compatibility matrix row is missing one or more manifest identity fields");
+    }
+    if (seenSlugs.has(row.runtimeModeSlug)) {
+      throw new Error(`duplicate runtimeModeSlug in compatibility matrix: ${row.runtimeModeSlug}`);
+    }
+    seenSlugs.add(row.runtimeModeSlug);
+
+    if (!row.noSpendHarness.type || row.noSpendHarness.type.trim().length === 0) {
+      throw new Error(`compatibility matrix row ${row.runtimeModeSlug} is missing noSpendHarness.type`);
+    }
+    if (row.coveredScenarios.length === 0) {
+      throw new Error(`compatibility matrix row ${row.runtimeModeSlug} must declare coveredScenarios`);
+    }
+  }
+}
+
+function buildMatrixSeeds(): MatrixSeed[] {
+  return [
+    {
+      adapter: new FakeRuntimeAdapter(),
+      noSpendHarness: {
+        type: "runtime-adapter-contract-harness",
+        mode: "in_process_fake"
+      },
+      coveredScenarios: [
+        "check",
+        "start",
+        "event_streaming",
+        "cancel",
+        "artifact_transcript"
+      ],
+      evaluate: async (adapter) => {
+        try {
+          await runRuntimeAdapterContract({
+            adapter,
+            runtime: "fake",
+            provider: "test",
+            model: "test-model",
+            adapterType: "process"
+          });
+          return {
+            ciStatus: "pass",
+            reason: "runtime adapter contract harness passed"
+          };
+        } catch (error) {
+          return {
+            ciStatus: "fail",
+            reason: error instanceof Error ? error.message : String(error)
+          };
+        }
+      }
+    },
+    {
+      adapter: new CodexExecJsonAdapter(),
+      noSpendHarness: {
+        type: "manifest_only",
+        mode: "ci_skip"
+      },
+      coveredScenarios: ["manifest_coverage", "doctor_strategy"],
+      evaluate: async () => ({
+        ciStatus: "skip",
+        reason: "ci_no_spend"
+      })
+    },
+    {
+      adapter: new ClaudeCodeAdapter({
+        client: createClaudeCodeCliClient({
+          command: "claude",
+          permissionMode: "read_only",
+          disabledTools: ["Bash", "WebFetch", "WebSearch"]
+        }),
+        liveProbe: false,
+        requestTimeoutMs: 5000,
+        maxBudgetUsd: 0.05
+      }),
+      noSpendHarness: {
+        type: "manifest_only",
+        mode: "ci_skip"
+      },
+      coveredScenarios: ["manifest_coverage", "doctor_strategy"],
+      evaluate: async () => ({
+        ciStatus: "skip",
+        reason: "ci_no_spend"
+      })
+    },
+    {
+      adapter: new GenericHttpAsyncRestAdapter(),
+      noSpendHarness: {
+        type: "fake_http_server",
+        mode: "check_only"
+      },
+      coveredScenarios: ["doctor_check", "config_validation", "availability_reason_codes"],
+      evaluate: async (adapter) => evaluateCheckOnlyAdapter(adapter)
+    },
+    {
+      adapter: new AgentFieldAsyncRestAdapter(),
+      noSpendHarness: {
+        type: "fake_http_server",
+        mode: "check_only"
+      },
+      coveredScenarios: ["doctor_check", "config_validation", "availability_reason_codes"],
+      evaluate: async (adapter) => evaluateCheckOnlyAdapter(adapter)
+    },
+    {
+      adapter: new OpenCodeAcpAdapter(),
+      noSpendHarness: {
+        type: "fake_acp_process",
+        mode: "ci_skip"
+      },
+      coveredScenarios: ["manifest_coverage", "doctor_strategy"],
+      evaluate: async () => ({
+        ciStatus: "skip",
+        reason: "ci_no_spend"
+      })
+    }
+  ];
+}
+
+async function evaluateCheckOnlyAdapter(adapter: RuntimeAdapter): Promise<{ ciStatus: CompatibilityStatus; reason: string }> {
   try {
-    const result = await check();
-    if (result.ok) {
+    const check = await adapter.check({ timeoutMs: 1000, maxDiagnosticBytes: 4096 });
+    if (check.ok) {
       return {
-        runtimeMode,
-        adapterId,
-        status: "pass",
-        reason: result.message ?? "check ok"
+        ciStatus: "pass",
+        reason: check.message ?? "check ok"
       };
     }
-
-    const reasonCode = extractReasonCode(result.details);
+    const reasonCode = extractReasonCode(check.details);
     return {
-      runtimeMode,
-      adapterId,
-      status: "skip",
-      reason: reasonCode ?? result.message ?? "adapter unavailable in no-spend mode"
+      ciStatus: "skip",
+      reason: reasonCode ?? check.message ?? "adapter unavailable in no-spend mode"
     };
   } catch (error) {
     return {
-      runtimeMode,
-      adapterId,
-      status: "fail",
+      ciStatus: "fail",
       reason: error instanceof Error ? error.message : String(error)
     };
+  }
+}
+
+function assertManifestCompleteness(adapterId: string, manifest: RuntimeAdapter["manifest"]): void {
+  if (
+    !manifest.runtimeModeId ||
+    !manifest.runtimeModeSlug ||
+    !manifest.adapterId ||
+    !manifest.providerId ||
+    !manifest.runtimeId
+  ) {
+    throw new Error(`adapter ${adapterId} manifest is missing identity fields`);
   }
 }
 

@@ -167,7 +167,11 @@ const RUN_STATUSES: readonly RunStatus[] = [
 ];
 
 export async function createDaemonApp(config?: DaemonConfig, options: CreateDaemonAppOptions = {}) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({
+    logger: false,
+    requestIdHeader: false,
+    genReqId: (request) => resolveRequestId(request.headers["x-request-id"])
+  });
   const stores: DaemonStoreResult = config ? createStorageStores(config) : createInMemoryStores();
   const checkTimeoutMs = options.checkTimeoutMs ?? 5000;
   const maxDiagnosticBytes = options.maxDiagnosticBytes ?? 4096;
@@ -413,6 +417,10 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   }
 
   registerErrorEnvelope(app);
+
+  app.addHook("onRequest", async (request, reply) => {
+    reply.header("x-request-id", request.id);
+  });
 
   app.addHook("onResponse", async (_request, reply) => {
     metrics.requestsTotal += 1;
@@ -769,6 +777,27 @@ function createDaemonMetricsState(): DaemonMetricsState {
       duplicateStarts: 0
     }
   };
+}
+
+const MAX_REQUEST_ID_LENGTH = 128;
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function resolveRequestId(value: unknown): string {
+  const candidate = firstHeaderValue(value)?.trim();
+  if (candidate && candidate.length <= MAX_REQUEST_ID_LENGTH && REQUEST_ID_PATTERN.test(candidate)) {
+    return candidate;
+  }
+  return `req_${crypto.randomUUID()}`;
+}
+
+function firstHeaderValue(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.find((entry): entry is string => typeof entry === "string");
+  }
+  return undefined;
 }
 
 async function collectRunStatusCounts(stores: DaemonStoreResult): Promise<Record<RunStatus, number>> {

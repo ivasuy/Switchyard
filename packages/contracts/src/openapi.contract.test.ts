@@ -48,4 +48,25 @@ describe("openapi generation", () => {
       supportsBinary: true
     });
   });
+
+  it("includes route descriptor operation id and request/query schemas", () => {
+    const document = generateOpenApiDocument();
+
+    const createRun = document.paths["/runs"]?.post;
+    expect(createRun?.operationId).toBe("createRun");
+    expect(createRun?.requestBody).toBeDefined();
+    expect(Array.isArray(createRun?.parameters)).toBe(true);
+
+    const listRuns = document.paths["/runs"]?.get;
+    expect(listRuns?.operationId).toBe("listRuns");
+    const queryParameters = listRuns?.parameters as Array<{ name: string }> | undefined;
+    expect(queryParameters?.some((parameter) => parameter.name === "limit")).toBe(true);
+  });
+
+  it("marks no-body routes and error-envelope ownership", () => {
+    const document = generateOpenApiDocument();
+    const getRun = document.paths["/runs/{id}"]?.get;
+    expect(getRun?.["x-switchyard-no-body"]).toBe(true);
+    expect(getRun?.["x-switchyard-error-envelope"]).toBe("contracts");
+  });
 });
