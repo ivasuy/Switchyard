@@ -1,6 +1,11 @@
 import Fastify from "fastify";
 import { mkdirSync } from "node:fs";
-import { CodexExecJsonAdapter, GenericHttpAsyncRestAdapter, probeCodexCatalog } from "@switchyard/adapters";
+import {
+  CodexExecJsonAdapter,
+  GenericHttpAsyncRestAdapter,
+  OpenCodeAcpAdapter,
+  probeCodexCatalog
+} from "@switchyard/adapters";
 import {
   type ArtifactStore,
   EventBus,
@@ -82,6 +87,8 @@ type DaemonRuntimeAvailability = {
 interface CreateDaemonAppOptions {
   codexProbe?: CodexCatalogProbe;
   probeCodexCatalog?: () => Promise<CodexCatalogProbe>;
+  opencodeProcessFactory?: NonNullable<ConstructorParameters<typeof OpenCodeAcpAdapter>[0]>["processFactory"];
+  opencodeProbeVersion?: NonNullable<ConstructorParameters<typeof OpenCodeAcpAdapter>[0]>["probeVersion"];
   logger?: RuntimeLogger | undefined;
   checkTimeoutMs?: number;
   maxDiagnosticBytes?: number;
@@ -97,10 +104,28 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     pollIntervalMs: 100,
     maxResponseBytes: 1024 * 1024
   };
+  const opencodeConfig = config?.opencode ?? {
+    command: "opencode"
+  };
+  const acpConfig = config?.acp ?? {
+    requestTimeoutMs: 5000,
+    cancelTimeoutMs: 5000,
+    maxMessageBytes: 1024 * 1024
+  };
   const codexProbe = await loadCodexProbe(options, checkTimeoutMs, maxDiagnosticBytes);
   const now = new Date().toISOString();
   const codexAvailability = availabilityFromProbe(codexProbe, now, maxDiagnosticBytes);
   const genericHttpAvailability = initialGenericHttpAvailability(genericHttpConfig, now);
+  const opencodeAvailability: DaemonRuntimeAvailability = {
+    state: "unknown",
+    canRun: false,
+    installed: false,
+    auth: "unknown",
+    version: null,
+    checkedAt: now,
+    reasonCode: "not_checked",
+    message: "Run POST /runtime-modes/opencode.acp/check to verify local OpenCode ACP availability."
+  };
   const fakeAvailability: DaemonRuntimeAvailability = {
     state: "available",
     canRun: true,
@@ -130,10 +155,27 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     ...(options.logger ? { logger: options.logger } : {})
   };
   const genericHttpAdapter = new GenericHttpAsyncRestAdapter(genericHttpAdapterOptions);
+  const opencodeAdapterOptions: ConstructorParameters<typeof OpenCodeAcpAdapter>[0] = {
+    command: opencodeConfig.command,
+    requestTimeoutMs: acpConfig.requestTimeoutMs,
+    cancelTimeoutMs: acpConfig.cancelTimeoutMs,
+    maxMessageBytes: acpConfig.maxMessageBytes
+  };
+  if (options.logger) {
+    opencodeAdapterOptions.logger = options.logger;
+  }
+  if (options.opencodeProcessFactory) {
+    opencodeAdapterOptions.processFactory = options.opencodeProcessFactory;
+  }
+  if (options.opencodeProbeVersion) {
+    opencodeAdapterOptions.probeVersion = options.opencodeProbeVersion;
+  }
+  const opencodeAdapter = new OpenCodeAcpAdapter(opencodeAdapterOptions);
   const adapters = new Map<string, RuntimeAdapter>([
     ["fake", new FakeRuntimeAdapter()],
     ["codex", new CodexExecJsonAdapter(codexOptions)],
-    ["generic_http", genericHttpAdapter]
+    ["generic_http", genericHttpAdapter],
+    ["opencode", opencodeAdapter]
   ]);
   const eventBus = new EventBus();
   const runnerOptions: ConstructorParameters<typeof RuntimeRunnerService>[0] = {
@@ -167,12 +209,19 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     await seedFakeRegistry(stores.registry);
     await seedCodexRegistry(stores, codexProbe, codexAvailability);
     await seedGenericHttpRegistry(stores, genericHttpAvailability);
+    await seedOpenCodeRegistry(stores, opencodeAvailability);
     await capabilityService.seedManifests(
-      [adapters.get("fake")!.manifest, adapters.get("codex")!.manifest, adapters.get("generic_http")!.manifest],
+      [
+        adapters.get("fake")!.manifest,
+        adapters.get("codex")!.manifest,
+        adapters.get("generic_http")!.manifest,
+        adapters.get("opencode")!.manifest
+      ],
       {
         "fake.deterministic": fakeAvailability,
         "codex.exec_json": codexAvailability,
-        "generic_http.async_rest": genericHttpAvailability
+        "generic_http.async_rest": genericHttpAvailability,
+        "opencode.acp": opencodeAvailability
       }
     );
     options.logger?.info("runtime_mode.seeded", {
@@ -189,6 +238,11 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
       runtimeMode: "generic_http.async_rest",
       adapterId: "generic_http",
       state: genericHttpAvailability.state
+    });
+    options.logger?.info("runtime_mode.seeded", {
+      runtimeMode: "opencode.acp",
+      adapterId: "opencode",
+      state: opencodeAvailability.state
     });
   } catch (error) {
     stores.close?.();
@@ -420,7 +474,7 @@ async function seedGenericHttpRegistry(
   availability: DaemonRuntimeAvailability
 ): Promise<void> {
   const registry = stores.registry;
-  const status = availability.state === "available" ? "available" : availability.state === "unknown" ? "unknown" : "unavailable";
+  const status = statusFromAvailability(availability);
 
   const existingProvider = await registry.getProvider("provider_generic_http");
   if (!existingProvider) {
@@ -464,6 +518,62 @@ async function seedGenericHttpRegistry(
       providerId: "provider_generic_http",
       modelName: "generic-http-default",
       supportsTools: false,
+      supportsStreaming: true,
+      supportsBrowser: false,
+      status: "available"
+    });
+  }
+}
+
+async function seedOpenCodeRegistry(
+  stores: DaemonStoreResult,
+  availability: DaemonRuntimeAvailability
+): Promise<void> {
+  const registry = stores.registry;
+  const status = statusFromAvailability(availability);
+
+  const existingProvider = await registry.getProvider("provider_opencode");
+  if (!existingProvider) {
+    await registry.createProvider({
+      id: "provider_opencode",
+      name: "OpenCode",
+      authMode: "local",
+      status
+    });
+  } else {
+    await updateProviderRecord(stores, {
+      id: "provider_opencode",
+      name: "OpenCode",
+      authMode: "local",
+      status
+    });
+  }
+
+  const existingRuntime = await registry.getRuntime("runtime_opencode");
+  if (!existingRuntime) {
+    await registry.createRuntime({
+      id: "runtime_opencode",
+      name: "OpenCode",
+      adapterType: "acpx",
+      status,
+      providerId: "provider_opencode"
+    });
+  } else {
+    await updateRuntimeRecord(stores, {
+      id: "runtime_opencode",
+      name: "OpenCode",
+      adapterType: "acpx",
+      status,
+      providerId: "provider_opencode"
+    });
+  }
+
+  if (!(await registry.getModel("model_opencode_default"))) {
+    await registry.createModel({
+      id: "model_opencode_default",
+      providerId: "provider_opencode",
+      modelName: "opencode-default",
+      supportsTools: true,
       supportsStreaming: true,
       supportsBrowser: false,
       status: "available"
@@ -654,6 +764,18 @@ function initialGenericHttpAvailability(
     reasonCode: null,
     message: null
   };
+}
+
+function statusFromAvailability(
+  availability: DaemonRuntimeAvailability
+): "available" | "unavailable" | "unknown" {
+  if (availability.state === "available" || availability.state === "partial") {
+    return "available";
+  }
+  if (availability.state === "unknown") {
+    return "unknown";
+  }
+  return "unavailable";
 }
 
 function isValidHttpUrl(value: string): boolean {

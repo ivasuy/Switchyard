@@ -47,9 +47,9 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/roadmap-base-20260529`, commit `461dea5`.
+Snapshot source: `agent/phase-4-r5-acp-foundation-and-opencode`.
 
-Current product state: local daemon MVP with shipped runtime modes `fake.deterministic`, `codex.exec_json`, and `generic_http.async_rest`.
+Current product state: local daemon MVP with shipped runtime modes `fake.deterministic`, `codex.exec_json`, `generic_http.async_rest`, and `opencode.acp`.
 
 The product is usable locally for one-shot agent runs, event inspection, artifact listing, cancellation, and registry lookups. It is not yet a hosted gateway, debate system, approval system, SDK, dashboard, or multi-runtime production platform.
 
@@ -68,7 +68,8 @@ The repository is a TypeScript pnpm/Turborepo monorepo with these shipped packag
 - `packages/storage`: SQLite stores and filesystem artifact content storage.
 - `packages/protocol-rest`: local REST route groups.
 - `packages/protocol-sse`: SSE event formatting and bounded replay/live collection helpers.
-- `packages/adapters`: Codex `exec --json` adapter.
+- `packages/adapters`: Codex, Generic HTTP, and OpenCode adapters.
+- `packages/protocol-acpx`: outbound ACP/acpx protocol framing, schemas, stdio client, and transcript helpers.
 
 ### Local Daemon
 
@@ -103,6 +104,7 @@ Shipped runtime modes:
 - `fake.deterministic`: deterministic test runtime mode for local smoke tests and contract coverage.
 - `codex.exec_json`: local non-interactive Codex CLI execution through `codex exec --json`.
 - `generic_http.async_rest`: daemon-configured async REST wrapper runtime with bounded health/start/status/events/cancel/artifacts, verified-terminal cancellation, and transcript artifact capture.
+- `opencode.acp`: local OpenCode ACP subprocess runtime with bounded doctor check, one-prompt-per-run behavior, verified cancellation, and raw ACP transcript artifacts.
 
 Codex support includes:
 
@@ -161,7 +163,7 @@ Current events include:
 
 `GET /runs/:id/events` returns SSE-formatted replay. Open-ended local live streaming ships through `?live=1` with a 15-second heartbeat and 5-minute idle close; the bounded `live=1&stopAfter=N` mode is preserved for deterministic tests. Hosted production streaming is still planned (R10).
 
-Completed fake and Codex runs can expose transcript artifacts through `GET /runs/:id/artifacts`, `GET /artifacts/:id` for global metadata lookup, and `GET /artifacts/:id/content` for streaming the raw bytes (transcripts as `application/x-ndjson`).
+Completed, cancelled, failed-after-start, and timeout-after-start runs can expose transcript artifacts through `GET /runs/:id/artifacts`, `GET /artifacts/:id` for global metadata lookup, and `GET /artifacts/:id/content` for streaming the raw bytes (transcripts as `application/x-ndjson`).
 
 ### Registry
 
@@ -169,6 +171,7 @@ The daemon seeds local registry records for:
 
 - test provider/runtime/model records for the fake runtime.
 - OpenAI provider and Codex runtime records.
+- OpenCode provider/runtime/model records for `opencode.acp`.
 - Codex model records when `codex debug models` is available.
 
 Both single-record registry lookups and registry list endpoints (`GET /providers`, `GET /runtimes`, `GET /models` with cursor pagination and provider/adapter filters) are shipped. Runtime capability endpoints (`GET /runtime-modes`, `GET /runtime-modes/:id`, `POST /runtime-modes/:id/check`) and runtime doctor summaries (`GET /doctor`) are also shipped.
@@ -184,7 +187,9 @@ The current workspace has passing package coverage for:
 - REST run and registry routes.
 - SSE formatting and bounded replay/live collection.
 - Codex catalog parsing, JSONL parsing, process adapter behavior, cancellation, transcript capture, and unsupported input.
-- daemon smoke behavior, registry seeding, persistence, artifact content, and restart reconciliation.
+- ACP framing/correlation/redaction behavior in `@switchyard/protocol-acpx`.
+- OpenCode ACP adapter checks, event mapping, cancellation semantics, and transcript artifacts.
+- daemon smoke behavior including runtime-mode checks, OpenCode ACP run/cancel/failure/timeout artifact retrieval, registry seeding, persistence, and restart reconciliation.
 
 ## What Does Not Exist Yet
 
@@ -196,12 +201,10 @@ These are planned or designed in docs, but not shipped product:
 - Postgres storage.
 - Redis/BullMQ queue.
 - S3/R2 artifact storage.
-- ACP/acpx protocol package.
 - WebSocket protocol package.
 - SDK package.
 - CLI package.
 - Policy package beyond current contracts/ports.
-- OpenCode adapter.
 - Claude Code adapter.
 - Cursor adapter.
 - AgentField adapter.
@@ -473,7 +476,7 @@ Promotion criteria met:
 
 ### R5: ACP Foundation And OpenCode
 
-Status: planned.
+Status: shipped. Verified on 2026-05-30 in phase branch `agent/phase-4-r5-acp-foundation-and-opencode`.
 
 Goal: add the structured ACP/acpx path and validate it with OpenCode.
 
@@ -508,6 +511,8 @@ Not included:
 - hosted node connectivity.
 - debate orchestration.
 - full inbound ACP server unless explicitly included in the release spec.
+- approval workflow expansion, tool routing expansion, and memory APIs.
+- PTY adapters and interactive Codex runtime sessions.
 
 Local verification:
 

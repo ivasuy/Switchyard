@@ -159,8 +159,8 @@ export class RuntimeDoctorService {
       }, []);
     }
 
-    if (isHttpHealthMode(mode, details)) {
-      return mapHttpHealthCheck(mode, checkResult, details, checkedAt, this.maxDiagnosticBytes);
+    if (isRecord(details["availability"]) || mode.slug === "generic_http.async_rest" || mode.slug === "opencode.acp") {
+      return mapAvailabilityCheck(mode, checkResult, details, checkedAt, this.maxDiagnosticBytes);
     }
 
     const version = typeof details["version"] === "string" && details["version"].length > 0
@@ -304,17 +304,12 @@ function redactSecrets(input: string): string {
   return input
     .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
     .replace(/(authorization\s*[:=]\s*)([^\s,;]+)/gi, "$1[REDACTED]")
-    .replace(/([A-Za-z0-9_-]*token[A-Za-z0-9_-]*\s*[:=]\s*)([^\s,;]+)/gi, "$1[REDACTED]");
+    .replace(/([A-Za-z0-9_-]*token[A-Za-z0-9_-]*\s*[:=]\s*)([^\s,;]+)/gi, "$1[REDACTED]")
+    .replace(/([A-Za-z0-9_-]*(?:_key|_secret)[A-Za-z0-9_-]*\s*[:=]\s*)([^\s,;]+)/gi, "$1[REDACTED]")
+    .replace(/\/([^/\s"]*(?:token|secret|key)[^/\s"]*)/gi, "/[REDACTED_SEGMENT]");
 }
 
-function isHttpHealthMode(mode: RuntimeMode, details: Record<string, unknown>): boolean {
-  if (mode.slug === "generic_http.async_rest") {
-    return true;
-  }
-  return isRecord(details["availability"]);
-}
-
-function mapHttpHealthCheck(
+function mapAvailabilityCheck(
   mode: RuntimeMode,
   checkResult: RuntimeAdapterCheck,
   details: Record<string, unknown>,
@@ -323,6 +318,10 @@ function mapHttpHealthCheck(
 ): RuntimeDoctorCheck {
   const availability = isRecord(details["availability"]) ? details["availability"] : undefined;
   const diagnostics = sanitizeDiagnostics(details["diagnostics"], maxDiagnosticBytes);
+  const invalidReasonCode = mode.slug === "generic_http.async_rest" ? "generic_http_health_invalid" : "custom_check_invalid";
+  const invalidMessage = mode.slug === "generic_http.async_rest"
+    ? "Invalid Generic HTTP health response."
+    : "Invalid custom adapter availability response.";
 
   if (!availability) {
     return {
@@ -336,13 +335,13 @@ function mapHttpHealthCheck(
       auth: "unknown",
       version: null,
       checkedAt,
-      reasonCode: "generic_http_health_invalid",
-      message: sanitizeMessage(checkResult.message ?? "Invalid Generic HTTP health response.", maxDiagnosticBytes),
+      reasonCode: invalidReasonCode,
+      message: sanitizeMessage(checkResult.message ?? invalidMessage, maxDiagnosticBytes),
       capabilities: mode.capabilities,
       limitations: mode.limitations,
       diagnostics: diagnostics.length > 0
         ? diagnostics
-        : [{ code: "generic_http_health_invalid", severity: "error", message: "Invalid Generic HTTP health response." }]
+        : [{ code: invalidReasonCode, severity: "error", message: invalidMessage }]
     };
   }
 

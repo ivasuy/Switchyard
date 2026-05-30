@@ -620,7 +620,7 @@ describe("core service shells", () => {
     expect(runService.startRun).toHaveBeenCalledWith(run.id);
   });
 
-  it("does not collect artifacts after cancellation", async () => {
+  it("collects transcript artifacts after verified cancellation", async () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();
     const sessions = new MemorySessionStore();
@@ -643,10 +643,10 @@ describe("core service shells", () => {
     await runner.cancel(run.id);
     await running;
 
-    expect(adapter.artifactsCalled).toBe(false);
-    expect(await artifacts.listByRun(run.id)).toHaveLength(0);
+    expect(adapter.artifactsCalled).toBe(true);
+    expect(await artifacts.listByRun(run.id)).toHaveLength(1);
     expect((await runs.get(run.id))?.status).toBe("cancelled");
-    expect(events.items.some((event) => event.type === "artifact.created")).toBe(false);
+    expect(events.items.some((event) => event.type === "artifact.created")).toBe(true);
   });
 
   it("deduplicates persisted artifact ids when adapter returns duplicate artifact ids", async () => {

@@ -22,6 +22,8 @@ export interface RuntimeRunnerDependencies {
 }
 
 export class RuntimeRunnerService {
+  private readonly persistedArtifactKeys = new Set<string>();
+
   constructor(private readonly deps: RuntimeRunnerDependencies) {}
 
   async start(run: Run): Promise<Run> {
@@ -210,9 +212,14 @@ export class RuntimeRunnerService {
 
     await adapter.cancel(this.adapterSession(session));
 
+    const currentRun = await this.requireRun(runId);
+    if (this.isTerminal(currentRun.status)) {
+      return currentRun;
+    }
+
     const cancelledAt = new Date().toISOString();
     const cancelledRun: Run = {
-      ...run,
+      ...currentRun,
       status: "cancelled",
       endedAt: cancelledAt
     };
@@ -223,12 +230,32 @@ export class RuntimeRunnerService {
     };
     await this.deps.runs.update(cancelledRun);
     await this.deps.sessions.update(cancelledSession);
+    let sequence = (await this.deps.events.listByRun(runId)).length;
     await this.appendAndPublish(this.eventForRun(
       cancelledRun,
       "run.cancelled",
-      (await this.deps.events.listByRun(runId)).length,
+      sequence++,
       { status: "cancelled" }
     ));
+
+    if (this.deps.artifacts) {
+      const artifactSequence = { value: sequence };
+      try {
+        await this.persistArtifacts(
+          adapter,
+          cancelledSession,
+          cancelledRun,
+          cancelledRun,
+          artifactSequence,
+          true
+        );
+      } catch (error) {
+        this.log("warn", "cancel.artifact_persistence_failed", {
+          runId,
+          error: this.errorPayload(error)
+        });
+      }
+    }
 
     return cancelledRun;
   }
@@ -384,7 +411,24 @@ export class RuntimeRunnerService {
         return;
       }
 
-      const storedArtifact = await this.deps.artifacts.create(prepared);
+      const artifactKey = `${baseRun.id}:${prepared.type}:${prepared.path}`;
+      if (this.persistedArtifactKeys.has(artifactKey)) {
+        continue;
+      }
+      const existing = await this.deps.artifacts.listByRun(baseRun.id);
+      if (existing.some((artifact) => `${baseRun.id}:${artifact.type}:${artifact.path}` === artifactKey)) {
+        this.persistedArtifactKeys.add(artifactKey);
+        continue;
+      }
+
+      this.persistedArtifactKeys.add(artifactKey);
+      let storedArtifact: Artifact;
+      try {
+        storedArtifact = await this.deps.artifacts.create(prepared);
+      } catch (error) {
+        this.persistedArtifactKeys.delete(artifactKey);
+        throw error;
+      }
       const artifactEvent = this.eventForRun(
         templateRun,
         "artifact.created",

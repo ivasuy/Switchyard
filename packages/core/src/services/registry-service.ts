@@ -78,6 +78,9 @@ function inferRuntimeMode(input: { runtime: string; adapterType: AdapterType }):
   if (input.runtime === "generic_http" && input.adapterType === "http") {
     return "generic_http.async_rest";
   }
+  if (input.runtime === "opencode" && input.adapterType === "acpx") {
+    return "opencode.acp";
+  }
   return undefined;
 }
 

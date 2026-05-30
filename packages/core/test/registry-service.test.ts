@@ -18,7 +18,7 @@ import type {
 import type { RegistryStore } from "../src/index.js";
 
 describe("RegistryService runtime mode inference and validation", () => {
-  it("infers fake, codex, and generic_http runtime modes when omitted", async () => {
+  it("infers fake, codex, generic_http, and opencode runtime modes when omitted", async () => {
     const service = new RegistryService({ registry: new InMemoryRegistryStore() });
 
     await expect(
@@ -44,6 +44,14 @@ describe("RegistryService runtime mode inference and validation", () => {
         adapterType: "http"
       })
     ).resolves.toBe("generic_http.async_rest");
+
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "opencode",
+        provider: "opencode",
+        adapterType: "acpx"
+      })
+    ).resolves.toBe("opencode.acp");
   });
 
   it("rejects internal runtime mode ids in public payloads", async () => {
@@ -94,6 +102,51 @@ describe("RegistryService runtime mode inference and validation", () => {
       details: [{ path: "runtimeMode", issue: expect.stringContaining("match runtime, provider, and adapterType") }]
     } satisfies Partial<RuntimeModeValidationError>);
   });
+
+  it("accepts explicit opencode runtime mode when runtime/provider/adapterType match", async () => {
+    const registry = new InMemoryRegistryStore();
+    await registry.upsertRuntimeMode(opencodeModeFixture());
+    const service = new RegistryService({ registry });
+
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "opencode",
+        provider: "opencode",
+        adapterType: "acpx",
+        runtimeMode: "opencode.acp"
+      })
+    ).resolves.toBe("opencode.acp");
+  });
+
+  it("rejects internal opencode runtime mode ids and mismatched explicit opencode mode", async () => {
+    const registry = new InMemoryRegistryStore();
+    await registry.upsertRuntimeMode(opencodeModeFixture());
+    const service = new RegistryService({ registry });
+
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "opencode",
+        provider: "opencode",
+        adapterType: "acpx",
+        runtimeMode: "runtime_mode_opencode_acp"
+      })
+    ).rejects.toMatchObject({
+      code: "invalid_input",
+      details: [{ path: "runtimeMode", issue: expect.stringContaining("slug") }]
+    } satisfies Partial<RuntimeModeValidationError>);
+
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "codex",
+        provider: "openai",
+        adapterType: "process",
+        runtimeMode: "opencode.acp"
+      })
+    ).rejects.toMatchObject({
+      code: "invalid_input",
+      details: [{ path: "runtimeMode", issue: expect.stringContaining("match runtime, provider, and adapterType") }]
+    } satisfies Partial<RuntimeModeValidationError>);
+  });
 });
 
 function genericHttpModeFixture() {
@@ -134,6 +187,48 @@ function genericHttpModeFixture() {
     },
     createdAt: "2026-05-29T00:00:00.000Z",
     updatedAt: "2026-05-29T00:00:00.000Z"
+  };
+}
+
+function opencodeModeFixture() {
+  return {
+    id: "runtime_mode_opencode_acp",
+    slug: "opencode.acp",
+    name: "OpenCode ACP",
+    providerId: "provider_opencode",
+    runtimeId: "runtime_opencode",
+    adapterId: "opencode",
+    adapterType: "acpx" as const,
+    kind: "acp" as const,
+    status: "unknown" as const,
+    capabilities: [
+      "run.start",
+      "run.cancel",
+      "run.timeout",
+      "event.normalized",
+      "event.streaming",
+      "artifact.transcript",
+      "artifact.raw_transcript",
+      "auth.local"
+    ],
+    limitations: [{ code: "no_post_start_input", message: "opencode.acp does not support POST /runs/:id/input in R5." }],
+    placement: {
+      local: { support: "conditional" as const, reason: "Local opencode binary required." },
+      hosted: { support: "future" as const, reason: "Hosted execution is not shipped in R5." },
+      connectedLocalNode: { support: "future" as const, reason: "Hybrid node execution is not shipped in R5." }
+    },
+    availability: {
+      state: "unknown" as const,
+      canRun: false,
+      installed: false,
+      auth: "unknown" as const,
+      version: null,
+      checkedAt: "2026-05-30T00:00:00.000Z",
+      reasonCode: "opencode_binary_unavailable",
+      message: "OpenCode binary unavailable."
+    },
+    createdAt: "2026-05-30T00:00:00.000Z",
+    updatedAt: "2026-05-30T00:00:00.000Z"
   };
 }
 

@@ -322,7 +322,9 @@ describe("run routes", () => {
       payload: fakeRunPayload("Unsupported input run")
     });
     const runId = createResponse.json().run.id;
-    const unsupportedError = new AdapterProtocolError("Codex exec-json does not support input after start");
+    const unsupportedError = new AdapterProtocolError("Codex exec-json does not support input after start", {
+      reasonCode: "codex_input_unsupported"
+    });
     vi.spyOn(harness.runService, "sendInput").mockRejectedValueOnce(unsupportedError);
 
     const inputResponse = await harness.app.inject({
@@ -335,7 +337,8 @@ describe("run routes", () => {
     expect(inputResponse.json()).toEqual({
       error: {
         code: "adapter_protocol_failed",
-        message: "Codex exec-json does not support input after start"
+        message: "Codex exec-json does not support input after start",
+        details: [{ path: "reasonCode", issue: "codex_input_unsupported" }]
       }
     });
   });

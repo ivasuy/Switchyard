@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "@switchyard/contracts": "workspace:*",
-    "@switchyard/core": "workspace:*"
+    "@switchyard/core": "workspace:*",
+    "@switchyard/protocol-acpx": "workspace:*"
   },
   "devDependencies": {
     "@switchyard/testkit": "workspace:*",

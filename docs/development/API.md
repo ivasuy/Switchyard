@@ -11,8 +11,8 @@ http://127.0.0.1:4545
 Current implementation status:
 
 - Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing).
-- Implemented runtimes: fake test runtime (`fake.deterministic`), local Codex (`codex.exec_json`), and Generic HTTP async REST wrapper (`generic_http.async_rest`).
-- Not implemented yet: trace endpoint, OpenAPI generation, debates, approvals, memory, tools, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, ACP, PTY, interactive Codex sessions, webhooks, per-run HTTP base URL overrides, and remote artifact URL fetching.
+- Implemented runtimes: fake test runtime (`fake.deterministic`), local Codex (`codex.exec_json`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
+- Not implemented yet: trace endpoint, OpenAPI generation, debates, approvals expansion, memory, tools expansion, hosted workers, hosted/hybrid placement, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex sessions, webhooks, per-run HTTP base URL overrides, and remote artifact URL fetching.
 
 ## Error Contract
 
@@ -151,8 +151,10 @@ curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
 - `runtime: "fake"` -> `runtimeMode: "fake.deterministic"`
 - `runtime: "codex"` and `adapterType: "process"` -> `runtimeMode: "codex.exec_json"`
 - `runtime: "generic_http"` and `adapterType: "http"` -> `runtimeMode: "generic_http.async_rest"`
+- `runtime: "opencode"` and `adapterType: "acpx"` -> `runtimeMode: "opencode.acp"`
 
 When provided, `runtimeMode` must be a runtime-mode slug (for example `codex.exec_json`), not an internal id like `runtime_mode_codex_exec_json`.
+For OpenCode specifically, `runtime_mode_opencode_acp` is rejected with `400 invalid_input`; use slug `opencode.acp` or omit `runtimeMode` and let inference apply.
 
 Generic HTTP create payload example:
 
@@ -169,6 +171,24 @@ curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
     "timeoutSeconds": 30
   }'
 ```
+
+OpenCode ACP create payload example:
+
+```bash
+curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{
+    "runtime": "opencode",
+    "provider": "opencode",
+    "model": "opencode-default",
+    "adapterType": "acpx",
+    "cwd": "/repo",
+    "task": "Return one short sentence.",
+    "timeoutSeconds": 30
+  }'
+```
+
+`opencode-default` means OpenCode's current configured model; R5 does not select OpenCode models per run.
 
 ## Get Run
 
@@ -317,6 +337,8 @@ curl -s "http://127.0.0.1:4545/runtime-modes?provider=openai&availability=availa
 curl -s "http://127.0.0.1:4545/runtime-modes/runtime_mode_codex_exec_json"
 curl -s "http://127.0.0.1:4545/runtime-modes/codex.exec_json"
 curl -s -X POST "http://127.0.0.1:4545/runtime-modes/codex.exec_json/check"
+curl -s "http://127.0.0.1:4545/runtime-modes/opencode.acp"
+curl -s -X POST "http://127.0.0.1:4545/runtime-modes/opencode.acp/check"
 curl -s "http://127.0.0.1:4545/doctor"
 ```
 
@@ -327,6 +349,11 @@ Runtime mode list filters:
 | `GET /runtime-modes` | `provider`, `runtime`, `adapterType`, `kind`, `availability`, `placement`, `capability`, `limit`, `before` |
 
 `GET /doctor` is read-only and returns the latest stored snapshots. `POST /runtime-modes/:id/check` runs a fresh bounded check and updates stored availability.
+
+OpenCode check behavior:
+
+- runs `opencode --version`, ACP `initialize`, and ACP `session/new`.
+- does not send ACP `session/prompt` (no model-budget spend during doctor checks).
 
 Example `GET /runtime-modes?provider=openai` response:
 
@@ -530,7 +557,9 @@ curl -s -X POST "http://127.0.0.1:4545/runs/$RUN_ID/input" \
   -d '{"text":"continue"}'
 ```
 
-Success returns `{"accepted":true}`. `codex.exec_json` and `generic_http.async_rest` both return `409 adapter_protocol_failed` for post-start input in R4.
+Success returns `{"accepted":true}`. `codex.exec_json`, `generic_http.async_rest`, and `opencode.acp` return `409 adapter_protocol_failed` for post-start input.
+
+For OpenCode input failures, response details include `reasonCode: opencode_input_unsupported`.
 
 ## Cancel Run
 
@@ -543,10 +572,12 @@ Cancellation semantics:
 
 - Cancel is idempotent for terminal runs.
 - For `generic_http.async_rest`, an upstream 2xx cancel acknowledgement alone is not terminal.
+- For `opencode.acp`, cancellation is only accepted after ACP verifies `stopReason:"cancelled"`.
 - Switchyard reports `cancelled` only after the adapter verifies terminal `cancelled` state.
-- Unverified or failed Generic HTTP cancellation returns `409 adapter_protocol_failed` and keeps the previous run state.
+- Unverified or failed cancellation returns `409 adapter_protocol_failed` and keeps the previous run state.
+- OpenCode unverified cancel uses `reasonCode: acp_cancel_unverified`.
 
-Generic HTTP transcripts are exposed through the existing artifact APIs:
+Generic HTTP and OpenCode transcripts are exposed through the existing artifact APIs:
 
 - `GET /runs/:id/artifacts`
 - `GET /artifacts/:id`

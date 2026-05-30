@@ -51,7 +51,9 @@ BASE=http://127.0.0.1:4545
 curl -s "$BASE/runtime-modes" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/fake.deterministic" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/codex.exec_json" | python3 -m json.tool
+curl -s "$BASE/runtime-modes/opencode.acp" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/codex.exec_json/check" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/opencode.acp/check" | python3 -m json.tool
 curl -s "$BASE/doctor" | python3 -m json.tool
 ```
 
@@ -60,6 +62,8 @@ Notes:
 - `fake.deterministic` is always locally available.
 - `codex.exec_json` is `available` only when both `codex --version` and `codex debug models` succeed with at least one model.
 - missing/slow/oversized Codex checks are bounded and reported as sanitized `unavailable`/`unknown`; daemon startup remains up.
+- `opencode.acp` check runs `opencode --version`, ACP `initialize`, and ACP `session/new` only.
+- Doctor/check does not send ACP `session/prompt`; prompt execution can spend model budget.
 
 Generic HTTP runtime checks:
 
@@ -102,6 +106,27 @@ R4 Generic HTTP boundaries:
 - No post-start input (`POST /runs/:id/input` returns `409 adapter_protocol_failed`).
 - No per-run base URL override; endpoint config is daemon env only.
 - No webhooks and no remote artifact URL fetching.
+
+## OpenCode ACP Local Smoke
+
+OpenCode-specific details live in [OpenCode ACP Local Development](adapters/OPENCODE.md).
+
+Doctor-only smoke (no prompt spend):
+
+```bash
+BASE=http://127.0.0.1:4545
+curl -s "$BASE/runtime-modes/opencode.acp" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/opencode.acp/check" | python3 -m json.tool
+```
+
+Optional run smoke (can spend model budget due `session/prompt`):
+
+```bash
+curl -s -X POST "$BASE/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"runtime":"opencode","provider":"opencode","model":"opencode-default","adapterType":"acpx","cwd":"/repo","task":"Return one short sentence.","timeoutSeconds":30}' \
+  | python3 -m json.tool
+```
 
 ## Quick Smoke
 
@@ -255,6 +280,11 @@ Focused docs-safe checks:
 
 ```bash
 git diff --check
+pnpm --filter @switchyard/protocol-acpx test
+pnpm --filter @switchyard/protocol-acpx typecheck
+pnpm --filter @switchyard/testkit test
+pnpm --filter @switchyard/adapters test
+pnpm --filter @switchyard/core test
 pnpm --filter @switchyard/protocol-rest test
 pnpm --filter @switchyard/daemon test
 ```

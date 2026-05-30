@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { type FastifyInstance } from "fastify";
 import type { CodexCatalogProbe } from "@switchyard/adapters";
-import { startFakeHttpRuntimeServer } from "@switchyard/testkit";
+import { createFakeAcpProcessFactory, type FakeAcpRuntimeStats, startFakeHttpRuntimeServer } from "@switchyard/testkit";
 import { createDaemonApp } from "../src/app.js";
-import type { DaemonConfig } from "../src/config.js";
+import { loadDaemonConfig, type DaemonConfig } from "../src/config.js";
 import { openSqliteStorage } from "@switchyard/storage";
 
 function tempDaemonConfig(prefix: string): DaemonConfig {
@@ -17,6 +17,14 @@ function tempDaemonConfig(prefix: string): DaemonConfig {
     dataDir: dir,
     sqlitePath: join(dir, "switchyard.sqlite"),
     artifactDir: join(dir, "artifacts"),
+    opencode: {
+      command: "opencode"
+    },
+    acp: {
+      requestTimeoutMs: 250,
+      cancelTimeoutMs: 250,
+      maxMessageBytes: 1024 * 1024
+    },
     genericHttp: {
       requestTimeoutMs: 5000,
       pollIntervalMs: 25,
@@ -52,6 +60,25 @@ const partialCodexProbe = {
 } satisfies CodexProbe;
 
 describe("daemon app", () => {
+  it("loads opencode/acp config defaults and trims command", () => {
+    const defaults = loadDaemonConfig({});
+    expect(defaults.opencode.command).toBe("opencode");
+    expect(defaults.acp.requestTimeoutMs).toBe(5000);
+    expect(defaults.acp.cancelTimeoutMs).toBe(5000);
+    expect(defaults.acp.maxMessageBytes).toBe(1024 * 1024);
+
+    const custom = loadDaemonConfig({
+      SWITCHYARD_OPENCODE_COMMAND: "  /usr/local/bin/opencode  ",
+      SWITCHYARD_ACP_REQUEST_TIMEOUT_MS: "1234",
+      SWITCHYARD_ACP_CANCEL_TIMEOUT_MS: "5678",
+      SWITCHYARD_ACP_MAX_MESSAGE_BYTES: "4096"
+    });
+    expect(custom.opencode.command).toBe("/usr/local/bin/opencode");
+    expect(custom.acp.requestTimeoutMs).toBe(1234);
+    expect(custom.acp.cancelTimeoutMs).toBe(5678);
+    expect(custom.acp.maxMessageBytes).toBe(4096);
+  });
+
   it("creates a fake run through the local REST API", async () => {
     const app = await createDaemonApp(undefined, { codexProbe: unavailableCodexProbe });
     try {
@@ -87,6 +114,14 @@ describe("daemon app", () => {
       dataDir: dir,
       sqlitePath: join(dir, "switchyard.sqlite"),
       artifactDir: join(dir, "artifacts"),
+      opencode: {
+        command: "opencode"
+      },
+      acp: {
+        requestTimeoutMs: 250,
+        cancelTimeoutMs: 250,
+        maxMessageBytes: 1024 * 1024
+      },
       genericHttp: {
         requestTimeoutMs: 5000,
         pollIntervalMs: 25,
@@ -232,7 +267,8 @@ describe("daemon app", () => {
       expect(list.json().runtimeModes.map((mode: { slug: string }) => mode.slug).sort()).toEqual([
         "codex.exec_json",
         "fake.deterministic",
-        "generic_http.async_rest"
+        "generic_http.async_rest",
+        "opencode.acp"
       ]);
       expect(codex.statusCode).toBe(200);
       expect(codex.json().runtimeMode.availability.state).toBe("available");
@@ -337,6 +373,253 @@ describe("daemon app", () => {
     } finally {
       await app.close();
       await server.close();
+    }
+  });
+
+  it("seeds opencode.acp runtime mode and runs bounded doctor checks without prompts", async () => {
+    const stats: FakeAcpRuntimeStats = { prompts: 0, cancels: 0, permissionResponses: 0 };
+    const app = await createDaemonApp(undefined, {
+      codexProbe: unavailableCodexProbe,
+      opencodeProcessFactory: createFakeAcpProcessFactory({ scenario: "stderr_warning", stats }),
+      opencodeProbeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    try {
+      const modes = await app.inject({ method: "GET", url: "/runtime-modes" });
+      expect(modes.statusCode).toBe(200);
+      expect(modes.json().runtimeModes.some((mode: { slug: string }) => mode.slug === "opencode.acp")).toBe(true);
+
+      const seeded = await app.inject({ method: "GET", url: "/runtime-modes/opencode.acp" });
+      expect(seeded.statusCode).toBe(200);
+      expect(seeded.json().runtimeMode.availability.reasonCode).toBe("not_checked");
+
+      const checked = await app.inject({ method: "POST", url: "/runtime-modes/opencode.acp/check" });
+      expect(checked.statusCode).toBe(200);
+      expect(checked.json().check.state).toBe("partial");
+      expect(checked.json().check.reasonCode).toBe("opencode_stderr_warning");
+      expect(stats.prompts).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("runs opencode.acp with runtime-mode inference, supports artifact retrieval, and rejects unsupported input/internal ids", async () => {
+    const config = tempDaemonConfig("switchyard-daemon-opencode-run-");
+    const app = await createDaemonApp(config, {
+      codexProbe: unavailableCodexProbe,
+      opencodeProcessFactory: createFakeAcpProcessFactory({ scenario: "happy" }),
+      opencodeProbeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    try {
+      const run = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "opencode",
+          provider: "opencode",
+          model: "opencode-default",
+          adapterType: "acpx",
+          cwd: "/repo",
+          task: "opencode smoke"
+        }
+      });
+      expect(run.statusCode).toBe(201);
+      expect(run.json().run.runtimeMode).toBe("opencode.acp");
+      expect(run.json().run.status).toBe("completed");
+
+      const runId = run.json().run.id as string;
+      const artifacts = await app.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
+      expect(artifacts.statusCode).toBe(200);
+      const transcript = artifacts.json().artifacts.find((artifact: { path: string }) =>
+        artifact.path === `runs/${runId}/opencode-acp-transcript.jsonl`
+      );
+      expect(transcript).toBeDefined();
+
+      const artifactId = String(transcript.id);
+      const artifact = await app.inject({ method: "GET", url: `/artifacts/${artifactId}` });
+      expect(artifact.statusCode).toBe(200);
+      expect(artifact.json().artifact.path).toBe(`runs/${runId}/opencode-acp-transcript.jsonl`);
+
+      const content = await app.inject({ method: "GET", url: `/artifacts/${artifactId}/content` });
+      expect(content.statusCode).toBe(200);
+      expect(content.body).toContain("\"method\":\"session/prompt\"");
+
+      const input = await app.inject({
+        method: "POST",
+        url: `/runs/${runId}/input`,
+        payload: { text: "continue" }
+      });
+      expect(input.statusCode).toBe(409);
+      expect(input.json().error.code).toBe("adapter_protocol_failed");
+      expect(input.json().error.details).toEqual(
+        expect.arrayContaining([expect.objectContaining({ path: "reasonCode", issue: "opencode_input_unsupported" })])
+      );
+
+      const internalId = await app.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "opencode",
+          provider: "opencode",
+          model: "opencode-default",
+          adapterType: "acpx",
+          runtimeMode: "runtime_mode_opencode_acp",
+          cwd: "/repo",
+          task: "bad id"
+        }
+      });
+      expect(internalId.statusCode).toBe(400);
+      expect(internalId.json().error.code).toBe("invalid_input");
+    } finally {
+      await app.close();
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists exactly one opencode transcript artifact after verified cancel", async () => {
+    const config = tempDaemonConfig("switchyard-daemon-opencode-cancel-");
+    const app = await createDaemonApp(config, {
+      codexProbe: unavailableCodexProbe,
+      opencodeProcessFactory: createFakeAcpProcessFactory({ scenario: "cancelled" }),
+      opencodeProbeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "opencode",
+          provider: "opencode",
+          model: "opencode-default",
+          adapterType: "acpx",
+          cwd: "/repo",
+          task: "cancel me"
+        }
+      });
+      expect(created.statusCode).toBe(202);
+      const runId = created.json().run.id as string;
+      await waitForRunStatus(app, runId, "running");
+
+      const cancel = await app.inject({ method: "POST", url: `/runs/${runId}/cancel` });
+      expect(cancel.statusCode).toBe(200);
+      expect(cancel.json().run.status).toBe("cancelled");
+
+      const artifacts = await app.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
+      expect(artifacts.statusCode).toBe(200);
+      const transcripts = artifacts
+        .json()
+        .artifacts.filter((artifact: { path: string }) => artifact.path.endsWith("/opencode-acp-transcript.jsonl"));
+      expect(transcripts).toHaveLength(1);
+
+      const artifactId = String(transcripts[0].id);
+      const artifact = await app.inject({ method: "GET", url: `/artifacts/${artifactId}` });
+      const content = await app.inject({ method: "GET", url: `/artifacts/${artifactId}/content` });
+      expect(artifact.statusCode).toBe(200);
+      expect(content.statusCode).toBe(200);
+      expect(content.body).toContain("\"method\":\"session/cancel\"");
+    } finally {
+      await app.close();
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists opencode transcript artifacts on failed-after-start and timeout-after-start runs", async () => {
+    const config = tempDaemonConfig("switchyard-daemon-opencode-fail-timeout-");
+    const app = await createDaemonApp(config, {
+      codexProbe: unavailableCodexProbe,
+      opencodeProcessFactory: createFakeAcpProcessFactory({ scenario: "prompt_failed" }),
+      opencodeProbeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    try {
+      const failed = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "opencode",
+          provider: "opencode",
+          model: "opencode-default",
+          adapterType: "acpx",
+          cwd: "/repo",
+          task: "fail me"
+        }
+      });
+      expect(failed.statusCode).toBe(201);
+      expect(failed.json().run.status).toBe("failed");
+      const failedRunId = failed.json().run.id as string;
+      await expectTranscriptArtifactRetrievable(app, failedRunId);
+    } finally {
+      await app.close();
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+
+    const timeoutConfig = tempDaemonConfig("switchyard-daemon-opencode-timeout-");
+    timeoutConfig.acp.requestTimeoutMs = 5000;
+    const timeoutApp = await createDaemonApp(timeoutConfig, {
+      codexProbe: unavailableCodexProbe,
+      opencodeProcessFactory: createFakeAcpProcessFactory({ scenario: "cancel_unverified" }),
+      opencodeProbeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    try {
+      const timedOut = await timeoutApp.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "opencode",
+          provider: "opencode",
+          model: "opencode-default",
+          adapterType: "acpx",
+          timeoutSeconds: 1,
+          cwd: "/repo",
+          task: "timeout me"
+        }
+      });
+      expect(timedOut.statusCode).toBe(201);
+      expect(timedOut.json().run.status).toBe("timeout");
+      const timeoutRunId = timedOut.json().run.id as string;
+      await expectTranscriptArtifactRetrievable(timeoutApp, timeoutRunId);
+    } finally {
+      await timeoutApp.close();
+      rmSync(timeoutConfig.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("maps opencode unverified public cancel to 409 and keeps run non-cancelled", async () => {
+    const config = tempDaemonConfig("switchyard-daemon-opencode-cancel-unverified-");
+    config.acp.cancelTimeoutMs = 30;
+    const app = await createDaemonApp(config, {
+      codexProbe: unavailableCodexProbe,
+      opencodeProcessFactory: createFakeAcpProcessFactory({ scenario: "cancel_unverified" }),
+      opencodeProbeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "opencode",
+          provider: "opencode",
+          model: "opencode-default",
+          adapterType: "acpx",
+          cwd: "/repo",
+          task: "cancel verify fail"
+        }
+      });
+      expect(created.statusCode).toBe(202);
+      const runId = created.json().run.id as string;
+      await waitForRunStatus(app, runId, "running");
+
+      const cancel = await app.inject({ method: "POST", url: `/runs/${runId}/cancel` });
+      expect(cancel.statusCode).toBe(409);
+      expect(cancel.json().error.code).toBe("adapter_protocol_failed");
+      expect(cancel.json().error.details).toEqual(
+        expect.arrayContaining([expect.objectContaining({ path: "reasonCode", issue: "acp_cancel_unverified" })])
+      );
+
+      const read = await app.inject({ method: "GET", url: `/runs/${runId}` });
+      expect(read.statusCode).toBe(200);
+      expect(read.json().run.status).not.toBe("cancelled");
+    } finally {
+      await app.close();
+      rmSync(config.dataDir, { recursive: true, force: true });
     }
   });
 
@@ -449,6 +732,14 @@ describe("daemon app", () => {
       dataDir: dir,
       sqlitePath: join(dir, "switchyard.sqlite"),
       artifactDir: join(dir, "artifacts"),
+      opencode: {
+        command: "opencode"
+      },
+      acp: {
+        requestTimeoutMs: 250,
+        cancelTimeoutMs: 250,
+        maxMessageBytes: 1024 * 1024
+      },
       genericHttp: {
         requestTimeoutMs: 5000,
         pollIntervalMs: 25,
@@ -587,6 +878,14 @@ describe("daemon app", () => {
       dataDir: dir,
       sqlitePath: join(dir, "switchyard.sqlite"),
       artifactDir: join(dir, "artifacts"),
+      opencode: {
+        command: "opencode"
+      },
+      acp: {
+        requestTimeoutMs: 250,
+        cancelTimeoutMs: 250,
+        maxMessageBytes: 1024 * 1024
+      },
       genericHttp: {
         requestTimeoutMs: 5000,
         pollIntervalMs: 25,
@@ -664,3 +963,35 @@ describe("daemon app", () => {
     }
   });
 });
+
+async function waitForRunStatus(
+  app: FastifyInstance,
+  runId: string,
+  status: string
+): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const read = await app.inject({ method: "GET", url: `/runs/${runId}` });
+    if (read.statusCode === 200 && read.json().run.status === status) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`run ${runId} did not reach status ${status}`);
+}
+
+async function expectTranscriptArtifactRetrievable(
+  app: FastifyInstance,
+  runId: string
+): Promise<void> {
+  const artifacts = await app.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
+  expect(artifacts.statusCode).toBe(200);
+  const transcript = artifacts
+    .json()
+    .artifacts.find((artifact: { path: string }) => artifact.path.endsWith("/opencode-acp-transcript.jsonl"));
+  expect(transcript).toBeDefined();
+  const artifactId = String(transcript.id);
+  const artifact = await app.inject({ method: "GET", url: `/artifacts/${artifactId}` });
+  const content = await app.inject({ method: "GET", url: `/artifacts/${artifactId}/content` });
+  expect(artifact.statusCode).toBe(200);
+  expect(content.statusCode).toBe(200);
+}

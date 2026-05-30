@@ -17,6 +17,23 @@ All notable changes to Switchyard will be documented in this file.
 - Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.
 
+## 2026-05-30 - Roadmap Release Train R5 ACP Foundation And OpenCode
+
+### Added
+
+- Added private workspace package `@switchyard/protocol-acpx` with ACP JSON-RPC framing, schema helpers, outbound stdio client correlation, named protocol errors, and redacted raw transcript recording.
+- Added deterministic fake ACP runtime harness in `@switchyard/testkit` for `happy`, `empty_output`, `prompt_failed`, `cancelled`, `cancel_unverified`, `invalid_json`, `invalid_initialize`, `invalid_session_new`, `permission_request`, `stderr_warning`, and `oversized_message` scenarios.
+- Added OpenCode ACP adapter/runtime mode `opencode.acp` with bounded doctor checks (`opencode --version`, ACP initialize/session-new), normalized event mapping, verified cancellation semantics, and transcript artifact capture.
+- Added daemon OpenCode ACP config/wiring (`SWITCHYARD_OPENCODE_COMMAND`, `SWITCHYARD_ACP_REQUEST_TIMEOUT_MS`, `SWITCHYARD_ACP_CANCEL_TIMEOUT_MS`, `SWITCHYARD_ACP_MAX_MESSAGE_BYTES`) plus runtime-mode seeding for `provider_opencode`/`runtime_opencode`/`model_opencode_default`.
+- Added OpenCode local adapter guide at `docs/development/adapters/OPENCODE.md`.
+
+### Changed
+
+- Updated runtime-mode inference to map `runtime: "opencode"` + `adapterType: "acpx"` -> `runtimeMode: "opencode.acp"` with strict mismatch/internal-id validation.
+- Updated runtime doctor custom-availability mapping and sanitization for ACP/OpenCode checks, including partial `opencode_stderr_warning` handling.
+- Updated public cancel behavior to persist transcript artifacts after verified cancellation and keep protocol-failure cancellation honest (`409 adapter_protocol_failed` with `reasonCode` details).
+- Updated daemon smoke coverage to include OpenCode runtime-mode discovery/check, no-prompt doctor assertions, run/input/cancel protocol behavior, and artifact retrieval for completed/cancelled/failed/timeout paths.
+
 ## 2026-05-30 - Roadmap Release Train R4 Shared Runtime Substrates And Generic HTTP
 
 ### Added

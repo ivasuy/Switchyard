@@ -57,6 +57,9 @@ importers:
       '@switchyard/core':
         specifier: workspace:*
         version: link:../core
+      '@switchyard/protocol-acpx':
+        specifier: workspace:*
+        version: link:../protocol-acpx
     devDependencies:
       '@switchyard/testkit':
         specifier: workspace:*
@@ -86,6 +89,22 @@ importers:
       '@switchyard/contracts':
         specifier: workspace:*
         version: link:../contracts
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.5
+        version: 4.1.5(@types/node@24.12.3)(vite@8.0.11(@types/node@24.12.3)(esbuild@0.27.7)(tsx@4.21.0))
+
+  packages/protocol-acpx:
+    dependencies:
+      '@switchyard/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      zod:
+        specifier: ^4.1.12
+        version: 4.4.3
     devDependencies:
       typescript:
         specifier: ^5.9.3
@@ -165,6 +184,9 @@ importers:
       '@switchyard/core':
         specifier: workspace:*
         version: link:../core
+      '@switchyard/protocol-acpx':
+        specifier: workspace:*
+        version: link:../protocol-acpx
       fastify:
         specifier: ^5.8.5
         version: 5.8.5

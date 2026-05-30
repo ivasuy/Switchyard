@@ -1,8 +1,13 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "vitest";
-import { CodexExecJsonAdapter, GenericHttpAsyncRestAdapter } from "../src/index.js";
-import { FakeRuntimeAdapter, runRuntimeAdapterContract, startFakeHttpRuntimeServer } from "@switchyard/testkit";
+import { CodexExecJsonAdapter, GenericHttpAsyncRestAdapter, OpenCodeAcpAdapter } from "../src/index.js";
+import {
+  FakeRuntimeAdapter,
+  createFakeAcpProcessFactory,
+  runRuntimeAdapterContract,
+  startFakeHttpRuntimeServer
+} from "@switchyard/testkit";
 
 describe("runtime adapter contract suite", () => {
   it("passes for fake runtime adapter", async () => {
@@ -52,6 +57,19 @@ describe("runtime adapter contract suite", () => {
     } finally {
       await server.close();
     }
+  });
+
+  it("passes for opencode acp adapter with fake acp process", async () => {
+    await runRuntimeAdapterContract({
+      adapter: new OpenCodeAcpAdapter({
+        processFactory: createFakeAcpProcessFactory({ scenario: "happy" }),
+        probeVersion: async () => ({ status: "ok", version: "1.3.15" })
+      }),
+      runtime: "opencode",
+      provider: "opencode",
+      model: "opencode-default",
+      adapterType: "acpx"
+    });
   });
 });
 

@@ -1,5 +1,5 @@
 {
-  "name": "@switchyard/testkit",
+  "name": "@switchyard/protocol-acpx",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,14 +10,11 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "fake-http-runtime": "node --disable-warning=DEP0205 --import tsx ./src/fake-http-runtime-cli.ts",
-    "fake-acp-runtime": "node --disable-warning=DEP0205 --import tsx ./src/fake-acp-runtime-cli.ts"
+    "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@switchyard/contracts": "workspace:*",
-    "@switchyard/core": "workspace:*",
-    "@switchyard/protocol-acpx": "workspace:*",
-    "fastify": "^5.8.5"
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

@@ -157,7 +157,8 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
         return sendHttpError(
           reply,
           "adapter_protocol_failed",
-          error.message
+          error.message,
+          adapterProtocolDetails(error)
         );
       }
       throw error;
@@ -177,7 +178,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       return reply.send({ run: cancelled });
     } catch (error) {
       if (error instanceof AdapterProtocolError) {
-        return sendHttpError(reply, "adapter_protocol_failed", error.message);
+        return sendHttpError(reply, "adapter_protocol_failed", error.message, adapterProtocolDetails(error));
       }
       throw error;
     }
@@ -475,4 +476,11 @@ function isValidationError(error: unknown): error is { code: string; message: st
   }
   const record = error as Record<string, unknown>;
   return record["code"] === "invalid_input" && Array.isArray(record["details"]) && typeof record["message"] === "string";
+}
+
+function adapterProtocolDetails(error: AdapterProtocolError): Array<{ path: string; issue: string }> | undefined {
+  if (!error.reasonCode) {
+    return undefined;
+  }
+  return [{ path: "reasonCode", issue: error.reasonCode }];
 }

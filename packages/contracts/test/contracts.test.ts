@@ -262,8 +262,11 @@ describe("Switchyard contracts", () => {
 
     expect(() => runtimeCapabilitySchema.parse("run.input")).toThrow();
     expect(() => runtimeCapabilitySchema.parse("session.resume")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("approval.request")).toThrow();
     expect(() => runtimeCapabilitySchema.parse("webhook.callback")).toThrow();
     expect(() => runtimeCapabilitySchema.parse("tool.invoke")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("hosted.run")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("mcp.server")).toThrow();
   });
 
   it("parses generic_http.async_rest runtime mode record", () => {
@@ -322,6 +325,58 @@ describe("Switchyard contracts", () => {
     expect(mode.adapterType).toBe("http");
     expect(mode.kind).toBe("async_rest");
     expect(mode.capabilities).toContain("auth.api_key");
+  });
+
+  it("parses opencode.acp runtime mode record", () => {
+    const mode = runtimeModeSchema.parse({
+      id: "runtime_mode_opencode_acp",
+      slug: "opencode.acp",
+      name: "OpenCode ACP",
+      providerId: "provider_opencode",
+      runtimeId: "runtime_opencode",
+      adapterId: "opencode",
+      adapterType: "acpx",
+      kind: "acp",
+      status: "unknown",
+      capabilities: [
+        "run.start",
+        "run.cancel",
+        "run.timeout",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "artifact.raw_transcript",
+        "auth.local"
+      ],
+      limitations: [
+        { code: "one_prompt_per_run", message: "opencode.acp sends one ACP prompt per Switchyard run in R5." },
+        { code: "no_post_start_input", message: "opencode.acp does not support POST /runs/:id/input in R5." },
+        { code: "no_switchyard_approval_bridge", message: "ACP permission requests are failed visibly because Switchyard approval workflow is not shipped in R5." },
+        { code: "configured_local_binary_only", message: "OpenCode command is daemon-level local configuration, not per run." },
+        { code: "no_session_resume", message: "OpenCode ACP session load/resume/fork/list are not exposed through Switchyard in R5." }
+      ],
+      placement: {
+        local: { support: "conditional", reason: "Requires a PATH-reachable local opencode binary and local OpenCode authentication/configuration." },
+        hosted: { support: "future", reason: "Hosted execution is not shipped in R5." },
+        connectedLocalNode: { support: "future", reason: "Hybrid local-node execution is not shipped in R5." }
+      },
+      availability: {
+        state: "unknown",
+        canRun: false,
+        installed: false,
+        auth: "unknown",
+        version: null,
+        checkedAt: "2026-05-30T00:00:00.000Z",
+        reasonCode: "opencode_binary_unavailable",
+        message: "OpenCode command was not found."
+      },
+      docsPath: "docs/development/adapters/OPENCODE.md",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      updatedAt: "2026-05-30T00:00:00.000Z"
+    });
+    expect(mode.adapterType).toBe("acpx");
+    expect(mode.kind).toBe("acp");
+    expect(mode.slug).toBe("opencode.acp");
   });
 
   it("supports run and session runtimeMode compatibility and rejects runtime mode ids", () => {

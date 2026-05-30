@@ -22,6 +22,14 @@ function tempConfig(prefix: string): DaemonConfig {
     dataDir: dir,
     sqlitePath: join(dir, "switchyard.sqlite"),
     artifactDir: join(dir, "artifacts"),
+    opencode: {
+      command: "opencode"
+    },
+    acp: {
+      requestTimeoutMs: 250,
+      cancelTimeoutMs: 250,
+      maxMessageBytes: 1024 * 1024
+    },
     genericHttp: {
       requestTimeoutMs: 5000,
       pollIntervalMs: 25,
