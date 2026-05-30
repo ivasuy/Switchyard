@@ -25,7 +25,8 @@ export interface ServerConfig {
 
 export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const deploymentMode = parseDeploymentMode(env["SWITCHYARD_DEPLOYMENT_MODE"]);
-  const allowlist = parseCsv(env["SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"], "fake.deterministic");
+  const hostedRuntimeAllowlistEnv = optional(env["SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"]);
+  const allowlist = parseCsv(hostedRuntimeAllowlistEnv, "fake.deterministic");
   const config: ServerConfig = {
     host: requiredOrDefault(env["SWITCHYARD_HOST"], "127.0.0.1"),
     port: Number(requiredOrDefault(env["SWITCHYARD_PORT"], "4646")),
@@ -49,6 +50,7 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     requireVar(config.redisUrl, "SWITCHYARD_REDIS_URL", config);
     requireVar(config.objectStoreDir, "SWITCHYARD_OBJECT_STORE_DIR", config);
     requireVar(config.nodeSharedToken, "SWITCHYARD_NODE_SHARED_TOKEN", config);
+    requireVar(hostedRuntimeAllowlistEnv, "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST", config);
     if (config.hostedRuntimeAllowlist.length === 0) {
       throw new ConfigError(
         "config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",

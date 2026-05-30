@@ -21,14 +21,17 @@ export interface NodeAppConfig {
 
 export function loadNodeConfig(env: NodeJS.ProcessEnv = process.env): NodeAppConfig {
   const deploymentMode = parseDeploymentMode(env["SWITCHYARD_DEPLOYMENT_MODE"]);
+  const capabilitiesEnv = optional(env["SWITCHYARD_NODE_CAPABILITIES"]);
+  const allowRuntimeModesEnv = optional(env["SWITCHYARD_NODE_ALLOW_RUNTIME_MODES"]);
+  const allowCwdPrefixesEnv = optional(env["SWITCHYARD_NODE_ALLOW_CWD_PREFIXES"]);
   const config: NodeAppConfig = {
     deploymentMode,
     serverUrl: env["SWITCHYARD_SERVER_URL"] ?? "http://127.0.0.1:4646",
-    capabilities: (env["SWITCHYARD_NODE_CAPABILITIES"] ?? "runtime.fake.deterministic").split(",").map((value) => value.trim()).filter(Boolean),
+    capabilities: (capabilitiesEnv ?? "runtime.fake.deterministic").split(",").map((value) => value.trim()).filter(Boolean),
     policy: {
-      allowRuntimeModes: (env["SWITCHYARD_NODE_ALLOW_RUNTIME_MODES"] ?? "fake.deterministic").split(",").map((value) => value.trim()).filter(Boolean),
+      allowRuntimeModes: (allowRuntimeModesEnv ?? "fake.deterministic").split(",").map((value) => value.trim()).filter(Boolean),
       denyAdapterTypes: [],
-      allowCwdPrefixes: (env["SWITCHYARD_NODE_ALLOW_CWD_PREFIXES"] ?? "/repo").split(",").map((value) => value.trim()).filter(Boolean),
+      allowCwdPrefixes: (allowCwdPrefixesEnv ?? "/repo").split(",").map((value) => value.trim()).filter(Boolean),
       allowEventTypes: [],
       artifactSync: "full"
     },
@@ -46,6 +49,9 @@ export function loadNodeConfig(env: NodeJS.ProcessEnv = process.env): NodeAppCon
   if (config.deploymentMode === "staging" || config.deploymentMode === "production") {
     requireVar(optional(env["SWITCHYARD_SERVER_URL"]), "SWITCHYARD_SERVER_URL", config);
     requireVar(sharedToken, "SWITCHYARD_NODE_SHARED_TOKEN", config);
+    requireVar(capabilitiesEnv, "SWITCHYARD_NODE_CAPABILITIES", config);
+    requireVar(allowRuntimeModesEnv, "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES", config);
+    requireVar(allowCwdPrefixesEnv, "SWITCHYARD_NODE_ALLOW_CWD_PREFIXES", config);
     if (config.capabilities.length === 0) {
       throw new ConfigError("config_required:SWITCHYARD_NODE_CAPABILITIES", "SWITCHYARD_NODE_CAPABILITIES", buildSummary(config));
     }

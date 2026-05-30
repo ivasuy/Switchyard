@@ -19,9 +19,10 @@ export interface WorkerConfig {
 
 export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const deploymentMode = parseDeploymentMode(env["SWITCHYARD_DEPLOYMENT_MODE"]);
+  const hostedRuntimeAllowlistEnv = optional(env["SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"]);
   const config: WorkerConfig = {
     deploymentMode,
-    hostedRuntimeAllowlist: parseCsv(env["SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"], "fake.deterministic"),
+    hostedRuntimeAllowlist: parseCsv(hostedRuntimeAllowlistEnv, "fake.deterministic"),
     queueName: optional(env["SWITCHYARD_QUEUE_NAME"]) ?? "switchyard-hosted-runs",
     idleIntervalMs: Number(optional(env["SWITCHYARD_WORKER_IDLE_MS"]) ?? "200"),
     redactedSummary: {}
@@ -41,6 +42,14 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     requireVar(config.postgresUrl, "SWITCHYARD_POSTGRES_URL", config);
     requireVar(config.redisUrl, "SWITCHYARD_REDIS_URL", config);
     requireVar(config.objectStoreDir, "SWITCHYARD_OBJECT_STORE_DIR", config);
+    requireVar(hostedRuntimeAllowlistEnv, "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST", config);
+    if (config.hostedRuntimeAllowlist.length === 0) {
+      throw new ConfigError(
+        "config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+        "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+        buildSummary(config)
+      );
+    }
     if (!config.hostedRuntimeAllowlist.includes("fake.deterministic")) {
       throw new ConfigError(
         "config_invalid:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",

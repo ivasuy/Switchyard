@@ -73,6 +73,7 @@ describe("hosted server", () => {
       SWITCHYARD_QUEUE_NAME: "switchyard-hosted",
       SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-objects",
       SWITCHYARD_NODE_SHARED_TOKEN: "token",
+      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic",
       SWITCHYARD_DEPLOYMENT_MODE: "staging"
     });
 
@@ -115,5 +116,24 @@ describe("hosted server", () => {
         SWITCHYARD_NODE_SHARED_TOKEN: "token"
       })
     ).toThrow("config_required:SWITCHYARD_REDIS_URL");
+  });
+
+  it("fails closed in staging when hosted allowlist is missing", () => {
+    expect(() =>
+      loadServerConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "staging",
+        SWITCHYARD_POSTGRES_URL: "postgres://localhost/db",
+        SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
+        SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store",
+        SWITCHYARD_NODE_SHARED_TOKEN: "token"
+      })
+    ).toThrow("config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST");
+  });
+
+  it("keeps local default hosted allowlist when env is absent", () => {
+    const config = loadServerConfig({
+      SWITCHYARD_DEPLOYMENT_MODE: "local"
+    });
+    expect(config.hostedRuntimeAllowlist).toEqual(["fake.deterministic"]);
   });
 });

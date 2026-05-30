@@ -58,6 +58,7 @@ describe("hosted worker app", () => {
       SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
       SWITCHYARD_QUEUE_NAME: "switchyard-worker",
       SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-worker-objects",
+      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic",
       SWITCHYARD_DEPLOYMENT_MODE: "staging"
     });
 
@@ -77,5 +78,23 @@ describe("hosted worker app", () => {
         SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic"
       })
     ).toThrow("config_required:SWITCHYARD_REDIS_URL");
+  });
+
+  it("fails closed in staging when hosted allowlist is missing", () => {
+    expect(() =>
+      loadWorkerConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "staging",
+        SWITCHYARD_POSTGRES_URL: "postgres://localhost/db",
+        SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
+        SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store"
+      })
+    ).toThrow("config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST");
+  });
+
+  it("keeps local default hosted allowlist when env is absent", () => {
+    const config = loadWorkerConfig({
+      SWITCHYARD_DEPLOYMENT_MODE: "local"
+    });
+    expect(config.hostedRuntimeAllowlist).toEqual(["fake.deterministic"]);
   });
 });

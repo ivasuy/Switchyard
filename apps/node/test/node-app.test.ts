@@ -125,4 +125,49 @@ describe("node app", () => {
       })
     ).toThrow("config_required:SWITCHYARD_NODE_SHARED_TOKEN");
   });
+
+  it("fails closed in staging mode without node capabilities env", () => {
+    expect(() =>
+      loadNodeConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "staging",
+        SWITCHYARD_SERVER_URL: "http://localhost:4646",
+        SWITCHYARD_NODE_SHARED_TOKEN: "token",
+        SWITCHYARD_NODE_ALLOW_RUNTIME_MODES: "fake.deterministic",
+        SWITCHYARD_NODE_ALLOW_CWD_PREFIXES: "/repo"
+      })
+    ).toThrow("config_required:SWITCHYARD_NODE_CAPABILITIES");
+  });
+
+  it("fails closed in staging mode without runtime mode allowlist env", () => {
+    expect(() =>
+      loadNodeConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "staging",
+        SWITCHYARD_SERVER_URL: "http://localhost:4646",
+        SWITCHYARD_NODE_SHARED_TOKEN: "token",
+        SWITCHYARD_NODE_CAPABILITIES: "runtime.fake.deterministic",
+        SWITCHYARD_NODE_ALLOW_CWD_PREFIXES: "/repo"
+      })
+    ).toThrow("config_required:SWITCHYARD_NODE_ALLOW_RUNTIME_MODES");
+  });
+
+  it("fails closed in staging mode without cwd prefix allowlist env", () => {
+    expect(() =>
+      loadNodeConfig({
+        SWITCHYARD_DEPLOYMENT_MODE: "staging",
+        SWITCHYARD_SERVER_URL: "http://localhost:4646",
+        SWITCHYARD_NODE_SHARED_TOKEN: "token",
+        SWITCHYARD_NODE_CAPABILITIES: "runtime.fake.deterministic",
+        SWITCHYARD_NODE_ALLOW_RUNTIME_MODES: "fake.deterministic"
+      })
+    ).toThrow("config_required:SWITCHYARD_NODE_ALLOW_CWD_PREFIXES");
+  });
+
+  it("keeps local defaults for node allowlists when env is absent", () => {
+    const config = loadNodeConfig({
+      SWITCHYARD_DEPLOYMENT_MODE: "local"
+    });
+    expect(config.capabilities).toEqual(["runtime.fake.deterministic"]);
+    expect(config.policy.allowRuntimeModes).toEqual(["fake.deterministic"]);
+    expect(config.policy.allowCwdPrefixes).toEqual(["/repo"]);
+  });
 });
