@@ -1362,6 +1362,70 @@ describe("run routes hosted auth", () => {
     expect(runCreateSpy).not.toHaveBeenCalled();
   });
 
+  it("denies hosted real provider policy failures before control-plane reservation and durable side effects", async () => {
+    const preflightRunCreate = vi.fn(async () => ({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "reserved",
+      reasonCode: "run_create",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      expiresAt: "2026-05-31T00:05:00.000Z"
+    }));
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      preflightRunCreate,
+      ensureOwnedOrAttachFromRun: vi.fn(async () => ({ ok: true, created: true })),
+      releaseQuotaReservation: vi.fn(async () => ({})),
+      recordAudit: vi.fn(async () => ({ ok: true })),
+      authorizeResource: vi.fn(async () => ({ ok: false, decision: "not_found", code: "run_not_found", reasonCode: "resource_not_owned" }))
+    };
+    const hostedRuns = {
+      preflightCreateRun: vi.fn(async () => {
+        const error = new Error("provider_runtime_policy_missing");
+        (error as { code?: string }).code = "placement_denied";
+        throw error;
+      }),
+      createRun: vi.fn(async () => {
+        throw new Error("must_not_create");
+      })
+    };
+    const harness = createRouteHarness({
+      withLauncher: false,
+      controlPlane: controlPlane as never,
+      hostedRuns: hostedRuns as never
+    });
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+    const runCreateSpy = vi.spyOn(harness.runService, "createRun");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: {
+        runtime: "codex",
+        provider: "openai",
+        model: "gpt-5",
+        adapterType: "process",
+        runtimeMode: "codex.exec_json",
+        cwd: "/repo",
+        task: "policy denied",
+        placement: "hosted"
+      }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("placement_denied");
+    expect(response.json().error.details).toEqual([{ path: "placement", issue: "provider_runtime_policy_missing" }]);
+    expect(preflightRunCreate).not.toHaveBeenCalled();
+    expect(hostedRuns.createRun).not.toHaveBeenCalled();
+    expect(runCreateSpy).not.toHaveBeenCalled();
+  });
+
   it("fails create when assignment ownership attach fails and leaves no queued unowned run visible", async () => {
     const assignmentIdsByRun = new Map<string, readonly { id: string }[]>();
     const releaseQuotaReservation = vi.fn(async () => ({
