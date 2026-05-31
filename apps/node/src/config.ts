@@ -1,4 +1,11 @@
 import type { NodePolicy } from "@switchyard/contracts";
+import {
+  redactSecrets,
+  validateProductionCwdPrefixes,
+  validateProductionFakeOnlyAllowlist,
+  validateProductionHttpsUrl,
+  validateProductionSecret
+} from "@switchyard/core";
 
 export type DeploymentMode = "local" | "test" | "staging" | "production";
 
@@ -69,9 +76,33 @@ export function loadNodeConfig(env: NodeJS.ProcessEnv = process.env): NodeAppCon
         buildSummary(config)
       );
     }
+
+    if (config.deploymentMode === "production") {
+      enforceProductionValidation(validateProductionHttpsUrl({
+        variable: "SWITCHYARD_SERVER_URL",
+        value: config.serverUrl
+      }), config);
+      enforceProductionValidation(validateProductionSecret({
+        variable: "SWITCHYARD_NODE_SHARED_TOKEN",
+        value: config.sharedToken,
+        minLength: 32
+      }), config);
+      enforceProductionValidation(validateProductionFakeOnlyAllowlist(config.policy.allowRuntimeModes), config);
+      enforceProductionValidation(validateProductionCwdPrefixes(config.policy.allowCwdPrefixes), config);
+    }
   }
   config.redactedSummary = buildSummary(config);
   return config;
+}
+
+function enforceProductionValidation(
+  validation: { ok: true } | { ok: false; code: string; variable: string },
+  config: NodeAppConfig
+): void {
+  if (validation.ok) {
+    return;
+  }
+  throw new ConfigError(validation.code, validation.variable, buildSummary(config));
 }
 
 function parseDeploymentMode(value: string | undefined): DeploymentMode {
@@ -94,13 +125,25 @@ function requireVar(value: string | undefined, variable: string, config: NodeApp
 }
 
 function buildSummary(config: NodeAppConfig): Record<string, unknown> {
-  return {
+  let serverUrlScheme = "invalid";
+  let serverUrlHost = "invalid";
+  try {
+    const parsed = new URL(config.serverUrl);
+    serverUrlScheme = parsed.protocol.replace(/:$/, "");
+    serverUrlHost = parsed.host;
+  } catch {
+    serverUrlScheme = "invalid";
+    serverUrlHost = "invalid";
+  }
+
+  return redactSecrets({
     deploymentMode: config.deploymentMode,
-    serverUrl: config.serverUrl.replace(/:\/\/[^@]+@/, "://[redacted]@"),
+    serverUrlScheme,
+    serverUrlHost,
     hasSharedToken: Boolean(config.sharedToken),
     capabilities: config.capabilities,
     allowRuntimeModes: config.policy.allowRuntimeModes,
     allowCwdPrefixes: config.policy.allowCwdPrefixes,
     idleIntervalMs: config.idleIntervalMs
-  };
+  });
 }

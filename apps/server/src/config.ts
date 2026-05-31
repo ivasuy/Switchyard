@@ -3,6 +3,9 @@ import {
   hashApiKey,
   redactSecrets,
   resolveHostedSandboxConfig,
+  validateProductionFakeOnlyAllowlist,
+  validateProductionSecret,
+  validateProductionUrlCredential,
   validateHostedRuntimeAllowlist,
   type ControlPlaneBootstrapInput,
   type HostedRealRuntimeExecution,
@@ -157,6 +160,50 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
     requireVar(config.apiKeyPepper, "SWITCHYARD_API_KEY_PEPPER", config);
     if (!config.controlPlaneBootstrap) {
       throw new ConfigError("control_plane_bootstrap_missing", "SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH", buildSummary(config));
+    }
+  }
+
+  if (config.deploymentMode === "production") {
+    enforceProductionValidation(validateProductionFakeOnlyAllowlist(config.hostedRuntimeAllowlist), config);
+
+    if (config.hostedRealRuntimeExecution !== "disabled") {
+      throw new ConfigError(
+        "config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        buildSummary(config)
+      );
+    }
+
+    enforceProductionValidation(validateProductionSecret({
+      variable: "SWITCHYARD_API_KEY_PEPPER",
+      value: config.apiKeyPepper,
+      minLength: 32
+    }), config);
+    enforceProductionValidation(validateProductionSecret({
+      variable: "SWITCHYARD_NODE_SHARED_TOKEN",
+      value: config.nodeSharedToken,
+      minLength: 32
+    }), config);
+    enforceProductionValidation(validateProductionUrlCredential({
+      variable: "SWITCHYARD_POSTGRES_URL",
+      value: config.postgresUrl,
+      credential: "password"
+    }), config);
+    enforceProductionValidation(validateProductionUrlCredential({
+      variable: "SWITCHYARD_REDIS_URL",
+      value: config.redisUrl,
+      credential: "password"
+    }), config);
+
+    if (config.objectStore.backend === "s3-compatible") {
+      enforceProductionValidation(validateProductionSecret({
+        variable: "SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID",
+        value: optional(env["SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID"])
+      }), config);
+      enforceProductionValidation(validateProductionSecret({
+        variable: "SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY",
+        value: optional(env["SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY"])
+      }), config);
     }
   }
 
@@ -468,6 +515,16 @@ function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean 
     return false;
   }
   throw new ConfigError("config_invalid:SWITCHYARD_PUBLIC_METRICS", "SWITCHYARD_PUBLIC_METRICS", { publicMetrics: normalized });
+}
+
+function enforceProductionValidation(
+  validation: { ok: true } | { ok: false; code: string; variable: string },
+  config: ServerConfig
+): void {
+  if (validation.ok) {
+    return;
+  }
+  throw new ConfigError(validation.code, validation.variable, buildSummary(config));
 }
 
 function requireVar(value: string | undefined, variable: string, config: ServerConfig): void {

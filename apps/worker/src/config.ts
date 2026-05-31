@@ -1,5 +1,9 @@
 import {
+  redactSecrets,
   resolveHostedSandboxConfig,
+  validateProductionFakeOnlyAllowlist,
+  validateProductionSecret,
+  validateProductionUrlCredential,
   validateHostedRuntimeAllowlist,
   type HostedRealRuntimeExecution,
   type ResolvedHostedSandboxConfig
@@ -99,6 +103,39 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     requireVar(hostedRuntimeAllowlistEnv, "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST", config);
   }
 
+  if (config.deploymentMode === "production") {
+    enforceProductionValidation(validateProductionUrlCredential({
+      variable: "SWITCHYARD_POSTGRES_URL",
+      value: config.postgresUrl,
+      credential: "password"
+    }), config);
+    enforceProductionValidation(validateProductionUrlCredential({
+      variable: "SWITCHYARD_REDIS_URL",
+      value: config.redisUrl,
+      credential: "password"
+    }), config);
+    enforceProductionValidation(validateProductionFakeOnlyAllowlist(config.hostedRuntimeAllowlist), config);
+
+    if (config.hostedRealRuntimeExecution !== "disabled") {
+      throw new ConfigError(
+        "config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        buildSummary(config)
+      );
+    }
+
+    if (config.objectStore.backend === "s3-compatible") {
+      enforceProductionValidation(validateProductionSecret({
+        variable: "SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID",
+        value: optional(env["SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID"])
+      }), config);
+      enforceProductionValidation(validateProductionSecret({
+        variable: "SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY",
+        value: optional(env["SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY"])
+      }), config);
+    }
+  }
+
   const allowlistValidation = validateHostedRuntimeAllowlist({
     allowlist: config.hostedRuntimeAllowlist,
     deploymentMode: config.deploymentMode,
@@ -177,6 +214,16 @@ function parsePositiveNumber(value: string, variable: string): number {
   return parsed;
 }
 
+function enforceProductionValidation(
+  validation: { ok: true } | { ok: false; code: string; variable: string },
+  config: WorkerConfig
+): void {
+  if (validation.ok) {
+    return;
+  }
+  throw new ConfigError(validation.code, validation.variable, buildSummary(config));
+}
+
 function requireVar(value: string | undefined, variable: string, config: WorkerConfig): void {
   if (!value) {
     throw new ConfigError(`config_required:${variable}`, variable, buildSummary(config));
@@ -189,7 +236,7 @@ function optional(value: string | undefined): string | undefined {
 }
 
 function buildSummary(config: WorkerConfig): Record<string, unknown> {
-  return {
+  return redactSecrets({
     deploymentMode: config.deploymentMode,
     queueName: config.queueName,
     hostedRuntimeAllowlist: config.hostedRuntimeAllowlist,
@@ -213,5 +260,5 @@ function buildSummary(config: WorkerConfig): Record<string, unknown> {
       cancelTimeoutMs: config.acp.cancelTimeoutMs,
       maxMessageBytes: config.acp.maxMessageBytes
     }
-  };
+  });
 }
