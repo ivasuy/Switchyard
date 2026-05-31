@@ -47,6 +47,15 @@ export const SANDBOX_REAL_COMMAND_DENYLIST = [
   "shell"
 ] as const;
 
+export const SANDBOX_REAL_EXECUTABLE_ABSOLUTE_DENYLIST = [
+  "/bin/bash",
+  "/usr/bin/sh",
+  "/usr/bin/python",
+  "/usr/bin/codex",
+  "/usr/bin/claude",
+  "/usr/bin/opencode"
+] as const;
+
 export const SANDBOX_DEFAULT_RESOURCE_LIMITS = {
   wallTimeMs: 30_000,
   stdoutBytes: 65_536,
@@ -95,6 +104,13 @@ export const sandboxNamedErrorSchema = z.enum([
   "sandbox_env_too_large",
   "sandbox_pty_invalid",
   "sandbox_command_denied",
+  "sandbox_real_execution_disabled",
+  "sandbox_executable_denied",
+  "sandbox_cwd_denied",
+  "sandbox_env_denied",
+  "sandbox_pty_unavailable",
+  "sandbox_spawn_failed",
+  "sandbox_isolation_unavailable",
   "sandbox_process_failed",
   "sandbox_timeout",
   "sandbox_cancelled",
@@ -139,8 +155,8 @@ export const sandboxArtifactPolicySchema = z.object({
   captureDeniedDecision: z.boolean().default(false)
 });
 
-const sandboxCwdSchema = z.string().min(1).refine((value) => {
-  if (!path.isAbsolute(value)) {
+const hasOnlyNormalizedAbsolutePathSegments = (value: string): boolean => {
+  if (!path.posix.isAbsolute(value)) {
     return false;
   }
   const normalized = path.posix.normalize(value);
@@ -149,7 +165,81 @@ const sandboxCwdSchema = z.string().min(1).refine((value) => {
   }
   const segments = normalized.split("/").filter((segment) => segment.length > 0);
   return !segments.includes("..") && !segments.includes(".");
-}, "cwd must be an absolute normalized path without traversal segments");
+};
+
+const sandboxAbsoluteNormalizedPathSchema = z.string().min(1).refine(
+  (value) => hasOnlyNormalizedAbsolutePathSegments(value),
+  "path must be an absolute normalized path without traversal segments"
+);
+
+const sandboxCwdSchema = sandboxAbsoluteNormalizedPathSchema;
+
+const SANDBOX_PLACEHOLDER_PATH_SEGMENT_PATTERN = /(^|[-_.])(example|placeholder|changeme|todo|sample)([-_.]|$)/i;
+
+const sandboxExecutablePathSchema = sandboxAbsoluteNormalizedPathSchema.refine((value) => {
+  const normalized = path.posix.normalize(value);
+  const segments = normalized.split("/").filter((segment) => segment.length > 0);
+  if (segments.length === 0) {
+    return false;
+  }
+  if (segments.some((segment) => SANDBOX_PLACEHOLDER_PATH_SEGMENT_PATTERN.test(segment))) {
+    return false;
+  }
+  const basename = path.posix.basename(normalized).toLowerCase();
+  if ((SANDBOX_REAL_COMMAND_DENYLIST as readonly string[]).includes(basename)) {
+    return false;
+  }
+  return !(SANDBOX_REAL_EXECUTABLE_ABSOLUTE_DENYLIST as readonly string[]).includes(normalized);
+}, "executablePath must be an allowlisted absolute path, not placeholder or denylisted");
+
+const sandboxEnvAllowlistEntrySchema = z.string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+
+export const sandboxRealExecutionModeSchema = z.enum(["disabled", "enabled"]);
+export const sandboxIsolationDriverSchema = z.enum(["none", "container", "microvm", "external"]);
+export const sandboxNetworkPolicySchema = z.literal("disabled");
+
+export const sandboxIsolationPolicySchema = z.object({
+  driver: sandboxIsolationDriverSchema,
+  required: z.boolean()
+});
+
+export const sandboxCommandPolicyEntrySchema = z.object({
+  commandId: z.string().min(1),
+  adapterType: sandboxAdapterTypeSchema,
+  executablePath: sandboxExecutablePathSchema,
+  fixedArgs: z.array(z.string()).default([]),
+  allowUserArgs: z.boolean().default(false),
+  cwdPrefixes: z.array(sandboxAbsoluteNormalizedPathSchema).min(1),
+  envAllowlist: z.array(sandboxEnvAllowlistEntrySchema).default([]),
+  allowStdin: z.boolean().default(false),
+  allowPtyInput: z.boolean().default(false),
+  isolation: sandboxIsolationPolicySchema,
+  networkPolicy: sandboxNetworkPolicySchema
+}).superRefine((value, ctx) => {
+  if (value.adapterType !== "pty" && value.allowPtyInput) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "allowPtyInput is only valid when adapterType is pty",
+      path: ["allowPtyInput"]
+    });
+  }
+});
+
+export const sandboxResolvedCommandSchema = z.object({
+  commandId: z.string().min(1),
+  adapterType: sandboxAdapterTypeSchema,
+  executablePath: sandboxExecutablePathSchema,
+  argv: z.array(z.string()),
+  cwd: sandboxCwdSchema,
+  env: z.record(z.string(), z.string()),
+  allowStdin: z.boolean().default(false),
+  allowPtyInput: z.boolean().default(false),
+  isolation: sandboxIsolationPolicySchema,
+  networkPolicy: sandboxNetworkPolicySchema
+});
 
 const sandboxResourceLimitNumberSchema = z.number().int().positive();
 
@@ -281,6 +371,12 @@ export const sandboxJobResultSchema = z.object({
 
 export type SandboxNamedError = z.infer<typeof sandboxNamedErrorSchema>;
 export type SandboxAdapterType = z.infer<typeof sandboxAdapterTypeSchema>;
+export type SandboxRealExecutionMode = z.infer<typeof sandboxRealExecutionModeSchema>;
+export type SandboxIsolationDriver = z.infer<typeof sandboxIsolationDriverSchema>;
+export type SandboxNetworkPolicy = z.infer<typeof sandboxNetworkPolicySchema>;
+export type SandboxIsolationPolicy = z.infer<typeof sandboxIsolationPolicySchema>;
+export type SandboxCommandPolicyEntry = z.infer<typeof sandboxCommandPolicyEntrySchema>;
+export type SandboxResolvedCommand = z.infer<typeof sandboxResolvedCommandSchema>;
 export type SandboxLifecycleState = z.infer<typeof sandboxLifecycleStateSchema>;
 export type SandboxTerminalState = z.infer<typeof sandboxTerminalStateSchema>;
 export type SandboxPtyFrame = z.infer<typeof sandboxPtyFrameSchema>;
