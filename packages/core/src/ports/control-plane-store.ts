@@ -67,6 +67,9 @@ export interface ReserveQuotaInput {
 
 export interface TransitionQuotaReservationInput {
   reservationId: string;
+  accountId: string;
+  tenantId: string;
+  projectId: string;
   nextState: QuotaReservationState;
   reasonCode?: string;
   now?: string;

@@ -12,6 +12,7 @@ import type {
   ResourceOwnership,
   WhoamiResponse
 } from "@switchyard/contracts";
+import { isRealHostedRuntimeMode } from "./hosted-runtime-catalog.js";
 import { redactSecrets } from "./local-policy-gate.js";
 import type {
   ActiveNodeCountInput,
@@ -341,6 +342,9 @@ export class ControlPlaneService {
     if (!entitlement.allowedRuntimeModes.includes(input.runtimeMode)) {
       throw new ControlPlaneError("entitlement_denied", "runtime_mode_not_allowed");
     }
+    if (input.placement === "hosted" && isRealHostedRuntimeMode(input.runtimeMode) && !entitlement.allowHostedRealRuntime) {
+      throw new ControlPlaneError("entitlement_denied", "hosted_real_runtime_disabled");
+    }
     if (input.timeoutSeconds > entitlement.maxRunTimeoutSeconds) {
       throw new ControlPlaneError("quota_exceeded", "run_timeout_exceeded");
     }
@@ -397,13 +401,23 @@ export class ControlPlaneService {
     this.ensureSameProject(input.auth, input.auth.account.id, input.auth.tenant.id, input.auth.project.id);
     const transition: TransitionQuotaReservationInput = {
       reservationId: input.reservationId,
+      accountId: input.auth.account.id,
+      tenantId: input.auth.tenant.id,
+      projectId: input.auth.project.id,
       nextState: input.outcome,
       now: input.now ?? this.now()
     };
     if (input.reasonCode) {
       transition.reasonCode = input.reasonCode;
     }
-    return this.input.store.transitionQuotaReservation(transition);
+    try {
+      return await this.input.store.transitionQuotaReservation(transition);
+    } catch (error) {
+      if (error instanceof Error && error.message === "reservation_scope_mismatch") {
+        throw new ControlPlaneError("tenant_access_denied", "reservation_scope_mismatch");
+      }
+      throw error;
+    }
   }
 
   async preflightArtifactContentRead(input: PreflightArtifactContentReadInput): Promise<QuotaReservation> {

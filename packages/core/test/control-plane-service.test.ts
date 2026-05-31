@@ -36,6 +36,10 @@ import type {
   Tenant,
   User
 } from "@switchyard/contracts";
+import {
+  billingPlanSchema as billingPlanSchemaRuntime,
+  entitlementSnapshotSchema as entitlementSnapshotSchemaRuntime
+} from "@switchyard/contracts";
 
 const NOW = "2026-05-31T10:00:00.000Z";
 
@@ -133,6 +137,58 @@ function createBaseBundle(rawKey: string, pepper: string, overrides?: Partial<Au
   };
 }
 
+function createSecondBundle(rawKey: string, pepper: string): AuthBundle {
+  return createBaseBundle(rawKey, pepper, {
+    account: {
+      id: "account_2",
+      name: "Beta",
+      status: "active",
+      billingPlanId: "billing_plan_2",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    tenant: {
+      id: "tenant_2",
+      accountId: "account_2",
+      slug: "beta",
+      displayName: "Beta",
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    project: {
+      id: "project_2",
+      accountId: "account_2",
+      tenantId: "tenant_2",
+      slug: "staging",
+      displayName: "Staging",
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    user: {
+      id: "user_2",
+      accountId: "account_2",
+      tenantId: "tenant_2",
+      displayName: "Beta User",
+      email: "beta@example.com",
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    apiKey: {
+      ...createBaseBundle(rawKey, pepper).apiKey,
+      id: "api_key_2",
+      accountId: "account_2",
+      tenantId: "tenant_2",
+      projectId: "project_2",
+      userId: "user_2",
+      secretHash: digest(rawKey, pepper)
+    },
+    plan: {
+      ...createPlan({
+        id: "billing_plan_2"
+      })
+    }
+  });
+}
+
 class InMemoryControlPlaneStore implements ControlPlaneStore {
   readonly bundles: AuthBundle[] = [];
   readonly reservations = new Map<string, QuotaReservation>();
@@ -225,6 +281,13 @@ class InMemoryControlPlaneStore implements ControlPlaneStore {
     const current = this.reservations.get(input.reservationId);
     if (!current) {
       throw new Error("reservation_not_found");
+    }
+    const sameScope =
+      current.accountId === input.accountId &&
+      current.tenantId === input.tenantId &&
+      current.projectId === input.projectId;
+    if (!sameScope) {
+      throw new Error("reservation_scope_mismatch");
     }
     const next: QuotaReservation = {
       ...current,
@@ -705,6 +768,34 @@ describe("ControlPlaneService authz + quota preflights", () => {
     });
   });
 
+  it("denies hosted real runtime when entitlement disallows it before reservation", async () => {
+    const { service, store, rawKey, pepper } = createServiceFixture();
+    store.bundles[0] = createBaseBundle(rawKey, pepper, {
+      plan: createPlan({
+        entitlements: {
+          ...createPlan().entitlements,
+          allowHostedRealRuntime: false,
+          allowedRuntimeModes: ["codex.exec_json"]
+        }
+      })
+    });
+    const auth = await service.authenticateRequest({ headers: { "x-switchyard-api-key": rawKey } });
+
+    await expect(
+      service.preflightRunCreate({
+        auth,
+        placement: "hosted",
+        runtimeMode: "codex.exec_json",
+        timeoutSeconds: 60,
+        now: NOW
+      })
+    ).rejects.toMatchObject({
+      code: "entitlement_denied",
+      reasonCode: "hosted_real_runtime_disabled"
+    });
+    expect(store.reservations.size).toBe(0);
+  });
+
   it("enforces artifact preflight ownership, entitlement, and byte quota", async () => {
     const { service, rawKey } = createServiceFixture();
     const auth = await service.authenticateRequest({ headers: { authorization: `Bearer ${rawKey}` } });
@@ -750,6 +841,35 @@ describe("ControlPlaneService authz + quota preflights", () => {
     ).rejects.toMatchObject({
       code: "quota_exceeded",
       reasonCode: "connected_nodes_exceeded"
+    });
+  });
+
+  it("rejects cross-tenant reservation transitions", async () => {
+    const { service, store, rawKey, pepper } = createServiceFixture();
+    const rawKey2 = "sk_sw_test_bravo";
+    store.bundles.push(createSecondBundle(rawKey2, pepper));
+
+    const tenantOneAuth = await service.authenticateRequest({ headers: { "x-switchyard-api-key": rawKey } });
+    const tenantTwoAuth = await service.authenticateRequest({ headers: { "x-switchyard-api-key": rawKey2 } });
+
+    const reservation = await service.preflightRunCreate({
+      auth: tenantOneAuth,
+      placement: "hosted",
+      runtimeMode: "fake.deterministic",
+      timeoutSeconds: 60,
+      now: NOW
+    });
+
+    await expect(
+      service.releaseQuotaReservation({
+        auth: tenantTwoAuth,
+        reservationId: reservation.id,
+        outcome: "released",
+        now: NOW
+      })
+    ).rejects.toMatchObject({
+      code: "tenant_access_denied",
+      reasonCode: "reservation_scope_mismatch"
     });
   });
 
@@ -855,5 +975,49 @@ describe("ControlPlaneService ownership and audit", () => {
     ).resolves.toMatchObject({
       ok: true
     });
+  });
+});
+
+describe("@switchyard/contracts package-root runtime enterprise schemas", () => {
+  it("parses R18 enterprise plan and entitlement fixtures via package root import", () => {
+    const plan = billingPlanSchemaRuntime.parse({
+      id: "billing_plan_runtime_1",
+      slug: "enterprise_runtime",
+      displayName: "Enterprise Runtime",
+      status: "active",
+      entitlements: {
+        allowedPlacements: ["hosted", "local", "connected_local_node"],
+        allowedRuntimeModes: ["fake.deterministic", "codex.exec_json"],
+        allowHostedRealRuntime: true,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowMetricsRead: true,
+        allowAuditRead: true
+      },
+      quotas: {
+        maxRunsPerHour: 100,
+        maxActiveRuns: 25,
+        maxRunTimeoutSeconds: 1800,
+        maxConnectedNodes: 5,
+        maxArtifactContentReadBytesPerHour: 1048576
+      },
+      createdAt: "2026-05-31T00:00:00.000Z"
+    });
+
+    const entitlement = entitlementSnapshotSchemaRuntime.parse({
+      accountId: "account_runtime_1",
+      tenantId: "tenant_runtime_1",
+      projectId: "project_runtime_1",
+      planId: plan.id,
+      planSlug: plan.slug,
+      planDisplayName: plan.displayName,
+      entitlements: plan.entitlements,
+      quotas: plan.quotas,
+      scopes: ["runs:write", "audit:read"],
+      capturedAt: "2026-05-31T00:00:00.000Z"
+    });
+
+    expect(entitlement.planSlug).toBe("enterprise_runtime");
+    expect(entitlement.entitlements.allowHostedRealRuntime).toBe(true);
   });
 });
