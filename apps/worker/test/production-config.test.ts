@@ -269,7 +269,7 @@ describe("production worker config", () => {
       await writeFile(invalidJsonPath, "{");
       await writeFile(invalidUtf8Path, Buffer.from([0xff, 0xfe, 0xfd]));
 
-      expectConfigError(() =>
+      const unreadable = expectConfigError(() =>
         loadWorkerConfig(
           createProductionEnv({
             SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
@@ -279,7 +279,10 @@ describe("production worker config", () => {
           })
         )
       );
-      expectConfigError(() =>
+      expect(unreadable.code).toBe("provider_runtime_policy_missing");
+      assertPathDiagnosticsRedaction(unreadable, unreadablePath, undefined);
+
+      const empty = expectConfigError(() =>
         loadWorkerConfig(
           createProductionEnv({
             SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
@@ -289,7 +292,10 @@ describe("production worker config", () => {
           })
         )
       );
-      expectConfigError(() =>
+      expect(empty.code).toBe("provider_runtime_policy_empty");
+      assertPathDiagnosticsRedaction(empty, emptyPath, "");
+
+      const oversized = expectConfigError(() =>
         loadWorkerConfig(
           createProductionEnv({
             SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
@@ -299,7 +305,10 @@ describe("production worker config", () => {
           })
         )
       );
-      expectConfigError(() =>
+      expect(oversized.code).toBe("provider_runtime_policy_malformed");
+      assertPathDiagnosticsRedaction(oversized, oversizedPath, "x".repeat(256));
+
+      const invalidJson = expectConfigError(() =>
         loadWorkerConfig(
           createProductionEnv({
             SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
@@ -309,7 +318,10 @@ describe("production worker config", () => {
           })
         )
       );
-      expectConfigError(() =>
+      expect(invalidJson.code).toBe("provider_runtime_policy_malformed");
+      assertPathDiagnosticsRedaction(invalidJson, invalidJsonPath, undefined);
+
+      const invalidUtf8 = expectConfigError(() =>
         loadWorkerConfig(
           createProductionEnv({
             SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
@@ -319,6 +331,8 @@ describe("production worker config", () => {
           })
         )
       );
+      expect(invalidUtf8.code).toBe("provider_runtime_policy_malformed");
+      assertPathDiagnosticsRedaction(invalidUtf8, invalidUtf8Path, undefined);
 
       const conflict = expectConfigError(() =>
         loadWorkerConfig(
@@ -333,10 +347,24 @@ describe("production worker config", () => {
       );
       expect(conflict.code).toBe("provider_runtime_policy_malformed");
       const summary = JSON.stringify(conflict.redactedConfig);
+      expect((conflict.redactedConfig["providerRuntimePolicy"] as Record<string, unknown>)?.["source"]).toBe("json");
       expect(summary).not.toContain(invalidJsonPath);
       expect(summary).not.toContain("SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON");
+      expect(summary).not.toContain(validCodexPolicy());
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 });
+
+function assertPathDiagnosticsRedaction(error: ConfigError, pathValue: string, rawContent: string | undefined): void {
+  const providerRuntimePolicy = error.redactedConfig["providerRuntimePolicy"] as Record<string, unknown> | undefined;
+  expect(providerRuntimePolicy?.["source"]).toBe("path");
+
+  const summary = JSON.stringify(error.redactedConfig);
+  expect(summary).not.toContain(pathValue);
+  if (rawContent !== undefined && rawContent.length > 0) {
+    expect(summary).not.toContain(rawContent);
+  }
+  expect(summary).not.toContain("SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH");
+}

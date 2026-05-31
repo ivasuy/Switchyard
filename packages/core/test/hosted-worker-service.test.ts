@@ -538,6 +538,217 @@ describe("HostedWorkerService", () => {
     expect((await queue.getJob("job_1"))?.failure?.reasonCode).toBe("provider_prompt_too_large");
   });
 
+  it("rejects provider run when max active runs spend control is exceeded before adapter start", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const metrics: string[] = [];
+    const run = await runs.create({
+      id: "run_provider_active_limit_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/srv/switchyard/work/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: { sandbox: "read-only" },
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await runs.create({
+      id: "run_provider_active_existing_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/srv/switchyard/work/repo",
+      task: "running",
+      status: "running",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: { sandbox: "read-only" },
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      startedAt: "2026-05-30T00:00:10.000Z"
+    });
+    await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    let started = 0;
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      providerActivation: validCodexActivation({
+        spendControls: {
+          maxActiveRuns: 1,
+          maxRunsPerHour: 10,
+          maxRunTimeoutSeconds: 120,
+          maxPromptBytes: 1024
+        }
+      }),
+      providerEnvironment: { OPENAI_API_KEY: "present", PATH: "/usr/bin" },
+      adapterRuntimeModes: new Set(["codex.exec_json"]),
+      metrics: { inc: (path) => metrics.push(path) },
+      startRun: async () => {
+        started += 1;
+        throw new Error("must_not_start");
+      },
+      now: () => "2026-05-30T00:30:00.000Z"
+    });
+
+    await svc.processNext();
+    expect(started).toBe(0);
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    const snapshot = await queue.getJob("job_1");
+    expect(snapshot?.state).toBe("failed");
+    expect(snapshot?.failure?.reasonCode).toBe("provider_spend_limit_exceeded");
+    expect(metrics.join("\n")).toContain("outcome.spend_control_denied");
+    expect(metrics.join("\n")).toContain("reason.provider_spend_limit_exceeded");
+  });
+
+  it("rejects provider run when hourly spend control is exceeded before adapter start", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const metrics: string[] = [];
+    const run = await runs.create({
+      id: "run_provider_hourly_limit_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/srv/switchyard/work/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: { sandbox: "read-only" },
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:30:00.000Z"
+    });
+    await runs.create({
+      id: "run_provider_hourly_existing_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/srv/switchyard/work/repo",
+      task: "recent",
+      status: "completed",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: { sandbox: "read-only" },
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:10:00.000Z",
+      endedAt: "2026-05-30T00:11:00.000Z"
+    });
+    await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    let started = 0;
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      providerActivation: validCodexActivation({
+        spendControls: {
+          maxActiveRuns: 10,
+          maxRunsPerHour: 1,
+          maxRunTimeoutSeconds: 120,
+          maxPromptBytes: 1024
+        }
+      }),
+      providerEnvironment: { OPENAI_API_KEY: "present", PATH: "/usr/bin" },
+      adapterRuntimeModes: new Set(["codex.exec_json"]),
+      metrics: { inc: (path) => metrics.push(path) },
+      startRun: async () => {
+        started += 1;
+        throw new Error("must_not_start");
+      },
+      now: () => "2026-05-30T00:30:00.000Z"
+    });
+
+    await svc.processNext();
+    expect(started).toBe(0);
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    const snapshot = await queue.getJob("job_1");
+    expect(snapshot?.state).toBe("failed");
+    expect(snapshot?.failure?.reasonCode).toBe("provider_spend_limit_exceeded");
+    expect(metrics.join("\n")).toContain("outcome.spend_control_denied");
+    expect(metrics.join("\n")).toContain("reason.provider_spend_limit_exceeded");
+  });
+
+  it("rejects provider run when timeout spend control is exceeded before adapter start", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const metrics: string[] = [];
+    const run = await runs.create({
+      id: "run_provider_timeout_limit_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/srv/switchyard/work/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 301,
+      metadata: { sandbox: "read-only" },
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    let started = 0;
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      providerActivation: validCodexActivation({
+        spendControls: {
+          maxActiveRuns: 10,
+          maxRunsPerHour: 10,
+          maxRunTimeoutSeconds: 300,
+          maxPromptBytes: 1024
+        }
+      }),
+      providerEnvironment: { OPENAI_API_KEY: "present", PATH: "/usr/bin" },
+      adapterRuntimeModes: new Set(["codex.exec_json"]),
+      metrics: { inc: (path) => metrics.push(path) },
+      startRun: async () => {
+        started += 1;
+        throw new Error("must_not_start");
+      },
+      now: () => "2026-05-30T00:30:00.000Z"
+    });
+
+    await svc.processNext();
+    expect(started).toBe(0);
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    const snapshot = await queue.getJob("job_1");
+    expect(snapshot?.state).toBe("failed");
+    expect(snapshot?.failure?.reasonCode).toBe("provider_spend_limit_exceeded");
+    expect(metrics.join("\n")).toContain("outcome.spend_control_denied");
+    expect(metrics.join("\n")).toContain("reason.provider_spend_limit_exceeded");
+  });
+
   it("does not retry non-retryable provider command denials", async () => {
     const queue = new MemoryQueue();
     const runs = new InMemoryRunStore();
