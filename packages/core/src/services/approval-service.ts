@@ -94,7 +94,7 @@ export class ApprovalService {
       approvalType: approval.approvalType
     }));
 
-    await this.scheduleOrExpireRuntimeApproval(approval);
+    await this.scheduleOrExpireApproval(approval);
     return (await this.deps.approvals.get(approval.id)) ?? approval;
   }
 
@@ -115,14 +115,14 @@ export class ApprovalService {
   }
 
   async expirePendingRuntimeApprovals(now = this.nowDate()): Promise<{ expired: number }> {
-    const pending = await this.listPendingRuntimeApprovals();
+    const pending = await this.listPendingExpirableApprovals();
     let expired = 0;
     for (const approval of pending) {
       const expiresAt = parseExpiresAt(approval);
       if (!expiresAt || expiresAt > now) {
         continue;
       }
-      const transitioned = await this.transitionPendingRuntimeApproval(approval.id, {
+      const transitioned = await this.transitionPendingApproval(approval.id, {
         status: "expired",
         message: "expired by Switchyard",
         eventType: "approval.expired"
@@ -131,7 +131,11 @@ export class ApprovalService {
         continue;
       }
       expired += 1;
-      await this.sendRuntimeRejectionResolution(transitioned, "expired by Switchyard", "approval.expiration_resolution_failed");
+      if (isRuntimeApproval(transitioned)) {
+        await this.sendRuntimeRejectionResolution(transitioned, "expired by Switchyard", "approval.expiration_resolution_failed");
+      } else if (isToolApproval(transitioned) && this.deps.toolRouter) {
+        await this.deps.toolRouter.resolveQueuedByApproval(transitioned);
+      }
     }
     return { expired };
   }
@@ -151,7 +155,7 @@ export class ApprovalService {
       if (!isRuntimeApproval(approval)) {
         continue;
       }
-      const transitioned = await this.transitionPendingRuntimeApproval(approval.id, {
+      const transitioned = await this.transitionPendingApproval(approval.id, {
         status: input.approvalStatus,
         message: input.message,
         eventType: input.approvalStatus === "expired" ? "approval.expired" : "approval.rejected"
@@ -186,13 +190,17 @@ export class ApprovalService {
 
       const expiresAt = parseExpiresAt(approval);
       if (expiresAt && expiresAt <= this.nowDate()) {
-        const expired = await this.transitionPendingRuntimeApprovalWithinLock(id, {
+        const expired = await this.transitionPendingApprovalWithinLock(id, {
           status: "expired",
           message: "expired by Switchyard",
           eventType: "approval.expired"
         });
         if (expired) {
-          await this.sendRuntimeRejectionResolution(expired, "expired by Switchyard", "approval.expiration_resolution_failed");
+          if (isRuntimeApproval(expired)) {
+            await this.sendRuntimeRejectionResolution(expired, "expired by Switchyard", "approval.expiration_resolution_failed");
+          } else if (isToolApproval(expired) && this.deps.toolRouter) {
+            await this.deps.toolRouter.resolveQueuedByApproval(expired);
+          }
         }
         throw new ServiceError("approval_not_pending", `Approval is not pending: ${id}`);
       }
@@ -357,8 +365,8 @@ export class ApprovalService {
     };
   }
 
-  private async scheduleOrExpireRuntimeApproval(approval: Approval): Promise<void> {
-    if (!isRuntimeApproval(approval)) {
+  private async scheduleOrExpireApproval(approval: Approval): Promise<void> {
+    if (!isRuntimeApproval(approval) && !isToolApproval(approval)) {
       return;
     }
     const expiresAt = parseExpiresAt(approval);
@@ -367,13 +375,17 @@ export class ApprovalService {
     }
     const now = this.nowDate();
     if (expiresAt <= now) {
-      const expired = await this.transitionPendingRuntimeApproval(approval.id, {
+      const expired = await this.transitionPendingApproval(approval.id, {
         status: "expired",
         message: "expired by Switchyard",
         eventType: "approval.expired"
       });
       if (expired) {
-        await this.sendRuntimeRejectionResolution(expired, "expired by Switchyard", "approval.expiration_resolution_failed");
+        if (isRuntimeApproval(expired)) {
+          await this.sendRuntimeRejectionResolution(expired, "expired by Switchyard", "approval.expiration_resolution_failed");
+        } else if (isToolApproval(expired) && this.deps.toolRouter) {
+          await this.deps.toolRouter.resolveQueuedByApproval(expired);
+        }
       }
       return;
     }
@@ -382,13 +394,17 @@ export class ApprovalService {
     const delayMs = Math.max(0, expiresAt.getTime() - now.getTime());
     const handle = scheduler.setTimeout(() => {
       void this.withResolutionLock(approval.id, async () => {
-        const expired = await this.transitionPendingRuntimeApprovalWithinLock(approval.id, {
+        const expired = await this.transitionPendingApprovalWithinLock(approval.id, {
           status: "expired",
           message: "expired by Switchyard",
           eventType: "approval.expired"
         });
         if (expired) {
-          await this.sendRuntimeRejectionResolution(expired, "expired by Switchyard", "approval.expiration_resolution_failed");
+          if (isRuntimeApproval(expired)) {
+            await this.sendRuntimeRejectionResolution(expired, "expired by Switchyard", "approval.expiration_resolution_failed");
+          } else if (isToolApproval(expired) && this.deps.toolRouter) {
+            await this.deps.toolRouter.resolveQueuedByApproval(expired);
+          }
         }
       }).catch((error) => {
         this.deps.logger?.warn("approval.expiration_resolution_failed", {
@@ -413,7 +429,7 @@ export class ApprovalService {
     this.expirationTimers.delete(approvalId);
   }
 
-  private async listPendingRuntimeApprovals(): Promise<Approval[]> {
+  private async listPendingExpirableApprovals(): Promise<Approval[]> {
     const collected: Approval[] = [];
     let before: Cursor | undefined;
     while (true) {
@@ -422,7 +438,7 @@ export class ApprovalService {
         limit: 200,
         ...(before ? { before } : {})
       });
-      collected.push(...page.approvals.filter((approval) => isRuntimeApproval(approval)));
+      collected.push(...page.approvals.filter((approval) => isRuntimeApproval(approval) || isToolApproval(approval)));
       if (!page.nextCursor) {
         break;
       }
@@ -431,7 +447,7 @@ export class ApprovalService {
     return collected;
   }
 
-  private async transitionPendingRuntimeApproval(
+  private async transitionPendingApproval(
     approvalId: string,
     input: {
       status: "expired" | "rejected";
@@ -440,11 +456,11 @@ export class ApprovalService {
     }
   ): Promise<Approval | null> {
     return this.withResolutionLock(approvalId, async () =>
-      this.transitionPendingRuntimeApprovalWithinLock(approvalId, input)
+      this.transitionPendingApprovalWithinLock(approvalId, input)
     );
   }
 
-  private async transitionPendingRuntimeApprovalWithinLock(
+  private async transitionPendingApprovalWithinLock(
     approvalId: string,
     input: {
       status: "expired" | "rejected";
@@ -528,6 +544,10 @@ export class ApprovalService {
 
 function isRuntimeApproval(approval: Approval): boolean {
   return typeof approval.payload["runtimeApprovalToken"] === "string";
+}
+
+function isToolApproval(approval: Approval): boolean {
+  return typeof approval.payload["toolInvocationId"] === "string";
 }
 
 function parseExpiresAt(approval: Approval): Date | undefined {

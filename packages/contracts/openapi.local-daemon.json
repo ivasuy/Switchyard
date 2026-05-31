@@ -31,7 +31,8 @@
                   "before_external_message",
                   "before_spending_budget",
                   "before_cross_runtime_delegation",
-                  "before_same_provider_model_delegation"
+                  "before_same_provider_model_delegation",
+                  "before_local_process_execution"
                 ],
                 "type": "string"
               },
@@ -188,7 +189,8 @@
                   "before_external_message",
                   "before_spending_budget",
                   "before_cross_runtime_delegation",
-                  "before_same_provider_model_delegation"
+                  "before_same_provider_model_delegation",
+                  "before_local_process_execution"
                 ],
                 "type": "string"
               },
@@ -1372,31 +1374,385 @@
       },
       "CreateToolInvocationRequest": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "additionalProperties": false,
-        "properties": {
-          "approvalPolicy": {
-            "type": "string"
-          },
-          "input": {
-            "additionalProperties": {},
-            "propertyNames": {
-              "type": "string"
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "captureContent": {
+                    "type": "boolean"
+                  },
+                  "headers": {
+                    "additionalProperties": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "propertyNames": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "method": {
+                    "default": "GET",
+                    "enum": [
+                      "GET",
+                      "HEAD"
+                    ],
+                    "type": "string"
+                  },
+                  "url": {
+                    "format": "uri",
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url",
+                  "method"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "type": {
+                "const": "fetch",
+                "type": "string"
+              }
             },
+            "required": [
+              "type",
+              "input"
+            ],
             "type": "object"
           },
-          "runId": {
-            "type": "string"
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "maxResults": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 50,
+                    "type": "integer"
+                  },
+                  "query": {
+                    "maxLength": 2048,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "type": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
           },
-          "type": {
-            "minLength": 1,
-            "type": "string"
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "base": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "head": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "number": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "operation": {
+                    "enum": [
+                      "get_issue",
+                      "get_pull",
+                      "list_pull_files",
+                      "get_file",
+                      "compare_refs"
+                    ],
+                    "type": "string"
+                  },
+                  "owner": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "path": {
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "ref": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "repo": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "owner",
+                  "repo"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "type": {
+                "const": "github",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "cwd": {
+                    "minLength": 1,
+                    "pattern": "^([A-Za-z]:[\\\\/]|\\/)",
+                    "type": "string"
+                  },
+                  "operation": {
+                    "enum": [
+                      "status",
+                      "diff",
+                      "show",
+                      "ls_files",
+                      "grep"
+                    ],
+                    "type": "string"
+                  },
+                  "pathspec": {
+                    "items": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 64,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "cwd"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "type": {
+                "const": "repo",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "args": {
+                    "items": {
+                      "maxLength": 1024,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 32,
+                    "type": "array"
+                  },
+                  "commandId": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "cwd": {
+                    "minLength": 1,
+                    "pattern": "^([A-Za-z]:[\\\\/]|\\/)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "commandId",
+                  "cwd"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "type": {
+                "const": "shell",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "additionalProperties": {},
+                    "propertyNames": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "url": {
+                    "format": "uri",
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "type": {
+                "const": "browser",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": {},
+                "properties": {
+                  "requiresApproval": {
+                    "type": "boolean"
+                  },
+                  "risk": {
+                    "enum": [
+                      "safe",
+                      "risky",
+                      "destructive"
+                    ],
+                    "type": "string"
+                  },
+                  "text": {
+                    "maxLength": 8192,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "type": {
+                "const": "fake_echo",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
           }
-        },
-        "required": [
-          "type",
-          "input"
-        ],
-        "type": "object"
+        ]
       },
       "DoctorSummaryResponse": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2190,6 +2546,9 @@
                   "tool_invocation_not_found",
                   "approval_not_pending",
                   "tool_policy_denied",
+                  "tool_policy_config_invalid",
+                  "tool_policy_failed",
+                  "tool_adapter_unavailable",
                   "approval_required",
                   "unsupported_tool",
                   "invalid_input",
@@ -2303,7 +2662,8 @@
                     "before_external_message",
                     "before_spending_budget",
                     "before_cross_runtime_delegation",
-                    "before_same_provider_model_delegation"
+                    "before_same_provider_model_delegation",
+                    "before_local_process_execution"
                   ],
                   "type": "string"
                 },
@@ -3788,17 +4148,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "properties": {
-          "nextCursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "toolInvocations": {
+          "invocations": {
             "items": {
               "additionalProperties": false,
               "properties": {
@@ -3890,10 +4240,20 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
-          "toolInvocations",
+          "invocations",
           "nextCursor"
         ],
         "type": "object"
@@ -4911,7 +5271,69 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": {},
         "properties": {
-          "toolInvocation": {
+          "approval": {
+            "additionalProperties": false,
+            "properties": {
+              "approvalType": {
+                "enum": [
+                  "before_commit",
+                  "before_push",
+                  "before_pr",
+                  "before_destructive_command",
+                  "before_external_web_action",
+                  "before_external_message",
+                  "before_spending_budget",
+                  "before_cross_runtime_delegation",
+                  "before_same_provider_model_delegation",
+                  "before_local_process_execution"
+                ],
+                "type": "string"
+              },
+              "createdAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^approval_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "payload": {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "resolvedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "approved",
+                  "rejected",
+                  "expired"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "approvalType",
+              "status",
+              "payload",
+              "createdAt"
+            ],
+            "type": "object"
+          },
+          "invocation": {
             "additionalProperties": false,
             "properties": {
               "approvalId": {
@@ -5003,7 +5425,7 @@
           }
         },
         "required": [
-          "toolInvocation"
+          "invocation"
         ],
         "type": "object"
       }

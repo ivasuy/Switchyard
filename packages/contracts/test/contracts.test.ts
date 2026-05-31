@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import {
   doctorSummaryResponseSchema,
+  approvalTypeSchema,
   approvalSchema,
   artifactSchema,
   budgetSchema,
@@ -25,6 +26,7 @@ import {
   runtimeModeSlugSchema,
   runtimeSchema,
   runtimeSessionSchema,
+  createToolInvocationRequestSchema,
   toolInvocationSchema,
   userSchema,
   httpErrorCodeSchema,
@@ -795,6 +797,104 @@ describe("Switchyard contracts", () => {
     });
 
     expect(message.deliveryStatus).toBe("queued");
+  });
+
+  it("parses the R17 local process approval type", () => {
+    expect(approvalTypeSchema.parse("before_local_process_execution")).toBe("before_local_process_execution");
+  });
+
+  it("validates per-tool create invocation input shapes", () => {
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "fetch",
+        input: {
+          url: "https://example.com/path",
+          method: "GET",
+          captureContent: true
+        }
+      }).type
+    ).toBe("fetch");
+
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "web_search",
+        input: {
+          query: "Switchyard runtime adapters",
+          maxResults: 5
+        }
+      }).type
+    ).toBe("web_search");
+
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "github",
+        input: {
+          operation: "get_issue",
+          owner: "openai",
+          repo: "codex",
+          number: 123
+        }
+      }).type
+    ).toBe("github");
+
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "repo",
+        input: {
+          operation: "diff",
+          cwd: "/repo",
+          pathspec: ["packages/core/src/services/tool-router.ts"]
+        }
+      }).type
+    ).toBe("repo");
+
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "shell",
+        input: {
+          commandId: "local.date.utc",
+          cwd: "/repo",
+          args: []
+        }
+      }).type
+    ).toBe("shell");
+  });
+
+  it("rejects invalid real tool payloads", () => {
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "fetch",
+        input: { url: "https://example.com", method: "POST" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "web_search",
+        input: { query: "" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "github",
+        input: { operation: "create_issue", owner: "o", repo: "r" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "repo",
+        input: { operation: "diff", cwd: "/repo", pathspec: ["../secret"] }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "shell",
+        input: { command: "rm -rf /", cwd: "/repo" }
+      })
+    ).toThrow();
   });
 
   it("parses artifacts, approvals, memory, evidence, tools, registry, placement, nodes, users, budgets, context, and errors", () => {

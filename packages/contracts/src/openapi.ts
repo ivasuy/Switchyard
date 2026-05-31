@@ -21,7 +21,7 @@ import { memoryItemSchema } from "./memory.js";
 import { evidenceItemSchema } from "./evidence.js";
 import { contextPacketSchema } from "./context.js";
 import { approvalSchema } from "./approval.js";
-import { toolInvocationSchema } from "./tool.js";
+import { createToolInvocationRequestSchema, toolInvocationSchema } from "./tool.js";
 import { debateSchema } from "./debate.js";
 import { httpErrorEnvelopeSchema } from "./http-error.js";
 import { nodeSchema } from "./node.js";
@@ -250,13 +250,11 @@ const SCHEMA_BY_REF: Record<string, z.ZodTypeAny> = {
     event: eventSchema.optional()
   }).passthrough(),
 
-  CreateToolInvocationRequest: z.object({
-    runId: z.string().optional(),
-    type: z.string().min(1),
-    input: z.record(z.string(), z.unknown()),
-    approvalPolicy: z.string().optional()
-  }),
-  ToolInvocationResponse: z.object({ toolInvocation: toolInvocationSchema }).passthrough(),
+  CreateToolInvocationRequest: createToolInvocationRequestSchema,
+  ToolInvocationResponse: z.object({
+    invocation: toolInvocationSchema,
+    approval: approvalSchema.optional()
+  }).passthrough(),
   ListToolInvocationsQuery: z.object({
     runId: z.string().optional(),
     type: z.string().optional(),
@@ -265,7 +263,7 @@ const SCHEMA_BY_REF: Record<string, z.ZodTypeAny> = {
     before: z.string().optional()
   }),
   ListToolInvocationsResponse: z.object({
-    toolInvocations: z.array(toolInvocationSchema),
+    invocations: z.array(toolInvocationSchema),
     nextCursor: z.string().nullable()
   }),
 

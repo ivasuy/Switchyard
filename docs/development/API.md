@@ -55,7 +55,7 @@ http://127.0.0.1:4545
 
 Current implementation status:
 
-- Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
+- Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), local-daemon real tool invocation routing for configured `fetch`/`web_search`/`github`/`repo`/command-catalog `shell` (deny-by-default, approval-by-default), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex one-shot (`codex.exec_json`), local Codex interactive (`codex.interactive`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
 - Not implemented yet: trace endpoint, dashboards, TUI, authentication, rate limiting, public PTY/terminal APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, and model-based debate judging.
@@ -124,13 +124,34 @@ All success bodies (`{run, events}`, `{accepted: true}`, etc.) are unchanged.
 | `409` | Request is valid, but the selected adapter cannot perform it. |
 | `500` | Unexpected server failure. |
 
-## R7 Middleware Constraints
+## R17 Middleware And Local Real Tool Constraints
 
-- Memory search is substring-only (`GET /memory/search`) and case-insensitive over `content`; no vector or embedding search is shipped.
-- Evidence routes store metadata only; R7 does not fetch remote evidence content.
-- Tool execution is limited to local deterministic `fake_echo`.
-- Known real tool types (`web_search`, `fetch`, `browser`, `repo`, `shell`, `github`) are denied before adapter dispatch with `403 tool_policy_denied`.
-- Context packets are not first-class persisted records in R7; they are persisted only inside `run.metadata.contextPacket` when `POST /runs` includes `context`.
+- Memory search remains substring-only (`GET /memory/search`) and case-insensitive over `content`; vector/embedding search is not shipped.
+- Evidence routes still store metadata only; Switchyard does not fetch remote evidence content in this slice.
+- Real tools are local-daemon only through `/tools/invocations` and are deny-by-default (`SWITCHYARD_REAL_TOOLS_ENABLED=0` by default).
+- Shipped real tools in R17: `fetch`, `web_search`, `github`, `repo`, command-catalog `shell`.
+- `browser` remains known-but-unshipped and policy-denied.
+- Real tools require approval by default and queue as `{ invocation, approval }` until resolved (`approve`, `reject`, or expire).
+- Hosted real tools and connected-node real tools remain unshipped in R17.
+- No public arbitrary execution route exists: no `/sandbox`, `/exec`, `/pty`, `/terminal`, `/shell`, `/process`, `/command`, `/browser`, top-level `/search`, or `/tools/search`.
+- Context packets are still persisted under `run.metadata.contextPacket` when `POST /runs` includes `context`.
+
+Local daemon real-tool env keys:
+
+- Global policy: `SWITCHYARD_REAL_TOOLS_ENABLED`, `SWITCHYARD_REAL_TOOLS_ALLOWED_PLACEMENTS`, `SWITCHYARD_REAL_TOOLS_APPROVAL_DEFAULT`, `SWITCHYARD_REAL_TOOLS_APPROVAL_EXPIRES_MS`, `SWITCHYARD_REAL_TOOLS_MAX_CONCURRENT`, `SWITCHYARD_REAL_TOOLS_MAX_INPUT_BYTES`, `SWITCHYARD_REAL_TOOLS_MAX_INLINE_OUTPUT_BYTES`, `SWITCHYARD_REAL_TOOLS_MAX_ARTIFACT_BYTES`, `SWITCHYARD_REAL_TOOLS_DEFAULT_TIMEOUT_MS`.
+- Fetch: `SWITCHYARD_FETCH_TOOL_ENABLED`, `SWITCHYARD_FETCH_ALLOW_HOSTS`, `SWITCHYARD_FETCH_ALLOW_METHODS`, `SWITCHYARD_FETCH_ALLOW_CONTENT_TYPES`, `SWITCHYARD_FETCH_ALLOW_HEADERS`, `SWITCHYARD_FETCH_MAX_REDIRECTS`, `SWITCHYARD_FETCH_TIMEOUT_MS`, `SWITCHYARD_FETCH_MAX_RESPONSE_BYTES`.
+- Web search: `SWITCHYARD_WEB_SEARCH_TOOL_ENABLED`, `SWITCHYARD_WEB_SEARCH_PROVIDER`, `SWITCHYARD_WEB_SEARCH_BASE_URL`, `SWITCHYARD_WEB_SEARCH_MAX_RESULTS`, `SWITCHYARD_WEB_SEARCH_TIMEOUT_MS`, `SWITCHYARD_WEB_SEARCH_MAX_RESPONSE_BYTES`.
+- GitHub: `SWITCHYARD_GITHUB_TOOL_ENABLED`, `SWITCHYARD_GITHUB_TOKEN`, `SWITCHYARD_GITHUB_ALLOW_REPOS`, `SWITCHYARD_GITHUB_TIMEOUT_MS`, `SWITCHYARD_GITHUB_MAX_RESPONSE_BYTES`.
+- Repo: `SWITCHYARD_REPO_TOOL_ENABLED`, `SWITCHYARD_REPO_GIT_BINARY`, `SWITCHYARD_REPO_ALLOW_CWD_PREFIXES`, `SWITCHYARD_REPO_MAX_PATHS`, `SWITCHYARD_REPO_TIMEOUT_MS`, `SWITCHYARD_REPO_MAX_OUTPUT_BYTES`.
+- Shell: `SWITCHYARD_SHELL_TOOL_ENABLED`, `SWITCHYARD_SHELL_COMMAND_CATALOG_PATH`, `SWITCHYARD_SHELL_ALLOW_CWD_PREFIXES`, `SWITCHYARD_SHELL_TIMEOUT_MS`, `SWITCHYARD_SHELL_MAX_OUTPUT_BYTES`.
+
+Tool invocation request/response envelope:
+
+- Create: `POST /tools/invocations` with body `{ runId?, type, input, approvalPolicy? }`.
+- Immediate completion: `201` with `{ invocation }`.
+- Approval required: `202` with `{ invocation, approval }`.
+- List: `GET /tools/invocations` returns `{ invocations, nextCursor }`.
+- Get: `GET /tools/invocations/:id` returns `{ invocation }`.
 
 ## R9 Debate V1 Constraints
 

@@ -807,7 +807,7 @@ switchyard/
 
 ### Runtime and Integration Packages
 
-- `packages/adapters`: runtime and tool integrations. Current shipped runtime-mode adapters include `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `generic_http.async_rest`, `agentfield.async_rest`, and `opencode.acp`. Codex uses one adapter id with mode routing (`codex.exec_json` default one-shot and explicit local `codex.interactive`). Planned adapter folders still include `cursor`, `openclaw`, `paperclip`, `browser-search`, broad `process`, and broad `pty` work.
+- `packages/adapters`: runtime and tool integrations. Current shipped runtime-mode adapters include `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `generic_http.async_rest`, `agentfield.async_rest`, and `opencode.acp`. R17 also ships local-daemon real tool adapters behind `/tools/invocations` for `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell` with deny-by-default policy and approval-by-default. Codex uses one adapter id with mode routing (`codex.exec_json` default one-shot and explicit local `codex.interactive`). Planned adapter folders still include `cursor`, `openclaw`, `paperclip`, `browser-search`, broad `process`, and broad `pty` work.
 - `packages/storage`: persistence implementations for in-memory tests, SQLite local mode, Postgres hosted mode, filesystem artifacts, and filesystem-backed object-compatible artifact content.
 - `packages/queue`: local in-process queue and hosted Redis/BullMQ queue implementations.
 - `packages/sdk`: typed client for frontend, backend, CLI, automation, and third-party consumers.
@@ -970,8 +970,10 @@ Current safety posture:
 - R16 adds explicit local-only `codex.interactive` under existing `/runs` + `/runs/:id/input` + `/runs/:id/cancel` + approvals APIs; it does not add any public `/terminal`, `/pty`, `/exec`, or `/sandbox` route.
 - R16 keeps `codex.exec_json` as the default inferred Codex mode and requires explicit `runtimeMode: "codex.interactive"` for interactive behavior.
 - R16 doctor/registry checks distinguish `resumeCommandShapeAvailable` from `liveResumeVerified` so default no-spend checks do not overclaim live local resume success.
+- R17 adds local-daemon real tool execution only through `/tools/invocations` for configured `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell` with explicit allowlists and approval-by-default.
 - R14 adds an internal hosted sandbox substrate (`HostedSandboxService` + deny-by-default fake command policy + `FakeHostedSandboxExecutor`) for process/PTY safety contracts; R15 does not add arbitrary hosted process/PTY execution or public sandbox execution routes.
 - The R14 substrate is fake/no-spend only: no `child_process`, no `node-pty`, no shell/browser/fetch/GitHub/repo execution, no public `/sandbox`/`/exec`/`/pty`/`/terminal` route, and no kernel/container isolation claims.
 - Hosted server remains fake-runner-only; real provider adapters are worker-owned and opt-in only for self-hosted/staging. Production hosted real-runtime execution is fail-closed in R15.
+- Hosted real tools and connected-node real tools remain unshipped in R17.
 - Hybrid connected nodes are explicit trust boundaries and enforce local policy before execution and sync.
 - S3/R2-compatible object-store backing is shipped in R13; required verification remains deterministic and local/no-spend by default.

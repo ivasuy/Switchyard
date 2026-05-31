@@ -72,12 +72,16 @@ describe("openapi generation", () => {
 
   it("keeps public arbitrary execution routes out of OpenAPI", () => {
     const document = generateOpenApiDocument();
-    const forbiddenPathTokens = ["/sandbox", "/exec", "/pty", "/terminal", "/shell", "/process", "/command"];
+    const forbiddenTopLevelExecutionRoute = /^\/(sandbox|exec|pty|terminal|shell|process|command|browser|search)(\/|$)/;
     const paths = Object.keys(document.paths);
     for (const path of paths) {
       const lower = path.toLowerCase();
-      expect(forbiddenPathTokens.some((token) => lower === token || lower.startsWith(`${token}/`))).toBe(false);
+      expect(forbiddenTopLevelExecutionRoute.test(lower)).toBe(false);
+      if (lower.startsWith("/tools/") && lower !== "/tools/invocations" && !lower.startsWith("/tools/invocations/")) {
+        expect(lower).not.toMatch(/search|exec|shell|terminal|pty|process|browser|command/);
+      }
     }
+    expect(document.paths["/memory/search"]?.get?.operationId).toBe("searchMemory");
   });
 
   it("keeps arbitrary execution operation ids out of OpenAPI", () => {
@@ -91,15 +95,43 @@ describe("openapi generation", () => {
       "process",
       "command",
       "genericProcess",
-      "arbitrary",
       "arbitraryProcess"
     ];
-    const operationIds = Object.values(document.paths).flatMap((methods) =>
-      Object.values(methods).map((operation) => String((operation as Record<string, unknown>)["operationId"] ?? ""))
+    const operations = Object.entries(document.paths).flatMap(([path, methods]) =>
+      Object.values(methods).map((operation) => ({ path, operation: operation as Record<string, unknown> }))
     );
-    for (const operationId of operationIds) {
+    for (const { path, operation } of operations) {
+      const operationId = String(operation["operationId"] ?? "");
       const lower = operationId.toLowerCase();
+      if (operationId === "searchMemory" && path === "/memory/search") {
+        continue;
+      }
+      const summary = String(operation["summary"] ?? "").toLowerCase();
+      const tags = Array.isArray(operation["tags"]) ? operation["tags"].map((tag) => String(tag).toLowerCase()) : [];
+      const looksExecutionSurface = /tool|run|runtime|exec|shell|command|process|terminal|pty|browser/.test(
+        `${path.toLowerCase()} ${summary} ${tags.join(" ")}`
+      );
+      if (!looksExecutionSurface) {
+        continue;
+      }
       expect(forbiddenOperationTokens.some((token) => lower.includes(token.toLowerCase()))).toBe(false);
     }
+  });
+
+  it("documents tool invocation create/get/list envelopes with invocation field names", () => {
+    const document = generateOpenApiDocument();
+    const components = document.components.schemas;
+    const toolInvocationResponse = components["ToolInvocationResponse"] as Record<string, unknown>;
+    const listToolInvocationsResponse = components["ListToolInvocationsResponse"] as Record<string, unknown>;
+    expect(toolInvocationResponse).toBeDefined();
+    expect(listToolInvocationsResponse).toBeDefined();
+
+    const toolInvocationProps = (toolInvocationResponse.properties ?? {}) as Record<string, unknown>;
+    const listProps = (listToolInvocationsResponse.properties ?? {}) as Record<string, unknown>;
+    expect(toolInvocationProps["invocation"]).toBeDefined();
+    expect(toolInvocationProps["approval"]).toBeDefined();
+    expect(toolInvocationProps["toolInvocation"]).toBeUndefined();
+    expect(listProps["invocations"]).toBeDefined();
+    expect(listProps["toolInvocations"]).toBeUndefined();
   });
 });

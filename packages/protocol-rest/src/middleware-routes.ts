@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
+  createToolInvocationRequestSchema,
   decodeCursor,
   LIST_LIMIT_DEFAULT,
   LIST_LIMIT_MAX,
@@ -292,22 +293,26 @@ export function registerMiddlewareRoutes(app: FastifyInstance, deps: MiddlewareR
 
   app.post("/tools/invocations", async (request, reply) => {
     const body = ensureRecord(request.body, "Request body must be an object");
-    const inputRaw = body["input"];
-    if (!inputRaw || typeof inputRaw !== "object" || Array.isArray(inputRaw)) {
-      return sendHttpError(reply, "invalid_input", "input must be an object", [{ path: "input", issue: "must be an object" }]);
+    let parsed: ReturnType<typeof createToolInvocationRequestSchema.parse>;
+    try {
+      parsed = createToolInvocationRequestSchema.parse(body);
+    } catch {
+      return sendHttpError(reply, "invalid_input", "tool invocation input is invalid", [{ path: "input", issue: "invalid tool input" }]);
     }
-
     try {
       const result = await deps.toolRouter.invoke({
-        runId: optionalString(body, "runId"),
-        type: requiredString(body, "type"),
-        input: inputRaw as Record<string, unknown>,
-        approvalPolicy: optionalString(body, "approvalPolicy")
+        runId: parsed.runId,
+        type: parsed.type,
+        input: parsed.input,
+        approvalPolicy: parsed.approvalPolicy
       });
       if (result.statusCode === 202) {
-        return reply.code(202).send(result);
+        return reply.code(202).send({
+          invocation: result.invocation,
+          approval: result.approval
+        });
       }
-      return reply.code(201).send(result);
+      return reply.code(201).send({ invocation: result.invocation });
     } catch (error) {
       return sendFromServiceError(reply, error);
     }
@@ -500,7 +505,10 @@ function sendFromServiceError(reply: FastifyReply, error: unknown) {
       code === "approval_not_found" ||
       code === "approval_not_pending" ||
       code === "tool_policy_denied" ||
-      code === "tool_invocation_not_found"
+      code === "tool_invocation_not_found" ||
+      code === "tool_policy_config_invalid" ||
+      code === "tool_policy_failed" ||
+      code === "tool_adapter_unavailable"
     ) {
       return sendHttpError(reply, code, serviceError.message, serviceError.details);
     }

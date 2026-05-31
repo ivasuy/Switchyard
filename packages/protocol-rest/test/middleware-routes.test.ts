@@ -264,7 +264,7 @@ describe("middleware routes", () => {
         payload: {
           runId: "run_1",
           type: "shell",
-          input: { text: "rm -rf /" }
+          input: { commandId: "local.date.utc", cwd: "/repo" }
         }
       });
       expect(response.statusCode).toBe(403);

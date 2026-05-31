@@ -291,62 +291,106 @@ Expected:
 
 Use the [API contract](API.md#create-run) for the real Codex request body.
 
-## R7 Middleware Smoke
+## R17 Middleware + Real Tool Smoke (No Spend)
+
+Use deterministic tests first (no external spend, fake clients/factories only):
+
+```bash
+pnpm --filter @switchyard/contracts test -- contracts
+pnpm --filter @switchyard/core test -- real-tool-policy
+pnpm --filter @switchyard/core test -- real-tool-router
+pnpm --filter @switchyard/adapters test -- real-tool-adapters
+pnpm --filter @switchyard/daemon test -- hardening
+pnpm --filter @switchyard/daemon test -- smoke
+```
+
+Run daemon with real tools disabled (default deny path):
+
+```bash
+SWITCHYARD_LOG_LEVEL=info pnpm --filter @switchyard/daemon dev
+```
+
+Run daemon with a local-only no-spend real-tool setup (command-catalog shell + allowlisted local fetch target):
+
+```bash
+cat > /tmp/switchyard-shell-catalog.json <<'JSON'
+{
+  "commands": [
+    {
+      "commandId": "local.date.utc",
+      "executablePath": "/bin/date",
+      "argv": ["-u"],
+      "allowedCwdPrefixes": ["/repo"],
+      "env": {"TZ": "UTC"},
+      "maxArgs": 2
+    }
+  ]
+}
+JSON
+
+SWITCHYARD_REAL_TOOLS_ENABLED=1 \
+SWITCHYARD_REAL_TOOLS_APPROVAL_DEFAULT=required \
+SWITCHYARD_FETCH_TOOL_ENABLED=1 \
+SWITCHYARD_FETCH_ALLOW_HOSTS=127.0.0.1,localhost \
+SWITCHYARD_FETCH_ALLOW_METHODS=GET,HEAD \
+SWITCHYARD_FETCH_ALLOW_CONTENT_TYPES=text/plain,application/json \
+SWITCHYARD_WEB_SEARCH_TOOL_ENABLED=0 \
+SWITCHYARD_GITHUB_TOOL_ENABLED=0 \
+SWITCHYARD_REPO_TOOL_ENABLED=0 \
+SWITCHYARD_SHELL_TOOL_ENABLED=1 \
+SWITCHYARD_SHELL_COMMAND_CATALOG_PATH=/tmp/switchyard-shell-catalog.json \
+SWITCHYARD_SHELL_ALLOW_CWD_PREFIXES=/repo \
+pnpm --filter @switchyard/daemon dev
+```
+
+Tool policy env matrix (local daemon):
+
+- Global: `SWITCHYARD_REAL_TOOLS_ENABLED`, `SWITCHYARD_REAL_TOOLS_ALLOWED_PLACEMENTS`, `SWITCHYARD_REAL_TOOLS_APPROVAL_DEFAULT`, `SWITCHYARD_REAL_TOOLS_APPROVAL_EXPIRES_MS`, `SWITCHYARD_REAL_TOOLS_MAX_CONCURRENT`, `SWITCHYARD_REAL_TOOLS_MAX_INPUT_BYTES`, `SWITCHYARD_REAL_TOOLS_MAX_INLINE_OUTPUT_BYTES`, `SWITCHYARD_REAL_TOOLS_MAX_ARTIFACT_BYTES`, `SWITCHYARD_REAL_TOOLS_DEFAULT_TIMEOUT_MS`.
+- Fetch: `SWITCHYARD_FETCH_TOOL_ENABLED`, `SWITCHYARD_FETCH_ALLOW_HOSTS`, `SWITCHYARD_FETCH_ALLOW_METHODS`, `SWITCHYARD_FETCH_ALLOW_CONTENT_TYPES`, `SWITCHYARD_FETCH_ALLOW_HEADERS`, `SWITCHYARD_FETCH_MAX_REDIRECTS`, `SWITCHYARD_FETCH_TIMEOUT_MS`, `SWITCHYARD_FETCH_MAX_RESPONSE_BYTES`.
+- Web search: `SWITCHYARD_WEB_SEARCH_TOOL_ENABLED`, `SWITCHYARD_WEB_SEARCH_PROVIDER`, `SWITCHYARD_WEB_SEARCH_BASE_URL`, `SWITCHYARD_WEB_SEARCH_MAX_RESULTS`, `SWITCHYARD_WEB_SEARCH_TIMEOUT_MS`, `SWITCHYARD_WEB_SEARCH_MAX_RESPONSE_BYTES`.
+- GitHub: `SWITCHYARD_GITHUB_TOOL_ENABLED`, `SWITCHYARD_GITHUB_TOKEN`, `SWITCHYARD_GITHUB_ALLOW_REPOS`, `SWITCHYARD_GITHUB_TIMEOUT_MS`, `SWITCHYARD_GITHUB_MAX_RESPONSE_BYTES`.
+- Repo: `SWITCHYARD_REPO_TOOL_ENABLED`, `SWITCHYARD_REPO_GIT_BINARY`, `SWITCHYARD_REPO_ALLOW_CWD_PREFIXES`, `SWITCHYARD_REPO_MAX_PATHS`, `SWITCHYARD_REPO_TIMEOUT_MS`, `SWITCHYARD_REPO_MAX_OUTPUT_BYTES`.
+- Shell: `SWITCHYARD_SHELL_TOOL_ENABLED`, `SWITCHYARD_SHELL_COMMAND_CATALOG_PATH`, `SWITCHYARD_SHELL_ALLOW_CWD_PREFIXES`, `SWITCHYARD_SHELL_TIMEOUT_MS`, `SWITCHYARD_SHELL_MAX_OUTPUT_BYTES`.
+
+Request/approval smoke:
 
 ```bash
 BASE=http://127.0.0.1:4545
 
-MEMORY_ID=$(curl -s -X POST "$BASE/memory" \
-  -H 'content-type: application/json' \
-  -d '{"scope":"project","content":"R7 fake_echo is the only executable tool.","metadata":{"source":"r7-smoke"}}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["memory"]["id"])')
-
-EVIDENCE_ID=$(curl -s -X POST "$BASE/evidence" \
-  -H 'content-type: application/json' \
-  -d '{"sourceType":"manual","title":"Local R7 smoke evidence","snippet":"fake tool path exercised","reliability":"primary"}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["evidence"]["id"])')
-
-MESSAGE_ID=$(curl -s -X POST "$BASE/messages" \
-  -H 'content-type: application/json' \
-  -d '{"channel":"r7-smoke","content":"middleware message"}' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["message"]["id"])')
-
-curl -s "$BASE/memory/search?q=fake_echo" | python3 -m json.tool
-
-curl -s -X POST "$BASE/context" \
-  -H 'content-type: application/json' \
-  -d "{\"target\":\"run\",\"memoryIds\":[\"$MEMORY_ID\"],\"evidenceIds\":[\"$EVIDENCE_ID\"],\"messageIds\":[\"$MESSAGE_ID\"]}" \
-  | python3 -m json.tool
-
 RUN_ID=$(curl -s -X POST "$BASE/runs?wait=1" \
   -H 'content-type: application/json' \
-  -d "{\"runtime\":\"fake\",\"provider\":\"test\",\"model\":\"test-model\",\"adapterType\":\"process\",\"cwd\":\"/repo\",\"task\":\"Use middleware context\",\"context\":{\"memoryIds\":[\"$MEMORY_ID\"],\"evidenceIds\":[\"$EVIDENCE_ID\"],\"messageIds\":[\"$MESSAGE_ID\"]}}" \
+  -d '{"runtime":"fake","provider":"test","model":"test-model","adapterType":"process","cwd":"/repo","task":"r17 tool smoke"}' \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["run"]["id"])')
 
-SAFE=$(curl -s -X POST "$BASE/tools/invocations" \
-  -H 'content-type: application/json' \
-  -d "{\"runId\":\"$RUN_ID\",\"type\":\"fake_echo\",\"input\":{\"text\":\"hello\"}}")
-echo "$SAFE" | python3 -m json.tool
-
-APPROVAL_JSON=$(curl -s -X POST "$BASE/tools/invocations" \
-  -H 'content-type: application/json' \
-  -d "{\"runId\":\"$RUN_ID\",\"type\":\"fake_echo\",\"input\":{\"text\":\"needs approval\",\"requiresApproval\":true}}")
-APPROVAL_ID=$(echo "$APPROVAL_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["approval"]["id"])')
-curl -s -X POST "$BASE/approvals/$APPROVAL_ID/approve" -H 'content-type: application/json' -d '{"actor":"local-user","reason":"ok"}' | python3 -m json.tool
-
+# Deterministic safe path
 curl -s -X POST "$BASE/tools/invocations" \
   -H 'content-type: application/json' \
-  -d "{\"runId\":\"$RUN_ID\",\"type\":\"shell\",\"input\":{\"text\":\"echo blocked\"}}" \
+  -d "{\"runId\":\"$RUN_ID\",\"type\":\"fake_echo\",\"input\":{\"text\":\"hello\"}}" \
+  | python3 -m json.tool
+
+# Real tool path queues approval by default
+APPROVAL_JSON=$(curl -s -X POST "$BASE/tools/invocations" \
+  -H 'content-type: application/json' \
+  -d "{\"runId\":\"$RUN_ID\",\"type\":\"shell\",\"input\":{\"commandId\":\"local.date.utc\",\"cwd\":\"/repo\"}}")
+
+echo "$APPROVAL_JSON" | python3 -m json.tool
+APPROVAL_ID=$(echo "$APPROVAL_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["approval"]["id"])')
+
+curl -s -X POST "$BASE/approvals/$APPROVAL_ID/approve" \
+  -H 'content-type: application/json' \
+  -d '{"actor":"local-user","reason":"r17 smoke"}' \
   | python3 -m json.tool
 ```
 
-R7 middleware boundaries:
+R17 middleware and tool boundaries:
 
-- Memory search is substring-only and case-insensitive; no vector memory or embedding search.
+- Memory search remains substring-only/case-insensitive (`GET /memory/search`); no vector memory search is shipped.
 - Evidence APIs do not fetch remote content.
-- Only `fake_echo` executes in R7.
-- Known real tools are denied with `tool_policy_denied` before adapter dispatch.
-- Context packets persist only under `run.metadata.contextPacket` on run creation with `context`.
+- Real tools are local-daemon only and deny-by-default until explicitly configured.
+- Real tools are approval-by-default (`before_external_web_action` for web actions, `before_local_process_execution` for repo/shell).
+- Shell tool is command-catalog only (`commandId`); raw command strings are rejected.
+- Browser tool is known but unshipped and denied by policy.
+- Hosted real tools, connected-node real tools, public `/sandbox`/`/exec`/`/pty`/`/terminal`/`/process`/`/shell`/`/command`/`/browser` routes, and top-level/tool-search execution routes are not shipped.
 
 ## R9 Debate Smoke (No Spend)
 

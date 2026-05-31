@@ -305,7 +305,7 @@ describe("daemon app", () => {
         payload: {
           runId: run.json().run.id,
           type: "shell",
-          input: { text: "echo should fail" }
+          input: { commandId: "local.date.utc", cwd: "/repo" }
         }
       });
       expect(deniedTool.statusCode).toBe(403);

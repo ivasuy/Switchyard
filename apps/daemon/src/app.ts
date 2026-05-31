@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import {
   AgentFieldAsyncRestAdapter,
@@ -11,16 +12,27 @@ import {
   CODEX_INTERACTIVE_RUNTIME_MODE_SLUG,
   CodexExecResumeJsonSessionFactory,
   CodexExecJsonAdapter,
+  FetchToolAdapter,
   GenericHttpAsyncRestAdapter,
+  GithubToolAdapter,
+  LocalProcessToolExecutor,
   OpenCodeAcpAdapter,
+  RepoToolAdapter,
+  ShellCatalogToolAdapter,
+  type GithubClient,
+  type LocalProcessFactory,
+  type SearchClient,
+  WebSearchToolAdapter,
   probeCodexCatalog
 } from "@switchyard/adapters";
 import {
+  type ArtifactContentStore,
   type ArtifactStore,
   AdapterProtocolError,
   EventBus,
   RegistryService,
   RuntimeCapabilityService,
+  createDisabledRealToolPolicyConfig,
   LocalPolicyGate,
   MessageRouter,
   MemoryService,
@@ -29,6 +41,7 @@ import {
   ContextBuilder,
   ApprovalService,
   ToolRouter,
+  type ToolAdapter,
   type RuntimeAdapter,
   RuntimeDoctorService,
   type RuntimeLogger,
@@ -145,6 +158,12 @@ interface CreateDaemonAppOptions {
   claudeLiveProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["runLiveProbe"];
   codexInteractiveSessionFactory?: CodexInteractiveSessionFactory;
   codexInteractiveApprovalBridge?: boolean;
+  clock?: () => Date;
+  toolFetchImpl?: typeof fetch;
+  toolDnsLookup?: typeof import("node:dns/promises").lookup;
+  toolSearchClient?: SearchClient;
+  toolGithubClient?: GithubClient;
+  toolProcessFactory?: LocalProcessFactory;
 }
 
 interface StartupRecoveryStats {
@@ -164,6 +183,7 @@ interface DaemonMetricsState {
   errorsTotal: number;
   runStatusCounts: Record<RunStatus, number>;
   startupRecovery: StartupRecoveryStats;
+  toolCounters: Array<{ path: string; labels: Record<string, string> }>;
 }
 
 const RUN_STATUSES: readonly RunStatus[] = [
@@ -480,13 +500,26 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
 
   app.get("/health", async () => ({ ok: true }));
   app.get("/metrics", async () => {
-    metrics.runStatusCounts = await collectRunStatusCounts(stores);
-    return {
-      requestsTotal: metrics.requestsTotal,
-      errorsTotal: metrics.errorsTotal,
-      runStatusCounts: metrics.runStatusCounts,
-      startupRecovery: metrics.startupRecovery
-    };
+    try {
+      metrics.runStatusCounts = await collectRunStatusCounts(stores);
+      const toolCounters = summarizeToolCounters(metrics.toolCounters);
+      return {
+        requestsTotal: metrics.requestsTotal,
+        errorsTotal: metrics.errorsTotal,
+        runStatusCounts: metrics.runStatusCounts,
+        startupRecovery: metrics.startupRecovery,
+        toolCounters
+      };
+    } catch {
+      metrics.errorsTotal += 1;
+      return {
+        requestsTotal: metrics.requestsTotal,
+        errorsTotal: metrics.errorsTotal,
+        runStatusCounts: metrics.runStatusCounts,
+        startupRecovery: metrics.startupRecovery,
+        toolMetricsUnavailable: true
+      };
+    }
   });
   const contextBuilder = new ContextBuilder({
     memory: stores.memory,
@@ -528,14 +561,62 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     registryService
   });
   const middlewareEventBus = eventBus;
-  const policy = new LocalPolicyGate();
+  const realToolConfig = config?.realTools ?? createDisabledRealToolPolicyConfig();
+  const policy = new LocalPolicyGate(realToolConfig);
+  const toolAdapters = new Map<string, ToolAdapter>([["fake_echo", new FakeEchoToolAdapter()]]);
+  const toolClock = options.clock ?? (() => new Date());
+  if (realToolConfig.fetch.enabled) {
+    toolAdapters.set("fetch", new FetchToolAdapter({
+      ...(options.toolFetchImpl ? { fetchImpl: options.toolFetchImpl } : {}),
+      ...(options.toolDnsLookup ? { lookup: options.toolDnsLookup } : {}),
+      ...(options.logger ? { logger: options.logger } : {}),
+      clock: toolClock
+    }));
+  }
+  if (realToolConfig.webSearch.enabled) {
+    toolAdapters.set("web_search", new WebSearchToolAdapter({
+      ...(options.toolSearchClient ? { client: options.toolSearchClient } : {}),
+      ...(options.toolFetchImpl ? { fetchImpl: options.toolFetchImpl } : {}),
+      ...(options.logger ? { logger: options.logger } : {}),
+      clock: toolClock
+    }));
+  }
+  if (realToolConfig.github.enabled) {
+    toolAdapters.set("github", new GithubToolAdapter({
+      ...(realToolConfig.github.token ? { token: realToolConfig.github.token } : {}),
+      ...(options.toolGithubClient ? { client: options.toolGithubClient } : {}),
+      ...(options.toolFetchImpl ? { fetchImpl: options.toolFetchImpl } : {}),
+      ...(options.logger ? { logger: options.logger } : {}),
+      clock: toolClock
+    }));
+  }
+  const processExecutor = new LocalProcessToolExecutor({
+    ...(options.toolProcessFactory ? { processFactory: options.toolProcessFactory } : {}),
+    ...(options.logger ? { logger: options.logger } : {}),
+    clock: toolClock
+  });
+  if (realToolConfig.repo.enabled) {
+    toolAdapters.set("repo", new RepoToolAdapter({ processExecutor }));
+  }
+  if (realToolConfig.shell.enabled) {
+    toolAdapters.set("shell", new ShellCatalogToolAdapter({ processExecutor }));
+  }
+  const artifactContent = adaptDaemonArtifactContentStore(stores.artifactContent);
   const toolRouter = new ToolRouter({
     runs: stores.runs,
     events: stores.events,
     approvals: stores.approvals,
     invocations: stores.toolInvocations,
+    artifacts: stores.artifacts,
+    ...(artifactContent ? { artifactContent } : {}),
+    metrics: {
+      inc(path, labels) {
+        metrics.toolCounters.push({ path, labels: labels ?? {} });
+      }
+    },
+    clock: toolClock,
     eventBus: middlewareEventBus,
-    adapters: new Map([["fake_echo", new FakeEchoToolAdapter()]]),
+    adapters: toolAdapters,
     policy
   });
   const approvalService = new ApprovalService({
@@ -550,6 +631,7 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   });
   approvalServiceRef = approvalService;
   await approvalService.expirePendingRuntimeApprovals();
+  await toolRouter.reconcileInterruptedInvocations();
   for (const runId of startupRecovery.reconciledRunIds) {
     await approvalService.terminalizePendingRuntimeApprovalsForRun(runId, {
       terminalEvent: "daemon_restarted",
@@ -612,6 +694,51 @@ function buildArtifactContentReader(
     async read(artifact) {
       const body = await reader(artifact.path);
       return { body, contentType: contentTypeForArtifact(artifact.type) };
+    }
+  };
+}
+
+export function adaptDaemonArtifactContentStore(
+  store: DaemonStores["artifactContent"]
+): ArtifactContentStore | undefined {
+  if (!store) {
+    return undefined;
+  }
+  const supportsCanonical = typeof (store as unknown as ArtifactContentStore).writeBytes === "function"
+    && typeof (store as unknown as ArtifactContentStore).read === "function";
+  if (supportsCanonical) {
+    return store as unknown as ArtifactContentStore;
+  }
+  return {
+    async writeText(path, text, options) {
+      const writtenPath = await store.writeText(path, text);
+      return {
+        path: writtenPath,
+        storageBackend: "filesystem",
+        sizeBytes: Buffer.byteLength(text, "utf8"),
+        sha256: createHash("sha256").update(text).digest("hex"),
+        contentType: options?.contentType ?? "text/plain"
+      };
+    },
+    async writeBytes(path, bytes, options) {
+      const text = bytes.toString("utf8");
+      const writtenPath = await store.writeText(path, text);
+      return {
+        path: writtenPath,
+        storageBackend: "filesystem",
+        sizeBytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        contentType: options?.contentType ?? "application/octet-stream"
+      };
+    },
+    async read(artifact) {
+      if (typeof store.readBuffer !== "function") {
+        throw new Error("artifact content reader is unavailable");
+      }
+      return {
+        body: await store.readBuffer(artifact.path),
+        contentType: contentTypeForArtifact(artifact.type)
+      };
     }
   };
 }
@@ -834,7 +961,8 @@ function createDaemonMetricsState(): DaemonMetricsState {
       failedSessions: 0,
       alreadyTerminal: 0,
       duplicateStarts: 0
-    }
+    },
+    toolCounters: []
   };
 }
 
@@ -905,6 +1033,17 @@ function createEmptyRunStatusCounts(): Record<RunStatus, number> {
     cancelled: 0,
     timeout: 0
   };
+}
+
+function summarizeToolCounters(
+  entries: Array<{ path: string; labels: Record<string, string> }>
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const entry of entries) {
+    const key = `${entry.path}:${entry.labels["toolType"] ?? "all"}:${entry.labels["status"] ?? "na"}:${entry.labels["reason"] ?? "na"}`;
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
 }
 
 async function seedCodexRegistry(

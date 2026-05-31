@@ -17,6 +17,9 @@ export type HttpErrorCode =
   | "tool_invocation_not_found"
   | "approval_not_pending"
   | "tool_policy_denied"
+  | "tool_policy_config_invalid"
+  | "tool_policy_failed"
+  | "tool_adapter_unavailable"
   | "approval_required"
   | "unsupported_tool"
   | "invalid_input"
@@ -74,6 +77,9 @@ const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   tool_invocation_not_found: 404,
   approval_not_pending: 409,
   tool_policy_denied: 403,
+  tool_policy_config_invalid: 403,
+  tool_policy_failed: 409,
+  tool_adapter_unavailable: 500,
   approval_required: 409,
   unsupported_tool: 409,
   invalid_input: 400,

@@ -88,6 +88,11 @@ describe("hosted worker app", () => {
     expect(adapters.has("codex")).toBe(true);
     expect(adapters.has("claude_code")).toBe(true);
     expect(adapters.has("opencode")).toBe(true);
+    expect(adapters.has("fetch")).toBe(false);
+    expect(adapters.has("web_search")).toBe(false);
+    expect(adapters.has("github")).toBe(false);
+    expect(adapters.has("repo")).toBe(false);
+    expect(adapters.has("shell")).toBe(false);
   });
 
   it("reports hosted runtime gate disabled in readiness", async () => {

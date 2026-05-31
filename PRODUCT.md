@@ -270,7 +270,7 @@ These are planned or designed in docs, but not shipped product:
 - PTY adapter.
 - Hosted debate with real participant runtimes and model judging.
 - Runtime-specific approval bridges (Codex/OpenCode/AgentField/Generic HTTP) are not shipped.
-- Real browser/search/fetch/repo/shell/GitHub tool execution is not shipped; R7 executes only deterministic `fake_echo`.
+- Browser automation and hosted/connected-node real-tool execution are not shipped. R17 ships only local-daemon real tools (`fetch`, `web_search`, `github`, `repo`, command-catalog `shell`) through `POST /tools/invocations` with deny-by-default and approval-by-default policy.
 - Trace endpoint.
 - Dashboard.
 - TUI.
@@ -670,7 +670,7 @@ Not included:
 - vector memory and embedding search (memory search is case-insensitive substring on `content` only).
 - remote evidence fetching (evidence records store metadata and optional relative `fetchedContentPath` pointers only).
 - full debate engine.
-- real browser/search/GitHub/fetch/repo/shell tool execution (known real tools are denied with `tool_policy_denied` before adapter dispatch).
+- browser automation, hosted real tools, connected-node real tools, and public arbitrary execution routes (`/sandbox`, `/exec`, `/pty`, `/terminal`, `/process`, `/shell`, `/command`, top-level `/search`).
 - persisted first-class reusable context packets (R7 stores context packets only in `run.metadata.contextPacket` when `POST /runs` includes `context`).
 
 Local verification:

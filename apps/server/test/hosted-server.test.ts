@@ -10,6 +10,32 @@ import { loadServerConfig } from "../src/config.js";
 const defaultSandbox = () => resolveHostedSandboxConfig({ deploymentMode: "test", env: {} });
 
 describe("hosted server", () => {
+  it("does not expose middleware tool invocation routes on hosted server", async () => {
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic"],
+      hostedRealRuntimeExecution: "disabled",
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
+      redactedSummary: {}
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/tools/invocations",
+        payload: {
+          type: "fetch",
+          input: { url: "https://example.com", method: "GET" }
+        }
+      });
+      expect(response.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("completes hosted fake run with wait", async () => {
     const app = await createServerApp({
       host: "127.0.0.1",

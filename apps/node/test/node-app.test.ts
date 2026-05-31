@@ -87,6 +87,7 @@ describe("node app", () => {
     expect(second).toBe(false);
     expect(fake.calls).toContain("complete");
     expect(fake.syncedEvents[0]?.events?.length).toBeGreaterThan(0);
+    expect(JSON.stringify(fake.syncedEvents[0])).toContain("[node-exec] completed");
     expect(fake.syncedManifests[0]?.artifacts?.length).toBeGreaterThan(0);
     expect(fake.syncedContents.length).toBe(1);
   });
@@ -167,6 +168,13 @@ describe("node app", () => {
       SWITCHYARD_DEPLOYMENT_MODE: "local"
     });
     expect(config.capabilities).toEqual(["runtime.fake.deterministic"]);
+    expect(config.capabilities).not.toContain("tools.real");
+    expect(config.capabilities).not.toContain("tool.fetch");
+    expect(config.capabilities).not.toContain("tool.web_search");
+    expect(config.capabilities).not.toContain("tool.github");
+    expect(config.capabilities).not.toContain("tool.repo");
+    expect(config.capabilities).not.toContain("tool.shell");
+    expect(config.capabilities).not.toContain("tool.browser");
     expect(config.policy.allowRuntimeModes).toEqual(["fake.deterministic"]);
     expect(config.policy.allowCwdPrefixes).toEqual(["/repo"]);
   });

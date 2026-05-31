@@ -15,6 +15,22 @@ This directory records runtime adapter facts before implementation and tracks im
 | OpenClaw | HTTP/acpx wrapper | Deferred | API boundary should be verified before implementation. |
 | Paperclip | HTTP wrapper | Deferred | API/source boundary should be verified before implementation. |
 
+## R17 Tool Adapter Slice
+
+R17 ships local-daemon tool adapters behind `POST /tools/invocations` only.
+
+| Tool adapter | Status | Boundary |
+| --- | --- | --- |
+| `fake_echo` | Shipped | deterministic/no-spend baseline tool |
+| `fetch` | Shipped (local daemon) | allowlisted hosts, GET/HEAD only, bounded redirects/bytes/content types, private-network denied |
+| `web_search` | Shipped (local daemon) | provider/base URL configured explicitly, bounded results/bytes, no hosted/node execution |
+| `github` | Shipped (local daemon) | read-only allowlisted repos; no mutation operations |
+| `repo` | Shipped (local daemon) | read-only git inspection via bounded local process executor |
+| `shell` | Shipped (local daemon) | command-catalog only (`commandId`), no raw shell strings/interpolation |
+| `browser` | Unshipped in R17 | policy-denied (`browser_tool_unshipped`) |
+
+Unshipped for R17: hosted real tools, connected-node real tools, generic process/PTY execution adapters, Cursor/OpenClaw/Paperclip tool adapters, and public `/exec`/`/terminal`/`/pty`/`/sandbox`/`/tools/search` execution surfaces.
+
 ## Implementation Rule
 
 Each adapter must ship with:
