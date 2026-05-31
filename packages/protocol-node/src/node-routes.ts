@@ -1,10 +1,13 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type {
   ArtifactSyncService,
+  ControlPlaneService,
   EventSyncService,
   NodeCoordinatorService
 } from "@switchyard/core";
+import { ControlPlaneError } from "@switchyard/core";
+import type { AuthContext } from "@switchyard/contracts";
 import {
   assignmentArtifactManifestRequestSchema,
   assignmentClaimRequestSchema,
@@ -14,7 +17,23 @@ import {
   nodeHeartbeatRequestSchema,
   nodeRegisterRequestSchema
 } from "@switchyard/contracts";
-import { sendHttpError } from "@switchyard/protocol-rest";
+import { sendHttpError, type HttpErrorCode, type HttpErrorDetail } from "@switchyard/protocol-rest";
+
+const FORBIDDEN_QUERY_CREDENTIAL_KEYS = new Set(["api_key", "token", "authorization"]);
+
+type NodeDeploymentMode = "local" | "test" | "staging" | "production";
+
+type NodeActorType = "api_key" | "node_token";
+
+export interface NodeTokenBinding {
+  token: string;
+  auth: AuthContext;
+}
+
+interface NodeRouteAuthState {
+  auth: AuthContext;
+  actorType: NodeActorType;
+}
 
 export interface NodeRouteDependencies {
   coordinator: NodeCoordinatorService;
@@ -24,23 +43,32 @@ export interface NodeRouteDependencies {
   requireAuth?: boolean;
   jsonBodyLimitBytes?: number;
   artifactBodyLimitBytes?: number;
+  controlPlane?: ControlPlaneService;
+  deploymentMode?: NodeDeploymentMode;
+  nodeTokenBindings?: readonly NodeTokenBinding[];
 }
 
 export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependencies): void {
-  app.addHook("preHandler", async (request, reply) => {
-    if (!request.url.startsWith("/nodes")) return;
-    const token = request.headers["x-switchyard-node-token"];
-    if (deps.requireAuth && !deps.sharedToken) {
-      return sendHttpError(reply, "node_auth_required", "Node token is required");
+  app.addHook("onRequest", async (request, reply) => {
+    if (!isNodeRoute(request)) return;
+
+    if (!isHostedControlPlaneMode(deps)) {
+      return handleLegacyNodeAuth(request, reply, deps);
     }
-    if (!deps.sharedToken) return;
-    if (typeof token !== "string" || !tokenMatches(token, deps.sharedToken)) {
-      return sendHttpError(reply, "node_auth_failed", "Node token is invalid");
+
+    try {
+      request.nodeRouteAuth = await authenticateHostedNodeRequest(request, deps);
+    } catch (error) {
+      if (error instanceof ControlPlaneError) {
+        await auditNodeAuthFailure(request, deps, error);
+        return sendHttpError(reply, error.code, error.reasonCode, controlPlaneDetails(error));
+      }
+      throw error;
     }
   });
 
   app.addHook("preValidation", async (request, reply) => {
-    if (!request.url.startsWith("/nodes")) return;
+    if (!isNodeRoute(request)) return;
     if (request.method !== "PUT") {
       const limit = deps.jsonBodyLimitBytes ?? 512 * 1024;
       const size = Buffer.byteLength(JSON.stringify(request.body ?? {}), "utf8");
@@ -58,26 +86,160 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
   });
 
   app.post("/nodes/register", async (request, reply) => {
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
+
     const body = nodeRegisterRequestSchema.parse(request.body ?? {});
+    const registerId = body.id ?? `node_${randomUUID()}`;
     const input: Parameters<NodeCoordinatorService["register"]>[0] = {
+      id: registerId,
       mode: body.mode,
       capabilities: body.capabilities
     };
-    if (body.id !== undefined) input.id = body.id;
     if (body.policy !== undefined) input.policy = body.policy;
     if (body.version !== undefined) input.version = body.version;
-    const node = await deps.coordinator.register(input);
-    return reply.code(201).send({ node });
+
+    let reservationId: string | undefined;
+    try {
+      if (hosted && controlPlane && auth) {
+        const reservation = await controlPlane.preflightNodeRegister({
+          auth,
+          nodeId: registerId
+        });
+        reservationId = reservation.id;
+      }
+
+      const node = await deps.coordinator.register(input);
+
+      if (hosted && controlPlane && auth) {
+        const ownership = await controlPlane.ensureOwnedOrAttachFromRun({
+          auth,
+          resourceType: "node",
+          resourceId: node.id,
+          runId: node.id
+        });
+        if (!ownership.ok) {
+          await failReservation(controlPlane, auth, reservationId, "ownership_attach_failed");
+          reservationId = undefined;
+          await bestEffortMarkNodeOffline(deps.coordinator, node.id);
+          await auditNodeDecision(controlPlane, {
+            auth,
+            eventType: "node.register_denied",
+            decision: "deny",
+            reasonCode: "ownership_attach_failed",
+            resourceType: "node",
+            resourceId: node.id,
+            requestId: request.id,
+            payload: { routeId: "nodes.register" }
+          });
+          return sendHttpError(reply, "internal_error", "ownership_attach_failed", [{ path: "reasonCode", issue: "ownership_attach_failed" }]);
+        }
+
+        await consumeReservation(controlPlane, auth, reservationId, "node_register_allowed");
+        reservationId = undefined;
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: "node.register_allowed",
+          decision: "allow",
+          reasonCode: "node_register_allowed",
+          resourceType: "node",
+          resourceId: node.id,
+          requestId: request.id,
+          payload: { routeId: "nodes.register" }
+        });
+      }
+
+      return reply.code(201).send({ node });
+    } catch (error) {
+      if (hosted && controlPlane && auth && error instanceof ControlPlaneError) {
+        await failReservation(controlPlane, auth, reservationId, error.reasonCode);
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: error.code === "tenant_access_denied" ? "tenant.access_denied" : "node.register_denied",
+          decision: "deny",
+          reasonCode: error.reasonCode,
+          resourceType: "node",
+          resourceId: registerId,
+          requestId: request.id,
+          payload: { routeId: "nodes.register" }
+        });
+        return sendHttpError(reply, error.code, error.reasonCode, controlPlaneDetails(error));
+      }
+      if (hosted && controlPlane && auth) {
+        await failReservation(controlPlane, auth, reservationId, "node_register_failed");
+      }
+      throw error;
+    }
   });
 
   app.post("/nodes/:id/heartbeat", async (request, reply) => {
     const nodeId = (request.params as { id: string }).id;
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
+
     try {
+      if (hosted && controlPlane && auth) {
+        const owned = await controlPlane.authorizeResource({
+          auth,
+          resourceType: "node",
+          resourceId: nodeId,
+          notFoundCode: "node_not_found"
+        });
+        if (!owned.ok) {
+          await auditNodeDecision(controlPlane, {
+            auth,
+            eventType: "tenant.access_denied",
+            decision: "deny",
+            reasonCode: owned.reasonCode,
+            resourceType: "node",
+            resourceId: nodeId,
+            requestId: request.id,
+            payload: { routeId: "nodes.heartbeat" }
+          });
+          return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+        }
+      }
+
       const body = nodeHeartbeatRequestSchema.parse(request.body ?? {});
       const input: Parameters<NodeCoordinatorService["heartbeat"]>[1] = {};
       if (body.capabilities !== undefined) input.capabilities = body.capabilities;
       if (body.policy !== undefined) input.policy = body.policy;
       const node = await deps.coordinator.heartbeat(nodeId, input);
+
+      if (hosted && controlPlane && auth) {
+        const ownership = await controlPlane.ensureOwnedOrAttachFromRun({
+          auth,
+          resourceType: "node",
+          resourceId: node.id,
+          runId: node.id
+        });
+        if (!ownership.ok) {
+          await auditNodeDecision(controlPlane, {
+            auth,
+            eventType: "node.register_denied",
+            decision: "error",
+            reasonCode: "ownership_attach_failed",
+            resourceType: "node",
+            resourceId: node.id,
+            requestId: request.id,
+            payload: { routeId: "nodes.heartbeat" }
+          });
+          return sendHttpError(reply, "internal_error", "ownership_attach_failed", [{ path: "reasonCode", issue: "ownership_attach_failed" }]);
+        }
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: "node.register_allowed",
+          decision: "allow",
+          reasonCode: "node_heartbeat_allowed",
+          resourceType: "node",
+          resourceId: node.id,
+          requestId: request.id,
+          payload: { routeId: "nodes.heartbeat" }
+        });
+      }
+
       return reply.send({ node });
     } catch (error) {
       if ((error as { code?: string }).code === "node_not_found") {
@@ -87,13 +249,59 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
     }
   });
 
-  app.get("/nodes", async () => {
+  app.get("/nodes", async (request) => {
     const nodes = await deps.coordinator.list();
-    return { nodes };
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
+
+    if (!hosted || !controlPlane || !auth) {
+      return { nodes };
+    }
+
+    const scoped = [];
+    for (const node of nodes) {
+      const owned = await controlPlane.authorizeResource({
+        auth,
+        resourceType: "node",
+        resourceId: node.id,
+        notFoundCode: "node_not_found"
+      });
+      if (owned.ok) {
+        scoped.push(node);
+      }
+    }
+    return { nodes: scoped };
   });
 
   app.get("/nodes/:id", async (request, reply) => {
     const nodeId = (request.params as { id: string }).id;
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
+
+    if (hosted && controlPlane && auth) {
+      const owned = await controlPlane.authorizeResource({
+        auth,
+        resourceType: "node",
+        resourceId: nodeId,
+        notFoundCode: "node_not_found"
+      });
+      if (!owned.ok) {
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: "tenant.access_denied",
+          decision: "deny",
+          reasonCode: owned.reasonCode,
+          resourceType: "node",
+          resourceId: nodeId,
+          requestId: request.id,
+          payload: { routeId: "nodes.get" }
+        });
+        return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      }
+    }
+
     const node = await deps.coordinator.get(nodeId);
     if (!node) {
       return sendHttpError(reply, "node_not_found", `Node not found: ${nodeId}`);
@@ -103,9 +311,42 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
 
   app.post("/nodes/:id/assignments/claim", async (request, reply) => {
     const nodeId = (request.params as { id: string }).id;
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
     const body = assignmentClaimRequestSchema.parse(request.body ?? {});
+
+    if (hosted && controlPlane && auth) {
+      const authorizeInput: Parameters<typeof authorizeNodeAndAssignment>[0] = {
+        controlPlane,
+        auth,
+        nodeId,
+        requestId: request.id,
+        routeId: "nodes.claim"
+      };
+      if (body.assignmentId !== undefined) {
+        authorizeInput.assignmentId = body.assignmentId;
+      }
+      const denied = await authorizeNodeAndAssignment(authorizeInput);
+      if (denied) {
+        return sendHttpError(reply, denied.code, denied.reasonCode, [{ path: "reasonCode", issue: denied.reasonCode }]);
+      }
+    }
+
     try {
       const claimed = await deps.coordinator.claim(nodeId, body.assignmentId);
+      if (hosted && controlPlane && auth) {
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: "node.register_allowed",
+          decision: "allow",
+          reasonCode: "assignment_claim_allowed",
+          resourceType: "assignment",
+          resourceId: body.assignmentId ?? "auto",
+          requestId: request.id,
+          payload: { routeId: "nodes.claim" }
+        });
+      }
       return reply.send({
         assignment: claimed?.assignment ?? null,
         run: claimed?.run ?? null
@@ -123,9 +364,39 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
 
   app.post("/nodes/:id/assignments/:assignmentId/reject", async (request, reply) => {
     const params = request.params as { id: string; assignmentId: string };
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
+
+    if (hosted && controlPlane && auth) {
+      const denied = await authorizeNodeAndAssignment({
+        controlPlane,
+        auth,
+        nodeId: params.id,
+        assignmentId: params.assignmentId,
+        requestId: request.id,
+        routeId: "nodes.reject"
+      });
+      if (denied) {
+        return sendHttpError(reply, denied.code, denied.reasonCode, [{ path: "reasonCode", issue: denied.reasonCode }]);
+      }
+    }
+
     const body = assignmentRejectRequestSchema.parse(request.body ?? {});
     try {
       const assignment = await deps.coordinator.reject(params.id, params.assignmentId, body.reason);
+      if (hosted && controlPlane && auth) {
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: "node.register_allowed",
+          decision: "allow",
+          reasonCode: "assignment_reject_allowed",
+          resourceType: "assignment",
+          resourceId: params.assignmentId,
+          requestId: request.id,
+          payload: { routeId: "nodes.reject" }
+        });
+      }
       return reply.send({ assignment });
     } catch (error) {
       if ((error as { code?: string }).code === "assignment_not_found") {
@@ -137,6 +408,24 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
 
   app.post("/nodes/:id/assignments/:assignmentId/events", async (request, reply) => {
     const params = request.params as { id: string; assignmentId: string };
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
+
+    if (hosted && controlPlane && auth) {
+      const denied = await authorizeNodeAndAssignment({
+        controlPlane,
+        auth,
+        nodeId: params.id,
+        assignmentId: params.assignmentId,
+        requestId: request.id,
+        routeId: "nodes.sync.events"
+      });
+      if (denied) {
+        return sendHttpError(reply, denied.code, denied.reasonCode, [{ path: "reasonCode", issue: denied.reasonCode }]);
+      }
+    }
+
     try {
       const body = assignmentEventSyncRequestSchema.parse(request.body ?? {});
       const input: Parameters<EventSyncService["appendBatch"]>[2] = {
@@ -144,6 +433,42 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
       };
       if (body.cursor !== undefined) input.cursor = body.cursor;
       const result = await deps.eventSync.appendBatch(params.id, params.assignmentId, input);
+
+      if (hosted && controlPlane && auth) {
+        for (const event of body.events) {
+          const ownership = await controlPlane.ensureOwnedOrAttachFromRun({
+            auth,
+            resourceType: "run_event",
+            resourceId: event.id,
+            runId: event.runId ?? params.assignmentId
+          });
+          if (!ownership.ok) {
+            await auditNodeDecision(controlPlane, {
+              auth,
+              eventType: "node.register_denied",
+              decision: "error",
+              reasonCode: "ownership_attach_failed",
+              resourceType: "assignment",
+              resourceId: params.assignmentId,
+              requestId: request.id,
+              payload: { routeId: "nodes.sync.events" }
+            });
+            return sendHttpError(reply, "internal_error", "ownership_attach_failed", [{ path: "reasonCode", issue: "ownership_attach_failed" }]);
+          }
+        }
+
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: "node.register_allowed",
+          decision: "allow",
+          reasonCode: "assignment_event_sync_allowed",
+          resourceType: "assignment",
+          resourceId: params.assignmentId,
+          requestId: request.id,
+          payload: { routeId: "nodes.sync.events" }
+        });
+      }
+
       return reply.send(result);
     } catch (error) {
       const code = (error as { code?: string }).code;
@@ -156,9 +481,63 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
 
   app.post("/nodes/:id/assignments/:assignmentId/artifacts/manifest", async (request, reply) => {
     const params = request.params as { id: string; assignmentId: string };
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
+
+    if (hosted && controlPlane && auth) {
+      const denied = await authorizeNodeAndAssignment({
+        controlPlane,
+        auth,
+        nodeId: params.id,
+        assignmentId: params.assignmentId,
+        requestId: request.id,
+        routeId: "nodes.sync.artifacts.manifest"
+      });
+      if (denied) {
+        return sendHttpError(reply, denied.code, denied.reasonCode, [{ path: "reasonCode", issue: denied.reasonCode }]);
+      }
+    }
+
     try {
       const body = assignmentArtifactManifestRequestSchema.parse(request.body ?? {});
       const result = await deps.artifactSync.acceptManifest(params.id, params.assignmentId, body);
+
+      if (hosted && controlPlane && auth) {
+        for (const artifact of body.artifacts) {
+          const ownership = await controlPlane.ensureOwnedOrAttachFromRun({
+            auth,
+            resourceType: "artifact",
+            resourceId: artifact.id,
+            runId: params.assignmentId
+          });
+          if (!ownership.ok) {
+            await auditNodeDecision(controlPlane, {
+              auth,
+              eventType: "node.register_denied",
+              decision: "error",
+              reasonCode: "ownership_attach_failed",
+              resourceType: "assignment",
+              resourceId: params.assignmentId,
+              requestId: request.id,
+              payload: { routeId: "nodes.sync.artifacts.manifest" }
+            });
+            return sendHttpError(reply, "internal_error", "ownership_attach_failed", [{ path: "reasonCode", issue: "ownership_attach_failed" }]);
+          }
+        }
+
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: "node.register_allowed",
+          decision: "allow",
+          reasonCode: "assignment_artifact_manifest_allowed",
+          resourceType: "assignment",
+          resourceId: params.assignmentId,
+          requestId: request.id,
+          payload: { routeId: "nodes.sync.artifacts.manifest" }
+        });
+      }
+
       return reply.send(result);
     } catch (error) {
       const code = (error as { code?: string }).code;
@@ -170,9 +549,61 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
 
   app.put("/nodes/:id/assignments/:assignmentId/artifacts/:artifactId/content", async (request, reply) => {
     const params = request.params as { id: string; assignmentId: string; artifactId: string };
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
+
+    if (hosted && controlPlane && auth) {
+      const denied = await authorizeNodeAndAssignment({
+        controlPlane,
+        auth,
+        nodeId: params.id,
+        assignmentId: params.assignmentId,
+        requestId: request.id,
+        routeId: "nodes.sync.artifacts.content"
+      });
+      if (denied) {
+        return sendHttpError(reply, denied.code, denied.reasonCode, [{ path: "reasonCode", issue: denied.reasonCode }]);
+      }
+    }
+
     const body = asBuffer(request);
     try {
       const result = await deps.artifactSync.acceptContent(params.id, params.assignmentId, params.artifactId, body);
+
+      if (hosted && controlPlane && auth) {
+        const ownership = await controlPlane.ensureOwnedOrAttachFromRun({
+          auth,
+          resourceType: "artifact",
+          resourceId: params.artifactId,
+          runId: params.assignmentId
+        });
+        if (!ownership.ok) {
+          await auditNodeDecision(controlPlane, {
+            auth,
+            eventType: "node.register_denied",
+            decision: "error",
+            reasonCode: "ownership_attach_failed",
+            resourceType: "assignment",
+            resourceId: params.assignmentId,
+            requestId: request.id,
+            payload: { routeId: "nodes.sync.artifacts.content" }
+          });
+          return sendHttpError(reply, "internal_error", "ownership_attach_failed", [{ path: "reasonCode", issue: "ownership_attach_failed" }]);
+        }
+
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: "node.register_allowed",
+          decision: "allow",
+          reasonCode: "assignment_artifact_content_allowed",
+          resourceType: "assignment",
+          resourceId: params.assignmentId,
+          requestId: request.id,
+          payload: { routeId: "nodes.sync.artifacts.content" }
+        });
+      }
+
       return reply.send(result);
     } catch (error) {
       const code = (error as { code?: string }).code;
@@ -186,9 +617,39 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
 
   app.post("/nodes/:id/assignments/:assignmentId/complete", async (request, reply) => {
     const params = request.params as { id: string; assignmentId: string };
+    const hosted = isHostedControlPlaneMode(deps);
+    const auth = hosted ? getHostedNodeAuth(request) : undefined;
+    const controlPlane = deps.controlPlane;
+
+    if (hosted && controlPlane && auth) {
+      const denied = await authorizeNodeAndAssignment({
+        controlPlane,
+        auth,
+        nodeId: params.id,
+        assignmentId: params.assignmentId,
+        requestId: request.id,
+        routeId: "nodes.complete"
+      });
+      if (denied) {
+        return sendHttpError(reply, denied.code, denied.reasonCode, [{ path: "reasonCode", issue: denied.reasonCode }]);
+      }
+    }
+
     const body = assignmentCompleteRequestSchema.parse(request.body ?? {});
     try {
       const assignment = await deps.coordinator.complete(params.id, params.assignmentId, body.status, body.error);
+      if (hosted && controlPlane && auth) {
+        await auditNodeDecision(controlPlane, {
+          auth,
+          eventType: "node.register_allowed",
+          decision: "allow",
+          reasonCode: "assignment_complete_allowed",
+          resourceType: "assignment",
+          resourceId: params.assignmentId,
+          requestId: request.id,
+          payload: { routeId: "nodes.complete" }
+        });
+      }
       return reply.send({ assignment });
     } catch (error) {
       if ((error as { code?: string }).code === "assignment_not_found") {
@@ -212,4 +673,374 @@ function tokenMatches(got: string, expected: string): boolean {
   const b = Buffer.from(expected);
   if (a.byteLength !== b.byteLength) return false;
   return timingSafeEqual(a, b);
+}
+
+function isNodeRoute(request: FastifyRequest): boolean {
+  return routePathname(request).startsWith("/nodes");
+}
+
+function routePathname(request: FastifyRequest): string {
+  const [raw] = (request.raw.url ?? request.url ?? "/").split("?", 1);
+  if (!raw || raw.length === 0) {
+    return "/";
+  }
+  if (raw === "/") {
+    return raw;
+  }
+  return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+}
+
+function isHostedControlPlaneMode(deps: NodeRouteDependencies): boolean {
+  if (!deps.controlPlane) {
+    return false;
+  }
+  return deps.deploymentMode !== "local" && deps.deploymentMode !== "test";
+}
+
+function handleLegacyNodeAuth(request: FastifyRequest, reply: { request: FastifyRequest }, deps: NodeRouteDependencies): void | ReturnType<typeof sendHttpError> {
+  const token = request.headers["x-switchyard-node-token"];
+  if (deps.requireAuth && !deps.sharedToken) {
+    return sendHttpError(reply as never, "node_auth_required", "Node token is required");
+  }
+  if (!deps.sharedToken) return;
+  if (typeof token !== "string" || !tokenMatches(token, deps.sharedToken)) {
+    return sendHttpError(reply as never, "node_auth_failed", "Node token is invalid");
+  }
+}
+
+async function authenticateHostedNodeRequest(request: FastifyRequest, deps: NodeRouteDependencies): Promise<NodeRouteAuthState> {
+  const controlPlane = deps.controlPlane;
+  if (!controlPlane) {
+    throw new ControlPlaneError("auth_required", "auth_required");
+  }
+
+  const headers = request.headers as Record<string, string | string[] | undefined>;
+  const query = asRecord(request.query);
+  if (containsForbiddenQueryCredentials(query)) {
+    throw new ControlPlaneError("auth_failed", "query_credentials_not_allowed");
+  }
+
+  if (hasApiCredentialHeader(headers)) {
+    const authInput: Parameters<ControlPlaneService["authenticateRequest"]>[0] = { headers };
+    if (query) {
+      authInput.query = query;
+    }
+    const auth = await controlPlane.authenticateRequest(authInput);
+    controlPlane.requireScope(auth, "nodes:write");
+    return { auth, actorType: "api_key" };
+  }
+
+  const nodeToken = readHeader(headers, "x-switchyard-node-token");
+  if (nodeToken !== undefined) {
+    const trimmed = nodeToken.trim();
+    if (trimmed.length === 0) {
+      throw new ControlPlaneError("node_auth_failed", "blank_node_token");
+    }
+
+    const binding = findNodeTokenBinding(trimmed, deps.nodeTokenBindings);
+    if (!binding) {
+      throw new ControlPlaneError("node_auth_failed", "node_token_unbound");
+    }
+
+    validateBoundNodeAuth(binding.auth);
+    controlPlane.requireScope(binding.auth, "nodes:write");
+    return { auth: binding.auth, actorType: "node_token" };
+  }
+
+  throw new ControlPlaneError("auth_required", "auth_required");
+}
+
+function validateBoundNodeAuth(auth: AuthContext): void {
+  const nowMs = Date.now();
+  if (auth.apiKey.status !== "active") {
+    throw new ControlPlaneError("auth_failed", auth.apiKey.status === "revoked" ? "api_key_revoked" : "api_key_inactive");
+  }
+  if (auth.apiKey.expiresAt && Date.parse(auth.apiKey.expiresAt) <= nowMs) {
+    throw new ControlPlaneError("auth_failed", "api_key_expired");
+  }
+  if (auth.account.status !== "active") {
+    throw new ControlPlaneError("auth_failed", "account_inactive");
+  }
+  if (auth.tenant.status !== "active") {
+    throw new ControlPlaneError("auth_failed", "tenant_inactive");
+  }
+  if (auth.project.status !== "active") {
+    throw new ControlPlaneError("auth_failed", "project_inactive");
+  }
+  if ((auth.user.status ?? "active") !== "active") {
+    throw new ControlPlaneError("auth_failed", "user_inactive");
+  }
+}
+
+function containsForbiddenQueryCredentials(query: Record<string, unknown> | undefined): boolean {
+  if (!query) {
+    return false;
+  }
+  for (const key of Object.keys(query)) {
+    if (FORBIDDEN_QUERY_CREDENTIAL_KEYS.has(key.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasApiCredentialHeader(headers: Record<string, string | string[] | undefined>): boolean {
+  return readHeader(headers, "authorization") !== undefined || readHeader(headers, "x-switchyard-api-key") !== undefined;
+}
+
+function readHeader(headers: Record<string, string | string[] | undefined>, headerName: string): string | undefined {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== headerName.toLowerCase()) {
+      continue;
+    }
+    if (typeof value === "string") {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      if (value.length === 0) return "";
+      const first = value[0];
+      return typeof first === "string" ? first : "";
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+function findNodeTokenBinding(token: string, bindings: readonly NodeTokenBinding[] | undefined): NodeTokenBinding | null {
+  if (!bindings || bindings.length === 0) {
+    return null;
+  }
+  for (const binding of bindings) {
+    if (tokenMatches(token, binding.token)) {
+      return binding;
+    }
+  }
+  return null;
+}
+
+function getHostedNodeAuth(request: FastifyRequest): AuthContext | undefined {
+  return request.nodeRouteAuth?.auth;
+}
+
+async function authorizeNodeAndAssignment(input: {
+  controlPlane: ControlPlaneService;
+  auth: AuthContext;
+  nodeId: string;
+  assignmentId?: string;
+  requestId?: string;
+  routeId: string;
+}): Promise<{ code: HttpErrorCode; reasonCode: string } | null> {
+  const nodeOwned = await input.controlPlane.authorizeResource({
+    auth: input.auth,
+    resourceType: "node",
+    resourceId: input.nodeId,
+    notFoundCode: "node_not_found"
+  });
+  if (!nodeOwned.ok) {
+    const auditInput: Omit<Parameters<ControlPlaneService["recordAudit"]>[0], "requestId"> & { requestId?: string } = {
+      auth: input.auth,
+      eventType: "tenant.access_denied",
+      decision: "deny",
+      reasonCode: nodeOwned.reasonCode,
+      resourceType: "node",
+      resourceId: input.nodeId,
+      payload: { routeId: input.routeId }
+    };
+    if (input.requestId) {
+      auditInput.requestId = input.requestId;
+    }
+    await auditNodeDecision(input.controlPlane, auditInput);
+    return { code: nodeOwned.code, reasonCode: nodeOwned.reasonCode };
+  }
+
+  if (!input.assignmentId) {
+    return null;
+  }
+
+  const assignmentOwned = await input.controlPlane.authorizeResource({
+    auth: input.auth,
+    resourceType: "assignment",
+    resourceId: input.assignmentId,
+    notFoundCode: "assignment_not_found"
+  });
+  if (!assignmentOwned.ok) {
+    const auditInput: Omit<Parameters<ControlPlaneService["recordAudit"]>[0], "requestId"> & { requestId?: string } = {
+      auth: input.auth,
+      eventType: "tenant.access_denied",
+      decision: "deny",
+      reasonCode: assignmentOwned.reasonCode,
+      resourceType: "assignment",
+      resourceId: input.assignmentId,
+      payload: { routeId: input.routeId }
+    };
+    if (input.requestId) {
+      auditInput.requestId = input.requestId;
+    }
+    await auditNodeDecision(input.controlPlane, auditInput);
+    return { code: assignmentOwned.code, reasonCode: assignmentOwned.reasonCode };
+  }
+
+  return null;
+}
+
+async function consumeReservation(
+  controlPlane: ControlPlaneService,
+  auth: AuthContext,
+  reservationId: string | undefined,
+  reasonCode: string
+): Promise<void> {
+  if (!reservationId) {
+    return;
+  }
+  try {
+    await controlPlane.releaseQuotaReservation({
+      auth,
+      reservationId,
+      outcome: "consumed",
+      reasonCode
+    });
+  } catch {
+    // Best-effort release; route outcome remains authoritative.
+  }
+}
+
+async function failReservation(
+  controlPlane: ControlPlaneService,
+  auth: AuthContext,
+  reservationId: string | undefined,
+  reasonCode: string
+): Promise<void> {
+  if (!reservationId) {
+    return;
+  }
+  try {
+    await controlPlane.releaseQuotaReservation({
+      auth,
+      reservationId,
+      outcome: "failed",
+      reasonCode
+    });
+  } catch {
+    // Best-effort release; route outcome remains authoritative.
+  }
+}
+
+async function bestEffortMarkNodeOffline(coordinator: NodeCoordinatorService, nodeId: string): Promise<void> {
+  const candidate = coordinator as unknown as { markOffline?: (id: string) => Promise<unknown> };
+  if (typeof candidate.markOffline !== "function") {
+    return;
+  }
+  try {
+    await candidate.markOffline(nodeId);
+  } catch {
+    // Best effort only.
+  }
+}
+
+async function auditNodeAuthFailure(
+  request: FastifyRequest,
+  deps: NodeRouteDependencies,
+  error: ControlPlaneError
+): Promise<void> {
+  const controlPlane = deps.controlPlane;
+  if (!controlPlane) {
+    return;
+  }
+
+  const fallback = resolveFallbackAuditAuth(request, deps);
+  if (fallback) {
+    await auditNodeDecision(controlPlane, {
+      auth: fallback,
+      eventType: error.code === "tenant_access_denied" ? "tenant.access_denied" : "node.auth_failed",
+      decision: "deny",
+      reasonCode: error.reasonCode,
+      resourceType: "auth",
+      resourceId: "nodes.route",
+      requestId: request.id,
+      payload: {
+        routeId: "nodes.auth",
+        method: request.method,
+        pathname: routePathname(request)
+      }
+    });
+    return;
+  }
+
+  const singleBinding = deps.nodeTokenBindings && deps.nodeTokenBindings.length === 1
+    ? deps.nodeTokenBindings[0]
+    : undefined;
+  if (!singleBinding) {
+    return;
+  }
+
+  try {
+    await controlPlane.recordAudit({
+      accountId: singleBinding.auth.account.id,
+      tenantId: singleBinding.auth.tenant.id,
+      projectId: singleBinding.auth.project.id,
+      actorType: "system",
+      eventType: error.code === "tenant_access_denied" ? "tenant.access_denied" : "node.auth_failed",
+      decision: "deny",
+      reasonCode: error.reasonCode,
+      resourceType: "auth",
+      resourceId: "nodes.route",
+      requestId: request.id,
+      payload: {
+        routeId: "nodes.auth",
+        method: request.method,
+        pathname: routePathname(request)
+      }
+    });
+  } catch {
+    // Best effort only.
+  }
+}
+
+function resolveFallbackAuditAuth(request: FastifyRequest, deps: NodeRouteDependencies): AuthContext | undefined {
+  const headers = request.headers as Record<string, string | string[] | undefined>;
+  const token = readHeader(headers, "x-switchyard-node-token");
+  if (!token) {
+    return undefined;
+  }
+  const binding = findNodeTokenBinding(token.trim(), deps.nodeTokenBindings);
+  return binding?.auth;
+}
+
+async function auditNodeDecision(
+  controlPlane: ControlPlaneService,
+  input: Omit<Parameters<ControlPlaneService["recordAudit"]>[0], "requestId"> & { requestId?: string }
+): Promise<void> {
+  const payload: Parameters<ControlPlaneService["recordAudit"]>[0] = { ...input };
+  if (!input.requestId) {
+    const mutable = payload as unknown as { requestId?: string };
+    delete mutable.requestId;
+  }
+  try {
+    await controlPlane.recordAudit(payload);
+  } catch {
+    // Best-effort only.
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function controlPlaneDetails(error: ControlPlaneError): HttpErrorDetail[] | undefined {
+  const details: HttpErrorDetail[] = [{ path: "reasonCode", issue: error.reasonCode }];
+  if (error.safeDetails) {
+    for (const [key, value] of Object.entries(error.safeDetails)) {
+      details.push({ path: key, issue: String(value) });
+    }
+  }
+  return details;
+}
+
+declare module "fastify" {
+  interface FastifyRequest {
+    nodeRouteAuth?: NodeRouteAuthState;
+  }
 }
