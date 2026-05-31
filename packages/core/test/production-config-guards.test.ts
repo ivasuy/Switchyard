@@ -137,6 +137,19 @@ describe("production config guards", () => {
     });
   });
 
+  it("fails closed on unknown hosted runtime allowlist entries before policy checks", () => {
+    expect(
+      validateProductionHostedRuntimeAllowlist({
+        allowlist: ["fake.deterministic", "generic_http.async_rest"],
+        hostedRealRuntimeExecution: "enabled"
+      })
+    ).toEqual({
+      ok: false,
+      code: "config_invalid:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+      variable: "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
+    });
+  });
+
   it("requires production https urls", () => {
     expect(validateProductionHttpsUrl({ variable: "SWITCHYARD_SERVER_URL", value: "http://hosted.example.com" })).toEqual({
       ok: false,

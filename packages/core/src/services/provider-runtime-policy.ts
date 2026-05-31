@@ -53,11 +53,8 @@ export interface ProviderRuntimeActivationResult {
     hostedRealRuntimeExecution: ProviderRuntimePolicyResolutionInput["hostedRealRuntimeExecution"];
     realModeCount: number;
     enabledRealModeCount: number;
-    source: {
-      kind: "none" | "json" | "path";
-      state: ProviderRuntimePolicySourceState | "none";
-      policyBytes?: number | undefined;
-    };
+    source: { kind: "none" | "json" | "path" };
+    policyVersion?: number | undefined;
     modeStatuses: Array<{ runtimeMode: ProviderRuntimeMode; ready: boolean; reasons: ProviderRuntimeActivationCode[] }>;
     reasonCodes: ProviderRuntimeActivationCode[];
   };
@@ -77,6 +74,7 @@ export interface ProviderRuntimeActivationInput {
   env: Readonly<Record<string, string | undefined>>;
   binaryProbe?: ((input: { runtimeMode: ProviderRuntimeMode; executablePath: string }) => boolean) | undefined;
   sourceSummary?: ProviderRuntimeActivationResult["redactedSummary"]["source"] | undefined;
+  policyVersion?: number | undefined;
 }
 
 export interface ProviderRuntimePolicyDenied {
@@ -136,8 +134,15 @@ const METADATA_DENIED_KEYS = new Set([
 
 export function resolveProviderRuntimePolicy(input: ProviderRuntimePolicyResolutionInput): ProviderRuntimePolicyResolutionResult {
   const source = normalizePolicySource(input.policyJson, input.policyPathContents);
+  const unknownModes = getUnknownHostedRuntimeAllowlistModes(input.hostedRuntimeAllowlist);
   const realModes = getAllowlistedRealModes(input.hostedRuntimeAllowlist);
   const sourceSummary = summarizeSource(source);
+
+  if (unknownModes.length > 0) {
+    return {
+      activation: buildFailureResult(input, realModes, sourceSummary, [{ code: "provider_runtime_policy_unknown_mode" }])
+    };
+  }
 
   if (input.hostedRealRuntimeExecution !== "enabled" && realModes.length > 0) {
     return {
@@ -178,21 +183,17 @@ export function resolveProviderRuntimePolicy(input: ProviderRuntimePolicyResolut
 
   const payload = source.contents ?? "";
   const policyBytes = Buffer.byteLength(payload, "utf8");
-  const withBytesSummary = {
-    ...sourceSummary,
-    policyBytes
-  };
 
   if (policyBytes > POLICY_MAX_BYTES) {
     return {
-      activation: buildFailureResult(input, realModes, withBytesSummary, [{ code: "provider_runtime_policy_malformed" }])
+      activation: buildFailureResult(input, realModes, sourceSummary, [{ code: "provider_runtime_policy_malformed" }])
     };
   }
 
   const normalizedPayload = payload.trim();
   if (!normalizedPayload) {
     return {
-      activation: buildFailureResult(input, realModes, withBytesSummary, [{ code: "provider_runtime_policy_empty" }])
+      activation: buildFailureResult(input, realModes, sourceSummary, [{ code: "provider_runtime_policy_empty" }])
     };
   }
 
@@ -201,13 +202,13 @@ export function resolveProviderRuntimePolicy(input: ProviderRuntimePolicyResolut
     parsedRaw = JSON.parse(normalizedPayload);
   } catch {
     return {
-      activation: buildFailureResult(input, realModes, withBytesSummary, [{ code: "provider_runtime_policy_malformed" }])
+      activation: buildFailureResult(input, realModes, sourceSummary, [{ code: "provider_runtime_policy_malformed" }])
     };
   }
 
   if (!parsedRaw || typeof parsedRaw !== "object" || Array.isArray(parsedRaw)) {
     return {
-      activation: buildFailureResult(input, realModes, withBytesSummary, [
+      activation: buildFailureResult(input, realModes, sourceSummary, [
         { code: "provider_runtime_policy_malformed", detail: "policy_not_json_object" }
       ])
     };
@@ -217,7 +218,7 @@ export function resolveProviderRuntimePolicy(input: ProviderRuntimePolicyResolut
   if (!parsedPolicy.success) {
     const code = classifyPolicyParseFailure(parsedPolicy.error.issues);
     return {
-      activation: buildFailureResult(input, realModes, withBytesSummary, [{ code }])
+      activation: buildFailureResult(input, realModes, sourceSummary, [{ code }])
     };
   }
 
@@ -228,7 +229,8 @@ export function resolveProviderRuntimePolicy(input: ProviderRuntimePolicyResolut
     policy: parsedPolicy.data,
     env: input.env,
     binaryProbe: input.binaryProbe,
-    sourceSummary: withBytesSummary
+    sourceSummary,
+    policyVersion: parsedPolicy.data.version
   });
 
   return {
@@ -239,18 +241,23 @@ export function resolveProviderRuntimePolicy(input: ProviderRuntimePolicyResolut
 
 export function validateProviderRuntimeActivation(input: ProviderRuntimeActivationInput): ProviderRuntimeActivationResult {
   const realModes = getAllowlistedRealModes(input.hostedRuntimeAllowlist);
-  const source = input.sourceSummary ?? { kind: "none", state: "none" };
+  const source = input.sourceSummary ?? { kind: "none" };
+  const unknownModes = getUnknownHostedRuntimeAllowlistModes(input.hostedRuntimeAllowlist);
+
+  if (unknownModes.length > 0) {
+    return buildFailureResult(input, realModes, source, [{ code: "provider_runtime_policy_unknown_mode" }], input.policyVersion);
+  }
 
   if (input.hostedRealRuntimeExecution !== "enabled" && realModes.length > 0) {
-    return buildFailureResult(input, realModes, source, [{ code: "hosted_real_runtime_disabled" }]);
+    return buildFailureResult(input, realModes, source, [{ code: "hosted_real_runtime_disabled" }], input.policyVersion);
   }
 
   if (realModes.length === 0) {
-    return buildSuccessResult(input, [], source, input.policy);
+    return buildSuccessResult(input, [], source, input.policy, input.policyVersion);
   }
 
   if (!input.policy) {
-    return buildFailureResult(input, realModes, source, [{ code: "provider_runtime_policy_missing", detail: "source_missing" }]);
+    return buildFailureResult(input, realModes, source, [{ code: "provider_runtime_policy_missing", detail: "source_missing" }], input.policyVersion);
   }
 
   const reasons: ProviderRuntimeActivationReason[] = [];
@@ -316,6 +323,7 @@ export function validateProviderRuntimeActivation(input: ProviderRuntimeActivati
         realModeCount: realModes.length,
         enabledRealModeCount: 0,
         source,
+        policyVersion: input.policyVersion,
         modeStatuses: realModes.map((runtimeMode) => ({
           runtimeMode,
           ready: (modeStatuses.get(runtimeMode)?.length ?? 0) === 0,
@@ -327,7 +335,7 @@ export function validateProviderRuntimeActivation(input: ProviderRuntimeActivati
     };
   }
 
-  return buildSuccessResult(input, enabledModes, source, input.policy);
+  return buildSuccessResult(input, enabledModes, source, input.policy, input.policyVersion);
 }
 
 export function buildProviderResolvedCommand(
@@ -584,16 +592,8 @@ function mapPathStateToFailureCode(state: ProviderRuntimePolicySourceState): Pro
 }
 
 function summarizeSource(source: NormalizedPolicySource): ProviderRuntimeActivationResult["redactedSummary"]["source"] {
-  if (source.kind === "none") {
-    return {
-      kind: "none",
-      state: "none"
-    };
-  }
-
   return {
-    kind: source.kind,
-    state: source.state
+    kind: source.kind
   };
 }
 
@@ -621,7 +621,8 @@ function buildFailureResult(
   input: Pick<ProviderRuntimePolicyResolutionInput, "deploymentMode" | "hostedRealRuntimeExecution">,
   realModes: ProviderRuntimeMode[],
   source: ProviderRuntimeActivationResult["redactedSummary"]["source"],
-  reasons: ProviderRuntimeActivationReason[]
+  reasons: ProviderRuntimeActivationReason[],
+  policyVersion?: number
 ): ProviderRuntimeActivationResult {
   const reasonCodes = dedupeReasonCodes(reasons);
   return {
@@ -634,6 +635,7 @@ function buildFailureResult(
       realModeCount: realModes.length,
       enabledRealModeCount: 0,
       source,
+      policyVersion,
       modeStatuses: realModes.map((runtimeMode) => ({ runtimeMode, ready: false, reasons: reasonCodes })),
       reasonCodes
     }
@@ -644,7 +646,8 @@ function buildSuccessResult(
   input: Pick<ProviderRuntimePolicyResolutionInput, "deploymentMode" | "hostedRealRuntimeExecution">,
   enabledRealModes: ProviderRuntimeMode[],
   source: ProviderRuntimeActivationResult["redactedSummary"]["source"],
-  policy: ProviderRuntimePolicy | undefined
+  policy: ProviderRuntimePolicy | undefined,
+  policyVersion?: number
 ): ProviderRuntimeActivationResult {
   return {
     valid: true,
@@ -656,6 +659,7 @@ function buildSuccessResult(
       realModeCount: enabledRealModes.length,
       enabledRealModeCount: enabledRealModes.length,
       source,
+      policyVersion,
       modeStatuses: enabledRealModes.map((runtimeMode) => ({ runtimeMode, ready: true, reasons: [] })),
       reasonCodes: []
     },
@@ -684,6 +688,19 @@ function getAllowlistedRealModes(allowlist: readonly string[]): ProviderRuntimeM
   }
 
   return realModes;
+}
+
+function getUnknownHostedRuntimeAllowlistModes(allowlist: readonly string[]): string[] {
+  const unknownModes: string[] = [];
+  for (const rawMode of allowlist) {
+    if (rawMode === "fake.deterministic") {
+      continue;
+    }
+    if (!providerRuntimeModeSchema.safeParse(rawMode).success) {
+      unknownModes.push(rawMode);
+    }
+  }
+  return unknownModes;
 }
 
 function requiresPolicy(

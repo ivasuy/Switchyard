@@ -109,6 +109,14 @@ export function validateProductionHostedRuntimeAllowlist(
   if (input.allowlist.length === 0) {
     return fail(`config_required:${variable}`, variable);
   }
+  for (const mode of input.allowlist) {
+    if (mode === FAKE_RUNTIME_ALLOWLIST) {
+      continue;
+    }
+    if (!providerRuntimeModeSchema.safeParse(mode).success) {
+      return fail(`config_invalid:${variable}`, variable);
+    }
+  }
   const realModes = input.allowlist.filter((mode) => mode !== FAKE_RUNTIME_ALLOWLIST);
   if (realModes.length === 0) {
     return { ok: true };

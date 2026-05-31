@@ -46,6 +46,18 @@ describe("provider runtime policy", () => {
     });
   });
 
+  it("fails closed on unknown hosted runtime allowlist mode before policy lookup", () => {
+    const result = resolveProviderRuntimePolicy({
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+      env: {}
+    });
+
+    expect(result.activation.valid).toBe(false);
+    expect(result.activation.reasons[0]).toMatchObject({ code: "provider_runtime_policy_unknown_mode" });
+  });
+
   it("rejects production real mode when gate is disabled", () => {
     const result = resolveProviderRuntimePolicy({
       deploymentMode: "production",
@@ -71,10 +83,14 @@ describe("provider runtime policy", () => {
     expect(result.activation.valid).toBe(false);
     expect(result.activation.reasons[0]).toMatchObject({ code: "provider_runtime_policy_malformed" });
 
+    expect(result.activation.redactedSummary.source).toEqual({ kind: "json" });
+
     const summary = JSON.stringify(result.activation.redactedSummary);
     expect(summary).not.toContain("secret-value");
     expect(summary).not.toContain("/opt/switchyard/bin/codex");
     expect(summary).not.toContain(VALID_POLICY);
+    expect(summary).not.toContain("policyBytes");
+    expect(summary).not.toContain("\"state\"");
   });
 
   it("maps unreadable and invalid path policies to named failures without leaking path", () => {
@@ -97,7 +113,9 @@ describe("provider runtime policy", () => {
     });
     expect(malformed.activation.valid).toBe(false);
     expect(malformed.activation.reasons[0]).toMatchObject({ code: "provider_runtime_policy_malformed" });
+    expect(malformed.activation.redactedSummary.source).toEqual({ kind: "path" });
     expect(JSON.stringify(malformed.activation.redactedSummary)).not.toContain("/tmp/policy.json");
+    expect(JSON.stringify(malformed.activation.redactedSummary)).not.toContain("\"state\"");
   });
 
   it("rejects empty and malformed policy payloads", () => {
