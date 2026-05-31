@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { type FastifyInstance } from "fastify";
-import type { CodexCatalogProbe } from "@switchyard/adapters";
+import { type CodexCatalogProbe, type GithubClient, type LocalProcessFactory, type SearchClient } from "@switchyard/adapters";
+import { createDisabledRealToolPolicyConfig } from "@switchyard/core";
 import {
   createFakeClaudeCodeClient,
   createFakeClaudeCodeCliProcessFactory,
@@ -355,6 +358,160 @@ describe("daemon app", () => {
       } catch {
         // best effort
       }
+      rmSync(config.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("runs configured no-spend approvals/completions for fetch, web_search, github, repo, and shell", async () => {
+    const config = tempDaemonConfig("switchyard-daemon-r17-no-spend-tools-");
+    const realTools = createDisabledRealToolPolicyConfig();
+    realTools.global.enabled = true;
+    realTools.global.approvalDefault = "required";
+    realTools.fetch.enabled = true;
+    realTools.fetch.allowedHosts = ["example.com"];
+    realTools.fetch.allowedContentTypes = ["text/plain"];
+    realTools.webSearch.enabled = true;
+    realTools.webSearch.providerId = "fake-search";
+    realTools.webSearch.baseUrl = "https://search.example/api";
+    realTools.webSearch.maxResults = 5;
+    realTools.github.enabled = true;
+    realTools.github.token = "ghp_no_spend";
+    realTools.github.allowedRepos = ["openai/codex"];
+    realTools.repo.enabled = true;
+    realTools.repo.allowedCwdPrefixes = ["/repo"];
+    realTools.shell.enabled = true;
+    realTools.shell.allowedCwdPrefixes = ["/repo"];
+    realTools.shell.catalog = {
+      "local.date.utc": {
+        commandId: "local.date.utc",
+        executablePath: "/bin/date",
+        argv: ["-u"],
+        allowedCwdPrefixes: ["/repo"],
+        env: { TZ: "UTC" },
+        maxArgs: 4
+      }
+    };
+    config.realTools = realTools;
+
+    let searchCalls = 0;
+    let githubCalls = 0;
+    const processCalls: Array<{ executablePath: string; argv: string[]; cwd: string }> = [];
+    const fakeSearchClient: SearchClient = {
+      async search(input) {
+        searchCalls += 1;
+        return [{ title: `result:${input.query}`, url: "https://example.com/r1", snippet: "ok" }];
+      }
+    };
+    const fakeGithubClient: GithubClient = {
+      async call(operation, plan) {
+        githubCalls += 1;
+        return { operation, owner: plan.owner, repo: plan.repo, number: plan.number ?? null };
+      }
+    };
+    const processFactory: LocalProcessFactory = {
+      spawn(executablePath, argv, options) {
+        processCalls.push({ executablePath, argv: [...argv], cwd: options.cwd });
+        const proc = new EventEmitter() as EventEmitter & {
+          stdout: PassThrough;
+          stderr: PassThrough;
+          kill: () => boolean;
+        };
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+        proc.stdout = stdout;
+        proc.stderr = stderr;
+        proc.kill = () => {
+          proc.emit("close", null);
+          return true;
+        };
+        setTimeout(() => {
+          stdout.end("ok\n");
+          stderr.end();
+          proc.emit("close", 0);
+        }, 0);
+        return proc;
+      }
+    };
+    const fetchCalls: string[] = [];
+    const toolFetchImpl: typeof fetch = async (url) => {
+      fetchCalls.push(String(url));
+      return new Response("ok", {
+        status: 200,
+        headers: { "content-type": "text/plain" }
+      });
+    };
+    const app = await createDaemonApp(config, {
+      codexProbe: unavailableCodexProbe,
+      toolFetchImpl,
+      toolDnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+      toolSearchClient: fakeSearchClient,
+      toolGithubClient: fakeGithubClient,
+      toolProcessFactory: processFactory
+    });
+    try {
+      const run = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "fake",
+          provider: "test",
+          model: "test-model",
+          adapterType: "process",
+          cwd: "/repo",
+          task: "real tools no-spend smoke"
+        }
+      });
+      expect(run.statusCode).toBe(201);
+      const runId = run.json().run.id as string;
+
+      const invokeAndApprove = async (payload: Record<string, unknown>) => {
+        const queued = await app.inject({
+          method: "POST",
+          url: "/tools/invocations",
+          payload: { runId, ...payload }
+        });
+        expect(queued.statusCode).toBe(202);
+        const approvalType = queued.json().approval.approvalType as string;
+        expect(["before_external_web_action", "before_local_process_execution"]).toContain(approvalType);
+        const approvalId = queued.json().approval.id as string;
+        const resolved = await app.inject({
+          method: "POST",
+          url: `/approvals/${approvalId}/approve`,
+          payload: { actor: "local-user" }
+        });
+        expect(resolved.statusCode).toBe(200);
+        expect(resolved.json().invocation.status, resolved.body).toBe("completed");
+      };
+
+      await invokeAndApprove({
+        type: "fetch",
+        input: { url: "https://example.com/smoke", method: "GET", captureContent: true }
+      });
+      await invokeAndApprove({
+        type: "web_search",
+        input: { query: "switchyard r17 smoke", maxResults: 2 }
+      });
+      await invokeAndApprove({
+        type: "github",
+        input: { operation: "get_issue", owner: "openai", repo: "codex", number: 1 }
+      });
+      await invokeAndApprove({
+        type: "repo",
+        input: { operation: "status", cwd: "/repo" }
+      });
+      await invokeAndApprove({
+        type: "shell",
+        input: { commandId: "local.date.utc", cwd: "/repo", args: ["+%Y"] }
+      });
+
+      expect(fetchCalls.length).toBeGreaterThanOrEqual(1);
+      expect(searchCalls).toBeGreaterThanOrEqual(1);
+      expect(githubCalls).toBeGreaterThanOrEqual(1);
+      expect(processCalls.length).toBeGreaterThanOrEqual(2);
+      expect(processCalls.some((call) => call.executablePath === "/bin/date")).toBe(true);
+      expect(processCalls.some((call) => call.executablePath === "git")).toBe(true);
+    } finally {
+      await app.close();
       rmSync(config.dataDir, { recursive: true, force: true });
     }
   });
