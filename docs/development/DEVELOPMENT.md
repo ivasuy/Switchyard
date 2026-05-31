@@ -68,50 +68,109 @@ SDK quick one-liner:
 node --import tsx -e 'import {SwitchyardClient} from \"@switchyard/sdk\"; const c=new SwitchyardClient({baseUrl:\"http://127.0.0.1:4545\"}); const r=await c.health(); console.log(r.ok);'
 ```
 
-## R18 No-Spend Verification (Copy/Paste)
+## R19 No-Spend Verification (Copy/Paste)
 
-These checks are deterministic and no-spend. They use fake/runtime-only harnesses and must not call payment providers, model providers, AWS/R2, live GitHub, external search, hosted browser, or arbitrary process/PTY execution.
+These required checks are deterministic and no-spend. They must not call payment providers, model providers, AWS/R2 live services, live GitHub, external search, hosted browsers, or arbitrary process/PTY execution.
 
 ```bash
 pnpm --filter @switchyard/daemon test -- smoke
 pnpm --filter @switchyard/sdk test -- client
 pnpm --filter @switchyard/cli test -- run-cli
+pnpm exec vitest run deploy/production/production-manifest.test.ts scripts/production-preflight.test.ts scripts/production-migrate.test.ts scripts/production-canary.test.ts
 pnpm --filter @switchyard/contracts openapi:check
 pnpm --filter @switchyard/contracts openapi:check:hosted
 pnpm typecheck
 git diff --check
 ```
 
-Hosted OpenAPI generation/check (for hosted contract drift):
+Hosted OpenAPI regeneration/check (run only when hosted contract/docs output changes):
 
 ```bash
 pnpm --filter @switchyard/contracts openapi:generate:hosted
 pnpm --filter @switchyard/contracts openapi:check:hosted
 ```
 
-## R18 Hosted Rollout / Rollback
+## R19 Production Operator Commands
+
+Preflight (required before deploy):
+
+```bash
+pnpm production:preflight -- --env-file deploy/production/.env --manifest deploy/production/manifest.json --include-node
+```
+
+Migrate (required before traffic):
+
+```bash
+pnpm production:migrate -- --env-file deploy/production/.env
+```
+
+Canary (required after server+worker are healthy):
+
+```bash
+pnpm production:canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --timeout-ms 30000
+```
+
+Canary supports `SWITCHYARD_CANARY_API_KEY` as an alternative to `--api-key`.
+
+## R19 Hosted Rollout / Rollback
 
 Rollout order (required):
 
-1. Deploy additive Postgres schema changes first (new control-plane and ownership tables/indexes).
-2. Deploy auth/control-plane code after schema readiness is confirmed.
-3. Enable hosted auth/config for staging/production:
-   - `SWITCHYARD_SERVER_AUTH_MODE=api_key`
-   - `SWITCHYARD_API_KEY_PEPPER=<non-empty>`
-   - `SWITCHYARD_CONTROL_PLANE_STORE=postgres`
-   - `SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH=<path>` or bootstrap JSON env
+1. Build/publish server, worker, and optional node images with compiled `dist` entrypoints.
+2. Copy `deploy/production/.env.example` to `deploy/production/.env` and replace every `replace-with-*` placeholder.
+3. Prepare bootstrap JSON from `deploy/production/bootstrap.example.json` and mount it to `SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH`.
+4. Run `pnpm production:preflight -- --env-file deploy/production/.env --manifest deploy/production/manifest.json --include-node`.
+5. Run `pnpm production:migrate -- --env-file deploy/production/.env`.
+6. Deploy server, wait for `GET /health`, then verify `GET /ready`.
+7. Deploy worker only after readiness is green.
+8. Run `pnpm production:canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key`.
 
-Fail-closed staging/production behavior:
+Fail-closed production behavior:
 
-- Startup/readiness fails if auth mode is disabled, pepper/bootstrap/store requirements are incomplete, or control-plane checks fail.
-- `/metrics` is not public in hosted auth mode; it requires API key auth plus `metrics:read` and `admin:read`.
-- Existing unowned hosted resources are never silently adopted into a tenant; readiness fails until explicit operator migration is performed.
+- Startup/readiness fails if auth/bootstrap/store/schema/runtime-gate requirements are unsafe.
+- `GET /ready` is public and reports named machine codes under `checks.*` (including `checks.schema` diagnostics).
+- `GET /metrics` is protected and requires API key auth with both `metrics:read` and `admin:read`.
+- `SWITCHYARD_PUBLIC_METRICS=1` is forbidden in staging/production.
+- Hosted production runtime policy remains fake-only (`SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic`, `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`).
 
-Rollback behavior:
+R19 non-goals reminder:
 
-- Roll back code after schema rollout leaves additive tables inert/unused.
-- Rollback does not delete or rewrite the new schema data.
-- Re-enabling R18 code must pass the same fail-closed readiness/bootstrap checks before protected hosted traffic is accepted.
+- No managed SaaS/public signup, payments/webhooks, OAuth/OIDC/SAML/SSO/SCIM, dashboard, or TUI setup is shipped here.
+- No production hosted real runtimes, no public `/exec`/`/sandbox`/`/terminal`/`/pty` routes, and no hosted or connected-node real tools are shipped here.
+- No browser automation, Cursor/OpenClaw/Paperclip adapters, runtime-specific hosted approval bridges, or hosted debate participant/model-judging workflows are shipped here.
+
+Rollback order:
+
+1. Pause worker claims first (example with compose):
+   - `docker compose -f deploy/production/docker-compose.yml stop worker`
+2. Roll server back to the last known-good image.
+3. Re-check readiness; if `checks.schema.code=postgres_schema_version_unsupported` or `postgres_schema_migration_required`, keep traffic blocked until compatible code is restored.
+4. Roll worker back after server readiness is green.
+5. Re-run canary and keep evidence.
+
+Queue inspection while workers are paused:
+
+```bash
+BASE=https://replace-with-public-server-url
+API_KEY=replace-with-operator-api-key
+curl -s -H "Authorization: Bearer $API_KEY" -H "x-switchyard-api-key: $API_KEY" "$BASE/metrics" | python3 -m json.tool
+curl -s -H "Authorization: Bearer $API_KEY" -H "x-switchyard-api-key: $API_KEY" "$BASE/runs?status=queued&limit=50" | python3 -m json.tool
+curl -s -H "Authorization: Bearer $API_KEY" -H "x-switchyard-api-key: $API_KEY" "$BASE/runs?status=running&limit=50" | python3 -m json.tool
+```
+
+Canary evidence retention:
+
+- Keep canary run/audit/artifact records as rollback and compliance evidence.
+- Keep the `runId` returned by `production:canary` and use:
+  - `GET /runs/:id`
+  - `GET /runs/:id/events`
+  - `GET /runs/:id/artifacts`
+  - `GET /audit/events?limit=50` (and match the canary metadata in event payloads)
+
+Optional live dependency checks:
+
+- Optional live checks against operator-managed Postgres/Redis/object stores are operator-owned.
+- Optional live checks are not required in CI/audit and must stay outside deterministic no-spend required verification.
 
 ## Runtime Capability Smoke
 

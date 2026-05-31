@@ -5,11 +5,11 @@ This document covers the shipped API surfaces:
 - Local daemon (`local_daemon` OpenAPI surface): no-auth by default, local-first runtime/middleware contract.
 - Hosted server (`hosted_server` OpenAPI surface): API-key-authenticated enterprise control-plane foundation for tenant/project ownership, entitlements/quotas, and audit events.
 
-R18 scope note: hosted/server auth/billing/tenant controls are now shipped as a foundation only. Payment collection, public self-service, OAuth/SSO, dashboard, TUI, hosted real tools, browser automation, and arbitrary process/PTY execution remain unshipped.
+R19 scope note: production hosted deployment readiness is shipped for the existing safe hosted boundary. This release is API/ops-first (manifests, preflight/migrate/canary, readiness/schema codes, rollback posture), not a managed SaaS launch.
 
-## R18 Hosted Enterprise Control-Plane Foundation
+## R19 Production Hosted Deployment Readiness
 
-Shipped hosted/server control-plane capabilities:
+Shipped hosted/server production-readiness capabilities:
 
 - `SWITCHYARD_SERVER_AUTH_MODE=api_key` for hosted protected routes.
 - `SWITCHYARD_API_KEY_PEPPER` hashing requirement in staging/production.
@@ -17,7 +17,49 @@ Shipped hosted/server control-plane capabilities:
 - `SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH` or bootstrap JSON env requirement before staging/production startup.
 - Tenant/project ownership checks plus entitlement/quota contracts before hosted side effects.
 - `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events` on hosted surface.
-- Hosted `/metrics` requires authenticated operator/admin scope (`metrics:read` plus `admin:read`) when hosted auth is enabled; tenant-scoped metrics are not shipped in R18.
+- Hosted `/metrics` requires authenticated operator/admin scope (`metrics:read` plus `admin:read`); `/health` and `/ready` remain public on hosted surface.
+- Production preflight command (`pnpm production:preflight -- --env-file <path>`) validates env/manifest/config/schema/queue/object-store/control-plane/runtime-gate posture with redacted diagnostics.
+- Production migration command (`pnpm production:migrate -- --env-file <path>`) runs additive Postgres schema migration with named status codes.
+- Production canary command (`pnpm production:canary -- --base-url <https-url> --api-key <key>`) verifies authenticated ready/run/events/artifacts/metrics/audit on fake-only hosted execution (`fake.deterministic`).
+- Production hosted real-runtime execution remains forbidden in R19.
+
+Named production readiness and migration codes used by `/ready` and production operator workflows:
+
+- `postgres_schema_ready`
+- `postgres_schema_migration_required`
+- `postgres_schema_version_unsupported`
+- `postgres_unavailable`
+- `queue_unavailable`
+- `object_store_unavailable`
+- `object_store_auth_failed`
+- `object_store_bucket_not_found`
+- `hosted_runtime_gate_failed`
+- `hosted_real_runtime_production_forbidden`
+
+Named production canary result codes:
+
+- `canary_ok`
+- `auth_required`
+- `auth_invalid`
+- `invalid_base_url`
+- `ready_denied`
+- `run_create_denied`
+- `worker_timeout`
+- `unexpected_terminal_status`
+- `artifact_missing`
+- `artifact_content_empty`
+- `artifact_digest_mismatch`
+- `metrics_auth_failed`
+- `audit_lookup_failed`
+- `malformed_response`
+- `malformed_sse`
+
+Local compatibility remains explicit:
+
+- Local daemon defaults remain no-auth.
+- Local OpenAPI (`local_daemon` surface) does not require `SwitchyardApiKey`.
+- Local fake runs, SDK flows, CLI flows, and local real-tool policy behavior stay backwards compatible.
+- `SWITCHYARD_PUBLIC_METRICS=1` remains forbidden in staging/production hosted posture.
 
 OpenAPI commands:
 
@@ -84,7 +126,7 @@ Current implementation status:
 - Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), local-daemon real tool invocation routing for configured `fetch`/`web_search`/`github`/`repo`/command-catalog `shell` (deny-by-default, approval-by-default), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex one-shot (`codex.exec_json`), local Codex interactive (`codex.interactive`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
-- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public PTY/terminal APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, per-run HTTP base URL overrides, remote artifact URL fetching, hosted/connected-node real tools, browser automation, real debate participant runtimes, and model-based debate judging.
+- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service/signup, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public `/exec`/`/sandbox`/`/pty`/`/terminal` APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, per-run HTTP base URL overrides, remote artifact URL fetching, hosted/connected-node real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, production hosted real-runtime execution, real debate participant runtimes, and model-based debate judging.
 
 ## Error Contract
 

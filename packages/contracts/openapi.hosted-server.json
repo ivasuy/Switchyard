@@ -3954,6 +3954,23 @@
       "ReadyResponse": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
+        "description": "Readiness checks keyed by subsystem name. Includes checks.schema with named Postgres schema compatibility codes.",
+        "examples": [
+          {
+            "checks": {
+              "schema": {
+                "code": "postgres_schema_migration_required",
+                "diagnostics": {
+                  "compatible": false,
+                  "currentVersion": 3,
+                  "requiredVersion": 4
+                },
+                "ok": false
+              }
+            },
+            "ok": false
+          }
+        ],
         "properties": {
           "checks": {
             "additionalProperties": {

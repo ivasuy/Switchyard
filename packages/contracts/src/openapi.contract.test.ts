@@ -152,6 +152,26 @@ describe("openapi generation", () => {
     expect(document.paths["/ready"]?.get?.security).toBeUndefined();
   });
 
+  it("documents hosted readiness schema checks with named codes and diagnostics", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const readySchema = document.components.schemas["ReadyResponse"] as Record<string, unknown> | undefined;
+    const examples = readySchema?.examples as Array<Record<string, unknown>> | undefined;
+    expect(Array.isArray(examples)).toBe(true);
+
+    const first = (examples ?? [])[0];
+    const checks = first?.checks as Record<string, unknown> | undefined;
+    const schemaCheck = checks?.schema as Record<string, unknown> | undefined;
+    expect(typeof schemaCheck?.ok).toBe("boolean");
+    expect(String(schemaCheck?.code ?? "")).toBe("postgres_schema_migration_required");
+    expect(schemaCheck?.diagnostics).toEqual(
+      expect.objectContaining({
+        currentVersion: expect.any(Number),
+        requiredVersion: expect.any(Number),
+        compatible: expect.any(Boolean)
+      })
+    );
+  });
+
   it("protects hosted runs and node routes with SwitchyardApiKey", () => {
     const document = generateOpenApiDocument({ surface: "hosted_server" });
     const expectedSecurity = [{ SwitchyardApiKey: [] }];

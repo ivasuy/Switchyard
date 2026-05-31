@@ -385,6 +385,9 @@ export function generateOpenApiDocument(options: GenerateOpenApiDocumentOptions 
     }
     components[schemaRef] = toJsonSchemaOrThrow(schemaRef, schema);
   }
+  if (surface === "hosted_server") {
+    applyHostedReadyResponseDocs(components.ReadyResponse);
+  }
 
   const paths: OpenApiDocument["paths"] = {};
 
@@ -488,6 +491,31 @@ function parseSurface(surface: OpenApiSurface | undefined): OpenApiSurface {
     return surface;
   }
   throw new Error(`Unknown OpenAPI surface "${surface}". Expected one of: local_daemon, hosted_server.`);
+}
+
+function applyHostedReadyResponseDocs(schema: SchemaObject | undefined): void {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return;
+  }
+
+  schema["description"] =
+    "Readiness checks keyed by subsystem name. Includes checks.schema with named Postgres schema compatibility codes.";
+  schema["examples"] = [
+    {
+      ok: false,
+      checks: {
+        schema: {
+          ok: false,
+          code: "postgres_schema_migration_required",
+          diagnostics: {
+            currentVersion: 3,
+            requiredVersion: 4,
+            compatible: false
+          }
+        }
+      }
+    }
+  ];
 }
 
 function isHostedProtectedOperation(entry: RouteInventoryEntry): boolean {
