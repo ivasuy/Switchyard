@@ -44,8 +44,29 @@ export const httpErrorCodeSchema = z.enum([
   "artifact_content_empty",
   "artifact_sync_failed",
   "hosted_runtime_not_allowed",
-  "payload_too_large"
+  "payload_too_large",
+  "auth_required",
+  "auth_failed",
+  "auth_conflict",
+  "auth_store_unavailable",
+  "tenant_access_denied",
+  "project_access_denied",
+  "entitlement_denied",
+  "quota_exceeded",
+  "audit_log_unavailable"
 ]);
+
+export const R18_HTTP_ERROR_CODES = [
+  "auth_required",
+  "auth_failed",
+  "auth_conflict",
+  "auth_store_unavailable",
+  "tenant_access_denied",
+  "project_access_denied",
+  "entitlement_denied",
+  "quota_exceeded",
+  "audit_log_unavailable"
+] as const satisfies readonly z.infer<typeof httpErrorCodeSchema>[];
 
 export const httpErrorDetailSchema = z.object({
   path: z.string().min(1),

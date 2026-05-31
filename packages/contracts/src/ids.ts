@@ -21,6 +21,13 @@ export const evidenceIdSchema = idSchema("evidence");
 export const toolInvocationIdSchema = idSchema("tool");
 export const userIdSchema = idSchema("user");
 export const organizationIdSchema = idSchema("org");
+export const accountIdSchema = idSchema("account");
+export const tenantIdSchema = idSchema("tenant");
+export const projectIdSchema = idSchema("project");
+export const apiKeyIdSchema = idSchema("api_key");
+export const billingPlanIdSchema = idSchema("billing_plan");
+export const quotaReservationIdSchema = idSchema("quota_reservation");
+export const auditLogEventIdSchema = idSchema("audit");
 export const contextPacketIdSchema = idSchema("context");
 
 export const isoDateSchema = z.string().datetime({ offset: true });

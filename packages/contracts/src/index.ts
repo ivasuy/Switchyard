@@ -5,6 +5,7 @@ export * from "./budget.js";
 export * from "./context.js";
 export * from "./cursor.js";
 export * from "./debate.js";
+export * from "./enterprise.js";
 export * from "./error.js";
 export * from "./endpoint-inventory.js";
 export * from "./event.js";

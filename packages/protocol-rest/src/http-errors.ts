@@ -45,6 +45,15 @@ export type HttpErrorCode =
   | "artifact_sync_failed"
   | "hosted_runtime_not_allowed"
   | "payload_too_large"
+  | "auth_required"
+  | "auth_failed"
+  | "auth_conflict"
+  | "auth_store_unavailable"
+  | "tenant_access_denied"
+  | "project_access_denied"
+  | "entitlement_denied"
+  | "quota_exceeded"
+  | "audit_log_unavailable"
   | "internal_error";
 
 export interface HttpErrorDetail {
@@ -105,6 +114,15 @@ const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   artifact_sync_failed: 500,
   hosted_runtime_not_allowed: 409,
   payload_too_large: 413,
+  auth_required: 401,
+  auth_failed: 401,
+  auth_conflict: 401,
+  auth_store_unavailable: 503,
+  tenant_access_denied: 403,
+  project_access_denied: 403,
+  entitlement_denied: 403,
+  quota_exceeded: 429,
+  audit_log_unavailable: 503,
   internal_error: 500
 };
 

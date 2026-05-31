@@ -1,6 +1,28 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import {
+  accountIdSchema,
+  tenantIdSchema,
+  projectIdSchema,
+  apiKeyIdSchema,
+  billingPlanIdSchema,
+  quotaReservationIdSchema,
+  auditLogEventIdSchema,
+  accountSchema,
+  tenantSchema as enterpriseTenantSchema,
+  projectSchema,
+  apiKeyPublicSchema,
+  apiKeyStoredSchema,
+  billingPlanSchema,
+  entitlementSnapshotSchema,
+  quotaUsageSchema,
+  quotaReservationSchema,
+  resourceOwnershipSchema,
+  authContextSchema,
+  auditLogEventSchema,
+  whoamiResponseSchema,
+  entitlementsResponseSchema,
+  auditEventsResponseSchema,
   doctorSummaryResponseSchema,
   approvalTypeSchema,
   approvalSchema,
@@ -613,6 +635,15 @@ describe("Switchyard contracts", () => {
     expect(httpErrorCodeSchema.parse("node_auth_failed")).toBe("node_auth_failed");
     expect(httpErrorCodeSchema.parse("assignment_claim_conflict")).toBe("assignment_claim_conflict");
     expect(httpErrorCodeSchema.parse("hosted_runtime_not_allowed")).toBe("hosted_runtime_not_allowed");
+    expect(httpErrorCodeSchema.parse("auth_required")).toBe("auth_required");
+    expect(httpErrorCodeSchema.parse("auth_failed")).toBe("auth_failed");
+    expect(httpErrorCodeSchema.parse("auth_conflict")).toBe("auth_conflict");
+    expect(httpErrorCodeSchema.parse("auth_store_unavailable")).toBe("auth_store_unavailable");
+    expect(httpErrorCodeSchema.parse("tenant_access_denied")).toBe("tenant_access_denied");
+    expect(httpErrorCodeSchema.parse("project_access_denied")).toBe("project_access_denied");
+    expect(httpErrorCodeSchema.parse("entitlement_denied")).toBe("entitlement_denied");
+    expect(httpErrorCodeSchema.parse("quota_exceeded")).toBe("quota_exceeded");
+    expect(httpErrorCodeSchema.parse("audit_log_unavailable")).toBe("audit_log_unavailable");
   });
 
   it("parses R10 assignment and node sync request contracts", () => {
@@ -990,6 +1021,264 @@ describe("Switchyard contracts", () => {
     expect(budgetSchema.parse({ status: "within_budget", maxCostUsd: 5, spentCostUsd: 0 }).status).toBe("within_budget");
     expect(contextPacketSchema.parse({ id: "context_123", target: "run", sections: [], createdAt: "2026-05-11T00:00:00.000Z" }).target).toBe("run");
     expect(errorSchema.parse({ code: "validation_failed", message: "Invalid request" }).code).toBe("validation_failed");
+  });
+
+  it("parses enterprise ids and rejects org prefix outside legacy organization id", () => {
+    expect(accountIdSchema.parse("account_123")).toBe("account_123");
+    expect(tenantIdSchema.parse("tenant_123")).toBe("tenant_123");
+    expect(projectIdSchema.parse("project_123")).toBe("project_123");
+    expect(apiKeyIdSchema.parse("api_key_123")).toBe("api_key_123");
+    expect(billingPlanIdSchema.parse("billing_plan_123")).toBe("billing_plan_123");
+    expect(quotaReservationIdSchema.parse("quota_reservation_123")).toBe("quota_reservation_123");
+    expect(auditLogEventIdSchema.parse("audit_123")).toBe("audit_123");
+    expect(() => tenantIdSchema.parse("org_123")).toThrow();
+  });
+
+  it("accepts legacy and enterprise user shapes", () => {
+    const legacy = userSchema.parse({
+      id: "user_legacy",
+      organizationId: "org_legacy",
+      displayName: "Legacy User",
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(legacy.organizationId).toBe("org_legacy");
+
+    const enterprise = userSchema.parse({
+      id: "user_enterprise",
+      accountId: "account_123",
+      tenantId: "tenant_123",
+      displayName: "Enterprise User",
+      email: "enterprise@example.com",
+      status: "active",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-12T00:00:00.000Z"
+    });
+    expect(enterprise.accountId).toBe("account_123");
+    expect(enterprise.tenantId).toBe("tenant_123");
+    expect(enterprise.status).toBe("active");
+  });
+
+  it("enforces api key secret visibility boundaries", () => {
+    expect(() =>
+      apiKeyPublicSchema.parse({
+        id: "api_key_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        userId: "user_1",
+        name: "test",
+        keyPrefix: "sk_sw",
+        scopes: ["runs:read"],
+        status: "active",
+        createdAt: "2026-05-11T00:00:00.000Z",
+        secretHash: "sha256:abc"
+      })
+    ).toThrow();
+
+    const stored = apiKeyStoredSchema.parse({
+      id: "api_key_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      name: "test",
+      keyPrefix: "sk_sw",
+      secretHash: "sha256:abc",
+      scopes: ["runs:read"],
+      status: "active",
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(stored.secretHash).toBe("sha256:abc");
+    expect(() =>
+      apiKeyStoredSchema.parse({
+        id: "api_key_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        userId: "user_1",
+        name: "test",
+        keyPrefix: "sk_sw",
+        scopes: ["runs:read"],
+        status: "active",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
+  });
+
+  it("parses enterprise identity, billing, entitlement, quota, and audit fixtures", () => {
+    const account = accountSchema.parse({
+      id: "account_1",
+      name: "Acme Account",
+      status: "active",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(account.id).toBe("account_1");
+
+    const tenant = enterpriseTenantSchema.parse({
+      id: "tenant_1",
+      accountId: "account_1",
+      name: "Acme Tenant",
+      status: "active",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(tenant.accountId).toBe("account_1");
+
+    const project = projectSchema.parse({
+      id: "project_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      name: "Production",
+      status: "active",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(project.tenantId).toBe("tenant_1");
+
+    const plan = billingPlanSchema.parse({
+      id: "billing_plan_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      name: "enterprise",
+      status: "active",
+      allowedPlacements: ["hosted", "local"],
+      allowedRuntimeModes: ["fake.deterministic"],
+      allowHostedRealRuntime: false,
+      maxTimeoutSeconds: 1800,
+      maxRunsPerHour: 100,
+      maxActiveRuns: 10,
+      maxConnectedNodes: 5,
+      maxArtifactContentReadBytesPerHour: 1048576,
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(plan.maxRunsPerHour).toBe(100);
+
+    const entitlement = entitlementSnapshotSchema.parse({
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      planId: "billing_plan_1",
+      planName: "enterprise",
+      allowedPlacements: ["hosted", "local"],
+      allowedRuntimeModes: ["fake.deterministic"],
+      allowHostedRealRuntime: false,
+      maxTimeoutSeconds: 1800,
+      maxRunsPerHour: 100,
+      maxActiveRuns: 10,
+      maxConnectedNodes: 5,
+      maxArtifactContentReadBytesPerHour: 1048576,
+      scopes: ["runs:read", "runs:write"],
+      capturedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(entitlement.planId).toBe("billing_plan_1");
+
+    const usage = quotaUsageSchema.parse({
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      used: 12,
+      windowStartedAt: "2026-05-11T00:00:00.000Z",
+      windowEndsAt: "2026-05-11T01:00:00.000Z",
+      updatedAt: "2026-05-11T00:10:00.000Z"
+    });
+    expect(usage.quotaKind).toBe("runs_per_hour");
+
+    const reservation = quotaReservationSchema.parse({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "reserved",
+      reasonCode: "run_create",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      expiresAt: "2026-05-11T00:05:00.000Z",
+      finalizedAt: "2026-05-11T00:01:00.000Z"
+    });
+    expect(reservation.state).toBe("reserved");
+
+    const ownership = resourceOwnershipSchema.parse({
+      resourceType: "run",
+      resourceId: "run_123",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      apiKeyId: "api_key_1",
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(ownership.resourceType).toBe("run");
+
+    const authContext = authContextSchema.parse({
+      account,
+      tenant,
+      project,
+      user: {
+        id: "user_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        displayName: "Vasu",
+        email: "vasu@example.com",
+        status: "active",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      },
+      apiKey: {
+        id: "api_key_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        userId: "user_1",
+        name: "test",
+        keyPrefix: "sk_sw",
+        scopes: ["runs:read"],
+        status: "active",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      },
+      entitlement
+    });
+    expect(authContext.apiKey.id).toBe("api_key_1");
+
+    const auditEvent = auditLogEventSchema.parse({
+      id: "audit_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      actorUserId: "user_1",
+      actorApiKeyId: "api_key_1",
+      action: "auth.denied",
+      resourceType: "auth",
+      resourceId: "api_key_1",
+      outcome: "denied",
+      reasonCode: "auth_required",
+      payload: {
+        authorization: "[REDACTED]",
+        keyPrefix: "sk_sw",
+        requestId: "req_1"
+      },
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(auditEvent.payload.authorization).toBe("[REDACTED]");
+
+    expect(
+      whoamiResponseSchema.parse({
+        auth: authContext
+      }).auth.project.id
+    ).toBe("project_1");
+    expect(
+      entitlementsResponseSchema.parse({
+        entitlement
+      }).entitlement.accountId
+    ).toBe("account_1");
+    expect(
+      auditEventsResponseSchema.parse({
+        events: [auditEvent],
+        nextCursor: "cursor_2"
+      }).events.length
+    ).toBe(1);
   });
 
   it("rejects missing required fields for every public contract schema", () => {
