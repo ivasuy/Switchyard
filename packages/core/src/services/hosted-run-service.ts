@@ -13,6 +13,11 @@ import {
   type HostedDeploymentMode,
   type HostedRealRuntimeExecution
 } from "./hosted-runtime-catalog.js";
+import {
+  checkProviderSpendControlsForRun,
+  type ProviderRuntimeActivationResult
+} from "./provider-runtime-policy.js";
+import { providerRuntimeModeSchema } from "@switchyard/contracts";
 
 export class HostedRunServiceError extends Error {
   readonly code:
@@ -37,6 +42,9 @@ export interface HostedRunServiceDependencies {
   hostedRuntimeAllowlist: string[];
   deploymentMode: HostedDeploymentMode;
   hostedRealRuntimeExecution: HostedRealRuntimeExecution;
+  providerRuntimeActivation?: ProviderRuntimeActivationResult | undefined;
+  countActiveRunsByRuntimeMode?: (runtimeMode: string) => Promise<number>;
+  countRunsInPastHourByRuntimeMode?: (runtimeMode: string) => Promise<number>;
   listOnlineNodes: () => Promise<ConnectedNode[]>;
   now?: () => string;
   waitForRun?: (runId: string) => Promise<Run>;
@@ -51,6 +59,11 @@ export type CreateHostedRunInput = Parameters<RunService["createRun"]>[0] & {
   placementFacts: RuntimePlacementFacts;
 };
 
+export interface HostedRunCreatePreflight {
+  decision: ReturnType<PlacementService["decide"]>;
+  catalog: ReturnType<typeof getHostedRuntimeCatalogEntry>;
+}
+
 export class HostedRunService {
   private readonly now: () => string;
 
@@ -58,48 +71,12 @@ export class HostedRunService {
     this.now = deps.now ?? (() => new Date().toISOString());
   }
 
-  async createRun(input: CreateHostedRunInput, options?: { wait?: boolean }): Promise<{ run: Run; response?: { text: string | null; outputs: Array<{ sequence: number; text: string }> } }> {
-    const decision = this.deps.placementService.decide({
-      requestedPlacement: input.placement,
-      runtimeMode: input.runtimeMode ?? "",
-      placementFacts: input.placementFacts,
-      hostedRuntimeAllowlist: this.deps.hostedRuntimeAllowlist,
-      onlineNodes: await this.deps.listOnlineNodes(),
-      now: this.now()
-    });
-
-    if (decision.decision === "reject") {
-      this.deps.metrics?.inc("placement.denied");
-      this.deps.logger?.warn("hosted.runtime.placement.denied", {
-        runtimeMode: input.runtimeMode,
-        reasonCode: decision.reason
-      });
-      throw new HostedRunServiceError(
-        decision.reason === "hosted_runtime_not_allowed" ? "hosted_runtime_not_allowed" : "placement_denied",
-        decision.reason
-      );
-    }
-
-    const runtimeMode = input.runtimeMode;
-    const catalog = getHostedRuntimeCatalogEntry(runtimeMode);
-
-    if (decision.decision === "hosted") {
-      const preflight = this.preflightHosted(input, options, catalog);
-      if (preflight) {
-        this.deps.metrics?.inc("placement.denied");
-        this.deps.logger?.warn("hosted.runtime.placement.denied", {
-          runtimeMode,
-          reasonCode: preflight.message
-        });
-        throw preflight;
-      }
-      this.deps.metrics?.inc("placement.accepted");
-      this.deps.logger?.info("hosted.runtime.placement.accepted", {
-        runtimeMode,
-        adapterId: catalog?.adapterId,
-        adapterType: catalog?.adapterType
-      });
-    }
+  async createRun(
+    input: CreateHostedRunInput,
+    options?: { wait?: boolean; preflight?: HostedRunCreatePreflight }
+  ): Promise<{ run: Run; response?: { text: string | null; outputs: Array<{ sequence: number; text: string }> } }> {
+    const preflight = options?.preflight ?? await this.preflightCreateRun(input, options);
+    const { decision } = preflight;
 
     const runPlacement: Run["placement"] =
       decision.decision === "connected_local_node"
@@ -151,11 +128,67 @@ export class HostedRunService {
     return { run };
   }
 
-  private preflightHosted(
+  async preflightCreateRun(
+    input: CreateHostedRunInput,
+    options?: { wait?: boolean }
+  ): Promise<HostedRunCreatePreflight> {
+    const runtimeMode = input.runtimeMode;
+    if (isRealHostedRuntimeMode(runtimeMode) && input.placement !== "hosted") {
+      this.deps.metrics?.inc("placement.denied");
+      this.deps.logger?.warn("hosted.runtime.placement.denied", {
+        runtimeMode,
+        reasonCode: "hosted_explicit_placement_required"
+      });
+      throw new HostedRunServiceError("placement_denied", "hosted_explicit_placement_required");
+    }
+
+    const decision = this.deps.placementService.decide({
+      requestedPlacement: input.placement,
+      runtimeMode: runtimeMode ?? "",
+      placementFacts: input.placementFacts,
+      hostedRuntimeAllowlist: this.deps.hostedRuntimeAllowlist,
+      onlineNodes: await this.deps.listOnlineNodes(),
+      now: this.now()
+    });
+    if (decision.decision === "reject") {
+      this.deps.metrics?.inc("placement.denied");
+      this.deps.logger?.warn("hosted.runtime.placement.denied", {
+        runtimeMode: input.runtimeMode,
+        reasonCode: decision.reason
+      });
+      throw new HostedRunServiceError(
+        decision.reason === "hosted_runtime_not_allowed" ? "hosted_runtime_not_allowed" : "placement_denied",
+        decision.reason
+      );
+    }
+
+    const catalog = getHostedRuntimeCatalogEntry(runtimeMode);
+    if (decision.decision === "hosted") {
+      const preflightError = await this.preflightHosted(input, options, catalog);
+      if (preflightError) {
+        this.deps.metrics?.inc("placement.denied");
+        this.deps.logger?.warn("hosted.runtime.placement.denied", {
+          runtimeMode,
+          reasonCode: preflightError.message
+        });
+        throw preflightError;
+      }
+      this.deps.metrics?.inc("placement.accepted");
+      this.deps.logger?.info("hosted.runtime.placement.accepted", {
+        runtimeMode,
+        adapterId: catalog?.adapterId,
+        adapterType: catalog?.adapterType
+      });
+    }
+
+    return { decision, catalog };
+  }
+
+  private async preflightHosted(
     input: CreateHostedRunInput,
     options: { wait?: boolean } | undefined,
     catalog: ReturnType<typeof getHostedRuntimeCatalogEntry>
-  ): HostedRunServiceError | undefined {
+  ): Promise<HostedRunServiceError | undefined> {
     const runtimeMode = input.runtimeMode;
     if (!runtimeMode || !catalog) {
       return new HostedRunServiceError("hosted_runtime_not_allowed", "hosted_runtime_not_allowed");
@@ -183,8 +216,49 @@ export class HostedRunService {
       if (this.deps.hostedRealRuntimeExecution !== "enabled") {
         return new HostedRunServiceError("placement_denied", "hosted_real_runtime_disabled");
       }
-      if (this.deps.deploymentMode === "production") {
-        return new HostedRunServiceError("placement_denied", "hosted_real_runtime_production_forbidden");
+      const parsedMode = providerRuntimeModeSchema.safeParse(runtimeMode);
+      if (!parsedMode.success) {
+        return new HostedRunServiceError("placement_denied", "provider_runtime_policy_unknown_mode");
+      }
+
+      const activation = this.deps.providerRuntimeActivation;
+      if (this.deps.deploymentMode === "production" && (!activation || !activation.valid)) {
+        return new HostedRunServiceError(
+          "placement_denied",
+          activation?.reasons[0]?.code ?? "provider_runtime_policy_missing"
+        );
+      }
+
+      if (activation && !activation.enabledRealModes.includes(parsedMode.data)) {
+        const reason = activation.reasons.find((entry: { runtimeMode?: string | undefined }) => entry.runtimeMode === parsedMode.data)?.code
+          ?? activation.reasons[0]?.code
+          ?? "provider_runtime_policy_missing";
+        return new HostedRunServiceError("placement_denied", reason);
+      }
+
+      const spend = checkProviderSpendControlsForRun({
+        activation: activation ?? {
+          valid: false,
+          enabledRealModes: [],
+          reasons: [{ code: "provider_spend_controls_invalid", runtimeMode: parsedMode.data }],
+          redactedSummary: {
+            deploymentMode: this.deps.deploymentMode,
+            hostedRealRuntimeExecution: this.deps.hostedRealRuntimeExecution,
+            realModeCount: 1,
+            enabledRealModeCount: 0,
+            source: { kind: "none" },
+            modeStatuses: [{ runtimeMode: parsedMode.data, ready: false, reasons: ["provider_spend_controls_invalid"] }],
+            reasonCodes: ["provider_spend_controls_invalid"]
+          }
+        },
+        runtimeMode: parsedMode.data,
+        promptBytes: Buffer.byteLength(input.task, "utf8"),
+        activeRuns: await this.countActiveRunsByRuntimeMode(runtimeMode),
+        runsInPastHour: await this.countRunsInPastHourByRuntimeMode(runtimeMode),
+        timeoutSeconds: input.timeoutSeconds
+      });
+      if (!spend.ok) {
+        return new HostedRunServiceError("placement_denied", spend.code);
       }
     }
 
@@ -193,6 +267,34 @@ export class HostedRunService {
     }
 
     return undefined;
+  }
+
+  private async countActiveRunsByRuntimeMode(runtimeMode: string): Promise<number> {
+    if (this.deps.countActiveRunsByRuntimeMode) {
+      return this.deps.countActiveRunsByRuntimeMode(runtimeMode);
+    }
+
+    const listed = await this.deps.runs.list({
+      limit: 200,
+      status: ["queued", "starting", "running", "waiting_for_input", "waiting_for_approval"],
+      placement: ["hosted"]
+    });
+    return listed.runs.filter((run) => run.runtimeMode === runtimeMode).length;
+  }
+
+  private async countRunsInPastHourByRuntimeMode(runtimeMode: string): Promise<number> {
+    if (this.deps.countRunsInPastHourByRuntimeMode) {
+      return this.deps.countRunsInPastHourByRuntimeMode(runtimeMode);
+    }
+
+    const nowMs = Date.parse(this.now());
+    const since = new Date((Number.isFinite(nowMs) ? nowMs : Date.now()) - (60 * 60 * 1000)).toISOString();
+    const listed = await this.deps.runs.list({
+      limit: 200,
+      since,
+      placement: ["hosted"]
+    });
+    return listed.runs.filter((run) => run.runtimeMode === runtimeMode).length;
   }
 
   private async failCreatedRun(run: Run, reasonCode: string): Promise<void> {

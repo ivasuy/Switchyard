@@ -317,7 +317,7 @@ describe("hosted server", () => {
     ).toThrow("config_invalid:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION");
   });
 
-  it("rejects production hosted real-runtime gate", () => {
+  it("fails closed in production real-runtime activation when provider policy gates are missing", () => {
     expect(() =>
       loadServerConfig({
         SWITCHYARD_DEPLOYMENT_MODE: "production",
@@ -333,7 +333,7 @@ describe("hosted server", () => {
         SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
         SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled"
       })
-    ).toThrow(/config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION|hosted_real_runtime_production_forbidden/);
+    ).toThrow(/provider_runtime_policy_missing|provider_runtime_policy_malformed|provider_runtime_policy_empty/);
   });
 
   it("exposes readiness and hosted metrics", async () => {

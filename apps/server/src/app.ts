@@ -239,6 +239,7 @@ export async function createServerApp(config: ServerConfig) {
     hostedRuntimeAllowlist: config.hostedRuntimeAllowlist,
     deploymentMode: config.deploymentMode,
     hostedRealRuntimeExecution: config.hostedRealRuntimeExecution,
+    providerRuntimeActivation: config.providerRuntimeActivation,
     listOnlineNodes: async () => nodes.list({ status: "online" }),
     metrics,
     logger: {

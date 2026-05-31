@@ -411,7 +411,7 @@ describe("run routes", () => {
 
     expect(response.statusCode).toBe(409);
     expect(response.json().error.code).toBe("adapter_protocol_failed");
-    expect(response.json().error.details).toEqual([{ path: "reasonCode", issue: "hosted_input_unsupported" }]);
+    expect(response.json().error.details).toEqual([{ path: "reasonCode", issue: "hosted_input_bridge_unsupported" }]);
     expect(sendSpy).not.toHaveBeenCalled();
   });
 
@@ -1233,6 +1233,133 @@ describe("run routes hosted auth", () => {
     expect(releaseQuotaReservation).toHaveBeenCalledWith(expect.objectContaining({
       outcome: "consumed"
     }));
+  });
+
+  it("denies hosted real wait=1 before control-plane reservation and durable run side effects", async () => {
+    const preflightRunCreate = vi.fn(async () => ({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "reserved",
+      reasonCode: "run_create",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      expiresAt: "2026-05-31T00:05:00.000Z"
+    }));
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      preflightRunCreate,
+      ensureOwnedOrAttachFromRun: vi.fn(async () => ({ ok: true, created: true })),
+      releaseQuotaReservation: vi.fn(async () => ({})),
+      recordAudit: vi.fn(async () => ({ ok: true })),
+      authorizeResource: vi.fn(async () => ({ ok: false, decision: "not_found", code: "run_not_found", reasonCode: "resource_not_owned" }))
+    };
+    const hostedRuns = {
+      preflightCreateRun: vi.fn(async () => {
+        const error = new Error("hosted_wait_unsupported");
+        (error as { code?: string }).code = "placement_denied";
+        throw error;
+      }),
+      createRun: vi.fn(async () => {
+        throw new Error("must_not_create");
+      })
+    };
+    const harness = createRouteHarness({
+      withLauncher: false,
+      controlPlane: controlPlane as never,
+      hostedRuns: hostedRuns as never
+    });
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+    const runCreateSpy = vi.spyOn(harness.runService, "createRun");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: {
+        runtime: "codex",
+        provider: "openai",
+        model: "gpt-5",
+        adapterType: "process",
+        runtimeMode: "codex.exec_json",
+        cwd: "/repo",
+        task: "wait denied",
+        placement: "hosted"
+      }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("placement_denied");
+    expect(response.json().error.details).toEqual([{ path: "placement", issue: "hosted_wait_unsupported" }]);
+    expect(preflightRunCreate).not.toHaveBeenCalled();
+    expect(hostedRuns.createRun).not.toHaveBeenCalled();
+    expect(runCreateSpy).not.toHaveBeenCalled();
+  });
+
+  it("denies hosted real implicit placement before control-plane reservation and durable side effects", async () => {
+    const preflightRunCreate = vi.fn(async () => ({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "reserved",
+      reasonCode: "run_create",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      expiresAt: "2026-05-31T00:05:00.000Z"
+    }));
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      preflightRunCreate,
+      ensureOwnedOrAttachFromRun: vi.fn(async () => ({ ok: true, created: true })),
+      releaseQuotaReservation: vi.fn(async () => ({})),
+      recordAudit: vi.fn(async () => ({ ok: true })),
+      authorizeResource: vi.fn(async () => ({ ok: false, decision: "not_found", code: "run_not_found", reasonCode: "resource_not_owned" }))
+    };
+    const hostedRuns = {
+      preflightCreateRun: vi.fn(async () => {
+        const error = new Error("hosted_explicit_placement_required");
+        (error as { code?: string }).code = "placement_denied";
+        throw error;
+      }),
+      createRun: vi.fn(async () => {
+        throw new Error("must_not_create");
+      })
+    };
+    const harness = createRouteHarness({
+      withLauncher: false,
+      controlPlane: controlPlane as never,
+      hostedRuns: hostedRuns as never
+    });
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+    const runCreateSpy = vi.spyOn(harness.runService, "createRun");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: {
+        runtime: "codex",
+        provider: "openai",
+        model: "gpt-5",
+        adapterType: "process",
+        runtimeMode: "codex.exec_json",
+        cwd: "/repo",
+        task: "implicit placement denied"
+      }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("placement_denied");
+    expect(response.json().error.details).toEqual([{ path: "placement", issue: "hosted_explicit_placement_required" }]);
+    expect(preflightRunCreate).not.toHaveBeenCalled();
+    expect(hostedRuns.createRun).not.toHaveBeenCalled();
+    expect(runCreateSpy).not.toHaveBeenCalled();
   });
 
   it("fails create when assignment ownership attach fails and leaves no queued unowned run visible", async () => {

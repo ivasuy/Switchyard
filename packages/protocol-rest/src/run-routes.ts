@@ -111,6 +111,18 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       }
       recoveryCreateInput = createInput;
 
+      let placementFacts;
+      if (runtimeMode && deps.registry) {
+        const mode = await deps.registry.getRuntimeMode(runtimeMode);
+        placementFacts = mode?.placement;
+      }
+      const hostedPreflight = deps.hostedRuns && placementFacts && hasHostedPreflight(deps.hostedRuns)
+        ? await deps.hostedRuns.preflightCreateRun({
+          ...createInput,
+          placementFacts
+        }, { wait })
+        : undefined;
+
       if (deps.controlPlane && controlPlaneAuth) {
         const reservation = await deps.controlPlane.preflightRunCreate({
           auth: controlPlaneAuth,
@@ -121,11 +133,6 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
         reservationId = reservation.id;
       }
 
-      let placementFacts;
-      if (runtimeMode && deps.registry) {
-        const mode = await deps.registry.getRuntimeMode(runtimeMode);
-        placementFacts = mode?.placement;
-      }
       if (createInput.placement === "hosted" && placementFacts?.hosted.support === "unsupported") {
         return sendHttpError(reply, "placement_denied", "hosted_runtime_not_allowed", [
           { path: "placement", issue: "hosted_runtime_not_allowed" }
@@ -136,7 +143,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
         ? await deps.hostedRuns.createRun({
           ...createInput,
           placementFacts
-        }, { wait })
+        }, { wait, ...(hostedPreflight ? { preflight: hostedPreflight } : {}) })
         : { run: await deps.runService.createRun(createInput) };
 
       const run = runResult.run;
@@ -464,7 +471,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
         ]);
       }
       return sendHttpError(reply, "adapter_protocol_failed", "Hosted input bridge is not supported", [
-        { path: "reasonCode", issue: "hosted_input_unsupported" }
+        { path: "reasonCode", issue: "hosted_input_bridge_unsupported" }
       ]);
     }
 
@@ -1288,13 +1295,33 @@ function isHostedRunServiceError(error: unknown): error is { code: "placement_de
   return code === "placement_denied" || code === "queue_unavailable" || code === "hosted_runtime_not_allowed";
 }
 
+function hasHostedPreflight(value: HostedRunService): value is HostedRunService & {
+  preflightCreateRun: (
+    input: Parameters<HostedRunService["createRun"]>[0],
+    options?: { wait?: boolean }
+  ) => Promise<unknown>;
+} {
+  return typeof (value as { preflightCreateRun?: unknown }).preflightCreateRun === "function";
+}
+
 function placementDeniedDetails(message: string): Array<{ path: string; issue: string }> | undefined {
   const known = new Set([
     "hosted_wait_unsupported",
     "hosted_explicit_placement_required",
     "hosted_real_runtime_disabled",
     "hosted_real_runtime_production_forbidden",
-    "hosted_runtime_not_allowed"
+    "hosted_runtime_not_allowed",
+    "provider_runtime_policy_missing",
+    "provider_runtime_policy_empty",
+    "provider_runtime_policy_malformed",
+    "provider_runtime_policy_unknown_mode",
+    "provider_runtime_policy_disabled",
+    "provider_command_policy_invalid",
+    "provider_binary_unavailable",
+    "provider_credentials_missing",
+    "provider_spend_controls_invalid",
+    "provider_spend_limit_exceeded",
+    "provider_prompt_too_large"
   ]);
   if (!known.has(message)) {
     return undefined;
