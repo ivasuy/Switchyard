@@ -17,7 +17,8 @@
     "hosted-real-runtime:smoke": "tsx scripts/hosted-real-runtime-smoke.ts",
     "production:preflight": "tsx scripts/production-preflight.ts",
     "production:migrate": "tsx scripts/production-migrate.ts",
-    "production:canary": "tsx scripts/production-canary.ts"
+    "production:canary": "tsx scripts/production-canary.ts",
+    "production:provider-runtime-canary": "tsx scripts/production-canary.ts --runtime-mode codex.exec_json --confirm-provider-spend"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -8,6 +8,9 @@ interface ServiceManifest {
   requiredEnv: string[];
   healthChecks?: string[];
   readinessChecks?: string[];
+  policy?: {
+    hostedRealRuntimeExecution?: string;
+  };
 }
 
 interface ProductionManifest {
@@ -78,6 +81,15 @@ describe("production manifest pack", () => {
 
     expect(manifest.requiredEnv).toContain("SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST");
     expect(manifest.forbiddenSurfaces.length).toBeGreaterThan(0);
+    expect(manifest.forbiddenSurfaces).toEqual(expect.arrayContaining([
+      "/browser",
+      "/search",
+      "/github",
+      "/fetch",
+      "/repo",
+      "/dashboard",
+      "/tui"
+    ]));
   });
 
   it("uses built production commands only", () => {
@@ -155,7 +167,11 @@ describe("production manifest pack", () => {
       "oauth",
       "oidc",
       "saml",
-      "browser",
+      "/browser",
+      "/search",
+      "/github",
+      "/fetch",
+      "/repo",
       "exec",
       "sandbox",
       "pty",
@@ -173,5 +189,105 @@ describe("production manifest pack", () => {
     for (const token of ["dashboard", "tui", "payment", "oauth", "browser", "exec", "sandbox", "pty", "terminal"]) {
       expect(services.includes(token)).toBe(false);
     }
+  });
+
+  it("accepts explicit provider activation example as opt-in while default stays fake-only", () => {
+    const providerOptIn = {
+      version: "r21-provider-opt-in-example-v1",
+      services: {
+        server: {
+          deploymentMode: "production",
+          command: ["node", "apps/server/dist/main.js"],
+          requiredEnv: [
+            "SWITCHYARD_DEPLOYMENT_MODE",
+            "SWITCHYARD_SERVER_AUTH_MODE",
+            "SWITCHYARD_CONTROL_PLANE_STORE",
+            "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+            "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+            "SWITCHYARD_SANDBOX_REAL_EXECUTION",
+            "SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH",
+            "OPENAI_API_KEY"
+          ],
+          healthChecks: ["GET /health", "GET /ready"],
+          policy: {
+            runtimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+            hostedRealRuntimeExecution: "enabled",
+            objectStoreProbe: "write_read_delete",
+            sandboxExecution: {
+              realExecution: "disabled",
+              commandPolicy: "required_when_enabled",
+              networkPolicy: "disabled"
+            }
+          }
+        },
+        worker: {
+          deploymentMode: "production",
+          command: ["node", "apps/worker/dist/main.js"],
+          requiredEnv: [
+            "SWITCHYARD_DEPLOYMENT_MODE",
+            "SWITCHYARD_OBJECT_STORE_PROBE",
+            "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+            "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+            "SWITCHYARD_SANDBOX_REAL_EXECUTION",
+            "SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH",
+            "OPENAI_API_KEY"
+          ],
+          readinessGate: {
+            command: ["node", "apps/worker/dist/ready.js"]
+          },
+          policy: {
+            runtimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+            hostedRealRuntimeExecution: "enabled",
+            objectStoreProbe: "write_read_delete",
+            sandboxExecution: {
+              realExecution: "disabled",
+              commandPolicy: "required_when_enabled",
+              networkPolicy: "disabled"
+            }
+          }
+        }
+      },
+      requiredEnv: [
+        "SWITCHYARD_DEPLOYMENT_MODE",
+        "SWITCHYARD_SERVER_AUTH_MODE",
+        "SWITCHYARD_CONTROL_PLANE_STORE",
+        "SWITCHYARD_POSTGRES_URL",
+        "SWITCHYARD_REDIS_URL",
+        "SWITCHYARD_OBJECT_STORE_BACKEND",
+        "SWITCHYARD_OBJECT_STORE_PROBE",
+        "SWITCHYARD_NODE_SHARED_TOKEN",
+        "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        "SWITCHYARD_SANDBOX_REAL_EXECUTION"
+      ],
+      forbiddenSurfaces: [
+        "dashboard",
+        "tui",
+        "payment",
+        "oauth",
+        "browser",
+        "/sandbox",
+        "/exec",
+        "/shell",
+        "/process",
+        "/command",
+        "/pty",
+        "/terminal",
+        "/browser",
+        "/search",
+        "/github",
+        "/fetch",
+        "/repo",
+        "/dashboard",
+        "/tui"
+      ]
+    };
+
+    expect(providerOptIn.services.server.policy.hostedRealRuntimeExecution).toBe("enabled");
+    expect(providerOptIn.services.worker.policy.hostedRealRuntimeExecution).toBe("enabled");
+
+    const committedManifest = parseManifestJson(readFileSync(deployPath("manifest.json"), "utf8"));
+    expect(committedManifest.services.server.policy?.hostedRealRuntimeExecution).toBe("disabled");
+    expect(committedManifest.services.worker.policy?.hostedRealRuntimeExecution).toBe("disabled");
   });
 });

@@ -57,6 +57,60 @@ function makeWorkerConfig(overrides: Record<string, unknown> = {}): any {
   };
 }
 
+function makeProviderActivation(
+  overrides: {
+    valid?: boolean;
+    enabledRealModes?: string[];
+    reasons?: Array<{ code: string; runtimeMode?: string }>;
+    source?: "none" | "json" | "path";
+    reasonCodes?: string[];
+  } = {}
+): any {
+  const reasons = overrides.reasons ?? [];
+  const reasonCodes = overrides.reasonCodes ?? reasons.map((entry) => entry.code);
+  return {
+    valid: overrides.valid ?? true,
+    enabledRealModes: overrides.enabledRealModes ?? [],
+    reasons,
+    redactedSummary: {
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      realModeCount: 1,
+      enabledRealModeCount: (overrides.enabledRealModes ?? []).length,
+      source: { kind: overrides.source ?? "json" },
+      modeStatuses: [
+        {
+          runtimeMode: "codex.exec_json",
+          ready: (overrides.valid ?? true) && (overrides.enabledRealModes ?? []).includes("codex.exec_json"),
+          reasons: reasonCodes
+        }
+      ],
+      reasonCodes
+    },
+    policy: {
+      version: 1,
+      modes: {
+        "codex.exec_json": {
+          enabled: true,
+          executablePath: "/bin/echo",
+          cwdPrefixes: ["/srv/switchyard/work"],
+          envAllowlist: ["OPENAI_API_KEY", "PATH"],
+          requiredEnv: ["OPENAI_API_KEY"],
+          fixedArgs: ["exec", "--json"],
+          allowUserArgs: false,
+          sandbox: "read_only",
+          spendControls: {
+            maxActiveRuns: 2,
+            maxRunsPerHour: 20,
+            maxRunTimeoutSeconds: 300,
+            maxPromptBytes: 60000
+          }
+        }
+      }
+    }
+  };
+}
+
 async function runDependencyPreflight(deps: Record<string, unknown>): Promise<Awaited<ReturnType<typeof runProductionPreflight>>> {
   return withTempResult(async (dir) => {
     const envPath = join(dir, "ok.env");
@@ -483,6 +537,135 @@ describe("validateProductionManifest", () => {
 });
 
 describe("runProductionPreflight", () => {
+  test("marks provider runtime policy inactive for fake-only production", async () => {
+    const result = await runDependencyPreflight({});
+    const providerPolicy = result.checks.find((entry) => entry.name === "providerRuntimePolicy");
+    expect(providerPolicy).toMatchObject({
+      name: "providerRuntimePolicy",
+      status: "pass",
+      code: "provider_runtime_policy_inactive"
+    });
+  });
+
+  test("fails with provider_runtime_policy_missing and skips adapter checks when real mode activation is invalid", async () => {
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: makeProviderActivation({
+            valid: false,
+            enabledRealModes: [],
+            reasons: [{ code: "provider_runtime_policy_missing", runtimeMode: "codex.exec_json" }],
+            reasonCodes: ["provider_runtime_policy_missing"]
+          })
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: makeProviderActivation({
+            valid: false,
+            enabledRealModes: [],
+            reasons: [{ code: "provider_runtime_policy_missing", runtimeMode: "codex.exec_json" }],
+            reasonCodes: ["provider_runtime_policy_missing"]
+          })
+        }),
+      checkHostedRuntimeGate: async () => ({ ok: true })
+    });
+
+    expect(result.ok).toBe(false);
+    const providerPolicy = result.checks.find((entry) => entry.name === "providerRuntimePolicy");
+    expect(providerPolicy).toMatchObject({
+      name: "providerRuntimePolicy",
+      status: "fail",
+      code: "provider_runtime_policy_missing"
+    });
+    expect(result.checks).toContainEqual({
+      name: "providerAdapterChecks",
+      status: "skip",
+      code: "skipped_provider_policy_invalid"
+    });
+  });
+
+  test("fails providerAdapterChecks when adapter availability check fails for real mode", async () => {
+    const activation = makeProviderActivation({
+      valid: true,
+      enabledRealModes: ["codex.exec_json"],
+      reasons: [],
+      reasonCodes: []
+    });
+
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({ ok: true }),
+      checkProviderAdapters: async () => ({
+        ok: false,
+        modes: {
+          "codex.exec_json": { ok: false, code: "provider_binary_unavailable" },
+          "claude_code.sdk": { ok: true },
+          "opencode.acp": { ok: true }
+        }
+      })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual({
+      name: "providerAdapterChecks",
+      status: "fail",
+      code: "provider_binary_unavailable",
+      diagnostics: {
+        modes: {
+          "codex.exec_json": { ok: false, code: "provider_binary_unavailable" },
+          "claude_code.sdk": { ok: true },
+          "opencode.acp": { ok: true }
+        }
+      }
+    });
+  });
+
+  test("redacts provider diagnostics for path and secret-like values", async () => {
+    const activation = makeProviderActivation({
+      valid: false,
+      enabledRealModes: [],
+      reasons: [{ code: "provider_runtime_policy_malformed", runtimeMode: "codex.exec_json" }],
+      source: "path",
+      reasonCodes: ["provider_runtime_policy_malformed"]
+    });
+
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({
+        ok: false,
+        code: "hosted_runtime_gate_failed",
+        diagnostics: {
+          sourcePath: "/run/secrets/provider-policy.json",
+          token: "replace-with-secret-token"
+        }
+      })
+    });
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("/run/secrets/provider-policy.json");
+    expect(serialized).not.toContain("replace-with-secret-token");
+  });
+
   test("returns input blockers and skips config/dependency checks", async () => {
     const loadServerConfig = vi.fn();
     const result = await runProductionPreflight({

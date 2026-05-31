@@ -193,6 +193,100 @@ function buildHappyPlan(contentBytes: Uint8Array, auditResponder?: PlannedRespon
   ];
 }
 
+function buildProviderHappyPlan(contentBytes: Uint8Array, runtimeMode: "codex.exec_json" | "claude_code.sdk" | "opencode.acp"): PlannedResponse[] {
+  const digest = `sha256:${sha256Hex(contentBytes)}`;
+  return [
+    {
+      method: "GET",
+      path: "/auth/whoami",
+      responder: () => jsonResponse(200, { auth: { account: { id: "account_1" } } })
+    },
+    {
+      method: "GET",
+      path: "/entitlements",
+      responder: () => jsonResponse(200, { entitlement: { entitlements: { allowMetricsRead: true } } })
+    },
+    {
+      method: "GET",
+      path: "/ready",
+      responder: () => jsonResponse(200, { ok: true, checks: {} })
+    },
+    {
+      method: "POST",
+      path: "/runs",
+      responder: ({ init }) => {
+        const body = JSON.parse(String(init.body ?? "{}"));
+        expect(body.placement).toBe("hosted");
+        expect(body.runtimeMode).toBe(runtimeMode);
+        expect(body.metadata.switchyardCanary).toBe("r21-provider-production");
+        return jsonResponse(202, { run: { id: "run_provider_1", status: "queued" } });
+      }
+    },
+    {
+      method: "GET",
+      path: "/runs/run_provider_1",
+      responder: () => jsonResponse(200, {
+        run: {
+          id: "run_provider_1",
+          status: "completed"
+        },
+        events: []
+      })
+    },
+    {
+      method: "GET",
+      path: "/runs/run_provider_1/events",
+      responder: () => textResponse(200, sseEvent({ event: "ok" }), "text/event-stream")
+    },
+    {
+      method: "GET",
+      path: "/runs/run_provider_1/artifacts",
+      responder: () => jsonResponse(200, {
+        artifacts: [
+          {
+            id: "artifact_provider_1",
+            metadata: {
+              digest,
+              size: contentBytes.byteLength
+            }
+          }
+        ]
+      })
+    },
+    {
+      method: "GET",
+      path: "/artifacts/artifact_provider_1/content",
+      responder: () => bytesResponse(200, contentBytes)
+    },
+    {
+      method: "GET",
+      path: "/metrics",
+      responder: () => jsonResponse(200, {
+        hostedRuntime: {
+          lifecycle: {
+            runtime_mode: runtimeMode,
+            outcome: "accepted"
+          }
+        }
+      })
+    },
+    {
+      method: "GET",
+      path: "/audit/events",
+      responder: () => jsonResponse(200, {
+        events: [
+          {
+            id: "audit_provider_1",
+            resourceType: "run",
+            resourceId: "run_provider_1",
+            payload: { switchyardCanary: "r21-provider-production" }
+          }
+        ]
+      })
+    }
+  ];
+}
+
 describe("runProductionCanary", () => {
   test("happy path verifies ready/run/events/artifact/content/metrics/audit", async () => {
     const baseUrl = "https://switchyard.example";
@@ -552,5 +646,162 @@ describe("runProductionCanary", () => {
 
     const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
     expectFailure(result, "auth_invalid");
+  });
+
+  test("provider mode requires explicit spend confirmation", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const result = await runProductionCanary({
+      baseUrl: "https://switchyard.example",
+      apiKey: "test-key",
+      runtimeMode: "codex.exec_json",
+      fetchImpl
+    });
+    expectFailure(result, "provider_canary_config_missing");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test("provider mode rejects blank runtime mode", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const result = await runProductionCanary({
+      baseUrl: "https://switchyard.example",
+      apiKey: "test-key",
+      runtimeMode: "   ",
+      confirmProviderSpend: true,
+      fetchImpl
+    });
+    expectFailure(result, "provider_canary_runtime_empty");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test("provider mode returns provider_canary_create_denied", async () => {
+    const baseUrl = "https://switchyard.example";
+    const { fetchImpl } = createPlannedFetch(baseUrl, [
+      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
+      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
+      { method: "GET", path: "/ready", responder: () => jsonResponse(200, { ok: true, checks: {} }) },
+      { method: "POST", path: "/runs", responder: () => jsonResponse(409, { code: "hosted_runtime_not_allowed" }) }
+    ]);
+
+    const result = await runProductionCanary({
+      baseUrl,
+      apiKey: "test-key",
+      runtimeMode: "codex.exec_json",
+      confirmProviderSpend: true,
+      fetchImpl
+    });
+    expectFailure(result, "provider_canary_create_denied");
+  });
+
+  test("provider mode returns provider_canary_timeout", async () => {
+    const baseUrl = "https://switchyard.example";
+    const { fetchImpl } = createPlannedFetch(baseUrl, [
+      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
+      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
+      { method: "GET", path: "/ready", responder: () => jsonResponse(200, { ok: true, checks: {} }) },
+      { method: "POST", path: "/runs", responder: () => jsonResponse(202, { run: { id: "run_provider_1", status: "queued" } }) },
+      { method: "GET", path: "/runs/run_provider_1", responder: () => jsonResponse(200, { run: { id: "run_provider_1", status: "queued" } }) },
+      { method: "GET", path: "/runs/run_provider_1", responder: () => jsonResponse(200, { run: { id: "run_provider_1", status: "running" } }) }
+    ]);
+
+    const result = await runProductionCanary({
+      baseUrl,
+      apiKey: "test-key",
+      runtimeMode: "codex.exec_json",
+      confirmProviderSpend: true,
+      fetchImpl,
+      timeoutMs: 150,
+      now: makeNow([0, 50, 100, 151, 200, 250, 300])
+    });
+    expectFailure(result, "provider_canary_timeout");
+  });
+
+  test("provider mode returns provider_canary_run_failed for failed terminal status", async () => {
+    const baseUrl = "https://switchyard.example";
+    const { fetchImpl } = createPlannedFetch(baseUrl, [
+      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
+      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
+      { method: "GET", path: "/ready", responder: () => jsonResponse(200, { ok: true, checks: {} }) },
+      { method: "POST", path: "/runs", responder: () => jsonResponse(202, { run: { id: "run_provider_1", status: "queued" } }) },
+      { method: "GET", path: "/runs/run_provider_1", responder: () => jsonResponse(200, { run: { id: "run_provider_1", status: "failed" } }) }
+    ]);
+
+    const result = await runProductionCanary({
+      baseUrl,
+      apiKey: "test-key",
+      runtimeMode: "codex.exec_json",
+      confirmProviderSpend: true,
+      fetchImpl
+    });
+    expectFailure(result, "provider_canary_run_failed");
+  });
+
+  test("provider mode returns provider_canary_artifact_missing", async () => {
+    const baseUrl = "https://switchyard.example";
+    const bytes = new TextEncoder().encode("provider output");
+    const plan = buildProviderHappyPlan(bytes, "codex.exec_json");
+    plan[6] = {
+      method: "GET",
+      path: "/runs/run_provider_1/artifacts",
+      responder: () => jsonResponse(200, { artifacts: [] })
+    };
+    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
+
+    const result = await runProductionCanary({
+      baseUrl,
+      apiKey: "test-key",
+      runtimeMode: "codex.exec_json",
+      confirmProviderSpend: true,
+      fetchImpl
+    });
+    expectFailure(result, "provider_canary_artifact_missing");
+  });
+
+  test("provider mode returns provider_canary_metrics_failed", async () => {
+    const baseUrl = "https://switchyard.example";
+    const bytes = new TextEncoder().encode("provider output");
+    const plan = buildProviderHappyPlan(bytes, "codex.exec_json");
+    plan[8] = {
+      method: "GET",
+      path: "/metrics",
+      responder: () => jsonResponse(403, { code: "forbidden" })
+    };
+    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
+
+    const result = await runProductionCanary({
+      baseUrl,
+      apiKey: "test-key",
+      runtimeMode: "codex.exec_json",
+      confirmProviderSpend: true,
+      fetchImpl
+    });
+    expectFailure(result, "provider_canary_metrics_failed");
+  });
+
+  test("provider mode returns provider_canary_audit_failed", async () => {
+    const baseUrl = "https://switchyard.example";
+    const bytes = new TextEncoder().encode("provider output");
+    const plan = buildProviderHappyPlan(bytes, "codex.exec_json");
+    plan[9] = {
+      method: "GET",
+      path: "/audit/events",
+      responder: () => jsonResponse(200, { events: [] })
+    };
+    plan.splice(10, 0, {
+      method: "GET",
+      path: "/audit/events",
+      responder: () => jsonResponse(200, { events: [] })
+    });
+    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
+
+    const result = await runProductionCanary({
+      baseUrl,
+      apiKey: "test-key",
+      runtimeMode: "codex.exec_json",
+      confirmProviderSpend: true,
+      fetchImpl,
+      timeoutMs: 700,
+      now: makeNow([0, 50, 100, 150, 200, 250, 300, 350, 500, 700, 900])
+    });
+    expectFailure(result, "provider_canary_audit_failed");
   });
 });

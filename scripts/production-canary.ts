@@ -7,6 +7,14 @@ type CanaryCode =
   | "auth_required"
   | "auth_invalid"
   | "invalid_base_url"
+  | "provider_canary_config_missing"
+  | "provider_canary_runtime_empty"
+  | "provider_canary_create_denied"
+  | "provider_canary_timeout"
+  | "provider_canary_run_failed"
+  | "provider_canary_artifact_missing"
+  | "provider_canary_metrics_failed"
+  | "provider_canary_audit_failed"
   | "ready_denied"
   | "run_create_denied"
   | "worker_timeout"
@@ -50,6 +58,8 @@ export interface ProductionCanaryResult {
 export interface ProductionCanaryOptions {
   baseUrl: string;
   apiKey?: string;
+  runtimeMode?: string;
+  confirmProviderSpend?: boolean;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -58,6 +68,8 @@ export interface ProductionCanaryOptions {
 interface ParsedCanaryArgs {
   baseUrl?: string;
   apiKey?: string;
+  runtimeMode?: string;
+  confirmProviderSpend: boolean;
   timeoutMs?: number;
   json: boolean;
 }
@@ -71,6 +83,11 @@ interface FetchState {
   apiKey: string;
   fetchImpl: typeof fetch;
   baseUrl: string;
+}
+
+interface ProviderCanaryMode {
+  kind: "fake" | "provider";
+  runtimeMode?: "codex.exec_json" | "claude_code.sdk" | "opencode.acp";
 }
 
 const TERMINAL_FAILURE_STATUSES = new Set(["failed", "cancelled", "timed_out", "timeout"]);
@@ -108,6 +125,7 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
   const startedAtMs = now();
   const steps: CanaryStep[] = [];
   const apiKey = options.apiKey ?? process.env["SWITCHYARD_CANARY_API_KEY"];
+  const canaryMode = resolveCanaryMode(options.runtimeMode);
   const parsedBase = parseBaseUrl(options.baseUrl);
   const timeoutMs = normalizeTimeoutMs(options.timeoutMs);
 
@@ -120,20 +138,38 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     delayedAuditEvidence: false
   };
 
+  if (!canaryMode.ok) {
+    addStep(steps, now, startedAtMs, "input.runtime", "fail", canaryMode.code);
+    return finalize(false, canaryMode.code, steps, summary, now, startedAtMs);
+  }
+
+  if (canaryMode.mode.kind === "provider" && !options.confirmProviderSpend) {
+    addStep(steps, now, startedAtMs, "input.confirmation", "fail", "provider_canary_config_missing");
+    return finalize(false, "provider_canary_config_missing", steps, summary, now, startedAtMs);
+  }
+
   if (!apiKey || apiKey.trim().length === 0) {
+    if (canaryMode.mode.kind === "provider") {
+      addStep(steps, now, startedAtMs, "input.auth", "fail", "provider_canary_config_missing");
+      return finalize(false, "provider_canary_config_missing", steps, summary, now, startedAtMs);
+    }
     addStep(steps, now, startedAtMs, "input.auth", "fail", "auth_required");
     return finalize(false, "auth_required", steps, summary, now, startedAtMs);
   }
 
   if (!parsedBase.ok) {
+    if (canaryMode.mode.kind === "provider") {
+      addStep(steps, now, startedAtMs, "input.baseUrl", "fail", "provider_canary_config_missing");
+      return finalize(false, "provider_canary_config_missing", steps, summary, now, startedAtMs);
+    }
     addStep(steps, now, startedAtMs, "input.baseUrl", "fail", "invalid_base_url");
     return finalize(false, "invalid_base_url", steps, summary, now, startedAtMs);
   }
 
-  const state: FetchState = {
-    apiKey: apiKey.trim(),
-    fetchImpl: options.fetchImpl ?? fetch,
-    baseUrl: parsedBase.value
+    const state: FetchState = {
+      apiKey: apiKey.trim(),
+      fetchImpl: options.fetchImpl ?? fetch,
+      baseUrl: parsedBase.value
   };
 
   try {
@@ -169,26 +205,27 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     }
     addStep(steps, now, startedAtMs, "ready", "pass", "ready_ok", { httpStatus: ready.status });
 
-    const canaryId = `r19-${randomUUID()}`;
+    const canaryId = `${canaryMode.mode.kind === "provider" ? "r21-provider" : "r19"}-${randomUUID()}`;
     const startedAtIso = new Date(startedAtMs).toISOString();
     const createPayload = {
-      runtime: "fake",
-      provider: "test",
-      model: "test-model",
-      adapterType: "process",
-      runtimeMode: "fake.deterministic",
+      ...buildRunShape(canaryMode.mode),
       placement: "hosted",
       cwd: "/repo",
-      task: "r19 production canary",
+      task: canaryMode.mode.kind === "provider" ? `r21 provider canary ${canaryMode.mode.runtimeMode}` : "r19 production canary",
       metadata: {
-        switchyardCanary: "r19-production",
+        switchyardCanary: canaryMode.mode.kind === "provider" ? "r21-provider-production" : "r19-production",
         canaryId,
-        startedAt: startedAtIso
+        startedAt: startedAtIso,
+        ...(canaryMode.mode.kind === "provider" ? { runtimeMode: canaryMode.mode.runtimeMode } : {})
       }
     };
 
     const created = await fetchJson(state, "POST", "/runs", createPayload);
     if (!created.ok) {
+      if (canaryMode.mode.kind === "provider") {
+        addStep(steps, now, startedAtMs, "run.create", "fail", "provider_canary_create_denied", { httpStatus: created.status });
+        return finalize(false, "provider_canary_create_denied", steps, summary, now, startedAtMs);
+      }
       if (created.status === 403) {
         addStep(steps, now, startedAtMs, "run.create", "fail", "run_create_denied", { httpStatus: created.status });
         return finalize(false, "run_create_denied", steps, summary, now, startedAtMs);
@@ -227,28 +264,28 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
       }
       if (TERMINAL_FAILURE_STATUSES.has(status)) {
         summary.terminalStatus = status;
-        addStep(steps, now, startedAtMs, "run.poll", "fail", "unexpected_terminal_status", {
+        addStep(steps, now, startedAtMs, "run.poll", "fail", canaryMode.mode.kind === "provider" ? "provider_canary_run_failed" : "unexpected_terminal_status", {
           httpStatus: detail.status,
           details: { runId, terminalStatus: status }
         });
-        return finalize(false, "unexpected_terminal_status", steps, summary, now, startedAtMs);
+        return finalize(false, canaryMode.mode.kind === "provider" ? "provider_canary_run_failed" : "unexpected_terminal_status", steps, summary, now, startedAtMs);
       }
       if (!RUNNING_STATUSES.has(status)) {
         summary.terminalStatus = status;
-        addStep(steps, now, startedAtMs, "run.poll", "fail", "unexpected_terminal_status", {
+        addStep(steps, now, startedAtMs, "run.poll", "fail", canaryMode.mode.kind === "provider" ? "provider_canary_run_failed" : "unexpected_terminal_status", {
           httpStatus: detail.status,
           details: { runId, terminalStatus: status }
         });
-        return finalize(false, "unexpected_terminal_status", steps, summary, now, startedAtMs);
+        return finalize(false, canaryMode.mode.kind === "provider" ? "provider_canary_run_failed" : "unexpected_terminal_status", steps, summary, now, startedAtMs);
       }
     }
 
     if (summary.terminalStatus !== "completed") {
       summary.terminalStatus = terminalStatus;
-      addStep(steps, now, startedAtMs, "run.poll", "fail", "worker_timeout", {
+      addStep(steps, now, startedAtMs, "run.poll", "fail", canaryMode.mode.kind === "provider" ? "provider_canary_timeout" : "worker_timeout", {
         details: { runId }
       });
-      return finalize(false, "worker_timeout", steps, summary, now, startedAtMs);
+      return finalize(false, canaryMode.mode.kind === "provider" ? "provider_canary_timeout" : "worker_timeout", steps, summary, now, startedAtMs);
     }
 
     const sseReplay = await fetchText(state, "GET", `/runs/${encodeURIComponent(runId)}/events`);
@@ -269,16 +306,18 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     const artifacts = await fetchJson(state, "GET", `/runs/${encodeURIComponent(runId)}/artifacts`);
     if (!artifacts.ok) {
       if (artifacts.status === 404) {
-        addStep(steps, now, startedAtMs, "artifact.list", "fail", "artifact_missing", { httpStatus: artifacts.status, details: { runId } });
-        return finalize(false, "artifact_missing", steps, summary, now, startedAtMs);
+        const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_missing";
+        addStep(steps, now, startedAtMs, "artifact.list", "fail", code, { httpStatus: artifacts.status, details: { runId } });
+        return finalize(false, code, steps, summary, now, startedAtMs);
       }
       return failFromHttp("artifact.list", artifacts.status, steps, summary, now, startedAtMs);
     }
 
     const artifact = readFirstArtifact(artifacts.json);
     if (!artifact) {
-      addStep(steps, now, startedAtMs, "artifact.list", "fail", "artifact_missing", { httpStatus: artifacts.status, details: { runId } });
-      return finalize(false, "artifact_missing", steps, summary, now, startedAtMs);
+      const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_missing";
+      addStep(steps, now, startedAtMs, "artifact.list", "fail", code, { httpStatus: artifacts.status, details: { runId } });
+      return finalize(false, code, steps, summary, now, startedAtMs);
     }
 
     summary.artifactId = artifact.id;
@@ -290,29 +329,32 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     const content = await fetchBytes(state, "GET", `/artifacts/${encodeURIComponent(artifact.id)}/content`);
     if (!content.ok) {
       if (content.status === 404) {
-        addStep(steps, now, startedAtMs, "artifact.content", "fail", "artifact_missing", {
+        const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_missing";
+        addStep(steps, now, startedAtMs, "artifact.content", "fail", code, {
           httpStatus: content.status,
           details: { artifactId: artifact.id }
         });
-        return finalize(false, "artifact_missing", steps, summary, now, startedAtMs);
+        return finalize(false, code, steps, summary, now, startedAtMs);
       }
       return failFromHttp("artifact.content", content.status, steps, summary, now, startedAtMs);
     }
 
     if (content.bytes.byteLength === 0) {
-      addStep(steps, now, startedAtMs, "artifact.content", "fail", "artifact_content_empty", {
+      const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_content_empty";
+      addStep(steps, now, startedAtMs, "artifact.content", "fail", code, {
         httpStatus: content.status,
         details: { artifactId: artifact.id }
       });
-      return finalize(false, "artifact_content_empty", steps, summary, now, startedAtMs);
+      return finalize(false, code, steps, summary, now, startedAtMs);
     }
 
     if (!artifactDigestAndSizeMatch(artifact, content.bytes)) {
-      addStep(steps, now, startedAtMs, "artifact.content", "fail", "artifact_digest_mismatch", {
+      const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_digest_mismatch";
+      addStep(steps, now, startedAtMs, "artifact.content", "fail", code, {
         httpStatus: content.status,
         details: { artifactId: artifact.id }
       });
-      return finalize(false, "artifact_digest_mismatch", steps, summary, now, startedAtMs);
+      return finalize(false, code, steps, summary, now, startedAtMs);
     }
 
     addStep(steps, now, startedAtMs, "artifact.content", "pass", "artifact_content_verified", {
@@ -322,11 +364,19 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
 
     const metrics = await fetchJson(state, "GET", "/metrics");
     if (!metrics.ok) {
+      if (canaryMode.mode.kind === "provider") {
+        addStep(steps, now, startedAtMs, "metrics", "fail", "provider_canary_metrics_failed", { httpStatus: metrics.status });
+        return finalize(false, "provider_canary_metrics_failed", steps, summary, now, startedAtMs);
+      }
       if (metrics.status === 401 || metrics.status === 403) {
         addStep(steps, now, startedAtMs, "metrics", "fail", "metrics_auth_failed", { httpStatus: metrics.status });
         return finalize(false, "metrics_auth_failed", steps, summary, now, startedAtMs);
       }
       return failFromHttp("metrics", metrics.status, steps, summary, now, startedAtMs);
+    }
+    if (canaryMode.mode.kind === "provider" && !hasProviderMetricsEvidence(metrics.json, canaryMode.mode.runtimeMode)) {
+      addStep(steps, now, startedAtMs, "metrics", "fail", "provider_canary_metrics_failed", { httpStatus: metrics.status });
+      return finalize(false, "provider_canary_metrics_failed", steps, summary, now, startedAtMs);
     }
     summary.metricsAuthorized = true;
     addStep(steps, now, startedAtMs, "metrics", "pass", "metrics_ok", { httpStatus: metrics.status });
@@ -337,9 +387,13 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     while (now() <= auditDeadline) {
       const audit = await fetchJson(state, "GET", "/audit/events?limit=50");
       if (!audit.ok) {
+        if (canaryMode.mode.kind === "provider") {
+          addStep(steps, now, startedAtMs, "audit", "fail", "provider_canary_audit_failed", { httpStatus: audit.status });
+          return finalize(false, "provider_canary_audit_failed", steps, summary, now, startedAtMs);
+        }
         return failFromHttp("audit", audit.status, steps, summary, now, startedAtMs);
       }
-      const matched = hasAuditEvidence(audit.json, runId, canaryId);
+      const matched = hasAuditEvidence(audit.json, runId, canaryId, canaryMode.mode.kind === "provider");
       if (matched) {
         summary.auditEvidence = true;
         if (auditAttempts > 0) {
@@ -361,6 +415,9 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     addStep(steps, now, startedAtMs, "audit", "fail", "audit_lookup_failed", {
       details: { runId }
     });
+    if (canaryMode.mode.kind === "provider") {
+      return finalize(false, "provider_canary_audit_failed", steps, summary, now, startedAtMs);
+    }
     return finalize(false, "audit_lookup_failed", steps, summary, now, startedAtMs);
   } catch {
     addStep(steps, now, startedAtMs, "canary", "fail", "malformed_response");
@@ -369,7 +426,7 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
 }
 
 function parseCliArgs(argv: string[]): ParsedCanaryArgs {
-  const parsed: ParsedCanaryArgs = { json: false };
+  const parsed: ParsedCanaryArgs = { json: false, confirmProviderSpend: false };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (!token) {
@@ -396,6 +453,15 @@ function parseCliArgs(argv: string[]): ParsedCanaryArgs {
       }
       continue;
     }
+    if (token === "--runtime-mode") {
+      parsed.runtimeMode = argv[index + 1];
+      index += 1;
+      continue;
+    }
+    if (token === "--confirm-provider-spend") {
+      parsed.confirmProviderSpend = true;
+      continue;
+    }
     if (token === "--json") {
       parsed.json = true;
       continue;
@@ -409,6 +475,28 @@ function normalizeTimeoutMs(input: number | undefined): number {
     return 30_000;
   }
   return Math.floor(input);
+}
+
+function resolveCanaryMode(
+  runtimeMode: string | undefined
+): { ok: true; mode: ProviderCanaryMode } | { ok: false; code: "provider_canary_runtime_empty" } {
+  if (runtimeMode === undefined) {
+    return { ok: true, mode: { kind: "fake" } };
+  }
+  const normalized = runtimeMode.trim();
+  if (normalized.length === 0) {
+    return { ok: false, code: "provider_canary_runtime_empty" };
+  }
+  if (normalized === "codex.exec_json" || normalized === "claude_code.sdk" || normalized === "opencode.acp") {
+    return {
+      ok: true,
+      mode: {
+        kind: "provider",
+        runtimeMode: normalized
+      }
+    };
+  }
+  return { ok: false, code: "provider_canary_runtime_empty" };
 }
 
 function parseBaseUrl(input: string): { ok: true; value: string } | { ok: false } {
@@ -479,6 +567,51 @@ function sanitizeForOutput(value: Record<string, unknown>): Record<string, unkno
     out[key] = entry;
   }
   return out;
+}
+
+function buildRunShape(
+  mode: ProviderCanaryMode
+): {
+  runtime: string;
+  provider: string;
+  model: string;
+  adapterType: "process" | "native" | "acpx";
+  runtimeMode: string;
+} {
+  if (mode.kind !== "provider") {
+    return {
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      runtimeMode: "fake.deterministic"
+    };
+  }
+  if (mode.runtimeMode === "codex.exec_json") {
+    return {
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      runtimeMode: "codex.exec_json"
+    };
+  }
+  if (mode.runtimeMode === "claude_code.sdk") {
+    return {
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      adapterType: "native",
+      runtimeMode: "claude_code.sdk"
+    };
+  }
+  return {
+    runtime: "opencode",
+    provider: "opencode",
+    model: "opencode-default",
+    adapterType: "acpx",
+    runtimeMode: "opencode.acp"
+  };
 }
 
 function authHeaders(apiKey: string): HeadersInit {
@@ -754,7 +887,7 @@ function asString(value: unknown): string | undefined {
   return undefined;
 }
 
-function hasAuditEvidence(value: unknown, runId: string, canaryId: string): boolean {
+function hasAuditEvidence(value: unknown, runId: string, canaryId: string, requireCanaryTag = false): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
@@ -762,22 +895,26 @@ function hasAuditEvidence(value: unknown, runId: string, canaryId: string): bool
   if (!Array.isArray(events)) {
     return false;
   }
-  return events.some((event) => eventMatches(event, runId, canaryId));
+  return events.some((event) => eventMatches(event, runId, canaryId, requireCanaryTag));
 }
 
-function eventMatches(value: unknown, runId: string, canaryId: string): boolean {
+function eventMatches(value: unknown, runId: string, canaryId: string, requireCanaryTag: boolean): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
   const event = value as Record<string, unknown>;
-  if (event["resourceId"] === runId || event["runId"] === runId) {
+  if (!requireCanaryTag && (event["resourceId"] === runId || event["runId"] === runId)) {
     return true;
   }
-  if (event["resourceId"] === canaryId) {
+  if (!requireCanaryTag && event["resourceId"] === canaryId) {
     return true;
   }
   const payload = event["payload"];
   if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    if (requireCanaryTag) {
+      return containsAnyString(payload as Record<string, unknown>, [runId, canaryId]) &&
+        containsAnyString(payload as Record<string, unknown>, ["r21-provider-production"]);
+    }
     return containsAnyString(payload as Record<string, unknown>, [runId, canaryId]);
   }
   return false;
@@ -833,11 +970,20 @@ function extractReadyCodes(value: unknown): Record<string, unknown> | undefined 
   return sanitizeForOutput(out);
 }
 
+function hasProviderMetricsEvidence(value: unknown, runtimeMode: string): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return containsAnyString(value as Record<string, unknown>, [runtimeMode, "hostedRuntime", "lifecycle", "accepted"]);
+}
+
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const result = await runProductionCanary({
     baseUrl: args.baseUrl ?? "",
     apiKey: args.apiKey,
+    runtimeMode: args.runtimeMode,
+    confirmProviderSpend: args.confirmProviderSpend,
     timeoutMs: args.timeoutMs
   });
 

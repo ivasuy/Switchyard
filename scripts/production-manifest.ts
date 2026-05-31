@@ -60,6 +60,10 @@ const FORBIDDEN_SERVICE_NAMES = new Set([
   "payment",
   "oauth",
   "browser",
+  "search",
+  "github",
+  "fetch",
+  "repo",
   "exec",
   "shell",
   "process",
@@ -68,10 +72,42 @@ const FORBIDDEN_SERVICE_NAMES = new Set([
   "pty",
   "terminal",
   "hosted-real-runtime",
+  "hosted-tool",
+  "hosted-debate",
   "real-tool"
 ]);
-const FORBIDDEN_SURFACE_TOKENS = ["sandbox", "exec", "shell", "process", "command", "pty", "terminal"] as const;
-const REQUIRED_FORBIDDEN_SURFACES = ["/sandbox", "/exec", "/shell", "/process", "/command", "/pty", "/terminal"] as const;
+const FORBIDDEN_SURFACE_TOKENS = [
+  "sandbox",
+  "exec",
+  "shell",
+  "process",
+  "command",
+  "pty",
+  "terminal",
+  "browser",
+  "search",
+  "github",
+  "fetch",
+  "repo",
+  "dashboard",
+  "tui"
+] as const;
+const REQUIRED_FORBIDDEN_SURFACES = [
+  "/sandbox",
+  "/exec",
+  "/shell",
+  "/process",
+  "/command",
+  "/pty",
+  "/terminal",
+  "/browser",
+  "/search",
+  "/github",
+  "/fetch",
+  "/repo",
+  "/dashboard",
+  "/tui"
+] as const;
 
 const REQUIRED_TOP_LEVEL_ENV = [
   "SWITCHYARD_DEPLOYMENT_MODE",

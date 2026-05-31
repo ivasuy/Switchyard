@@ -1,5 +1,5 @@
 {
-  "version": "r19-production-manifest-v1",
+  "version": "r21-production-manifest-v1",
   "services": {
     "server": {
       "deploymentMode": "production",
@@ -108,6 +108,13 @@
     "/command",
     "/pty",
     "/terminal",
+    "/browser",
+    "/search",
+    "/github",
+    "/fetch",
+    "/repo",
+    "/dashboard",
+    "/tui",
     "hosted-real-runtime",
     "real-tool"
   ]

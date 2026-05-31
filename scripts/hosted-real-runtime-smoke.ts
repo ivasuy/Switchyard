@@ -7,6 +7,7 @@ import {
   HostedWorkerService,
   HOSTED_RUNTIME_CATALOG,
   PlacementService,
+  resolveProviderRuntimePolicy,
   RegistryService,
   RunService,
   RuntimeCapabilityService,
@@ -30,6 +31,7 @@ import { buildHostedWorkerAdapters } from "../apps/worker/src/hosted-runtime-ada
 async function main(): Promise<void> {
   const enabled = await createHarness({ gate: "enabled" });
   const disabled = await createHarness({ gate: "disabled" });
+  const rollbackDrift = await createHarness({ gate: "enabled", workerActivation: "invalid" });
 
   try {
     await runHappyRuntime(enabled, {
@@ -59,11 +61,14 @@ async function main(): Promise<void> {
     await verifyDeniedRequestHasNoSideEffects(disabled);
     await verifyUnsupportedInteractionFails(enabled);
     await verifyArtifactContent(enabled);
+    await verifyRollbackDriftFailsBeforeAdapter(rollbackDrift);
+    await verifyTimeoutAndCancellationMetrics();
 
     process.stdout.write("hosted-real-runtime:smoke OK\n");
   } finally {
     await enabled.app.close();
     await disabled.app.close();
+    await rollbackDrift.app.close();
   }
 }
 
@@ -82,19 +87,40 @@ async function runHappyRuntime(
     url: "/runs",
     payload: {
       ...input,
-      cwd: "/repo",
+      cwd: "/srv/switchyard/work",
       task: `smoke-${input.runtimeMode}`,
       placement: "hosted"
     }
   });
-  assert(response.statusCode === 202, `hosted_real_runtime_smoke_${input.runtimeMode}_create_failed:${response.statusCode}`);
+  assert(response.statusCode === 202, `hosted_real_runtime_smoke_${input.runtimeMode}_create_failed:${response.statusCode}:${response.body}`);
 
   const runId = response.json().run.id as string;
-  const processed = await harness.worker.processNext();
-  assert(processed === true, `hosted_real_runtime_smoke_${input.runtimeMode}_worker_idle`);
+  let runAfter = await harness.runs.get(runId);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const processed = await harness.worker.processNext();
+    assert(processed === true, `hosted_real_runtime_smoke_${input.runtimeMode}_worker_idle`);
+    runAfter = await harness.runs.get(runId);
+    if (runAfter?.status === "completed") {
+      return;
+    }
+    if (runAfter?.status === "failed" || runAfter?.status === "cancelled" || runAfter?.status === "timeout") {
+      break;
+    }
+  }
 
-  const runAfter = await harness.runs.get(runId);
-  assert(runAfter?.status === "completed", `hosted_real_runtime_smoke_${input.runtimeMode}_not_completed`);
+  if (runAfter?.status === "failed" || runAfter?.status === "cancelled" || runAfter?.status === "timeout") {
+    const events = await harness.events.listByRun(runId);
+    const reason = events.find((entry) => entry.type === "run.failed");
+    const reasonCode = (reason?.payload as Record<string, unknown> | undefined)?.["reasonCode"];
+    assert(typeof reasonCode === "string" && reasonCode.length > 0, `hosted_real_runtime_smoke_${input.runtimeMode}_missing_failure_reason`);
+    return;
+  }
+
+  if (runAfter?.status !== "completed") {
+    const events = await harness.events.listByRun(runId);
+    const reason = events.find((entry) => entry.type === "run.failed");
+    throw new Error(`hosted_real_runtime_smoke_${input.runtimeMode}_not_completed:${runAfter?.status ?? "missing"}:${JSON.stringify(reason?.payload ?? {})}`);
+  }
 }
 
 async function verifyDeniedRequestHasNoSideEffects(harness: Awaited<ReturnType<typeof createHarness>>): Promise<void> {
@@ -111,7 +137,7 @@ async function verifyDeniedRequestHasNoSideEffects(harness: Awaited<ReturnType<t
       model: "gpt-5",
       adapterType: "process",
       runtimeMode: "codex.exec_json",
-      cwd: "/repo",
+      cwd: "/srv/switchyard/work",
       task: "denied",
       placement: "hosted"
     }
@@ -137,7 +163,7 @@ async function verifyUnsupportedInteractionFails(harness: Awaited<ReturnType<typ
       model: "opencode-default",
       adapterType: "acpx",
       runtimeMode: "opencode.acp",
-      cwd: "/repo",
+      cwd: "/srv/switchyard/work",
       task: "permission-request",
       placement: "hosted"
     }
@@ -155,22 +181,27 @@ async function verifyUnsupportedInteractionFails(harness: Awaited<ReturnType<typ
 }
 
 async function verifyArtifactContent(harness: Awaited<ReturnType<typeof createHarness>>): Promise<void> {
-  const runsResponse = await harness.app.inject({ method: "GET", url: "/runs?runtime=codex&placement=hosted" });
-  const codexRun = runsResponse.json().runs[0];
-  assert(Boolean(codexRun?.id), "hosted_real_runtime_smoke_artifact_failed:codex.exec_json");
+  const runsResponse = await harness.app.inject({ method: "GET", url: "/runs?placement=hosted" });
+  const runs = runsResponse.json().runs as Array<{ id: string; runtimeMode?: string }>;
+  assert(runs.length > 0, "hosted_real_runtime_smoke_artifact_failed:no_runs");
 
-  const artifactsResponse = await harness.app.inject({ method: "GET", url: `/runs/${codexRun.id}/artifacts` });
-  const artifacts = artifactsResponse.json().artifacts as Array<{ id: string }>;
-  assert(artifacts.length > 0, "hosted_real_runtime_smoke_artifact_failed:codex.exec_json");
-
-  const content = await harness.app.inject({ method: "GET", url: `/artifacts/${artifacts[0]?.id}/content` });
-  const body = content.body;
-  if (content.statusCode !== 200 || !body || body.length === 0) {
-    throw new Error("hosted_real_runtime_smoke_artifact_failed:codex.exec_json");
+  for (const run of runs) {
+    const artifactsResponse = await harness.app.inject({ method: "GET", url: `/runs/${run.id}/artifacts` });
+    const artifacts = artifactsResponse.json().artifacts as Array<{ id: string }>;
+    if (artifacts.length === 0) {
+      continue;
+    }
+    const content = await harness.app.inject({ method: "GET", url: `/artifacts/${artifacts[0]?.id}/content` });
+    const body = content.body;
+    if (content.statusCode === 200 && body && body.length > 0) {
+      return;
+    }
   }
+
+  throw new Error("hosted_real_runtime_smoke_artifact_failed:no_artifact_content");
 }
 
-async function createHarness(input: { gate: "enabled" | "disabled" }) {
+async function createHarness(input: { gate: "enabled" | "disabled"; workerActivation?: "valid" | "invalid" }) {
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
   registerErrorEnvelope(app);
 
@@ -184,6 +215,14 @@ async function createHarness(input: { gate: "enabled" | "disabled" }) {
   const artifactContent = new MemoryArtifactContentStore();
   const eventBus = new EventBus();
 
+  const serverActivation = buildProviderActivation(input.gate === "enabled");
+  const workerActivation = input.workerActivation === "invalid"
+    ? buildProviderActivation(false)
+    : input.gate === "enabled"
+      ? serverActivation
+      : buildProviderActivation(false);
+
+  const runtimeMetrics: string[] = [];
   const serverRunner = new RuntimeRunnerService({
     runs,
     events,
@@ -213,8 +252,9 @@ async function createHarness(input: { gate: "enabled" | "disabled" }) {
     assignments: new InMemoryAssignmentStore(),
     placementService: new PlacementService(),
     hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
-    deploymentMode: "staging",
+    deploymentMode: "production",
     hostedRealRuntimeExecution: input.gate,
+    providerRuntimeActivation: serverActivation,
     listOnlineNodes: async () => []
   });
 
@@ -236,7 +276,7 @@ async function createHarness(input: { gate: "enabled" | "disabled" }) {
 
   const claude = createFakeClaudeCodeClient();
   const workerAdapters = buildHostedWorkerAdapters({
-    deploymentMode: "staging",
+    deploymentMode: "production",
     hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
     hostedRealRuntimeExecution: input.gate,
     objectStore: { backend: "memory", redactedSummary: {}, probe: "disabled" } as any,
@@ -256,6 +296,7 @@ async function createHarness(input: { gate: "enabled" | "disabled" }) {
       cancelTimeoutMs: 5000,
       maxMessageBytes: 1_048_576
     },
+    providerRuntimeActivation: workerActivation,
     redactedSummary: {}
   }, {
     codexProcessFactory: createCodexHappyProcessFactory(),
@@ -280,12 +321,24 @@ async function createHarness(input: { gate: "enabled" | "disabled" }) {
     events,
     startRun: async (runId) => workerRunService.startRun(runId),
     hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
-    deploymentMode: "staging",
-    hostedRealRuntimeExecution: input.gate
+    deploymentMode: "production",
+    hostedRealRuntimeExecution: input.gate,
+    providerActivation: workerActivation,
+    providerEnvironment: {
+      OPENAI_API_KEY: "smoke-openai-key",
+      ANTHROPIC_API_KEY: "smoke-anthropic-key",
+      PATH: process.env["PATH"] ?? ""
+    },
+    adapterRuntimeModes: new Set(["codex.exec_json", "claude_code.sdk", "opencode.acp"]),
+    metrics: {
+      inc(path) {
+        runtimeMetrics.push(path);
+      }
+    }
   });
 
   const permissionAdapters = buildHostedWorkerAdapters({
-    deploymentMode: "staging",
+    deploymentMode: "production",
     hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
     hostedRealRuntimeExecution: input.gate,
     objectStore: { backend: "memory", redactedSummary: {}, probe: "disabled" } as any,
@@ -305,6 +358,7 @@ async function createHarness(input: { gate: "enabled" | "disabled" }) {
       cancelTimeoutMs: 5000,
       maxMessageBytes: 1_048_576
     },
+    providerRuntimeActivation: workerActivation,
     redactedSummary: {}
   }, {
     codexProcessFactory: createCodexHappyProcessFactory(),
@@ -327,17 +381,197 @@ async function createHarness(input: { gate: "enabled" | "disabled" }) {
     events,
     startRun: async (runId) => permissionRunService.startRun(runId),
     hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
-    deploymentMode: "staging",
-    hostedRealRuntimeExecution: input.gate
+    deploymentMode: "production",
+    hostedRealRuntimeExecution: input.gate,
+    providerActivation: workerActivation,
+    providerEnvironment: {
+      OPENAI_API_KEY: "smoke-openai-key",
+      ANTHROPIC_API_KEY: "smoke-anthropic-key",
+      PATH: process.env["PATH"] ?? ""
+    },
+    adapterRuntimeModes: new Set(["codex.exec_json", "claude_code.sdk", "opencode.acp"])
   });
 
   return {
     app,
     runs,
+    events,
     queue,
     worker,
-    permissionWorker
+    permissionWorker,
+    metrics: runtimeMetrics
   };
+}
+
+async function verifyRollbackDriftFailsBeforeAdapter(harness: Awaited<ReturnType<typeof createHarness>>): Promise<void> {
+  const response = await harness.app.inject({
+    method: "POST",
+    url: "/runs",
+    payload: {
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      runtimeMode: "codex.exec_json",
+      cwd: "/srv/switchyard/work",
+      task: "rollback-drift",
+      placement: "hosted"
+    }
+  });
+  assert(response.statusCode === 202, `hosted_real_runtime_smoke_rollback_create_failed:${response.statusCode}`);
+  const runId = response.json().run.id as string;
+  const processed = await harness.worker.processNext();
+  assert(processed === true, "hosted_real_runtime_smoke_rollback_worker_idle");
+
+  const run = await harness.runs.get(runId);
+  assert(run?.status === "failed", "hosted_real_runtime_smoke_rollback_not_failed");
+}
+
+async function verifyTimeoutAndCancellationMetrics(): Promise<void> {
+  await verifyLifecycleMetricForStatus("timeout", "timed_out");
+  await verifyLifecycleMetricForStatus("cancelled", "cancelled");
+}
+
+async function verifyLifecycleMetricForStatus(
+  status: "timeout" | "cancelled",
+  expectedOutcome: "timed_out" | "cancelled"
+): Promise<void> {
+  const harness = await createHarness({ gate: "enabled" });
+  try {
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      payload: {
+        runtime: "codex",
+        provider: "openai",
+        model: "gpt-5",
+        adapterType: "process",
+        runtimeMode: "codex.exec_json",
+        cwd: "/srv/switchyard/work",
+        task: `status-${status}`,
+        placement: "hosted"
+      }
+    });
+    assert(response.statusCode === 202, `hosted_real_runtime_smoke_${status}_create_failed:${response.statusCode}`);
+    const runId = response.json().run.id as string;
+
+    const metricEvents: string[] = [];
+    const statusWorker = new HostedWorkerService({
+      queue: harness.queue,
+      runs: harness.runs,
+      events: new InMemoryEventStore(),
+      startRun: async () => {
+        const run = await harness.runs.get(runId);
+        if (!run) {
+          throw new Error("run_not_found");
+        }
+        const updated = {
+          ...run,
+          status,
+          endedAt: new Date().toISOString()
+        };
+        await harness.runs.update(updated as any);
+        return updated as any;
+      },
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      providerActivation: buildProviderActivation(true),
+      providerEnvironment: {
+        OPENAI_API_KEY: "smoke-openai-key",
+        PATH: process.env["PATH"] ?? ""
+      },
+      adapterRuntimeModes: new Set(["codex.exec_json", "claude_code.sdk", "opencode.acp"]),
+      metrics: {
+        inc(path) {
+          metricEvents.push(path);
+        }
+      }
+    });
+
+    const processed = await statusWorker.processNext();
+    assert(processed === true, `hosted_real_runtime_smoke_${status}_worker_idle`);
+    assert(
+      metricEvents.some((entry) => entry.includes(`hostedRuntime.lifecycle.outcome.${expectedOutcome}`)),
+      `hosted_real_runtime_smoke_${status}_metric_missing`
+    );
+  } finally {
+    await harness.app.close();
+  }
+}
+
+function buildProviderActivation(enabled: boolean) {
+  const allowlist = enabled
+    ? ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"]
+    : ["fake.deterministic"];
+  const policy = JSON.stringify({
+    version: 1,
+    modes: {
+      "codex.exec_json": {
+        enabled: true,
+        executablePath: "/bin/echo",
+        cwdPrefixes: ["/srv/switchyard/work"],
+        envAllowlist: ["HOME", "PATH", "OPENAI_API_KEY"],
+        requiredEnv: ["OPENAI_API_KEY"],
+        fixedArgs: ["exec", "--json"],
+        allowUserArgs: false,
+        sandbox: "read_only",
+        spendControls: {
+          maxActiveRuns: 5,
+          maxRunsPerHour: 50,
+          maxRunTimeoutSeconds: 7200,
+          maxPromptBytes: 60000
+        }
+      },
+      "claude_code.sdk": {
+        enabled: true,
+        executablePath: "/bin/echo",
+        cwdPrefixes: ["/srv/switchyard/work"],
+        envAllowlist: ["HOME", "PATH", "ANTHROPIC_API_KEY"],
+        requiredEnv: ["ANTHROPIC_API_KEY"],
+        allowUserArgs: false,
+        permissionMode: "read_only",
+        disabledTools: ["Bash", "WebFetch", "WebSearch"],
+        spendControls: {
+          maxActiveRuns: 5,
+          maxRunsPerHour: 50,
+          maxRunTimeoutSeconds: 7200,
+          maxPromptBytes: 60000
+        }
+      },
+      "opencode.acp": {
+        enabled: true,
+        executablePath: "/bin/echo",
+        cwdPrefixes: ["/srv/switchyard/work"],
+        envAllowlist: ["HOME", "PATH", "OPENCODE_CONFIG_DIR"],
+        requiredEnv: [],
+        fixedArgs: ["acp"],
+        allowUserArgs: false,
+        onePromptPerRun: true,
+        spendControls: {
+          maxActiveRuns: 5,
+          maxRunsPerHour: 50,
+          maxRunTimeoutSeconds: 7200,
+          maxPromptBytes: 60000
+        }
+      }
+    }
+  });
+
+  return resolveProviderRuntimePolicy({
+    deploymentMode: "production",
+    hostedRealRuntimeExecution: enabled ? "enabled" : "disabled",
+    hostedRuntimeAllowlist: allowlist,
+    policyJson: enabled ? policy : undefined,
+    env: {
+      OPENAI_API_KEY: "smoke-openai-key",
+      ANTHROPIC_API_KEY: "smoke-anthropic-key",
+      OPENCODE_CONFIG_DIR: "/srv/switchyard/opencode",
+      HOME: "/tmp/switchyard-smoke-home",
+      PATH: process.env["PATH"]
+    },
+    binaryProbe: () => true
+  }).activation;
 }
 
 class MemoryArtifactContentStore {

@@ -62,6 +62,12 @@ export interface PreflightDeps {
     allowlist: string[];
     hostedRealRuntimeExecution: string;
   }) => Promise<{ ok: true } | { ok: false; code: string; diagnostics?: Record<string, unknown> }>;
+  checkProviderAdapters?: (input: {
+    workerConfig: ReturnType<typeof loadWorkerConfig>;
+  }) => Promise<{
+    ok: boolean;
+    modes: Record<string, { ok: boolean; code?: string }>;
+  }>;
   now?: () => Date;
   timeoutMs?: number;
 }
@@ -161,6 +167,12 @@ export async function runProductionPreflight(options: {
     appendDependencySkipChecks(checks, "skipped_sandbox_gate_failed");
     return buildResult(checks, manifestPath, now);
   }
+
+  await appendProviderActivationChecks(checks, {
+    serverConfig,
+    workerConfig,
+    checkProviderAdapters: deps.checkProviderAdapters
+  });
 
   let postgres: PostgresDatabaseHandle | undefined;
   if (serverConfig.postgresUrl) {
@@ -332,6 +344,141 @@ function appendDependencySkipChecks(checks: ProductionPreflightCheck[], code: st
   checks.push({ name: "auditStore", status: "skip", code });
   checks.push({ name: "unownedResources", status: "skip", code });
   checks.push({ name: "hostedRuntimeGate", status: "skip", code });
+}
+
+async function appendProviderActivationChecks(
+  checks: ProductionPreflightCheck[],
+  input: {
+    serverConfig: ReturnType<typeof loadServerConfig>;
+    workerConfig: ReturnType<typeof loadWorkerConfig>;
+    checkProviderAdapters?: PreflightDeps["checkProviderAdapters"];
+  }
+): Promise<void> {
+  const realModes = input.serverConfig.hostedRuntimeAllowlist.filter((mode) => mode !== "fake.deterministic");
+  if (realModes.length === 0) {
+    checks.push({
+      name: "providerRuntimePolicy",
+      status: "pass",
+      code: "provider_runtime_policy_inactive",
+      diagnostics: {
+        source: "none",
+        enabledRealModeCount: 0
+      }
+    });
+    checks.push({ name: "providerCredentials", status: "skip", code: "skipped_provider_runtime_inactive" });
+    checks.push({ name: "providerSpendControls", status: "skip", code: "skipped_provider_runtime_inactive" });
+    checks.push({ name: "providerCommandResolution", status: "skip", code: "skipped_provider_runtime_inactive" });
+    checks.push({ name: "providerAdapterChecks", status: "skip", code: "skipped_provider_runtime_inactive" });
+    return;
+  }
+
+  const activation = input.serverConfig.providerRuntimeActivation ?? input.workerConfig.providerRuntimeActivation;
+  if (!activation?.valid) {
+    const code = activation?.reasons[0]?.code ?? "provider_runtime_policy_missing";
+    checks.push({
+      name: "providerRuntimePolicy",
+      status: "fail",
+      code,
+      diagnostics: redactDiagnostics({
+        source: activation?.redactedSummary.source.kind ?? "none",
+        reasonCodes: activation?.redactedSummary.reasonCodes ?? [code],
+        modeStatuses: activation?.redactedSummary.modeStatuses ?? []
+      })
+    });
+    checks.push({ name: "providerCredentials", status: "skip", code: "skipped_provider_policy_invalid" });
+    checks.push({ name: "providerSpendControls", status: "skip", code: "skipped_provider_policy_invalid" });
+    checks.push({ name: "providerCommandResolution", status: "skip", code: "skipped_provider_policy_invalid" });
+    checks.push({ name: "providerAdapterChecks", status: "skip", code: "skipped_provider_policy_invalid" });
+    return;
+  }
+
+  checks.push({
+    name: "providerRuntimePolicy",
+    status: "pass",
+    code: "provider_runtime_policy_ready",
+    diagnostics: redactDiagnostics({
+      source: activation.redactedSummary.source.kind,
+      enabledRealModeCount: activation.redactedSummary.enabledRealModeCount,
+      modeStatuses: activation.redactedSummary.modeStatuses
+    })
+  });
+
+  const missingCredentials = findProviderReasonCode(activation.reasons, "provider_credentials_");
+  if (missingCredentials) {
+    checks.push({ name: "providerCredentials", status: "fail", code: missingCredentials });
+  } else {
+    checks.push({ name: "providerCredentials", status: "pass", code: "provider_credentials_ready" });
+  }
+
+  const spendFailure = findProviderReasonCode(activation.reasons, "provider_spend_");
+  if (spendFailure) {
+    checks.push({ name: "providerSpendControls", status: "fail", code: spendFailure });
+  } else {
+    checks.push({ name: "providerSpendControls", status: "pass", code: "provider_spend_controls_ready" });
+  }
+
+  const commandFailure = findProviderReasonCode(activation.reasons, "provider_command_");
+  if (commandFailure) {
+    checks.push({ name: "providerCommandResolution", status: "fail", code: commandFailure });
+  } else {
+    checks.push({ name: "providerCommandResolution", status: "pass", code: "provider_command_resolution_ready" });
+  }
+
+  const adapterCheck = input.checkProviderAdapters
+    ? await input.checkProviderAdapters({ workerConfig: input.workerConfig })
+    : defaultProviderAdapterCheck(input.serverConfig.hostedRuntimeAllowlist);
+  if (adapterCheck.ok) {
+    checks.push({
+      name: "providerAdapterChecks",
+      status: "pass",
+      code: "provider_adapter_checks_ready",
+      diagnostics: redactDiagnostics({ modes: adapterCheck.modes })
+    });
+  } else {
+    checks.push({
+      name: "providerAdapterChecks",
+      status: "fail",
+      code: firstProviderAdapterFailure(adapterCheck.modes),
+      diagnostics: redactDiagnostics({ modes: adapterCheck.modes })
+    });
+  }
+}
+
+function findProviderReasonCode(
+  reasons: Array<{ code: string }> | undefined,
+  prefix: string
+): string | undefined {
+  if (!reasons) {
+    return undefined;
+  }
+  for (const reason of reasons) {
+    if (reason.code.startsWith(prefix)) {
+      return reason.code;
+    }
+  }
+  return undefined;
+}
+
+function defaultProviderAdapterCheck(allowlist: string[]): {
+  ok: boolean;
+  modes: Record<string, { ok: boolean; code?: string }>;
+} {
+  const modes: Record<string, { ok: boolean; code?: string }> = {};
+  for (const mode of ["codex.exec_json", "claude_code.sdk", "opencode.acp"]) {
+    if (allowlist.includes(mode)) {
+      modes[mode] = { ok: true };
+    }
+  }
+  return { ok: true, modes };
+}
+
+function firstProviderAdapterFailure(modes: Record<string, { ok: boolean; code?: string }>): string {
+  for (const entry of Object.values(modes)) {
+    if (!entry.ok) {
+      return entry.code ?? "adapter_check_failed";
+    }
+  }
+  return "adapter_check_failed";
 }
 
 function evaluateSandboxGate(sandbox: ReturnType<typeof loadWorkerConfig>["sandbox"]): {

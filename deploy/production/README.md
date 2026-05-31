@@ -1,6 +1,6 @@
-# Switchyard Production Manifest Pack (R20)
+# Switchyard Production Manifest Pack (R21)
 
-This directory contains a provider-neutral production example for the hosted server, hosted worker, and optional connected node. It is intentionally API/ops-only and keeps production hosted runtime execution fake-only (`fake.deterministic`) while shipping only an internal worker sandbox substrate.
+This directory contains a production operator manifest pack for hosted server, hosted worker, and optional connected node. It is API/ops-only and keeps the checked-in default fake-only (`fake.deterministic`) and no-spend.
 
 The worker service uses the currently available built entrypoint (`node apps/worker/dist/main.js`). Worker readiness must fail closed before queue claiming when runtime/sandbox/control-plane requirements are not satisfied.
 
@@ -33,19 +33,28 @@ Generate unique high-entropy values for at least:
 - Object-store credentials
 - Bootstrap API key and node token records
 
-## Runtime Boundary (R20)
+## Runtime Boundary (R21)
 
-Production runtime policy is fake-only:
+Checked-in production defaults are fake-only:
 
 - `SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic`
 - `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`
 - `SWITCHYARD_SANDBOX_REAL_EXECUTION=disabled` (safe default)
 
-If an operator intentionally sets `SWITCHYARD_SANDBOX_REAL_EXECUTION=enabled`, they must also provide valid `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` or readiness fails closed (`sandbox_policy_missing` / `sandbox_policy_invalid`).
+R21 allows explicit provider opt-in for exactly:
+- `codex.exec_json`
+- `claude_code.sdk`
+- `opencode.acp`
 
-No public arbitrary execution route is shipped in this phase (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox` remain absent).
+Provider activation requires:
+- `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=enabled`
+- allowlist includes fake plus explicit provider modes
+- `SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON` or `SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH`
+- required provider credentials by env var name (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
+- spend controls in provider policy (`maxActiveRuns`, `maxRunsPerHour`, `maxRunTimeoutSeconds`, `maxPromptBytes`)
+- production preflight, readiness, and smoke checks passing
 
-Do not enable hosted real runtime modes in this phase.
+No public arbitrary execution route is shipped (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`, `/browser`, `/search`, `/github`, `/fetch`, `/repo` remain absent).
 
 ## Rollout Order
 
@@ -62,10 +71,14 @@ Do not enable hosted real runtime modes in this phase.
 8. Deploy worker.
 9. Optionally deploy node:
    - `docker compose -f deploy/production/docker-compose.yml --profile optional-node up -d node`
-10. Run canary:
+10. Run fake canary (default no-spend):
     - `pnpm tsx scripts/production-canary.ts --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key`
 11. Run production sandbox smoke:
     - `pnpm production:sandbox-smoke`
+12. Run production hosted provider smoke (deterministic/no-spend):
+    - `pnpm hosted-real-runtime:smoke`
+13. Optional live provider canary (requires explicit spend confirmation and one runtime mode):
+    - `pnpm production:provider-runtime-canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --runtime-mode codex.exec_json --confirm-provider-spend`
 
 ## Rollback Order
 
@@ -74,6 +87,11 @@ Do not enable hosted real runtime modes in this phase.
 3. Re-run readiness checks; if schema mismatch appears, keep traffic blocked until compatible code is restored.
 4. Roll worker image back after server readiness is green.
 5. Keep canary and readiness evidence records; do not delete them.
+6. To rollback provider runtime activation to fake-only:
+   - Set `SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic`
+   - Set `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`
+   - Unset `SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON/PATH`
+   - Restart server and worker
 
 ## Readiness and Metrics Interpretation
 
@@ -84,6 +102,34 @@ Do not enable hosted real runtime modes in this phase.
 ## Canary Record Retention
 
 Canary runs are expected durable evidence in production. Query them by canary metadata/tag and retain them for audit and rollback diagnostics.
+
+## Provider Policy Example (Opt-In Only)
+
+This is an operator-owned example. Do not check live credentials into git.
+
+```json
+{
+  "version": 1,
+  "modes": {
+    "codex.exec_json": {
+      "enabled": true,
+      "executablePath": "/usr/local/bin/codex",
+      "cwdPrefixes": ["/srv/switchyard/work"],
+      "envAllowlist": ["OPENAI_API_KEY", "PATH"],
+      "requiredEnv": ["OPENAI_API_KEY"],
+      "fixedArgs": ["exec", "--json"],
+      "allowUserArgs": false,
+      "sandbox": "read_only",
+      "spendControls": {
+        "maxActiveRuns": 2,
+        "maxRunsPerHour": 20,
+        "maxRunTimeoutSeconds": 300,
+        "maxPromptBytes": 60000
+      }
+    }
+  }
+}
+```
 
 ## CI/Audit Boundary
 
