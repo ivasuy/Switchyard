@@ -10,7 +10,10 @@ export interface ProductionManifestService {
   policy?: {
     runtimeAllowlist?: string[];
     realTools?: string;
+    objectStoreProbe?: string;
   };
+  runtimeAllowlist?: string[];
+  objectStoreProbe?: string;
 }
 
 export interface ProductionManifest {
@@ -127,7 +130,8 @@ export async function validateProductionManifest(path: string): Promise<Producti
   validateForbiddenSurfaces(manifest.services, errors);
   validateRequiredEnv(manifest, errors);
   validateReadinessChecks(manifest.services.server, manifest.services.worker, errors);
-  validateFakeOnlyPolicy(manifest.services.node, errors);
+  validateRuntimePosture(manifest.services, errors);
+  validateObjectStoreProbePosture(manifest.services, errors);
 
   if (errors.length > 0) {
     return {
@@ -221,19 +225,46 @@ function validateReadinessChecks(
   }
 
   const readinessChecks = worker.readinessChecks ?? [];
-  if (readinessChecks.length === 0) {
+  const hasR19WorkerGate = readinessChecks.some((entry) => {
+    const normalized = entry.toLowerCase();
+    return normalized.includes("startup/claim gate") || normalized.includes("apps/worker/dist/ready.js");
+  });
+  if (!hasR19WorkerGate) {
     errors.push({ code: "manifest_invalid", service: "worker" });
   }
 }
 
-function validateFakeOnlyPolicy(node: ProductionManifestService | undefined, errors: ProductionManifestError[]): void {
-  if (!node) {
-    return;
+function validateRuntimePosture(
+  services: ProductionManifest["services"],
+  errors: ProductionManifestError[]
+): void {
+  for (const [name, service] of Object.entries(services)) {
+    if (!service) {
+      continue;
+    }
+    const allowlist = service.policy?.runtimeAllowlist ?? service.runtimeAllowlist;
+    if (!allowlist) {
+      continue;
+    }
+    const fakeOnly = allowlist.length === 1 && allowlist[0] === "fake.deterministic";
+    if (!fakeOnly) {
+      errors.push({ code: "manifest_forbidden_surface", service: name });
+    }
   }
-  const allowlist = node.policy?.runtimeAllowlist ?? [];
-  const fakeOnly = allowlist.length === 1 && allowlist[0] === "fake.deterministic";
-  if (!fakeOnly) {
-    errors.push({ code: "manifest_forbidden_surface", service: "node" });
+}
+
+function validateObjectStoreProbePosture(
+  services: ProductionManifest["services"],
+  errors: ProductionManifestError[]
+): void {
+  for (const [name, service] of Object.entries(services)) {
+    if (!service) {
+      continue;
+    }
+    const probe = service.policy?.objectStoreProbe ?? service.objectStoreProbe;
+    if (probe !== undefined && probe !== "write_read_delete") {
+      errors.push({ code: "manifest_invalid", service: name });
+    }
   }
 }
 

@@ -19,6 +19,136 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const ACTIVE_COUNTS = {
+  accounts: 1,
+  tenants: 1,
+  projects: 1,
+  users: 1,
+  apiKeys: 1,
+  billingPlans: 1
+};
+
+function makeServerConfig(overrides: Record<string, unknown> = {}): any {
+  return {
+    deploymentMode: "production",
+    postgresUrl: "postgres://user:pw@db.example:5432/switchyard",
+    redisUrl: "redis://:pw@redis.example:6379/0",
+    queueName: "switchyard-hosted-runs",
+    hostedRuntimeAllowlist: ["fake.deterministic"],
+    hostedRealRuntimeExecution: "disabled",
+    nodeSharedToken: "x".repeat(32),
+    controlPlaneBootstrap: {
+      active: { ...ACTIVE_COUNTS },
+      nodeTokenBindings: [{ token: "x".repeat(32), apiKeyId: "api_key_1" }]
+    },
+    ...overrides
+  };
+}
+
+function makeWorkerConfig(overrides: Record<string, unknown> = {}): any {
+  return {
+    deploymentMode: "production",
+    redisUrl: "redis://:pw@redis.example:6379/0",
+    queueName: "switchyard-hosted-runs",
+    objectStore: { backend: "memory", probe: "write_read_delete", redactedSummary: { backend: "memory" } },
+    ...overrides
+  };
+}
+
+async function runDependencyPreflight(deps: Record<string, unknown>): Promise<Awaited<ReturnType<typeof runProductionPreflight>>> {
+  return withTempResult(async (dir) => {
+    const envPath = join(dir, "ok.env");
+    await writeFile(envPath, "SWITCHYARD_DEPLOYMENT_MODE=production\n", "utf8");
+    return runProductionPreflight({
+      envFile: envPath,
+      deps: {
+        validateManifest: async () => ({ ok: true, manifest: {} as never }),
+        loadServerConfig: () => makeServerConfig(),
+        loadWorkerConfig: () => makeWorkerConfig(),
+        openPostgresDatabase: () => ({ close: async () => undefined } as never),
+        checkPostgresSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 }),
+        queueStats: async () => undefined,
+        probeObjectStore: async () => undefined,
+        checkControlPlane: async () => ({ checks: [] }),
+        checkHostedRuntimeGate: async () => ({ ok: true }),
+        ...deps
+      }
+    });
+  });
+}
+
+async function withTempResult<T>(run: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), "switchyard-production-preflight-test-"));
+  try {
+    return await run(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function failedCodes(result: Awaited<ReturnType<typeof runProductionPreflight>>): string[] {
+  return result.checks.filter((entry) => entry.status === "fail").map((entry) => entry.code);
+}
+
+function validManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    services: {
+      server: {
+        deploymentMode: "production",
+        command: ["node", "apps/server/dist/main.js"],
+        requiredEnv: [
+          "SWITCHYARD_DEPLOYMENT_MODE",
+          "SWITCHYARD_SERVER_AUTH_MODE",
+          "SWITCHYARD_CONTROL_PLANE_STORE",
+          "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+          "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+        ],
+        healthChecks: ["GET /health", "GET /ready"]
+      },
+      worker: {
+        deploymentMode: "production",
+        command: ["node", "apps/worker/dist/main.js"],
+        requiredEnv: [
+          "SWITCHYARD_DEPLOYMENT_MODE",
+          "SWITCHYARD_OBJECT_STORE_PROBE",
+          "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+          "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+        ],
+        readinessChecks: ["P18-T4 worker startup/claim gate"]
+      },
+      node: {
+        deploymentMode: "production",
+        command: ["node", "apps/node/dist/main.js"],
+        requiredEnv: [
+          "SWITCHYARD_DEPLOYMENT_MODE",
+          "SWITCHYARD_SERVER_URL",
+          "SWITCHYARD_NODE_SHARED_TOKEN",
+          "SWITCHYARD_NODE_CAPABILITIES",
+          "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES",
+          "SWITCHYARD_NODE_ALLOW_CWD_PREFIXES"
+        ],
+        policy: {
+          runtimeAllowlist: ["fake.deterministic"],
+          realTools: "forbidden"
+        }
+      }
+    },
+    requiredEnv: [
+      "SWITCHYARD_DEPLOYMENT_MODE",
+      "SWITCHYARD_SERVER_AUTH_MODE",
+      "SWITCHYARD_CONTROL_PLANE_STORE",
+      "SWITCHYARD_POSTGRES_URL",
+      "SWITCHYARD_REDIS_URL",
+      "SWITCHYARD_OBJECT_STORE_BACKEND",
+      "SWITCHYARD_NODE_SHARED_TOKEN",
+      "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+      "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+    ],
+    forbiddenSurfaces: ["dashboard", "tui", "payment", "oauth", "browser", "/sandbox", "/exec", "/pty", "/terminal"],
+    ...overrides
+  };
+}
+
 describe("parseProductionEnvFile", () => {
   test("parses comments, quoted values, and inline comments", async () => {
     await withTempDir(async (dir) => {
@@ -85,6 +215,20 @@ describe("parseProductionEnvFile", () => {
       ]);
     });
   });
+
+  test("returns env_file_empty for zero-byte or whitespace-only files", async () => {
+    await withTempDir(async (dir) => {
+      const envPath = join(dir, "empty.env");
+      await writeFile(envPath, " \n\t\n", "utf8");
+
+      const parsed = await parseProductionEnvFile(envPath);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) {
+        return;
+      }
+      expect(parsed.errors).toEqual([{ code: "env_file_empty" }]);
+    });
+  });
 });
 
 describe("validateProductionManifest", () => {
@@ -149,6 +293,77 @@ describe("validateProductionManifest", () => {
       const codes = result.errors.map((entry) => entry.code);
       expect(codes).toContain("manifest_forbidden_command");
       expect(codes).toContain("manifest_forbidden_surface");
+    });
+  });
+
+  test("returns manifest_env_missing for missing required env keys", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      await writeFile(
+        manifestPath,
+        JSON.stringify(validManifest({ requiredEnv: ["SWITCHYARD_DEPLOYMENT_MODE"] })),
+        "utf8"
+      );
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors.map((entry) => entry.code)).toContain("manifest_env_missing");
+    });
+  });
+
+  test("rejects missing worker readiness gate path or startup gate", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      (manifest.services as any).worker.readinessChecks = ["queue stats only"];
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors).toContainEqual({ code: "manifest_invalid", service: "worker" });
+    });
+  });
+
+  test("rejects non-fake runtime posture declared by services", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      (manifest.services as any).worker.policy = {
+        runtimeAllowlist: ["fake.deterministic", "codex.exec_json"]
+      };
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors).toContainEqual({ code: "manifest_forbidden_surface", service: "worker" });
+    });
+  });
+
+  test("rejects disabled object-store probe posture", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      (manifest.services as any).worker.policy = {
+        runtimeAllowlist: ["fake.deterministic"],
+        objectStoreProbe: "disabled"
+      };
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors).toContainEqual({ code: "manifest_invalid", service: "worker" });
     });
   });
 });
@@ -279,6 +494,54 @@ describe("runProductionPreflight", () => {
         "hosted_runtime_gate_failed"
       ]));
     });
+  });
+
+  test("surfaces schema migration required and malformed codes", async () => {
+    const migrationRequired = await runDependencyPreflight({
+      checkPostgresSchemaCompatibility: async () => ({ ok: false, code: "postgres_schema_migration_required", version: 18 })
+    });
+    const malformed = await runDependencyPreflight({
+      checkPostgresSchemaCompatibility: async () => ({ ok: false, code: "postgres_schema_malformed" })
+    });
+
+    expect(failedCodes(migrationRequired)).toContain("postgres_schema_migration_required");
+    expect(failedCodes(malformed)).toContain("postgres_schema_malformed");
+  });
+
+  test("surfaces postgres unavailable when schema check rejects", async () => {
+    const result = await runDependencyPreflight({
+      checkPostgresSchemaCompatibility: async () => {
+        throw new Error("database unavailable");
+      }
+    });
+
+    expect(failedCodes(result)).toContain("postgres_unavailable");
+  });
+
+  test("surfaces each missing control-plane bootstrap entity code", async () => {
+    const result = await runDependencyPreflight({
+      checkControlPlane: async () => ({
+        checks: [
+          { name: "bootstrapAccount", ok: false, code: "control_plane_bootstrap_account_missing" },
+          { name: "bootstrapTenant", ok: false, code: "control_plane_bootstrap_tenant_missing" },
+          { name: "bootstrapProject", ok: false, code: "control_plane_bootstrap_project_missing" },
+          { name: "bootstrapUser", ok: false, code: "control_plane_bootstrap_user_missing" },
+          { name: "bootstrapApiKey", ok: false, code: "control_plane_bootstrap_api_key_missing" },
+          { name: "bootstrapBillingPlan", ok: false, code: "control_plane_bootstrap_billing_plan_missing" },
+          { name: "nodeTokenBinding", ok: false, code: "control_plane_node_token_unbound" }
+        ]
+      })
+    });
+
+    expect(failedCodes(result)).toEqual(expect.arrayContaining([
+      "control_plane_bootstrap_account_missing",
+      "control_plane_bootstrap_tenant_missing",
+      "control_plane_bootstrap_project_missing",
+      "control_plane_bootstrap_user_missing",
+      "control_plane_bootstrap_api_key_missing",
+      "control_plane_bootstrap_billing_plan_missing",
+      "control_plane_node_token_unbound"
+    ]));
   });
 
   test("redacts diagnostics in output", async () => {
