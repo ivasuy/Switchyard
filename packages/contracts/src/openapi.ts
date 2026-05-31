@@ -508,9 +508,8 @@ function applyHostedReadyResponseDocs(schema: SchemaObject | undefined): void {
           ok: false,
           code: "postgres_schema_migration_required",
           diagnostics: {
-            currentVersion: 3,
-            requiredVersion: 4,
-            compatible: false
+            expectedVersion: 19,
+            actualVersion: 18
           }
         }
       }

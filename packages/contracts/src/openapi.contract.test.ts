@@ -165,6 +165,12 @@ describe("openapi generation", () => {
     expect(String(schemaCheck?.code ?? "")).toBe("postgres_schema_migration_required");
     expect(schemaCheck?.diagnostics).toEqual(
       expect.objectContaining({
+        expectedVersion: expect.any(Number),
+        actualVersion: expect.any(Number)
+      })
+    );
+    expect(schemaCheck?.diagnostics).not.toEqual(
+      expect.objectContaining({
         currentVersion: expect.any(Number),
         requiredVersion: expect.any(Number),
         compatible: expect.any(Boolean)

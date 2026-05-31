@@ -3961,9 +3961,8 @@
               "schema": {
                 "code": "postgres_schema_migration_required",
                 "diagnostics": {
-                  "compatible": false,
-                  "currentVersion": 3,
-                  "requiredVersion": 4
+                  "actualVersion": 18,
+                  "expectedVersion": 19
                 },
                 "ok": false
               }
