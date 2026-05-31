@@ -1,8 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
   ArtifactStore,
+  ControlPlaneService,
   EventBus,
   EventStore,
+  PlacementStore,
   RegistryService,
   RegistryStore,
   ContextBuilder,
@@ -11,7 +13,7 @@ import type {
   RunService,
   RunStore
 } from "@switchyard/core";
-import { AdapterProtocolError, isRealHostedRuntimeMode } from "@switchyard/core";
+import { AdapterProtocolError, ControlPlaneError, isRealHostedRuntimeMode } from "@switchyard/core";
 import {
   adapterTypeSchema,
   decodeCursor,
@@ -27,6 +29,7 @@ import {
   streamRunEvents
 } from "@switchyard/protocol-sse";
 import { ZodError } from "zod";
+import { getHostedAuthContext } from "./hosted-auth.js";
 import { HttpProblem, sendHttpError, zodIssuesToDetails } from "./http-errors.js";
 import { resolveProviderIds } from "./registry-helpers.js";
 
@@ -41,11 +44,27 @@ export interface RunRouteDependencies {
   launcher?: RunLauncherService;
   registry?: RegistryStore;
   registryService?: RegistryService;
+  placements?: PlacementStore;
+  controlPlane?: ControlPlaneService;
 }
 
 export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependencies): void {
   app.post("/runs", async (request, reply) => {
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+
+    let reservationId: string | undefined;
+    let controlPlaneAuth = auth;
     try {
+      const rawBody = isRecord(request.body) ? request.body : undefined;
+      if (rawBody) {
+        const ownershipOverrideIssue = findOwnershipOverrideIssue(rawBody);
+        if (ownershipOverrideIssue) {
+          return sendHttpError(reply, "invalid_input", "ownership overrides are not allowed", [ownershipOverrideIssue]);
+        }
+      }
       const wait = shouldWaitForCompletion(request.query);
       const body = parseCreateRunBody(request.body);
       const renderedContext = body.context
@@ -79,6 +98,17 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       if (runtimeMode !== undefined) {
         createInput.runtimeMode = runtimeMode;
       }
+
+      if (deps.controlPlane && controlPlaneAuth) {
+        const reservation = await deps.controlPlane.preflightRunCreate({
+          auth: controlPlaneAuth,
+          placement: createInput.placement ?? "local",
+          runtimeMode: createInput.runtimeMode ?? "",
+          timeoutSeconds: createInput.timeoutSeconds
+        });
+        reservationId = reservation.id;
+      }
+
       let placementFacts;
       if (runtimeMode && deps.registry) {
         const mode = await deps.registry.getRuntimeMode(runtimeMode);
@@ -98,12 +128,89 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
         : { run: await deps.runService.createRun(createInput) };
 
       const run = runResult.run;
+
+      if (deps.controlPlane && controlPlaneAuth) {
+        const ownership = await deps.controlPlane.ensureOwnedOrAttachFromRun({
+          auth: controlPlaneAuth,
+          resourceType: "run",
+          resourceId: run.id,
+          runId: run.id
+        });
+        if (!ownership.ok) {
+          await terminalizeCreatedRun(deps, run.id);
+          if (reservationId) {
+            await deps.controlPlane.releaseQuotaReservation({
+              auth: controlPlaneAuth,
+              reservationId,
+              outcome: "failed",
+              reasonCode: ownership.reasonCode
+            });
+          }
+          await deps.controlPlane.recordAudit({
+            auth: controlPlaneAuth,
+            eventType: "run.create_denied",
+            decision: "error",
+            reasonCode: "ownership_attach_failed",
+            resourceType: "run",
+            resourceId: run.id,
+            requestId: request.id,
+            payload: { routeId: "runs.create", reasonCode: "ownership_attach_failed" }
+          });
+          return sendHttpError(reply, "internal_error", "ownership_attach_failed", [
+            { path: "reasonCode", issue: "ownership_attach_failed" }
+          ]);
+        }
+        await attachRunSideEffectOwnership(deps, controlPlaneAuth, run.id);
+      }
+
       if (wait) {
         if (runResult.response) {
+          if (deps.controlPlane && controlPlaneAuth && reservationId) {
+            await deps.controlPlane.releaseQuotaReservation({
+              auth: controlPlaneAuth,
+              reservationId,
+              outcome: "consumed",
+              reasonCode: "run_create_wait_completed"
+            });
+            reservationId = undefined;
+          }
+          if (deps.controlPlane && controlPlaneAuth) {
+            await deps.controlPlane.recordAudit({
+              auth: controlPlaneAuth,
+              eventType: "run.create_allowed",
+              decision: "allow",
+              reasonCode: "run_create_allowed",
+              resourceType: "run",
+              resourceId: run.id,
+              requestId: request.id,
+              payload: { routeId: "runs.create", wait: true }
+            });
+          }
           return reply.code(201).send({ run: runResult.run, response: runResult.response });
         }
         const completed = await deps.runService.startRun(run.id);
         const events = await deps.events.listByRun(run.id);
+        if (deps.controlPlane && controlPlaneAuth && reservationId) {
+          await deps.controlPlane.releaseQuotaReservation({
+            auth: controlPlaneAuth,
+            reservationId,
+            outcome: "consumed",
+            reasonCode: "run_create_wait_completed"
+          });
+          reservationId = undefined;
+        }
+        if (deps.controlPlane && controlPlaneAuth) {
+          await deps.controlPlane.recordAudit({
+            auth: controlPlaneAuth,
+            eventType: "run.create_allowed",
+            decision: "allow",
+            reasonCode: "run_create_allowed",
+            resourceType: "run",
+            resourceId: run.id,
+            requestId: request.id,
+            payload: { routeId: "runs.create", wait: true }
+          });
+        }
         return reply.code(201).send({ run: completed, response: collectRunResponse(events) });
       }
       if (!deps.hostedRuns && deps.launcher) {
@@ -113,8 +220,50 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
           void deps.runService.startRun(run.id).catch(() => {});
         });
       }
+      if (deps.controlPlane && controlPlaneAuth && reservationId) {
+        await deps.controlPlane.releaseQuotaReservation({
+          auth: controlPlaneAuth,
+          reservationId,
+          outcome: "consumed",
+          reasonCode: "run_create_accepted"
+        });
+        reservationId = undefined;
+      }
+      if (deps.controlPlane && controlPlaneAuth) {
+        await deps.controlPlane.recordAudit({
+          auth: controlPlaneAuth,
+          eventType: "run.create_allowed",
+          decision: "allow",
+          reasonCode: "run_create_allowed",
+          resourceType: "run",
+          resourceId: run.id,
+          requestId: request.id,
+          payload: { routeId: "runs.create", wait: false }
+        });
+      }
       return reply.code(202).send({ run });
     } catch (error) {
+      if (deps.controlPlane && controlPlaneAuth && reservationId) {
+        const failure = classifyRunCreateFailure(error);
+        await deps.controlPlane.releaseQuotaReservation({
+          auth: controlPlaneAuth,
+          reservationId,
+          outcome: failure.outcome,
+          reasonCode: failure.reasonCode
+        });
+        await deps.controlPlane.recordAudit({
+          auth: controlPlaneAuth,
+          eventType: failure.eventType,
+          decision: "deny",
+          reasonCode: failure.reasonCode,
+          resourceType: "run",
+          requestId: request.id,
+          payload: { routeId: "runs.create", reasonCode: failure.reasonCode }
+        });
+      }
+      if (error instanceof ControlPlaneError) {
+        return sendHttpError(reply, error.code, error.reasonCode, [{ path: "reasonCode", issue: error.reasonCode }]);
+      }
       if (isHostedRunServiceError(error)) {
         if (error.code === "queue_unavailable") {
           return sendHttpError(reply, "queue_unavailable", error.message);
@@ -129,6 +278,17 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
   });
 
   app.get("/runs", async (request, reply) => {
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane) {
+      if (!auth) {
+        return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+      }
+      const deniedOwnerFilter = detectOwnerFilterAttempt(request.query);
+      if (deniedOwnerFilter) {
+        return sendHttpError(reply, "tenant_access_denied", "tenant_filter_not_allowed", [deniedOwnerFilter]);
+      }
+    }
+
     const query = parseListRunsQuery(request.query);
     let providerSlugFilter: readonly string[] | undefined;
     let runtimeSlugFilter: readonly string[] | undefined;
@@ -155,7 +315,9 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       filter.before = decodeRunCursor(query.before);
     }
 
-    const result = await deps.runs.list(filter);
+    const result = deps.controlPlane && auth
+      ? await listOwnedRunsPage(deps, auth, filter, limit)
+      : await deps.runs.list(filter);
     return reply.send({
       runs: result.runs,
       nextCursor: result.nextCursor ? encodeRunCursor(result.nextCursor) : null
@@ -164,6 +326,31 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
 
   app.get("/runs/:id", async (request, reply) => {
     const id = (request.params as { id: string }).id;
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+    if (deps.controlPlane && auth) {
+      const owned = await deps.controlPlane.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: id,
+        notFoundCode: "run_not_found"
+      });
+      if (!owned.ok) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "tenant.access_denied",
+          decision: "deny",
+          reasonCode: owned.reasonCode,
+          resourceType: "run",
+          resourceId: id,
+          requestId: request.id,
+          payload: { routeId: "runs.get", reasonCode: owned.reasonCode }
+        });
+        return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      }
+    }
     const run = await deps.runs.get(id);
     if (!run) {
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
@@ -179,6 +366,31 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
 
   app.get("/runs/:id/artifacts", async (request, reply) => {
     const id = (request.params as { id: string }).id;
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+    if (deps.controlPlane && auth) {
+      const owned = await deps.controlPlane.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: id,
+        notFoundCode: "run_not_found"
+      });
+      if (!owned.ok) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "tenant.access_denied",
+          decision: "deny",
+          reasonCode: owned.reasonCode,
+          resourceType: "run",
+          resourceId: id,
+          requestId: request.id,
+          payload: { routeId: "runs.artifacts", reasonCode: owned.reasonCode }
+        });
+        return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      }
+    }
     const run = await deps.runs.get(id);
     if (!run) {
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
@@ -191,6 +403,31 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
 
   app.post("/runs/:id/input", async (request, reply) => {
     const id = (request.params as { id: string }).id;
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+    if (deps.controlPlane && auth) {
+      const owned = await deps.controlPlane.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: id,
+        notFoundCode: "run_not_found"
+      });
+      if (!owned.ok) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "tenant.access_denied",
+          decision: "deny",
+          reasonCode: owned.reasonCode,
+          resourceType: "run",
+          resourceId: id,
+          requestId: request.id,
+          payload: { routeId: "runs.input", reasonCode: owned.reasonCode }
+        });
+        return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      }
+    }
     const run = await deps.runs.get(id);
     if (!run) {
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
@@ -225,6 +462,31 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
 
   app.post("/runs/:id/cancel", async (request, reply) => {
     const id = (request.params as { id: string }).id;
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+    if (deps.controlPlane && auth) {
+      const owned = await deps.controlPlane.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: id,
+        notFoundCode: "run_not_found"
+      });
+      if (!owned.ok) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "tenant.access_denied",
+          decision: "deny",
+          reasonCode: owned.reasonCode,
+          resourceType: "run",
+          resourceId: id,
+          requestId: request.id,
+          payload: { routeId: "runs.cancel", reasonCode: owned.reasonCode }
+        });
+        return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      }
+    }
     const run = await deps.runs.get(id);
     if (!run) {
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
@@ -261,6 +523,34 @@ async function handleRunEventsRequest(
   deps: RunRouteDependencies
 ): Promise<void> {
   const id = (request.params as { id: string }).id;
+  const auth = getHostedAuthContext(request);
+  if (deps.controlPlane && !auth) {
+    sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    return;
+  }
+  if (deps.controlPlane && auth) {
+    const owned = await deps.controlPlane.authorizeResource({
+      auth,
+      resourceType: "run",
+      resourceId: id,
+      notFoundCode: "run_not_found"
+    });
+    if (!owned.ok) {
+      await deps.controlPlane.recordAudit({
+        auth,
+        eventType: "tenant.access_denied",
+        decision: "deny",
+        reasonCode: owned.reasonCode,
+        resourceType: "run",
+        resourceId: id,
+        requestId: request.id,
+        payload: { routeId: "runs.events", reasonCode: owned.reasonCode }
+      });
+      sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      return;
+    }
+  }
+
   const run = await deps.runs.get(id);
   if (!run) {
     sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
@@ -334,6 +624,157 @@ async function handleRunEventsRequest(
   if (lastEventId !== undefined) streamInput.lastEventId = lastEventId;
   const handle = streamRunEvents(streamInput);
   await handle.finished;
+}
+
+async function listOwnedRunsPage(
+  deps: RunRouteDependencies,
+  auth: NonNullable<ReturnType<typeof getHostedAuthContext>>,
+  filter: Parameters<RunStore["list"]>[0],
+  limit: number
+): Promise<{ runs: Awaited<ReturnType<RunStore["list"]>>["runs"]; nextCursor: Awaited<ReturnType<RunStore["list"]>>["nextCursor"] }> {
+  const runs: Awaited<ReturnType<RunStore["list"]>>["runs"] = [];
+  let currentBefore = filter.before;
+  let nextCursor: Awaited<ReturnType<RunStore["list"]>>["nextCursor"] = null;
+
+  while (runs.length < limit) {
+    const pageFilter: Parameters<RunStore["list"]>[0] = { ...filter, limit };
+    if (currentBefore) {
+      pageFilter.before = currentBefore;
+    }
+    const page = await deps.runs.list(pageFilter);
+    const owned: typeof page.runs = [];
+    for (const run of page.runs) {
+      const result = await deps.controlPlane!.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: run.id,
+        notFoundCode: "run_not_found"
+      });
+      if (result.ok) {
+        owned.push(run);
+      }
+    }
+    runs.push(...owned);
+    if (!page.nextCursor) {
+      nextCursor = null;
+      break;
+    }
+    currentBefore = page.nextCursor;
+    nextCursor = page.nextCursor;
+    if (page.runs.length === 0) {
+      break;
+    }
+  }
+
+  return {
+    runs: runs.slice(0, limit),
+    nextCursor
+  };
+}
+
+function detectOwnerFilterAttempt(query: unknown): { path: string; issue: string } | null {
+  if (!query || typeof query !== "object" || Array.isArray(query)) {
+    return null;
+  }
+  const key = Object.keys(query).find((entry) =>
+    entry === "accountId" ||
+    entry === "tenantId" ||
+    entry === "projectId" ||
+    entry === "createdByUserId" ||
+    entry === "apiKeyId"
+  );
+  if (!key) {
+    return null;
+  }
+  return { path: key, issue: "owner filters are not allowed" };
+}
+
+function findOwnershipOverrideIssue(payload: Record<string, unknown>): { path: string; issue: string } | null {
+  const ownerKeys = ["accountId", "tenantId", "projectId", "createdByUserId", "apiKeyId"];
+  const topLevel = ownerKeys.find((key) => key in payload);
+  if (topLevel) {
+    return { path: topLevel, issue: "owner override is not allowed" };
+  }
+  const metadata = payload["metadata"];
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const metadataRecord = metadata as Record<string, unknown>;
+  const metadataOverride = ownerKeys.find((key) => key in metadataRecord);
+  if (!metadataOverride) {
+    return null;
+  }
+  return { path: `metadata.${metadataOverride}`, issue: "owner override is not allowed" };
+}
+
+function classifyRunCreateFailure(error: unknown): {
+  eventType: "run.create_denied" | "quota.denied";
+  reasonCode: string;
+  outcome: "released" | "failed";
+} {
+  if (error instanceof ControlPlaneError) {
+    if (error.code === "quota_exceeded") {
+      return { eventType: "quota.denied", reasonCode: error.reasonCode, outcome: "released" };
+    }
+    if (error.code === "entitlement_denied") {
+      return { eventType: "run.create_denied", reasonCode: error.reasonCode, outcome: "released" };
+    }
+    return { eventType: "run.create_denied", reasonCode: error.reasonCode, outcome: "failed" };
+  }
+  if (isHostedRunServiceError(error)) {
+    if (error.code === "queue_unavailable") {
+      return { eventType: "run.create_denied", reasonCode: "queue_enqueue_failed", outcome: "failed" };
+    }
+    return { eventType: "run.create_denied", reasonCode: "placement_store_failed", outcome: "failed" };
+  }
+  if (error instanceof Error && error.message.includes("create")) {
+    return { eventType: "run.create_denied", reasonCode: "run_store_create_failed", outcome: "failed" };
+  }
+  return { eventType: "run.create_denied", reasonCode: "run_create_failed", outcome: "failed" };
+}
+
+async function terminalizeCreatedRun(deps: RunRouteDependencies, runId: string): Promise<void> {
+  const run = await deps.runs.get(runId);
+  if (!run || isTerminalStatus(run.status)) {
+    return;
+  }
+  await deps.runs.update({
+    ...run,
+    status: "failed",
+    endedAt: new Date().toISOString()
+  });
+}
+
+async function attachRunSideEffectOwnership(
+  deps: RunRouteDependencies,
+  auth: NonNullable<ReturnType<typeof getHostedAuthContext>>,
+  runId: string
+): Promise<void> {
+  if (!deps.controlPlane) {
+    return;
+  }
+
+  const events = await deps.events.listByRun(runId);
+  for (const event of events) {
+    await deps.controlPlane.ensureOwnedOrAttachFromRun({
+      auth,
+      resourceType: "run_event",
+      resourceId: event.id,
+      runId
+    });
+  }
+
+  if (deps.placements) {
+    const placements = await deps.placements.listByRun(runId);
+    for (const placement of placements) {
+      await deps.controlPlane.ensureOwnedOrAttachFromRun({
+        auth,
+        resourceType: "placement_decision",
+        resourceId: placement.id,
+        runId
+      });
+    }
+  }
 }
 
 function noopEventBus(): EventBus {

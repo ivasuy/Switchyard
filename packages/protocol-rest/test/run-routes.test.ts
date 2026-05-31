@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import {
   AdapterProtocolError,
+  ControlPlaneError,
   type ArtifactStore,
   EventBus,
   RegistryService,
@@ -11,7 +12,7 @@ import {
 } from "@switchyard/core";
 import type { Artifact } from "@switchyard/contracts";
 import { FakeRuntimeAdapter, InMemoryEventStore, InMemoryRegistryStore, InMemoryRunStore, InMemorySessionStore } from "@switchyard/testkit";
-import { registerRunRoutes } from "../src/index.js";
+import { registerHostedAuthHooks, registerRunRoutes } from "../src/index.js";
 
 describe("run routes", () => {
   it("falls back to direct async start when launcher is omitted", async () => {
@@ -1121,3 +1122,35 @@ function seedRuntimeMode(registry: InMemoryRegistryStore, mode: {
   registry.runtimeModes.set(mode.id, mode as never);
   registry.runtimeModesBySlug.set(mode.slug, mode.id);
 }
+
+describe("run routes hosted auth", () => {
+  it("denies large unauthenticated create before parser and run service side effects", async () => {
+    const harness = createRouteHarness();
+    const runCreateSpy = vi.spyOn(harness.runService, "createRun");
+    const preParsingSpy = vi.fn();
+    harness.app.addHook("preParsing", async () => {
+      preParsingSpy();
+    });
+
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => {
+        throw new ControlPlaneError("auth_required", "auth_required");
+      }),
+      requireScope: vi.fn()
+    };
+
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      payload: {
+        ...fakeRunPayload("x".repeat(1024 * 1024 * 5))
+      }
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(runCreateSpy).not.toHaveBeenCalled();
+    expect(preParsingSpy).not.toHaveBeenCalled();
+  });
+});

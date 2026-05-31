@@ -1,12 +1,14 @@
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import type { Artifact } from "@switchyard/contracts";
+import { ControlPlaneError } from "@switchyard/core";
 import type { ArtifactStore } from "@switchyard/core";
 import { InMemoryArtifactStore } from "@switchyard/testkit";
 import {
   contentTypeForArtifact,
   registerArtifactRoutes,
   registerErrorEnvelope,
+  registerHostedAuthHooks,
   type ArtifactContentReader
 } from "../src/index.js";
 
@@ -151,4 +153,124 @@ describe("artifact routes", () => {
     expect(contentTypeForArtifact("raw_log")).toBe("text/plain; charset=utf-8");
     expect(contentTypeForArtifact("custom_unknown")).toBe("application/octet-stream");
   });
+
+  it("denies artifact content quota before artifactContent.read", async () => {
+    const artifacts = new InMemoryArtifactStore();
+    await artifacts.create({ ...baseArtifact, metadata: { contentStored: true, sizeBytes: 2048 } });
+    let readCalls = 0;
+    const app = Fastify();
+    registerErrorEnvelope(app);
+    registerHostedAuthHooks(app, {
+      controlPlane: {
+        authenticateRequest: async () => testAuth(),
+        requireScope: () => {},
+        recordAudit: async () => ({ ok: true }),
+        authorizeResource: async () => ({ ok: true }),
+        preflightArtifactContentRead: async () => {
+          throw new ControlPlaneError("quota_exceeded", "artifact_read_bytes_exceeded");
+        }
+      } as never
+    });
+    registerArtifactRoutes(app, {
+      artifacts,
+      controlPlane: {
+        authorizeResource: async () => ({ ok: true }),
+        preflightArtifactContentRead: async () => {
+          throw new ControlPlaneError("quota_exceeded", "artifact_read_bytes_exceeded");
+        },
+        recordAudit: async () => ({ ok: true })
+      } as never,
+      artifactContent: {
+        async read() {
+          readCalls += 1;
+          return { body: "nope", contentType: "text/plain" };
+        }
+      }
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/artifacts/artifact_test/content",
+      headers: { authorization: "Bearer sk_sw_test_1" }
+    });
+    expect(response.statusCode).toBe(429);
+    expect(response.json().error.code).toBe("quota_exceeded");
+    expect(readCalls).toBe(0);
+  });
 });
+
+function testAuth() {
+  return {
+    account: {
+      id: "account_1",
+      name: "Acme",
+      status: "active",
+      billingPlanId: "billing_plan_1",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    tenant: {
+      id: "tenant_1",
+      accountId: "account_1",
+      slug: "acme",
+      displayName: "Acme",
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    project: {
+      id: "project_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      slug: "prod",
+      displayName: "Prod",
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    user: {
+      id: "user_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      displayName: "Tester",
+      email: "t@example.com",
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    apiKey: {
+      id: "api_key_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      name: "primary",
+      keyPrefix: "sk_sw",
+      scopes: ["artifacts:read"],
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    entitlement: {
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      planId: "billing_plan_1",
+      planSlug: "enterprise",
+      planDisplayName: "Enterprise",
+      entitlements: {
+        allowedPlacements: ["local", "hosted", "connected_local_node"],
+        allowedRuntimeModes: ["fake.deterministic"],
+        allowHostedRealRuntime: false,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowMetricsRead: true,
+        allowAuditRead: true
+      },
+      quotas: {
+        maxRunsPerHour: 10,
+        maxActiveRuns: 2,
+        maxRunTimeoutSeconds: 600,
+        maxConnectedNodes: 2,
+        maxArtifactContentReadBytesPerHour: 1024
+      },
+      scopes: ["artifacts:read"],
+      capturedAt: "2026-05-31T00:00:00.000Z"
+    }
+  };
+}
