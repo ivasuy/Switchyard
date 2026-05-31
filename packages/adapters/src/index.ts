@@ -12,3 +12,4 @@ export * from "./generic-http/index.js";
 export * from "./opencode/index.js";
 export * from "./compatibility-matrix.js";
 export * from "./tools/index.js";
+export * from "./sandbox/production-hosted-sandbox-executor.js";
