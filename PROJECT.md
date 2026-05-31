@@ -267,3 +267,19 @@ The shipped boundary remains explicit: R19 does not ship dashboard, TUI, managed
 
 ### Deferred Concerns
 - None.
+
+## Phase 19: R20 Production Subprocess/PTY Sandbox Foundation
+**Date:** 2026-05-31
+**Spec:** docs/superpowers/specs/2026-05-31-phase-19-r20-production-subprocess-pty.md
+**Plan:** docs/superpowers/plans/2026-05-31-phase-19-r20-production-subprocess-pty.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-19-report.md
+**Branch:** agent/phase-19-r20-production-subprocess-pty (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R20 is now shipped on the phase branch. Switchyard adds an internal worker-only production subprocess/PTY sandbox foundation: contracts for production command policy and policy-resolved commands, core real-execution gating that is disabled by default, a production executor substrate with direct-spawn process execution and driver-injected PTY behavior, worker-only service construction, production manifest/preflight/readiness gates, and deterministic no-spend `production:sandbox-smoke` verification. The audit found and fixed one blocker before green: process and PTY abort cleanup now settles cleanly even when `kill("SIGTERM")` succeeds but no later `close` event arrives.
+
+The shipped boundary remains explicit: R20 does not ship dashboard, TUI, public arbitrary execution APIs, generic process/PTY runtime adapters, hosted provider execution for Codex/Claude/OpenCode, hosted or connected-node real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, runtime-specific hosted approval bridge expansion, managed SaaS/public signup, payment provider integration, OAuth/OIDC/SAML/SSO/SCIM, or hosted debate with real participant runtimes/model judging.
+
+### Deferred Concerns
+- None.
