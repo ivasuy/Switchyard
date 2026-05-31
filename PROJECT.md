@@ -203,3 +203,19 @@ The shipped boundary remains explicit: R15 does not ship managed production host
 
 ### Deferred Concerns
 - None.
+
+## Phase 15: R16 Interactive Codex And Approval Bridges
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-15-r16-interactive-codex-and-approval-bridges.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-15-r16-interactive-codex-and-approval-bridges.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-15-report.md
+**Branch:** agent/phase-15-r16-interactive-codex-and-approval-bridges (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R16 is now shipped on the phase branch. Switchyard adds an explicit local-only `codex.interactive` runtime mode while preserving `codex.exec_json` as the inferred one-shot default. The release adds fake/no-spend Codex interactive session coverage, bounded post-start input, session-state/resume metadata handling, runtime approval terminalization and startup reconciliation, approval expiry without lock re-entry, adapter-emitted terminal failure cleanup, runtime-output log redaction, double-input conflict handling, daemon registry/doctor wiring that avoids live-resume overclaiming, REST/OpenAPI boundary guards, and product/development docs for the shipped local Codex interactive path.
+
+The shipped boundary remains explicit: R16 does not ship hosted post-start input or approval bridges, public PTY/TUI/terminal/exec/sandbox routes, arbitrary shell/tool execution, generic process/PTY adapters, real shell/browser/search/GitHub/fetch/repo tools, live Codex resume success guarantees, hosted debate with real participant runtimes/model judging, managed production hosted platform deployment, enterprise auth/billing/tenant controls, dashboard, or TUI.
+
+### Deferred Concerns
+- None.
