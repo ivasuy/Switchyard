@@ -460,11 +460,21 @@ function truncateUtf8(value: string, maxBytes: number): string {
   if (maxBytes <= 0) {
     return "";
   }
-  const buffer = Buffer.from(value, "utf8");
-  if (buffer.byteLength <= maxBytes) {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) {
     return value;
   }
-  return buffer.subarray(0, maxBytes).toString("utf8");
+
+  const codePoints: string[] = [];
+  let usedBytes = 0;
+  for (const codePoint of value) {
+    const pointBytes = Buffer.byteLength(codePoint, "utf8");
+    if (usedBytes + pointBytes > maxBytes) {
+      break;
+    }
+    usedBytes += pointBytes;
+    codePoints.push(codePoint);
+  }
+  return codePoints.join("");
 }
 
 function failed(

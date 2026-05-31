@@ -153,7 +153,36 @@ describe("ProductionHostedSandboxExecutor", () => {
     const result = await pending;
 
     expect(Buffer.byteLength(result.stdout ?? "", "utf8")).toBeLessThanOrEqual(8);
+    expect(Buffer.byteLength(result.stderr ?? "", "utf8")).toBeLessThanOrEqual(8);
     expect(Buffer.byteLength((result.stdout ?? "") + (result.stderr ?? ""), "utf8")).toBeLessThanOrEqual(8);
+  });
+
+  it("bounds multibyte process output without breaking UTF-8 limits", async () => {
+    const processFactory = new RecordingProcessFactory();
+    const child = new FakeProcess();
+    processFactory.nextChild = child;
+    const executor = new ProductionHostedSandboxExecutor({ processFactory });
+    const request = baseProcessRequest({
+      resourceLimits: {
+        ...BASE_LIMITS,
+        stdoutBytes: 5,
+        stderrBytes: 5,
+        combinedOutputBytes: 9
+      }
+    });
+
+    const pending = executor.execute(request, {
+      resolvedCommand: baseProcessResolvedCommand()
+    });
+    await nextTick();
+    child.stdout.write("🙂🙂");
+    child.stderr.write("€€");
+    child.emitClose(0);
+    const result = await pending;
+
+    expect(Buffer.byteLength(result.stdout ?? "", "utf8")).toBeLessThanOrEqual(5);
+    expect(Buffer.byteLength(result.stderr ?? "", "utf8")).toBeLessThanOrEqual(5);
+    expect(Buffer.byteLength((result.stdout ?? "") + (result.stderr ?? ""), "utf8")).toBeLessThanOrEqual(9);
   });
 
   it("kills process and returns named failure when stdin write fails", async () => {
@@ -216,6 +245,33 @@ describe("ProductionHostedSandboxExecutor", () => {
     ]);
     expect(result.status).toBe("completed");
     expect(result.stdout).toBe("pty-output");
+  });
+
+  it("bounds multibyte PTY output without breaking UTF-8 limits", async () => {
+    const ptyFactory = new RecordingPtyFactory();
+    const pty = new FakePty();
+    ptyFactory.nextPty = pty;
+    const executor = new ProductionHostedSandboxExecutor({ ptyFactory });
+    const request = basePtyRequest({
+      resourceLimits: {
+        ...BASE_LIMITS,
+        stdoutBytes: 5,
+        stderrBytes: 5,
+        combinedOutputBytes: 5
+      }
+    });
+
+    const pending = executor.execute(request, {
+      resolvedCommand: basePtyResolvedCommand()
+    });
+    await nextTick();
+    pty.emitData("🙂🙂");
+    pty.emitClose(0);
+    const result = await pending;
+
+    expect(Buffer.byteLength(result.stdout ?? "", "utf8")).toBeLessThanOrEqual(5);
+    expect(Buffer.byteLength(result.stderr ?? "", "utf8")).toBeLessThanOrEqual(5);
+    expect(Buffer.byteLength((result.stdout ?? "") + (result.stderr ?? ""), "utf8")).toBeLessThanOrEqual(5);
   });
 
   it("maps PTY spawn failures and never falls back to process", async () => {
