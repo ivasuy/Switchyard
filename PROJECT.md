@@ -219,3 +219,19 @@ The shipped boundary remains explicit: R16 does not ship hosted post-start input
 
 ### Deferred Concerns
 - None.
+
+## Phase 16: R17 Production Tools And Adapter Expansion
+**Date:** 2026-05-30
+**Spec:** docs/superpowers/specs/2026-05-30-phase-16-r17-production-tools-and-adapter-expansion.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-16-r17-production-tools-and-adapter-expansion.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-16-report.md
+**Branch:** agent/phase-16-r17-production-tools-and-adapter-expansion (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R17 is now shipped on the phase branch. Switchyard adds the first local-daemon production real-tool slice through `/tools/invocations`: configured `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell` tools. Real tools remain disabled by default and are deny-by-default, require explicit allowlists/config, and require approval by default. The release adds typed per-tool contracts and OpenAPI alignment, immutable `ToolExecutionPlan` handoff, bounded/redacted inputs, outputs, artifacts, logs, events, and approval payloads, local real-tool policy, fake/no-spend adapters and tests, DNS/private-network/redirect protection for fetch, command-catalog direct-spawn shell execution with absolute executable-path and argument/pathspec hardening, exactly-once approval execution/expiration handling, daemon config/REST/metrics wiring, hosted/node real-tool denial tests, and expanded no-spend REST/daemon/adapter acceptance matrices.
+
+The shipped boundary remains explicit: R17 does not ship hosted or connected-node real tools, browser automation, generic process/PTY runtimes, arbitrary shell/exec/pty/terminal/sandbox routes, Cursor/OpenClaw/Paperclip, runtime-specific approval bridges for OpenCode/AgentField/Generic HTTP/hosted Codex, managed production hosted platform, enterprise auth/billing/tenant controls, dashboard, or TUI.
+
+### Deferred Concerns
+- None.

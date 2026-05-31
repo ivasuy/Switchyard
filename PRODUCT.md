@@ -269,15 +269,15 @@ These are planned or designed in docs, but not shipped product:
 - Generic process adapter.
 - PTY adapter.
 - Hosted debate with real participant runtimes and model judging.
-- Runtime-specific approval bridges (Codex/OpenCode/AgentField/Generic HTTP) are not shipped.
+- Hosted/runtime-specific approval bridges for OpenCode, AgentField, Generic HTTP, and hosted Codex are not shipped. R16 ships only local Codex interactive approval terminalization for the local daemon path.
 - Browser automation and hosted/connected-node real-tool execution are not shipped. R17 ships only local-daemon real tools (`fetch`, `web_search`, `github`, `repo`, command-catalog `shell`) through `POST /tools/invocations` with deny-by-default and approval-by-default policy.
 - Trace endpoint.
 - Dashboard.
 - TUI.
 - Hosted (non-local) open-ended SSE streams.
-- Interactive Codex sessions.
-- Codex approval bridging.
-- Codex interactive runtime mode promotion and session-resume runtime mode.
+- Hosted interactive Codex sessions.
+- Hosted Codex approval bridging.
+- Codex live-resume success guarantees and hosted session-resume runtime mode.
 - Hosted Codex execution.
 - Hosted Claude Code/OpenCode execution.
 - Runtime approval/session-resume bridge for interactive Codex.
@@ -947,8 +947,8 @@ For releases that claim Codex behavior, verify:
 
 Current release readiness:
 
-- R0-R12 have audit-green phase branches.
-- Local daemon, hosted-like fake worker slice, connected-node safe slice, self-hosted staging foundation, SDK, CLI, OpenAPI, compatibility matrix, migrations, and packaging smoke are locally testable.
+- R0-R17 have audit-green phase branches.
+- Local daemon, hosted-like fake worker slice, connected-node safe slice, self-hosted staging foundation, S3/R2-compatible artifact storage, hosted real-runtime staging gates, local Codex interactive mode, local real-tool execution, SDK, CLI, OpenAPI, compatibility matrix, migrations, and packaging smoke are locally testable.
 - Codex `exec --json` remains usable for one-shot local runs.
 - Claude Code SDK mode is the shipped bounded interactive coding path.
 - API docs, generated OpenAPI, SDK, CLI, and development docs exist for the local daemon surface.
@@ -961,6 +961,7 @@ Known release risks:
 - Runtime capability and doctor reporting are shipped for `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; external/provider-backed modes still require local binaries/configuration or remain no-spend skipped in CI.
 - Artifact metadata/content endpoints are shipped (`GET /artifacts/:id`, `GET /artifacts/:id/content`), but HTTP `HEAD` and `Range` support is not implemented.
 - Hosted-like execution remains safety-first and worker-owned. Managed hosted deployment and production arbitrary hosted subprocess execution remain unshipped. R15 only adds operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` with production fail-closed posture.
+- Local real tools are shipped only for the local daemon through `POST /tools/invocations` and remain disabled by default, deny-by-default, explicitly configured/allowlisted, and approval-by-default. Hosted and connected-node real-tool execution remain unshipped.
 
 ## Source Map
 
@@ -1060,4 +1061,83 @@ Explicitly not shipped in R13:
 - Hosted real-runtime execution for Codex/Claude/OpenCode or arbitrary subprocess/PTY.
 - Presigned direct upload/download URLs.
 - Automated bucket provisioning/lifecycle policy/KMS/CDN management.
+- Enterprise auth, billing, tenant controls, dashboard, or TUI.
+
+## R14 Hosted Sandbox Substrate For Process/PTY (Shipped Fake/No-Spend Slice)
+
+Shipped in this phase:
+
+- Internal hosted sandbox contracts for future process-like and PTY-like work.
+- Deny-by-default fake-command policy and deterministic fake executor coverage.
+- Resource-limit validation, transcript redaction, artifact metadata redaction, readiness/metrics counters, and no-spend sandbox smoke coverage.
+- Hosted worker construction that still registers only safe fake execution by default.
+- OpenAPI boundary checks proving no public `/sandbox`, `/exec`, `/pty`, or `/terminal` execution routes.
+
+Explicitly not shipped in R14:
+
+- Managed hosted deployment.
+- Production arbitrary subprocess/PTY execution.
+- Hosted Codex/Claude/OpenCode execution.
+- Cursor, OpenClaw, Paperclip, browser/search/fetch/GitHub/repo/generic process/generic PTY adapters.
+- Real shell/browser/search/GitHub/fetch/repo tool execution.
+- Interactive Codex runtime/session-resume/approval bridges.
+- Enterprise auth/billing/tenant controls, hosted debate with real participants/model judging, dashboard, or TUI.
+
+## R15 Hosted Real Runtime Execution (Shipped Self-Hosted/Staging Slice)
+
+Shipped in this phase:
+
+- Operator opt-in self-hosted/staging hosted worker execution for known real runtime modes: `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- Closed hosted runtime catalog, real-runtime gate validation, explicit hosted placement requirements, production fail-closed behavior, and server-side `?wait=1` denial before durable or queue side effects.
+- Worker claim revalidation and guarded prepared-metadata compare-and-update before adapter start.
+- Hosted-safe adapter logging and provider adapter construction limited to allowlisted known modes.
+- No-spend hosted real-runtime smoke coverage and rollback/operations documentation.
+
+Explicitly not shipped in R15:
+
+- Managed production hosted platform deployment.
+- Production arbitrary subprocess/PTY sandboxing.
+- Generic process/PTY adapters.
+- Public `/sandbox`, `/exec`, `/pty`, or `/terminal` APIs.
+- Hosted Generic HTTP/AgentField/Cursor/OpenClaw/Paperclip/browser/search/fetch/GitHub/repo/shell execution.
+- Interactive Codex sessions, Codex session resume, approval bridges, hosted debate with real participants/model judging, enterprise auth/billing/tenant controls, dashboard, or TUI.
+
+## R16 Interactive Codex And Approval Bridges (Shipped Local Codex Slice)
+
+Shipped in this phase:
+
+- Explicit local-only `codex.interactive` runtime mode while preserving `codex.exec_json` as the inferred one-shot default.
+- Fake/no-spend Codex interactive session coverage, bounded post-start input, session-state/resume metadata handling, and double-input conflict handling.
+- Runtime approval terminalization, startup reconciliation, approval expiry without lock re-entry, and adapter-emitted terminal failure cleanup.
+- Runtime-output log redaction, daemon registry/doctor wiring that avoids live-resume overclaiming, REST/OpenAPI boundary guards, and product/development docs for the shipped local Codex interactive path.
+
+Explicitly not shipped in R16:
+
+- Hosted post-start input or approval bridges.
+- Public PTY/TUI/terminal/exec/sandbox routes.
+- Arbitrary shell/tool execution.
+- Generic process/PTY adapters.
+- Real shell/browser/search/GitHub/fetch/repo tools.
+- Live Codex resume success guarantees.
+- Hosted debate with real participant runtimes/model judging, managed production hosted platform deployment, enterprise auth/billing/tenant controls, dashboard, or TUI.
+
+## R17 Production Tools And Adapter Expansion (Shipped Local-Daemon Slice)
+
+Shipped in this phase:
+
+- Local-daemon production real-tool slice through `POST /tools/invocations` for configured `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell`.
+- Real tools disabled by default, deny-by-default, explicit allowlist/config requirements, and approval-by-default policy.
+- Typed per-tool contracts and OpenAPI alignment, immutable `ToolExecutionPlan` handoff, local real-tool policy gates, and fake/no-spend adapter coverage.
+- Bounded and redacted inputs, outputs, artifacts, logs, events, and approval payloads.
+- Fetch DNS/private-network/redirect protection, web_search/GitHub inline output bounding, repo direct-spawn Git operations, and shell catalog direct-spawn execution with absolute executable paths and argument/pathspec hardening.
+- Exactly-once approval execution/expiration handling, approval-store failure side-effect guards, daemon config/REST/metrics wiring, hosted/node real-tool denial tests, and expanded no-spend REST/daemon/adapter acceptance matrices.
+
+Explicitly not shipped in R17:
+
+- Hosted or connected-node real-tool execution.
+- Browser automation.
+- Generic process/PTY runtimes or arbitrary shell/exec/pty/terminal/sandbox routes.
+- Cursor, OpenClaw, or Paperclip adapters.
+- Runtime-specific approval bridges for OpenCode, AgentField, Generic HTTP, or hosted Codex.
+- Managed production hosted platform deployment.
 - Enterprise auth, billing, tenant controls, dashboard, or TUI.
