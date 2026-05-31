@@ -1,16 +1,23 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 import {
   SANDBOX_DEFAULT_RESOURCE_LIMITS,
   SANDBOX_FAKE_COMMAND_IDS,
   SANDBOX_MAX_RESOURCE_LIMITS,
   SANDBOX_REAL_COMMAND_DENYLIST,
+  SANDBOX_REAL_EXECUTABLE_ABSOLUTE_DENYLIST,
+  sandboxCommandPolicyEntrySchema,
   sandboxJobRequestSchema,
   sandboxNamedErrorSchema,
+  sandboxRealExecutionModeSchema,
   type SandboxCapturedArtifact,
+  type SandboxCommandPolicyEntry,
   type SandboxJobRequest,
   type SandboxJobResult,
   type SandboxNamedError,
   type SandboxPolicyDecision,
+  type SandboxRealExecutionMode,
+  type SandboxResolvedCommand,
   type SandboxResourceLimits,
   type SandboxResourceLimitsInput,
   type SandboxTerminalState
@@ -22,6 +29,7 @@ import { redactSecrets } from "./local-policy-gate.js";
 
 export interface HostedSandboxExecutorOutput {
   status: SandboxTerminalState;
+  reasonCode?: SandboxNamedError;
   exitCode?: number;
   stdout?: string;
   stderr?: string;
@@ -30,7 +38,10 @@ export interface HostedSandboxExecutorOutput {
 }
 
 export interface HostedSandboxExecutorPort {
-  execute(request: SandboxJobRequest & { resourceLimits: SandboxResourceLimits }, options?: { signal?: AbortSignal }): Promise<HostedSandboxExecutorOutput>;
+  execute(
+    request: SandboxJobRequest & { resourceLimits: SandboxResourceLimits },
+    options?: { signal?: AbortSignal; resolvedCommand?: SandboxResolvedCommand }
+  ): Promise<HostedSandboxExecutorOutput>;
 }
 
 export interface SandboxMetricsSink {
@@ -44,6 +55,12 @@ export interface ResolvedHostedSandboxConfig {
   fakeCommandAllowlist: string[];
   defaultLimits: SandboxResourceLimits;
   maxLimits: SandboxResourceLimits;
+  realExecution: {
+    mode: SandboxRealExecutionMode;
+    commandPolicy: SandboxCommandPolicyEntry[];
+    ptyDriverConfigured: boolean;
+    redactedSummary: Record<string, unknown>;
+  };
   redactedSummary: Record<string, unknown>;
 }
 
@@ -64,18 +81,39 @@ interface ActiveJob {
 }
 
 const REAL_COMMAND_DENYLIST = new Set<string>(SANDBOX_REAL_COMMAND_DENYLIST);
+const REAL_EXECUTABLE_ABSOLUTE_DENYLIST = new Set<string>(SANDBOX_REAL_EXECUTABLE_ABSOLUTE_DENYLIST);
 const FAKE_COMMANDS = new Set<string>(SANDBOX_FAKE_COMMAND_IDS);
+const SANDBOX_PLACEHOLDER_PATH_SEGMENT_PATTERN = /(^|[-_.])(example|placeholder|changeme|todo|sample)([-_.]|$)/i;
 const SECRET_QUERY_KEY_PATTERN = /(token|signature|secret|password|apikey|access_key|accesskey|refresh_token|id_token)/i;
+const SWITCHYARD_SANDBOX_COMMAND_POLICY_MAX_JSON_BYTES = 65_536;
+const SWITCHYARD_SANDBOX_COMMAND_POLICY_MAX_ENTRIES = 64;
+
+type HostedSandboxPolicyDecision = SandboxPolicyDecision & { resolvedCommand?: SandboxResolvedCommand };
 
 export class HostedSandboxPolicy {
   private readonly allowlist: Set<string>;
+  private readonly realExecution: ResolvedHostedSandboxConfig["realExecution"];
+  private readonly commandPolicyById: Map<string, SandboxCommandPolicyEntry>;
 
-  constructor(input: { allowlist: string[] }) {
+  constructor(input: { allowlist: string[]; realExecution?: ResolvedHostedSandboxConfig["realExecution"] }) {
     this.allowlist = new Set(input.allowlist);
+    this.realExecution = input.realExecution ?? {
+      mode: "disabled",
+      commandPolicy: [],
+      ptyDriverConfigured: false,
+      redactedSummary: {
+        mode: "disabled",
+        commandPolicyCount: 0,
+        ptyDriverConfigured: false
+      }
+    };
+    this.commandPolicyById = new Map(
+      this.realExecution.commandPolicy.map((entry) => [entry.commandId, entry] as const)
+    );
   }
 
-  decide(input: { commandId: string }): SandboxPolicyDecision {
-    const commandId = input.commandId.trim();
+  decide(input: { request: SandboxJobRequest; limits: SandboxResourceLimits }): HostedSandboxPolicyDecision {
+    const commandId = input.request.commandId.trim();
     if (!commandId) {
       return {
         decision: "deny",
@@ -90,23 +128,120 @@ export class HostedSandboxPolicy {
         policyTrace: [{ rule: "real_command_denied", commandId }]
       };
     }
-    if (!FAKE_COMMANDS.has(commandId)) {
+
+    if (FAKE_COMMANDS.has(commandId)) {
+      if (!this.allowlist.has(commandId)) {
+        return {
+          decision: "deny",
+          reasonCode: "sandbox_command_denied",
+          policyTrace: [{ rule: "allowlist_denied", commandId }]
+        };
+      }
+      return {
+        decision: "allow",
+        policyTrace: [{ rule: "fake_command_allowed", commandId }]
+      };
+    }
+
+    if (this.realExecution.mode !== "enabled") {
+      return {
+        decision: "deny",
+        reasonCode: "sandbox_real_execution_disabled",
+        policyTrace: [{ rule: "real_execution_disabled", commandId }]
+      };
+    }
+
+    const policy = this.commandPolicyById.get(commandId);
+    if (!policy) {
       return {
         decision: "deny",
         reasonCode: "sandbox_command_denied",
-        policyTrace: [{ rule: "unknown_command_denied", commandId }]
+        policyTrace: [{ rule: "policy_entry_missing", commandId }]
       };
     }
-    if (!this.allowlist.has(commandId)) {
+
+    if (input.request.adapterType !== policy.adapterType) {
       return {
         decision: "deny",
         reasonCode: "sandbox_command_denied",
-        policyTrace: [{ rule: "allowlist_denied", commandId }]
+        policyTrace: [{ rule: "adapter_type_denied", commandId }]
       };
     }
+
+    if (policy.adapterType === "pty" && !this.realExecution.ptyDriverConfigured) {
+      return {
+        decision: "deny",
+        reasonCode: "sandbox_pty_unavailable",
+        policyTrace: [{ rule: "pty_driver_unavailable", commandId }]
+      };
+    }
+
+    if (!isPathAllowedByPrefixes(input.request.cwd, policy.cwdPrefixes)) {
+      return {
+        decision: "deny",
+        reasonCode: "sandbox_cwd_denied",
+        policyTrace: [{ rule: "cwd_denied", commandId }]
+      };
+    }
+
+    const envAllowlist = new Set(policy.envAllowlist);
+    for (const key of Object.keys(input.request.env)) {
+      if (!envAllowlist.has(key)) {
+        return {
+          decision: "deny",
+          reasonCode: "sandbox_env_denied",
+          policyTrace: [{ rule: "env_denied", commandId, key }]
+        };
+      }
+    }
+
+    if (input.request.stdin !== undefined && input.request.stdin.length > 0 && !policy.allowStdin) {
+      return {
+        decision: "deny",
+        reasonCode: "sandbox_command_denied",
+        policyTrace: [{ rule: "stdin_denied", commandId }]
+      };
+    }
+
+    if (policy.adapterType === "pty" && input.request.pty) {
+      const hasPtyInput = input.request.pty.inputFrames.some((frame) => frame.type === "input" && frame.data.length > 0);
+      if (hasPtyInput && !policy.allowPtyInput) {
+        return {
+          decision: "deny",
+          reasonCode: "sandbox_command_denied",
+          policyTrace: [{ rule: "pty_input_denied", commandId }]
+        };
+      }
+    }
+
+    const argv = [...policy.fixedArgs];
+    if (policy.allowUserArgs) {
+      argv.push(...input.request.argv);
+    } else if (input.request.argv.length > 0) {
+      return {
+        decision: "deny",
+        reasonCode: "sandbox_command_denied",
+        policyTrace: [{ rule: "argv_denied", commandId }]
+      };
+    }
+
+    const resolvedCommand: SandboxResolvedCommand = {
+      commandId: policy.commandId,
+      adapterType: policy.adapterType,
+      executablePath: policy.executablePath,
+      argv,
+      cwd: input.request.cwd,
+      env: { ...input.request.env },
+      allowStdin: policy.allowStdin,
+      allowPtyInput: policy.allowPtyInput,
+      isolation: policy.isolation,
+      networkPolicy: policy.networkPolicy
+    };
+
     return {
       decision: "allow",
-      policyTrace: [{ rule: "fake_command_allowed", commandId }]
+      policyTrace: [{ rule: "real_policy_allowed", commandId }],
+      resolvedCommand
     };
   }
 }
@@ -118,7 +253,10 @@ export class HostedSandboxService {
   private readonly terminalResults = new Map<string, SandboxJobResult>();
 
   constructor(private readonly deps: HostedSandboxServiceDependencies) {
-    this.policy = deps.policy ?? new HostedSandboxPolicy({ allowlist: deps.config.fakeCommandAllowlist });
+    this.policy = deps.policy ?? new HostedSandboxPolicy({
+      allowlist: deps.config.fakeCommandAllowlist,
+      realExecution: deps.config.realExecution
+    });
     this.now = deps.now ?? (() => new Date().toISOString());
   }
 
@@ -148,9 +286,9 @@ export class HostedSandboxService {
       return this.terminalFromRequest(input, "failed", requestValidationReason);
     }
 
-    let decision: SandboxPolicyDecision;
+    let decision: HostedSandboxPolicyDecision;
     try {
-      decision = this.policy.decide({ commandId: input.commandId });
+      decision = this.policy.decide({ request: input, limits: limits.value });
     } catch {
       this.deps.metrics?.inc("sandbox.failed");
       return this.terminalFromRequest(input, "failed", "sandbox_policy_failed");
@@ -279,18 +417,21 @@ export class HostedSandboxService {
   private async dispatchExecution(
     request: SandboxJobRequest,
     limits: SandboxResourceLimits,
-    decision: SandboxPolicyDecision,
+    decision: HostedSandboxPolicyDecision,
     startedAt: string,
     signal: AbortSignal,
     timedOut: () => boolean
   ): Promise<SandboxJobResult> {
     try {
+      const executeOptions = decision.resolvedCommand
+        ? { signal, resolvedCommand: decision.resolvedCommand }
+        : { signal };
       const raw = await this.deps.executor.execute(
         {
           ...request,
           resourceLimits: limits
         },
-        { signal }
+        executeOptions
       );
 
       const transformed = await this.transformExecutorOutput(request, raw, startedAt, decision, limits);
@@ -345,7 +486,7 @@ export class HostedSandboxService {
     request: SandboxJobRequest,
     output: HostedSandboxExecutorOutput,
     startedAt: string,
-    policyDecision: SandboxPolicyDecision,
+    policyDecision: HostedSandboxPolicyDecision,
     limits: SandboxResourceLimits
   ): Promise<SandboxJobResult> {
     const stdout = redactSandboxString(output.stdout ?? "");
@@ -437,8 +578,9 @@ export class HostedSandboxService {
     }
 
     const status = output.status;
-    const reasonCode =
-      status === "failed"
+    const reasonCode = sandboxNamedErrorSchema.safeParse(output.reasonCode).success
+      ? output.reasonCode
+      : status === "failed"
         ? "sandbox_process_failed"
         : status === "cancelled"
           ? "sandbox_cancelled"
@@ -693,6 +835,10 @@ export function checkHostedSandboxReadiness(config: ResolvedHostedSandboxConfig)
     return { ok: false, code: "sandbox_disabled" };
   }
   if (!config.valid) {
+    const readinessError = config.errors.find((entry) => sandboxNamedErrorSchema.safeParse(entry).success);
+    if (readinessError) {
+      return { ok: false, code: readinessError as SandboxNamedError };
+    }
     return { ok: false, code: "sandbox_config_invalid" };
   }
   if (config.fakeCommandAllowlist.length === 0) {
@@ -701,6 +847,9 @@ export function checkHostedSandboxReadiness(config: ResolvedHostedSandboxConfig)
   if (config.fakeCommandAllowlist.some((commandId) => !FAKE_COMMANDS.has(commandId))) {
     return { ok: false, code: "sandbox_policy_invalid" };
   }
+  if (config.realExecution.mode === "enabled" && config.realExecution.commandPolicy.length === 0) {
+    return { ok: false, code: "sandbox_policy_missing" };
+  }
   return { ok: true };
 }
 
@@ -708,6 +857,14 @@ export function resolveHostedSandboxConfig(input: { env?: NodeJS.ProcessEnv; dep
   const env = input.env ?? process.env;
   const errors: string[] = [];
   const enabled = parseBooleanEnv(env["SWITCHYARD_SANDBOX_ENABLED"], true);
+  const parsedRealExecutionMode = sandboxRealExecutionModeSchema.safeParse(env["SWITCHYARD_SANDBOX_REAL_EXECUTION"]?.trim() ?? "disabled");
+  const realExecutionMode: SandboxRealExecutionMode = parsedRealExecutionMode.success
+    ? parsedRealExecutionMode.data
+    : "disabled";
+  if (!parsedRealExecutionMode.success) {
+    errors.push("sandbox_config_invalid");
+  }
+  const ptyDriverConfigured = parseBooleanEnv(env["SWITCHYARD_SANDBOX_PTY_DRIVER_CONFIGURED"], false);
 
   const allowlist = parseCsvEnv(
     env["SWITCHYARD_SANDBOX_FAKE_COMMAND_ALLOWLIST"],
@@ -731,21 +888,41 @@ export function resolveHostedSandboxConfig(input: { env?: NodeJS.ProcessEnv; dep
     memoryMiB: parseLimitEnv(env["SWITCHYARD_SANDBOX_MEMORY_MIB"], SANDBOX_DEFAULT_RESOURCE_LIMITS.memoryMiB, SANDBOX_MAX_RESOURCE_LIMITS.memoryMiB, errors, "SWITCHYARD_SANDBOX_MEMORY_MIB")
   };
 
+  const policyResolution = resolveCommandPolicyFromEnv({
+    mode: realExecutionMode,
+    env,
+    ptyDriverConfigured
+  });
+  errors.push(...policyResolution.errors);
+
+  const valid = errors.length === 0;
   const config: ResolvedHostedSandboxConfig = {
     enabled,
-    valid: errors.length === 0,
+    valid,
     errors,
     fakeCommandAllowlist: allowlist,
     defaultLimits,
     maxLimits: { ...SANDBOX_MAX_RESOURCE_LIMITS },
+    realExecution: {
+      mode: realExecutionMode,
+      commandPolicy: policyResolution.commandPolicy,
+      ptyDriverConfigured,
+      redactedSummary: policyResolution.redactedSummary
+    },
     redactedSummary: {
       deploymentMode: input.deploymentMode,
       enabled,
-      valid: errors.length === 0,
+      valid,
       errors,
       fakeCommandAllowlist: allowlist,
       defaultLimits,
-      maxLimits: SANDBOX_MAX_RESOURCE_LIMITS
+      maxLimits: SANDBOX_MAX_RESOURCE_LIMITS,
+      realExecution: {
+        mode: realExecutionMode,
+        commandPolicyCount: policyResolution.commandPolicy.length,
+        ptyDriverConfigured,
+        redactedSummary: policyResolution.redactedSummary
+      }
     }
   };
 
@@ -834,10 +1011,246 @@ function parseLimitEnv(
   }
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > max) {
-    errors.push(`config_invalid:${variable}`);
+    errors.push("sandbox_config_invalid");
     return fallback;
   }
   return parsed;
+}
+
+function isPathAllowedByPrefixes(cwd: string, prefixes: string[]): boolean {
+  return prefixes.some((prefix) => cwd === prefix || cwd.startsWith(`${prefix}/`));
+}
+
+function validateExecutableCandidate(candidate: unknown): "ok" | "denied" | "unknown" {
+  if (!candidate || typeof candidate !== "object") {
+    return "unknown";
+  }
+  const rawExecutablePath = (candidate as Record<string, unknown>)["executablePath"];
+  if (typeof rawExecutablePath !== "string") {
+    return "unknown";
+  }
+  const trimmed = rawExecutablePath.trim();
+  if (!trimmed) {
+    return "denied";
+  }
+
+  const basename = path.posix.basename(trimmed).toLowerCase();
+  if (REAL_COMMAND_DENYLIST.has(basename)) {
+    return "denied";
+  }
+
+  if (!path.posix.isAbsolute(trimmed)) {
+    return "unknown";
+  }
+
+  const normalized = path.posix.normalize(trimmed);
+  const segments = normalized.split("/").filter((segment) => segment.length > 0);
+  if (segments.some((segment) => SANDBOX_PLACEHOLDER_PATH_SEGMENT_PATTERN.test(segment))) {
+    return "denied";
+  }
+
+  if (REAL_EXECUTABLE_ABSOLUTE_DENYLIST.has(normalized)) {
+    return "denied";
+  }
+
+  return "ok";
+}
+
+function isIsolationDriverConfigured(driver: SandboxCommandPolicyEntry["isolation"]["driver"], ptyDriverConfigured: boolean): boolean {
+  if (driver === "none") {
+    return true;
+  }
+  if (driver === "external") {
+    return ptyDriverConfigured;
+  }
+  return false;
+}
+
+function dedupe(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function resolveCommandPolicyFromEnv(input: {
+  mode: SandboxRealExecutionMode;
+  env: NodeJS.ProcessEnv;
+  ptyDriverConfigured: boolean;
+}): { commandPolicy: SandboxCommandPolicyEntry[]; errors: string[]; redactedSummary: Record<string, unknown> } {
+  if (input.mode !== "enabled") {
+    return {
+      commandPolicy: [],
+      errors: [],
+      redactedSummary: {
+        mode: input.mode,
+        commandPolicyCount: 0,
+        ptyDriverConfigured: input.ptyDriverConfigured
+      }
+    };
+  }
+
+  const errors: string[] = [];
+  const diagnostics: Record<string, unknown> = {};
+  const rawPolicy = input.env["SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON"]?.trim();
+  if (!rawPolicy) {
+    errors.push("sandbox_policy_missing");
+    diagnostics.code = "policy_missing";
+    return {
+      commandPolicy: [],
+      errors,
+      redactedSummary: {
+        mode: input.mode,
+        commandPolicyCount: 0,
+        ptyDriverConfigured: input.ptyDriverConfigured,
+        diagnostics
+      }
+    };
+  }
+
+  const policyJsonBytes = Buffer.byteLength(rawPolicy, "utf8");
+  diagnostics.policyJsonBytes = policyJsonBytes;
+  diagnostics.maxPolicyJsonBytes = SWITCHYARD_SANDBOX_COMMAND_POLICY_MAX_JSON_BYTES;
+  if (policyJsonBytes > SWITCHYARD_SANDBOX_COMMAND_POLICY_MAX_JSON_BYTES) {
+    errors.push("sandbox_policy_invalid");
+    diagnostics.code = "policy_too_large";
+    return {
+      commandPolicy: [],
+      errors,
+      redactedSummary: {
+        mode: input.mode,
+        commandPolicyCount: 0,
+        ptyDriverConfigured: input.ptyDriverConfigured,
+        diagnostics
+      }
+    };
+  }
+
+  let parsedRaw: unknown;
+  try {
+    parsedRaw = JSON.parse(rawPolicy);
+  } catch {
+    errors.push("sandbox_policy_invalid");
+    diagnostics.code = "policy_json_parse_failed";
+    return {
+      commandPolicy: [],
+      errors,
+      redactedSummary: {
+        mode: input.mode,
+        commandPolicyCount: 0,
+        ptyDriverConfigured: input.ptyDriverConfigured,
+        diagnostics
+      }
+    };
+  }
+
+  if (!Array.isArray(parsedRaw)) {
+    errors.push("sandbox_policy_invalid");
+    diagnostics.code = "policy_not_array";
+    return {
+      commandPolicy: [],
+      errors,
+      redactedSummary: {
+        mode: input.mode,
+        commandPolicyCount: 0,
+        ptyDriverConfigured: input.ptyDriverConfigured,
+        diagnostics
+      }
+    };
+  }
+
+  diagnostics.entryCount = parsedRaw.length;
+  diagnostics.maxEntries = SWITCHYARD_SANDBOX_COMMAND_POLICY_MAX_ENTRIES;
+  if (parsedRaw.length > SWITCHYARD_SANDBOX_COMMAND_POLICY_MAX_ENTRIES) {
+    errors.push("sandbox_policy_invalid");
+    diagnostics.code = "policy_too_many_entries";
+    return {
+      commandPolicy: [],
+      errors,
+      redactedSummary: {
+        mode: input.mode,
+        commandPolicyCount: 0,
+        ptyDriverConfigured: input.ptyDriverConfigured,
+        diagnostics
+      }
+    };
+  }
+
+  if (parsedRaw.length === 0) {
+    errors.push("sandbox_policy_missing");
+    diagnostics.code = "policy_empty";
+    return {
+      commandPolicy: [],
+      errors,
+      redactedSummary: {
+        mode: input.mode,
+        commandPolicyCount: 0,
+        ptyDriverConfigured: input.ptyDriverConfigured,
+        diagnostics
+      }
+    };
+  }
+
+  const commandPolicy: SandboxCommandPolicyEntry[] = [];
+  const seenCommandIds = new Set<string>();
+  const parseIssueSummary: Array<{ index: number; code: string; path: string }> = [];
+
+  for (let index = 0; index < parsedRaw.length; index += 1) {
+    const candidate = parsedRaw[index];
+    const executableValidation = validateExecutableCandidate(candidate);
+    if (executableValidation === "denied") {
+      errors.push("sandbox_executable_denied");
+      continue;
+    }
+
+    const parsedEntry = sandboxCommandPolicyEntrySchema.safeParse(candidate);
+    if (!parsedEntry.success) {
+      errors.push("sandbox_policy_invalid");
+      for (const issue of parsedEntry.error.issues) {
+        parseIssueSummary.push({
+          index,
+          code: issue.code,
+          path: issue.path.join(".")
+        });
+      }
+      continue;
+    }
+
+    const policyEntry = parsedEntry.data;
+    if (seenCommandIds.has(policyEntry.commandId)) {
+      errors.push("sandbox_policy_invalid");
+      parseIssueSummary.push({
+        index,
+        code: "duplicate_command_id",
+        path: "commandId"
+      });
+      continue;
+    }
+    seenCommandIds.add(policyEntry.commandId);
+
+    if (policyEntry.isolation.required && !isIsolationDriverConfigured(policyEntry.isolation.driver, input.ptyDriverConfigured)) {
+      errors.push("sandbox_isolation_unavailable");
+      continue;
+    }
+
+    commandPolicy.push(policyEntry);
+  }
+
+  diagnostics.issueCount = parseIssueSummary.length;
+  diagnostics.issues = parseIssueSummary;
+  const uniqueErrors = dedupe(errors);
+  const validPolicy = uniqueErrors.length === 0;
+  if (!validPolicy) {
+    diagnostics.code = diagnostics.code ?? "policy_invalid";
+  }
+
+  return {
+    commandPolicy: validPolicy ? commandPolicy : [],
+    errors: uniqueErrors,
+    redactedSummary: {
+      mode: input.mode,
+      commandPolicyCount: validPolicy ? commandPolicy.length : 0,
+      ptyDriverConfigured: input.ptyDriverConfigured,
+      diagnostics
+    }
+  };
 }
 
 function validateRequestPayload(request: SandboxJobRequest, limits: SandboxResourceLimits): SandboxNamedError | undefined {
