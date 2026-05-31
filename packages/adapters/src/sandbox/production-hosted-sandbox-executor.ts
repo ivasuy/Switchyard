@@ -66,6 +66,10 @@ export interface ProductionHostedSandboxExecutorOptions {
 }
 
 type ExecuteRequest = SandboxJobRequest & { resourceLimits: SandboxResourceLimits };
+type DriverCompletion = { type: "close"; code: number | null } | { type: "error" };
+type AbortCompletion = { type: "aborted" } | { type: "abort_cleanup_failed" };
+
+const SANDBOX_ABORT_CLEANUP_GRACE_MS = 25;
 
 const defaultProcessFactory: SandboxProcessFactory = {
   spawn(executablePath, argv, options) {
@@ -137,9 +141,9 @@ export class ProductionHostedSandboxExecutor implements HostedSandboxExecutorPor
       safeKillChild(child);
     });
 
-    const completion = new Promise<{ type: "close"; code: number | null } | { type: "error" }>((resolve) => {
+    const completion = new Promise<DriverCompletion>((resolve) => {
       let settled = false;
-      const settle = (value: { type: "close"; code: number | null } | { type: "error" }) => {
+      const settle = (value: DriverCompletion) => {
         if (settled) {
           return;
         }
@@ -150,18 +154,12 @@ export class ProductionHostedSandboxExecutor implements HostedSandboxExecutorPor
       child.once("close", (code) => settle({ type: "close", code }));
     });
 
-    let abortCleanupFailed = false;
-    const abortListener = () => {
-      if (!safeKillChild(child)) {
-        abortCleanupFailed = true;
-      }
-    };
-    signal?.addEventListener("abort", abortListener, { once: true });
+    const abortCompletion = createAbortCompletion(signal, () => safeKillChild(child));
 
     if (request.stdin && request.stdin.length > 0) {
       if (!resolvedCommand.allowStdin) {
         safeKillChild(child);
-        signal?.removeEventListener("abort", abortListener);
+        abortCompletion.cleanup();
         return failed("sandbox_command_denied", { stdout: output.stdout(), stderr: output.stderr() });
       }
 
@@ -169,21 +167,21 @@ export class ProductionHostedSandboxExecutor implements HostedSandboxExecutorPor
         await writeToChildStdin(child, request.stdin);
       } catch {
         safeKillChild(child);
-        signal?.removeEventListener("abort", abortListener);
+        abortCompletion.cleanup();
         return failed("sandbox_process_failed", { stdout: output.stdout(), stderr: output.stderr() });
       }
     }
 
     child.stdin.end();
 
-    const terminal = await completion;
-    signal?.removeEventListener("abort", abortListener);
+    const terminal = await Promise.race([completion, abortCompletion.promise]);
+    abortCompletion.cleanup();
 
-    if (abortCleanupFailed) {
+    if (terminal.type === "abort_cleanup_failed") {
       return failed("sandbox_cancel_failed", { stdout: output.stdout(), stderr: output.stderr() });
     }
 
-    if (signal?.aborted) {
+    if (terminal.type === "aborted" || signal?.aborted) {
       return {
         status: "cancelled",
         reasonCode: "sandbox_cancelled",
@@ -252,9 +250,9 @@ export class ProductionHostedSandboxExecutor implements HostedSandboxExecutorPor
     }
 
     const output = createOutputCollector(request.resourceLimits);
-    const completion = new Promise<{ type: "close"; code: number | null } | { type: "error" }>((resolve) => {
+    const completion = new Promise<DriverCompletion>((resolve) => {
       let settled = false;
-      const settle = (value: { type: "close"; code: number | null } | { type: "error" }) => {
+      const settle = (value: DriverCompletion) => {
         if (settled) {
           return;
         }
@@ -269,34 +267,20 @@ export class ProductionHostedSandboxExecutor implements HostedSandboxExecutorPor
       pty.on("close", (code) => settle({ type: "close", code }));
     });
 
-    let abortCleanupFailed = false;
-    let abortCleanupFailureSettle: (() => void) | undefined;
-    const abortCleanupFailure = new Promise<void>((resolve) => {
-      abortCleanupFailureSettle = resolve;
-    });
-
-    const abortListener = () => {
-      try {
-        pty.kill("SIGTERM");
-      } catch {
-        abortCleanupFailed = true;
-        abortCleanupFailureSettle?.();
-      }
-    };
-    signal?.addEventListener("abort", abortListener, { once: true });
+    const abortCompletion = createAbortCompletion(signal, () => safeKillPty(pty));
 
     for (const frame of request.pty.inputFrames) {
       if (frame.type === "input") {
         if (frame.data.length > 0 && !resolvedCommand.allowPtyInput) {
           safeKillPty(pty);
-          signal?.removeEventListener("abort", abortListener);
+          abortCompletion.cleanup();
           return failed("sandbox_command_denied", { stdout: output.stdout() });
         }
         try {
           pty.write(frame.data);
         } catch {
           safeKillPty(pty);
-          signal?.removeEventListener("abort", abortListener);
+          abortCompletion.cleanup();
           return failed("sandbox_process_failed", { stdout: output.stdout() });
         }
       } else {
@@ -304,20 +288,20 @@ export class ProductionHostedSandboxExecutor implements HostedSandboxExecutorPor
           pty.resize(frame.cols, frame.rows);
         } catch {
           safeKillPty(pty);
-          signal?.removeEventListener("abort", abortListener);
+          abortCompletion.cleanup();
           return failed("sandbox_process_failed", { stdout: output.stdout() });
         }
       }
     }
 
-    await Promise.race([completion.then(() => undefined), abortCleanupFailure]);
-    signal?.removeEventListener("abort", abortListener);
+    const terminal = await Promise.race([completion, abortCompletion.promise]);
+    abortCompletion.cleanup();
 
-    if (abortCleanupFailed) {
+    if (terminal.type === "abort_cleanup_failed") {
       return failed("sandbox_cancel_failed", { stdout: output.stdout() });
     }
 
-    if (signal?.aborted) {
+    if (terminal.type === "aborted" || signal?.aborted) {
       return {
         status: "cancelled",
         reasonCode: "sandbox_cancelled",
@@ -326,7 +310,6 @@ export class ProductionHostedSandboxExecutor implements HostedSandboxExecutorPor
       };
     }
 
-    const terminal = await completion;
     if (terminal.type === "error") {
       return failed("sandbox_process_failed", { stdout: output.stdout() });
     }
@@ -424,6 +407,67 @@ async function writeToChildStdin(child: SandboxSpawnedProcess, text: string): Pr
       settle(() => reject(failure));
     }
   });
+}
+
+function createAbortCompletion(
+  signal: AbortSignal | undefined,
+  kill: () => boolean
+): { promise: Promise<AbortCompletion>; cleanup: () => void } {
+  if (!signal) {
+    return {
+      promise: new Promise<AbortCompletion>(() => undefined),
+      cleanup: () => undefined
+    };
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let listener: (() => void) | undefined;
+  let resolveAbort: ((value: AbortCompletion) => void) | undefined;
+  let settled = false;
+
+  const promise = new Promise<AbortCompletion>((resolve) => {
+    resolveAbort = resolve;
+  });
+
+  const settle = (value: AbortCompletion) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    resolveAbort?.(value);
+  };
+
+  const onAbort = () => {
+    if (!kill()) {
+      settle({ type: "abort_cleanup_failed" });
+      return;
+    }
+    timer = setTimeout(() => settle({ type: "aborted" }), SANDBOX_ABORT_CLEANUP_GRACE_MS);
+  };
+
+  if (signal.aborted) {
+    onAbort();
+  } else {
+    listener = onAbort;
+    signal.addEventListener("abort", listener, { once: true });
+  }
+
+  return {
+    promise,
+    cleanup() {
+      if (listener) {
+        signal.removeEventListener("abort", listener);
+      }
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    }
+  };
 }
 
 function safeKillChild(child: SandboxSpawnedProcess): boolean {

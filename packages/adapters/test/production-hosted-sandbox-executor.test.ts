@@ -129,6 +129,26 @@ describe("ProductionHostedSandboxExecutor", () => {
     expect(result.reasonCode).toBe("sandbox_cancelled");
   });
 
+  it("settles process abort when kill succeeds but close never arrives", async () => {
+    const processFactory = new RecordingProcessFactory();
+    const child = new FakeProcess();
+    processFactory.nextChild = child;
+    const executor = new ProductionHostedSandboxExecutor({ processFactory });
+    const controller = new AbortController();
+
+    const pending = executor.execute(baseProcessRequest(), {
+      signal: controller.signal,
+      resolvedCommand: baseProcessResolvedCommand()
+    });
+    await nextTick();
+    controller.abort(new Error("stop"));
+    const result = await settleOrFail(pending);
+
+    expect(child.killCalls).toBe(1);
+    expect(result.status).toBe("cancelled");
+    expect(result.reasonCode).toBe("sandbox_cancelled");
+  });
+
   it("bounds process output collection", async () => {
     const processFactory = new RecordingProcessFactory();
     const child = new FakeProcess();
@@ -272,6 +292,26 @@ describe("ProductionHostedSandboxExecutor", () => {
     expect(Buffer.byteLength(result.stdout ?? "", "utf8")).toBeLessThanOrEqual(5);
     expect(Buffer.byteLength(result.stderr ?? "", "utf8")).toBeLessThanOrEqual(5);
     expect(Buffer.byteLength((result.stdout ?? "") + (result.stderr ?? ""), "utf8")).toBeLessThanOrEqual(5);
+  });
+
+  it("settles PTY abort when kill succeeds but close never arrives", async () => {
+    const ptyFactory = new RecordingPtyFactory();
+    const pty = new FakePty({ suppressCloseOnKill: true });
+    ptyFactory.nextPty = pty;
+    const executor = new ProductionHostedSandboxExecutor({ ptyFactory });
+    const controller = new AbortController();
+
+    const pending = executor.execute(basePtyRequest(), {
+      signal: controller.signal,
+      resolvedCommand: basePtyResolvedCommand()
+    });
+    await nextTick();
+    controller.abort(new Error("cancel"));
+    const result = await settleOrFail(pending);
+
+    expect(pty.killCalls).toBe(1);
+    expect(result.status).toBe("cancelled");
+    expect(result.reasonCode).toBe("sandbox_cancelled");
   });
 
   it("maps PTY spawn failures and never falls back to process", async () => {
@@ -463,15 +503,18 @@ class RecordingPtyFactory implements SandboxPtyFactory {
 
 class FakePty extends EventEmitter {
   actions: string[] = [];
+  killCalls = 0;
   readonly failWrite: boolean;
   readonly failResize: boolean;
   readonly failKill: boolean;
+  readonly suppressCloseOnKill: boolean;
 
-  constructor(options?: { failWrite?: boolean; failResize?: boolean; failKill?: boolean }) {
+  constructor(options?: { failWrite?: boolean; failResize?: boolean; failKill?: boolean; suppressCloseOnKill?: boolean }) {
     super();
     this.failWrite = options?.failWrite === true;
     this.failResize = options?.failResize === true;
     this.failKill = options?.failKill === true;
+    this.suppressCloseOnKill = options?.suppressCloseOnKill === true;
   }
 
   write(data: string): void {
@@ -489,10 +532,13 @@ class FakePty extends EventEmitter {
   }
 
   kill(): boolean {
+    this.killCalls += 1;
     if (this.failKill) {
       throw new Error("kill failed");
     }
-    this.emitClose(null);
+    if (!this.suppressCloseOnKill) {
+      this.emitClose(null);
+    }
     return true;
   }
 
@@ -586,4 +632,13 @@ function basePtyResolvedCommand(overrides: Partial<SandboxResolvedCommand> = {})
 
 function nextTick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function settleOrFail<T>(promise: Promise<T>): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("executor did not settle")), 250);
+    })
+  ]);
 }
