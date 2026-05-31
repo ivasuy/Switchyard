@@ -836,6 +836,21 @@ const preflight = await deps.controlPlane.preflightRunCreate(preflightInput);
         "from_task": "P20-T3-adapter-command-handoff",
         "name": "CodexExecJsonAdapterOptions.hostedProviderCommand",
         "signature": "ProviderResolvedCommand | undefined"
+      },
+      {
+        "from_task": "P20-T3-adapter-command-handoff",
+        "name": "ClaudeCodeCliClientOptions.hostedProviderCommand",
+        "signature": "ProviderResolvedCommand | undefined"
+      },
+      {
+        "from_task": "P20-T3-adapter-command-handoff",
+        "name": "ClaudeCodeAdapterOptions.hostedProviderCommand",
+        "signature": "ProviderResolvedCommand | undefined"
+      },
+      {
+        "from_task": "P20-T3-adapter-command-handoff",
+        "name": "OpenCodeAcpAdapterOptions.hostedProviderCommand",
+        "signature": "ProviderResolvedCommand | undefined"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
@@ -1583,3 +1598,403 @@ const preflight = await deps.controlPlane.preflightRunCreate(preflightInput);
 - [x] No task edits a file owned by another task.
 - [x] No incomplete marker text is present.
 - [x] Complexity is L and has been challenged; the phase remains one phase with disjoint tasks because no single task crosses package boundaries without a stable contract dependency.
+
+## Architect Revision 1
+
+Architect verdict was GREEN with `implementation_ready=false`. CTO accepts all required revisions and integrates them as task addenda rather than changing the task IDs. Task IDs stay stable for worktree dispatch, and T3/T7 now have subtask-level implementation and review matrices so their behavior can be built and reviewed independently inside the existing non-overlapping file ownership boundaries.
+
+### Reconciliation Decisions
+
+- Accepted: add missing task test cases for adapter redaction, worker spend checks, server startup failures, server admission side-effect ordering, and provider canary failures.
+- Accepted: require every error rescue row to have an explicit `error_path`, `happy_shadow_empty`, or `integration` test in the same task.
+- Accepted: update T4 integration contracts to consume every adapter `hostedProviderCommand` option exported by T3: Codex, Claude CLI client, Claude adapter, and OpenCode ACP adapter.
+- Accepted: add lifecycle metrics requirements and tests for accepted, denied, failed, timed out, cancelled, and spend-control-denied provider runs.
+- Accepted: add provider policy path handling ownership and tests for unreadable path, empty file, oversized file, invalid JSON, invalid UTF-8, and source-kind-only redacted diagnostics.
+- Accepted with structure instead of split: T3 and T7 keep their task IDs to avoid dispatch churn, but implementers and reviewers must use the subtask matrices below as independent review slices.
+- Accepted: add a compact state transition diagram for provider denial, bridge unsupported, timeout, cancellation, and rollback drift.
+
+### State Transition Diagram
+
+This diagram is part of the implementation contract for T4, T6, and T7.
+
+```text
+POST /runs or queue claim
+  |
+  +-- provider policy / allowlist / credential / spend denial
+  |      |
+  |      +-- server-known denial -> DENIED before reservation, run row, audit row, queue job
+  |      |
+  |      +-- worker drift denial -> FAILED terminal event before adapter.start
+  |
+  +-- accepted
+         |
+         +-- adapter starts -> RUNNING
+                |
+                +-- bridge unsupported -> FAILED(reason=hosted_approval_bridge_unsupported
+                |                         or hosted_input_bridge_unsupported)
+                |
+                +-- provider timeout -> TIMED_OUT(reason=provider_run_timeout)
+                |
+                +-- user/runtime cancellation -> CANCELLED(reason=run_cancelled)
+                |
+                +-- provider failure -> FAILED(reason=<provider failure code>)
+                |
+                +-- provider success -> COMPLETED
+
+rollback drift path:
+QUEUED(real provider) -> operator restarts fake-only -> worker claim revalidation
+  -> FAILED(reason=hosted_real_runtime_disabled or hosted_runtime_not_allowed)
+     before adapter.start, with no fallback to fake or local execution.
+```
+
+### Cross-Cutting Lifecycle Metrics Contract
+
+Tasks T2, T4, T5, T6, and T7 must use low-cardinality lifecycle metrics for provider-hosted runs. Exact metric names may follow the existing metrics helper style, but the required logical series is:
+
+- `provider_run_lifecycle_total{runtime_mode,reason,outcome}` where `outcome` is one of `accepted`, `denied`, `failed`, `timed_out`, `cancelled`, or `spend_control_denied`.
+- `runtime_mode` must be one of `codex.exec_json`, `claude_code.sdk`, or `opencode.acp`. `fake.deterministic` can be omitted from provider-only metrics.
+- `reason` must be one of the named failure codes or a fixed success reason such as `accepted`, `completed`, `provider_run_timeout`, or `run_cancelled`.
+- Forbidden metric label values: run id, tenant id, project id, user id, prompt text, cwd, executable path, argv, env key, env value, object key, provider output, stdout, stderr, API key, token, or policy path.
+
+Required lifecycle metric tests:
+
+- T4 must test worker metrics for claim accepted, claim denied by rollback drift, adapter failure, provider timeout, provider cancellation, and spend-control denial.
+- T6 must test server metrics for admission accepted, request-shape denial, provider-policy denial, and spend-control denial before side effects.
+- T7 must test canary/preflight metrics assertions for provider canary success, create denial, timeout, failed run, metrics failure, and audit failure.
+
+### Provider Policy Path Handling Contract
+
+Tasks T2, T4, T5, and T7 must treat policy source loading as a first-class failure surface.
+
+- T2 owns pure content validation. It must expose a maximum provider policy byte limit for callers and return redacted diagnostics that contain only `source_kind` (`json`, `path`, or `none`), policy version when parsed, enabled mode count, runtime mode slugs, and reason codes.
+- T4 owns worker config path loading tests for unreadable path, empty file, oversized file, invalid JSON, invalid UTF-8, both JSON and path source present, and source-kind-only redaction.
+- T5 owns server config path loading tests for unreadable path, empty file, oversized file, invalid JSON, invalid UTF-8, both JSON and path source present, and source-kind-only redaction.
+- T7 owns preflight path handling tests so operator-facing output reports named failures without printing the path, raw JSON, executable path, cwd, env values, tokens, or file contents.
+
+Required named mappings:
+
+- unreadable path -> `provider_runtime_policy_missing` or `provider_runtime_policy_malformed` with `source_kind=path`.
+- empty file -> `provider_runtime_policy_empty` with `source_kind=path`.
+- oversized file -> `provider_runtime_policy_malformed` with `source_kind=path`.
+- invalid JSON -> `provider_runtime_policy_malformed` with `source_kind=path`.
+- invalid UTF-8 -> `provider_runtime_policy_malformed` with `source_kind=path`.
+- both JSON and path present -> `provider_runtime_policy_malformed` with `source_kind` summary only.
+
+### T3 Subtask Matrix
+
+T3 remains one task because it owns adapter package files exclusively. Implementer and reviewer must treat these slices as independently reviewable:
+
+| Slice | Owned files | Required behavior | Required tests |
+|---|---|---|---|
+| T3a Adapter option contracts | `packages/adapters/src/codex/types.ts`, `packages/adapters/src/claude-code/types.ts`, `packages/adapters/src/opencode/types.ts`, `packages/adapters/src/index.ts` | Export `hostedProviderCommand?: ProviderResolvedCommand` for Codex, Claude CLI client, Claude adapter, and OpenCode ACP adapter without importing core. | Typecheck proves all four option contracts compile and remain importable by worker. |
+| T3b Codex command handoff | `packages/adapters/src/codex/codex-exec-json-adapter.ts`, `packages/adapters/test/codex-exec-json-adapter.test.ts` | Use resolved executable, fixed `exec --json`, filtered env, read-only posture, and metadata injection denial before spawn. | Happy command handoff, metadata escape denial, spawn unavailable, nested provider error redaction, and log redaction. |
+| T3c Claude CLI handoff | `packages/adapters/src/claude-code/claude-code-cli-client.ts`, `packages/adapters/test/claude-code-cli-client.test.ts` | Use resolved executable, filtered env, read-only permission mode, disabled Bash/WebFetch/WebSearch, and no approval/input enablement. | CLI arg construction, missing handoff field denial, spawn unavailable, provider stderr redaction, and no unrelated `process.env` leakage. |
+| T3d Claude adapter hosted bridge failures | `packages/adapters/src/claude-code/claude-code-adapter.ts`, `packages/adapters/test/claude-code-adapter.test.ts` | Terminalize hosted approval/input states with named unsupported bridge codes. | Approval-required event fails terminally, post-start input fails terminally, timeout remains timeout, cancellation remains cancellation, and logs stay redacted. |
+| T3e OpenCode ACP handoff | `packages/adapters/src/opencode/opencode-acp-adapter.ts`, `packages/adapters/test/opencode-acp-adapter.test.ts` | Pass filtered env to ACP stdio client, enforce one prompt per hosted run, and map permission/input states to unsupported bridge codes. | Env filtering, permission request failure, post-start input failure, ACP client spawn failure, transcript redaction, and existing non-hosted tests still pass. |
+
+Additional T3 test cases that amend `test_cases`:
+
+```json
+[
+  {
+    "name": "adapter logs redact hosted command details",
+    "lens": "error_path",
+    "given": "Codex, Claude, and OpenCode hosted provider runs emit start, denial, spawn failure, and provider error logs containing executable path, cwd, argv, env values, prompt text, stdout, stderr, token-like strings, object keys, and a home path in the fake payload",
+    "expect": "Captured logs and emitted errors include runtimeMode and reason code only; sensitive fields are absent or replaced by redaction markers."
+  },
+  {
+    "name": "adapter provider error payload redaction",
+    "lens": "error_path",
+    "given": "Nested provider error objects include API key-like strings, bearer tokens, cwd, stdout, stderr, command argv, and prompt text",
+    "expect": "run.failed reason is named and redacted diagnostics do not contain raw sensitive values."
+  },
+  {
+    "name": "adapter timeout and cancellation preserve lifecycle reasons",
+    "lens": "integration",
+    "given": "Fake provider process times out or receives cancellation while hostedProviderCommand is active",
+    "expect": "Terminal events use provider_run_timeout or run_cancelled and do not remap to provider_command_denied."
+  }
+]
+```
+
+### T4 Addendum: Spend, Metrics, Path, And Adapter Contracts
+
+T4 `integration_contracts.imports_from_other_tasks` must include all of these T3 exports and reviewers must reject the task if any are missing:
+
+```json
+[
+  {
+    "from_task": "P20-T3-adapter-command-handoff",
+    "name": "CodexExecJsonAdapterOptions.hostedProviderCommand",
+    "signature": "ProviderResolvedCommand | undefined"
+  },
+  {
+    "from_task": "P20-T3-adapter-command-handoff",
+    "name": "ClaudeCodeCliClientOptions.hostedProviderCommand",
+    "signature": "ProviderResolvedCommand | undefined"
+  },
+  {
+    "from_task": "P20-T3-adapter-command-handoff",
+    "name": "ClaudeCodeAdapterOptions.hostedProviderCommand",
+    "signature": "ProviderResolvedCommand | undefined"
+  },
+  {
+    "from_task": "P20-T3-adapter-command-handoff",
+    "name": "OpenCodeAcpAdapterOptions.hostedProviderCommand",
+    "signature": "ProviderResolvedCommand | undefined"
+  }
+]
+```
+
+Additional T4 acceptance:
+
+- Worker claim spend checks must cover prompt bytes, active run count, hourly run count, and requested timeout seconds before adapter invocation.
+- Worker lifecycle metrics must emit accepted, denied, failed, timed out, cancelled, and spend-control-denied outcomes with only `runtime_mode`, `reason`, and fixed outcome labels.
+- Worker config path loading must fail closed for unreadable path, empty file, oversized file, invalid JSON, invalid UTF-8, and JSON/path source conflict with source-kind-only diagnostics.
+
+Additional T4 test cases:
+
+```json
+[
+  {
+    "name": "claim spend active limit",
+    "lens": "error_path",
+    "given": "Provider policy maxActiveRuns is 1 and active count for codex.exec_json is already 1",
+    "expect": "HostedWorkerService fails before start state and before adapter.start with provider_spend_limit_exceeded and outcome spend_control_denied."
+  },
+  {
+    "name": "claim spend hourly limit",
+    "lens": "error_path",
+    "given": "Provider policy maxRunsPerHour is 2 and the hourly counter for claude_code.sdk is already 2",
+    "expect": "HostedWorkerService fails before adapter.start with provider_spend_limit_exceeded and outcome spend_control_denied."
+  },
+  {
+    "name": "claim spend timeout limit",
+    "lens": "error_path",
+    "given": "Provider policy maxRunTimeoutSeconds is 300 and queued run timeout is 301",
+    "expect": "HostedWorkerService fails before adapter.start with provider_spend_limit_exceeded and does not retry."
+  },
+  {
+    "name": "worker policy path failures are redacted",
+    "lens": "error_path",
+    "given": "Worker config points to unreadable, empty, oversized, invalid JSON, and invalid UTF-8 policy files in separate cases",
+    "expect": "ConfigError uses the mapped provider policy code and diagnostics contain source_kind=path without raw path or file contents."
+  },
+  {
+    "name": "worker lifecycle metrics outcomes",
+    "lens": "integration",
+    "given": "Fake worker runs for accepted, rollback-denied, adapter-failed, timed-out, cancelled, and spend-denied provider jobs",
+    "expect": "provider lifecycle metrics use runtime_mode and reason labels only and cover all six outcomes."
+  }
+]
+```
+
+### T5 Addendum: Server Startup Failure Variants
+
+Additional T5 acceptance:
+
+- Server config startup failure tests must cover every production provider activation variant: missing policy, both policy sources, unreadable policy path, empty policy file, oversized policy file, invalid JSON, invalid UTF-8, unknown runtime mode, disabled entry, missing credentials, invalid spend controls, invalid command policy, real mode with gate disabled, and out-of-scope hosted mode in allowlist.
+- `/ready` diagnostics must include source kind, enabled mode count, runtime mode slugs, and reason codes only.
+
+Additional T5 test cases:
+
+```json
+[
+  {
+    "name": "server startup rejects policy source conflict",
+    "lens": "error_path",
+    "given": "SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON and SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH are both set",
+    "expect": "ConfigError provider_runtime_policy_malformed and diagnostics do not include either source value."
+  },
+  {
+    "name": "server startup rejects unreadable policy path",
+    "lens": "error_path",
+    "given": "Production real activation points to a path that cannot be read",
+    "expect": "ConfigError provider_runtime_policy_missing or provider_runtime_policy_malformed with source_kind=path only."
+  },
+  {
+    "name": "server startup rejects empty oversized invalid json and invalid utf8 policy files",
+    "lens": "error_path",
+    "given": "Separate policy files that are empty, exceed the configured byte limit, contain malformed JSON, or contain invalid UTF-8",
+    "expect": "ConfigError maps to provider_runtime_policy_empty or provider_runtime_policy_malformed with no raw content in logs/readiness."
+  },
+  {
+    "name": "server startup rejects activation matrix failures",
+    "lens": "error_path",
+    "given": "Unknown mode, disabled policy entry, missing required env, invalid spend controls, invalid command policy, real mode with gate disabled, and generic_http.async_rest allowlist cases",
+    "expect": "ConfigError uses the matching named reason code for each case."
+  },
+  {
+    "name": "server readiness diagnostics are source-kind-only",
+    "lens": "integration",
+    "given": "Readiness runs with path-sourced provider policy and a failing required env",
+    "expect": "providerRuntimeActivation reports source_kind=path, runtime mode, and provider_credentials_missing without raw path, env value, executable path, cwd, or JSON."
+  }
+]
+```
+
+### T6 Addendum: Admission Side-Effect Ordering
+
+Additional T6 acceptance:
+
+- For request-shape and config-known denials, tests must assert no quota reservation, run row, ownership row, audit row, queue job, artifact row, or adapter invocation occurred.
+- For failures after a quota reservation has legitimately happened, tests must assert the existing reservation release path and audit semantics remain correct.
+- Provider spend denials at server admission must cover prompt bytes, active run count, hourly run count, and timeout seconds where those counters are available to the server.
+- Server admission lifecycle metrics must cover accepted, denied, and spend-control-denied outcomes with low-cardinality `runtime_mode` and `reason` labels.
+
+Additional T6 test cases:
+
+```json
+[
+  {
+    "name": "disabled gate denied before all side effects",
+    "lens": "error_path",
+    "given": "POST /runs placement=hosted runtimeMode=codex.exec_json while real-runtime gate is disabled",
+    "expect": "hosted_real_runtime_disabled and fake repositories show zero reservation, run, ownership, audit, queue, artifact, and adapter calls."
+  },
+  {
+    "name": "missing provider policy denied before all side effects",
+    "lens": "error_path",
+    "given": "POST /runs placement=hosted runtimeMode=claude_code.sdk with production gate enabled but invalid activation",
+    "expect": "provider_runtime_policy_missing and no durable or queue side effects."
+  },
+  {
+    "name": "server spend active hourly timeout denials",
+    "lens": "error_path",
+    "given": "Valid provider activation but active, hourly, or timeout spend controls are exceeded before admission",
+    "expect": "provider_spend_limit_exceeded, outcome spend_control_denied, and no run/queue side effects."
+  },
+  {
+    "name": "later enqueue failure releases reservation",
+    "lens": "integration",
+    "given": "Allowed hosted provider run where control-plane reservation succeeds and queue enqueue then throws",
+    "expect": "Reservation release is called once, run is terminalized or absent per existing service contract, and diagnostics are redacted."
+  },
+  {
+    "name": "approval bridge denial has no approval side effects",
+    "lens": "error_path",
+    "given": "Approval route request for a hosted provider run",
+    "expect": "hosted_approval_bridge_unsupported and no runtime approval record is created."
+  },
+  {
+    "name": "server lifecycle metrics admission outcomes",
+    "lens": "integration",
+    "given": "Accepted hosted provider run, wait=1 denial, missing-policy denial, and spend denial",
+    "expect": "Lifecycle metrics emit accepted, denied, and spend_control_denied outcomes with runtime_mode and reason only."
+  }
+]
+```
+
+### T7 Subtask Matrix
+
+T7 remains one task because it owns scripts and deployment artifacts exclusively. Implementer and reviewer must use these independent slices:
+
+| Slice | Owned files | Required behavior | Required tests |
+|---|---|---|---|
+| T7a Preflight provider checks | `scripts/production-preflight.ts`, `scripts/production-preflight.test.ts` | Validate provider activation, path handling, credentials, spend controls, adapter availability, redaction, and fake-only default. | Fake-only pass, missing policy, unreadable path, invalid UTF-8, binary unavailable, invalid spend, redaction. |
+| T7b No-spend hosted smoke | `scripts/hosted-real-runtime-smoke.ts` | Exercise production-mode config, server preflight, worker readiness, adapter handoff, rollback drift, timeout, cancellation, and lifecycle metrics using fake clients. | Known modes pass, rollback drift fails before adapter, timeout metric, cancellation metric, no live provider calls. |
+| T7c Provider canary | `scripts/production-canary.ts`, `scripts/production-canary.test.ts` | One runtime mode per invocation, explicit spend confirmation, run create, wait, events, artifacts, metrics auth, audit ownership, and named failure exits. | Every `provider_canary_*` failure listed below plus success path. |
+| T7d Manifest and deployment docs | `scripts/production-manifest.ts`, `deploy/production/manifest.json`, `deploy/production/.env.example`, `deploy/production/README.md`, `deploy/production/production-manifest.test.ts` | Keep checked-in manifest fake-only by default; document explicit provider opt-in, policy examples, credentials by env name, spend controls, canary, and rollback. | Manifest default fake-only, opt-in example valid, forbidden surfaces rejected, rollback text present. |
+| T7e Package scripts | `package.json` | Expose deterministic provider smoke and spend-confirmed provider canary without adding live provider checks to default CI. | Script inventory test or package assertion proves defaults remain no-spend. |
+
+Additional T7 test cases:
+
+```json
+[
+  {
+    "name": "canary missing base url api key or runtime",
+    "lens": "error_path",
+    "given": "production-canary lacks base URL, API key, or --runtime-mode for provider mode",
+    "expect": "provider_canary_config_missing before any HTTP run creation."
+  },
+  {
+    "name": "canary empty runtime list",
+    "lens": "happy_shadow_empty",
+    "given": "production-canary receives an empty provider runtime list or blank --runtime-mode",
+    "expect": "provider_canary_runtime_empty before any HTTP run creation."
+  },
+  {
+    "name": "canary create denied",
+    "lens": "error_path",
+    "given": "Fake hosted API returns 409 hosted_runtime_not_allowed for provider canary create",
+    "expect": "provider_canary_create_denied with redacted response diagnostics."
+  },
+  {
+    "name": "canary timeout",
+    "lens": "error_path",
+    "given": "Fake hosted API leaves the canary run non-terminal past timeout",
+    "expect": "provider_canary_timeout."
+  },
+  {
+    "name": "canary run failed",
+    "lens": "error_path",
+    "given": "Fake hosted API returns terminal failed run with provider error reason",
+    "expect": "provider_canary_run_failed and no provider output leakage."
+  },
+  {
+    "name": "canary artifact missing",
+    "lens": "error_path",
+    "given": "Canary run completes but expected artifact metadata or content is absent",
+    "expect": "provider_canary_artifact_missing."
+  },
+  {
+    "name": "canary metrics failed",
+    "lens": "error_path",
+    "given": "Metrics endpoint returns unauthorized, unavailable, or missing provider lifecycle series",
+    "expect": "provider_canary_metrics_failed."
+  },
+  {
+    "name": "canary audit failed",
+    "lens": "error_path",
+    "given": "Audit lookup lacks ownership trace or canary tag",
+    "expect": "provider_canary_audit_failed."
+  },
+  {
+    "name": "preflight policy path redaction",
+    "lens": "error_path",
+    "given": "production-preflight uses unreadable, oversized, invalid JSON, and invalid UTF-8 policy path fixtures",
+    "expect": "Named provider policy failures with source_kind=path and no raw path, JSON, executable path, cwd, env value, or token in output."
+  }
+]
+```
+
+### Error Rescue Coverage Addendum
+
+Reviewers must verify the following coverage before GREEN:
+
+- T1 error rescue rows are covered by policy parse, command escape, provider-specific unsafe setting, and failure-code schema tests.
+- T2 error rescue rows are covered by missing policy, empty policy, policy source conflict, unknown mode, disabled entry, missing env, invalid spend controls, binary unavailable, command denial, prompt too large, active limit, hourly limit, and timeout limit tests.
+- T3 error rescue rows are covered by metadata injection denial, spawn unavailable, missing handoff validation, approval bridge unsupported, input bridge unsupported, ACP permission request unsupported, timeout, cancellation, and redaction tests.
+- T4 error rescue rows are covered by worker startup failure variants, adapter gate denial, rollback drift claim denial, prompt/active/hourly/timeout spend denial, adapter readiness failure, non-retryable policy denial, lifecycle metric, and path handling tests.
+- T5 error rescue rows are covered by server startup failure variants, readiness invalid activation, source-kind-only diagnostics, and redaction tests.
+- T6 error rescue rows are covered by implicit placement, wait=1, disabled gate, missing policy, prompt/active/hourly/timeout spend denials, allowed-run preservation, later enqueue failure reservation release, input bridge unsupported, approval bridge unsupported, no-forbidden-route, and lifecycle metric tests.
+- T7 error rescue rows are covered by preflight provider failures, no-spend smoke assertions, spend-confirmation denial, every provider canary failure variant, manifest forbidden-surface rejection, and path redaction tests.
+- T8 error rescue rows are covered by OpenAPI forbidden route fixtures, endpoint inventory forbidden route fixtures, product truth assertions, and `PROJECT.md` diff guard.
+
+### Architect Revision 1 Self-Review
+
+1. Spec coverage: all original acceptance criteria remain covered by T1 through T8, with additional coverage for architect-noted missing variants.
+2. Placeholder scan: this revision adds no deferred implementation markers.
+3. Type consistency: T4 now imports every T3 adapter `hostedProviderCommand` option contract using the same `ProviderResolvedCommand | undefined` signature exported by T3.
+4. Ownership disjoint: no file ownership changes were made; T3 and T7 are structured internally without adding cross-task file overlap.
+5. Context files real: no new context file paths were introduced by this revision.
+6. Acceptance testable: every added acceptance item names an observable response, metric, side-effect absence, redaction assertion, or command result.
+7. Dependency order sane: addenda preserve the existing T1 -> T2/T3 -> T4/T5 -> T6 -> T7 -> T8 order.
+8. Checks runnable: no new check command depends on live provider spend; live provider canary remains explicit.
+9. Error/rescue map present: every architect-noted failure branch has a required error-path or integration test in the owning task.
+10. Observability present: lifecycle metrics are now explicit for accepted, denied, failed, timed out, cancelled, and spend-control-denied provider runs.
+11. Test cases enumerate acceptance: each new acceptance cluster has matching test cases in the owning task addendum.
+12. Integration contracts walk: T4 imports resolve to T3 exports; all previous cross-task imports remain unchanged.
+13. Contract types match: provider policy, activation, resolved command, adapter option, and canary contracts retain the existing signatures.
+
+### Architect Revision 1 Plan Completeness Self-Test
+
+- [x] Every acceptance criterion in the spec has at least one task that delivers it.
+- [x] Every task has at least one acceptance criterion.
+- [x] Every acceptance criterion has at least one test case, including architect-added criteria.
+- [x] Every error_rescue_map entry has a matching `error_path`, `happy_shadow_empty`, or `integration` test requirement.
+- [x] Every integration contract import resolves to a real export elsewhere.
+- [x] Every context file path still exists in the project; this revision adds no new context file path.
+- [x] No task edits a file owned by another task.
+- [x] No incomplete marker text is present in this revision.
+- [x] Complexity remains L; oversized T3 and T7 now have subtask-level implementation/review matrices rather than new worktree splits.
