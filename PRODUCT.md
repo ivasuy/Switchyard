@@ -47,7 +47,7 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/phase-17-r18-enterprise-auth-billing-tenant-controls` at commit `9ef92e3b32103ace28cfaaed110209e56ecec47b`.
+Snapshot source: `agent/phase-17-r18-enterprise-auth-billing-tenant-controls` at commit `58b5e25`.
 
 Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like worker execution for fake deterministic plus operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; shipped S3/R2-compatible object-store client wiring for hosted artifact content; and shipped the R18 API-first hosted/server enterprise control-plane foundation (API key auth, tenant/project ownership, entitlement/quota contracts, audit events, fail-closed staging/production checks, and hosted OpenAPI surface).
 
@@ -1151,3 +1151,32 @@ Explicitly not shipped in R17:
 - Runtime-specific approval bridges for OpenCode, AgentField, Generic HTTP, or hosted Codex.
 - Managed production hosted platform deployment.
 - Enterprise auth, billing, tenant controls, dashboard, or TUI.
+
+## R18 Enterprise Auth, Billing, And Tenant Controls (Shipped Control-Plane Foundation)
+
+Shipped in this phase:
+
+- API-first hosted/server enterprise control-plane foundation for API key auth, tenant/project ownership, plan/entitlement/quota contracts, and audit events.
+- Public contracts for account, tenant, project, user, API key, billing plan, entitlement, quota reservation/usage, resource ownership, auth context, and audit event records.
+- Hosted/server API key authentication with bearer and `x-switchyard-api-key` support, query-string credential rejection, redacted auth failures, tenant/project scoping, and scope-based route authorization.
+- Durable ownership for hosted/server resources touched by R18, including runs, events, artifacts, placement decisions, nodes, assignments, quota reservations, and audit log events.
+- Entitlement and quota enforcement before hosted side effects for run creation, active run count, timeout limits, placements/runtime modes, artifact reads, and connected-node registration.
+- Tenant-scoped hosted enterprise routes for `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events`.
+- Hosted OpenAPI surface with API-key security for protected routes while local-daemon OpenAPI remains unauthenticated and backwards compatible by default.
+- Staging/production fail-closed server config and readiness checks for auth mode, key pepper, bootstrap records, active plan/key/tenant/project, quota store, audit store, node-token binding, and unowned hosted resources.
+- Hosted global `/metrics` protected as operator/admin telemetry requiring `metrics:read` plus `admin:read`; tenant-scoped metrics are not shipped in R18.
+- Local daemon, SDK, and CLI compatibility tests proving local fake flows, local metrics, and local OpenAPI remain no-auth by default.
+
+Explicitly not shipped in R18:
+
+- Dashboard or TUI.
+- Payment provider integration, invoices, checkout, webhooks, tax, subscription lifecycle, customer portal, or automated billing collection.
+- Managed production hosting platform.
+- Public tenant signup, tenant self-service UI, API-key creation UI, billing admin UI, or organization-management UI.
+- OAuth, OIDC, SAML, SSO, SCIM, passkeys, session cookies, user passwords, email invites, or browser login flow.
+- Hosted or connected-node real tools.
+- Browser automation.
+- Arbitrary process/PTY execution, generic process/PTY adapters, or public `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` execution APIs.
+- Cursor, OpenClaw, or Paperclip adapters.
+- Runtime-specific approval bridge expansion for OpenCode, AgentField, Generic HTTP, or hosted Codex.
+- Hosted debate with real participant runtimes or model judging.

@@ -235,3 +235,19 @@ The shipped boundary remains explicit: R17 does not ship hosted or connected-nod
 
 ### Deferred Concerns
 - None.
+
+## Phase 17: R18 Enterprise Auth, Billing, And Tenant Controls
+**Date:** 2026-05-31
+**Spec:** docs/superpowers/specs/2026-05-30-phase-17-r18-enterprise-auth-billing-tenant-controls.md
+**Plan:** docs/superpowers/plans/2026-05-30-phase-17-r18-enterprise-auth-billing-tenant-controls.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-17-report.md
+**Branch:** agent/phase-17-r18-enterprise-auth-billing-tenant-controls (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R18 is now shipped on the phase branch. Switchyard adds an API-first enterprise control-plane foundation for hosted/server APIs: API key authentication, tenant/project ownership, account/user/project/API-key/billing-plan/entitlement/quota/audit contracts, entitlement and quota enforcement before hosted side effects, tenant-scoped ownership checks for hosted runs/events/artifacts/nodes/assignments, hosted enterprise routes for `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events`, hosted OpenAPI generation, redacted audit/error/config behavior, and staging/production fail-closed readiness checks. Hosted global `/metrics` is operator/admin only with `metrics:read` plus `admin:read`, while the local daemon, SDK, CLI, metrics endpoint, and local OpenAPI remain no-auth by default. The audit found and fixed two blocker paths before green: artifact content authorization now gates before existence/content-state probing, and quota reservations/audit events now receive durable ownership rows and readiness coverage.
+
+The shipped boundary remains explicit: R18 does not ship dashboard, TUI, payment provider integration, invoices, checkout, webhooks, managed production hosting, public tenant self-service, OAuth/OIDC/SAML/SSO/SCIM, hosted or connected-node real tools, browser automation, arbitrary process/PTY execution, Cursor/OpenClaw/Paperclip, runtime-specific approval bridge expansion, or hosted debate with real participant runtimes/model judging.
+
+### Deferred Concerns
+- None.
