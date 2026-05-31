@@ -6,7 +6,9 @@ import type {
   RuntimeModeKind,
   RuntimePlacementFacts
 } from "@switchyard/contracts";
+import { providerRuntimeModeSchema, type ProviderRuntimeMode } from "@switchyard/contracts";
 import type { RuntimeAdapterManifest } from "../ports/runtime-adapter.js";
+import type { ProviderRuntimeActivationResult } from "./provider-runtime-policy.js";
 
 export type HostedRuntimeModeSlug = "fake.deterministic" | "codex.exec_json" | "claude_code.sdk" | "opencode.acp";
 export type HostedDeploymentMode = "local" | "test" | "staging" | "production";
@@ -306,7 +308,23 @@ export interface HostedRuntimeConfigInput {
   allowlist: string[];
   deploymentMode: HostedDeploymentMode;
   realRuntimeExecution: HostedRealRuntimeExecution;
+  providerActivation?: ProviderRuntimeActivationResult | undefined;
 }
+
+type HostedRuntimeConfigFailureCode =
+  | "config_invalid:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
+  | "config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
+  | "hosted_real_runtime_disabled"
+  | "hosted_real_runtime_production_forbidden"
+  | "provider_runtime_policy_missing"
+  | "provider_runtime_policy_empty"
+  | "provider_runtime_policy_malformed"
+  | "provider_runtime_policy_unknown_mode"
+  | "provider_runtime_policy_disabled"
+  | "provider_command_policy_invalid"
+  | "provider_binary_unavailable"
+  | "provider_credentials_missing"
+  | "provider_spend_controls_invalid";
 
 export type HostedRuntimeConfigValidation =
   | {
@@ -317,12 +335,7 @@ export type HostedRuntimeConfigValidation =
   }
   | {
     ok: false;
-    code:
-      | "config_invalid:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
-      | "config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
-      | "config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
-      | "hosted_real_runtime_disabled"
-      | "hosted_real_runtime_production_forbidden";
+    code: HostedRuntimeConfigFailureCode;
   };
 
 export interface HostedRunPreparationInput {
@@ -335,6 +348,7 @@ export interface HostedRunPreparationInput {
   allowlist: string[];
   deploymentMode: string;
   realRuntimeExecution: HostedRealRuntimeExecution;
+  providerActivation?: ProviderRuntimeActivationResult | undefined;
 }
 
 export type HostedRunPreparationResult =
@@ -374,14 +388,28 @@ export function validateHostedRuntimeAllowlist(input: HostedRuntimeConfigInput):
   }
 
   const hasRealMode = allowlist.some((mode) => isRealHostedRuntimeMode(mode));
-  if (input.deploymentMode === "production" && input.realRuntimeExecution === "enabled") {
-    return { ok: false, code: "config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION" };
-  }
-  if (input.deploymentMode === "production" && hasRealMode) {
-    return { ok: false, code: "hosted_real_runtime_production_forbidden" };
-  }
   if (hasRealMode && input.realRuntimeExecution !== "enabled") {
     return { ok: false, code: "hosted_real_runtime_disabled" };
+  }
+  if (input.deploymentMode === "production" && hasRealMode) {
+    if (!input.providerActivation || !input.providerActivation.valid) {
+      return {
+        ok: false,
+        code: toHostedRuntimeValidationCode(input.providerActivation?.reasons[0]?.code)
+      };
+    }
+
+    for (const runtimeMode of allowlist) {
+      if (!isRealHostedRuntimeMode(runtimeMode)) {
+        continue;
+      }
+      if (!isProviderRuntimeMode(runtimeMode)) {
+        return { ok: false, code: "provider_runtime_policy_unknown_mode" };
+      }
+      if (!input.providerActivation.enabledRealModes.includes(runtimeMode)) {
+        return { ok: false, code: "provider_runtime_policy_missing" };
+      }
+    }
   }
 
   return {
@@ -431,8 +459,8 @@ export function prepareHostedRunForExecution(input: HostedRunPreparationInput): 
     if (input.realRuntimeExecution !== "enabled") {
       return { ok: false, reasonCode: "hosted_real_runtime_disabled" };
     }
-    if (input.deploymentMode === "production") {
-      return { ok: false, reasonCode: "hosted_real_runtime_production_forbidden" };
+    if (input.deploymentMode === "production" && !isHostedRuntimeProductionAllowed(runtimeMode, input.providerActivation)) {
+      return { ok: false, reasonCode: input.providerActivation?.reasons[0]?.code ?? "provider_runtime_policy_missing" };
     }
   }
 
@@ -472,9 +500,50 @@ export function hostedManifestForCatalog(entry: HostedRuntimeCatalogEntry): Runt
   return entry.manifest;
 }
 
+export function isHostedRuntimeProductionAllowed(
+  slug: HostedRuntimeModeSlug,
+  activation?: ProviderRuntimeActivationResult
+): boolean {
+  if (!HOSTED_RUNTIME_CATALOG[slug].requiresRealRuntimeGate) {
+    return HOSTED_RUNTIME_CATALOG[slug].productionAllowed;
+  }
+  if (!isProviderRuntimeMode(slug)) {
+    return false;
+  }
+  return Boolean(activation?.valid && activation.enabledRealModes.includes(slug));
+}
+
 function toRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
   }
   return value as Record<string, unknown>;
+}
+
+function toHostedRuntimeValidationCode(
+  code: ProviderRuntimeActivationResult["reasons"][number]["code"] | undefined
+): HostedRuntimeConfigFailureCode {
+  if (!code) {
+    return "provider_runtime_policy_missing";
+  }
+  switch (code) {
+    case "provider_runtime_policy_missing":
+    case "provider_runtime_policy_empty":
+    case "provider_runtime_policy_malformed":
+    case "provider_runtime_policy_unknown_mode":
+    case "provider_runtime_policy_disabled":
+    case "provider_command_policy_invalid":
+    case "provider_binary_unavailable":
+    case "provider_credentials_missing":
+    case "provider_spend_controls_invalid":
+    case "hosted_real_runtime_disabled":
+    case "hosted_real_runtime_production_forbidden":
+      return code;
+    default:
+      return "provider_runtime_policy_missing";
+  }
+}
+
+function isProviderRuntimeMode(value: string): value is ProviderRuntimeMode {
+  return providerRuntimeModeSchema.safeParse(value).success;
 }

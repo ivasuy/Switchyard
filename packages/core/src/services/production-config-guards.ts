@@ -1,4 +1,6 @@
 import { URL } from "node:url";
+import { providerRuntimeModeSchema } from "@switchyard/contracts";
+import type { ProviderRuntimeActivationResult } from "./provider-runtime-policy.js";
 
 export interface ProductionValidationOk {
   ok: true;
@@ -29,6 +31,13 @@ interface ProductionHttpsUrlValidationInput {
 
 const PLACEHOLDER_WORDS = new Set(["switchyard", "password", "secret", "test", "example", "replace-me"]);
 const FAKE_RUNTIME_ALLOWLIST = "fake.deterministic";
+
+export interface ProductionHostedRuntimeAllowlistValidationInput {
+  allowlist: readonly string[];
+  hostedRealRuntimeExecution: "enabled" | "disabled";
+  providerActivation?: ProviderRuntimeActivationResult | undefined;
+  variable?: string | undefined;
+}
 
 export function isPlaceholderSecret(value: string | undefined): boolean {
   const normalized = optional(value);
@@ -93,17 +102,45 @@ export function validateProductionUrlCredential(
   return { ok: true };
 }
 
+export function validateProductionHostedRuntimeAllowlist(
+  input: ProductionHostedRuntimeAllowlistValidationInput
+): ProductionValidationOk | ProductionValidationFail {
+  const variable = input.variable ?? "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST";
+  if (input.allowlist.length === 0) {
+    return fail(`config_required:${variable}`, variable);
+  }
+  const realModes = input.allowlist.filter((mode) => mode !== FAKE_RUNTIME_ALLOWLIST);
+  if (realModes.length === 0) {
+    return { ok: true };
+  }
+
+  if (input.hostedRealRuntimeExecution !== "enabled") {
+    return fail("hosted_real_runtime_disabled", variable);
+  }
+
+  if (!input.providerActivation || !input.providerActivation.valid) {
+    return fail(input.providerActivation?.reasons[0]?.code ?? "provider_runtime_policy_missing", variable);
+  }
+
+  for (const mode of realModes) {
+    const parsedMode = providerRuntimeModeSchema.safeParse(mode);
+    if (!parsedMode.success || !input.providerActivation.enabledRealModes.includes(parsedMode.data)) {
+      return fail("provider_runtime_policy_missing", variable);
+    }
+  }
+
+  return { ok: true };
+}
+
 export function validateProductionFakeOnlyAllowlist(
   allowlist: readonly string[],
   variable = "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
 ): ProductionValidationOk | ProductionValidationFail {
-  if (allowlist.length === 0) {
-    return fail(`config_required:${variable}`, variable);
-  }
-  if (allowlist.length === 1 && allowlist[0] === FAKE_RUNTIME_ALLOWLIST) {
-    return { ok: true };
-  }
-  return fail("hosted_real_runtime_production_forbidden", variable);
+  return validateProductionHostedRuntimeAllowlist({
+    allowlist,
+    hostedRealRuntimeExecution: "disabled",
+    variable
+  });
 }
 
 export function validateProductionHttpsUrl(

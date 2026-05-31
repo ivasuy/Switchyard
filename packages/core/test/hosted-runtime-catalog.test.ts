@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   HOSTED_RUNTIME_CATALOG,
   getHostedRuntimeCatalogEntry,
+  isHostedRuntimeProductionAllowed,
   isKnownHostedRuntimeMode,
   isRealHostedRuntimeMode,
   prepareHostedRunForExecution,
@@ -89,7 +90,34 @@ describe("hosted runtime catalog", () => {
       realRuntimeExecution: "disabled"
     });
     expect(result.ok).toBe(false);
-    expect(result.code).toBe("hosted_real_runtime_production_forbidden");
+    expect(result.code).toBe("hosted_real_runtime_disabled");
+  });
+
+  it("requires activation result for production real mode", () => {
+    const denied = validateHostedRuntimeAllowlist({
+      allowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      realRuntimeExecution: "enabled"
+    });
+    expect(denied.ok).toBe(false);
+    expect(denied.code).toBe("provider_runtime_policy_missing");
+
+    const allowed = validateHostedRuntimeAllowlist({
+      allowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      realRuntimeExecution: "enabled",
+      providerActivation: {
+        valid: true,
+        enabledRealModes: ["codex.exec_json"],
+        reasons: [],
+        redactedSummary: {}
+      }
+    });
+    expect(allowed.ok).toBe(true);
+    if (!allowed.ok) {
+      return;
+    }
+    expect(allowed.allowlist).toEqual(["fake.deterministic", "codex.exec_json"]);
   });
 
   it("keeps local fake defaults", () => {
@@ -123,6 +151,46 @@ describe("hosted runtime catalog", () => {
     expect((prepared.run.metadata as Record<string, unknown>).sandbox).toBe("read-only");
   });
 
+  it("keeps production real execution closed without activation during run preparation", () => {
+    const denied = prepareHostedRunForExecution({
+      run: baseRun({
+        runtime: "codex",
+        provider: "openai",
+        model: "gpt-5",
+        runtimeMode: "codex.exec_json"
+      }),
+      queuePayload: { runId: "run_1", placement: "hosted", runtimeMode: "codex.exec_json" },
+      allowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      realRuntimeExecution: "enabled"
+    });
+    expect(denied.ok).toBe(false);
+    if (denied.ok) return;
+    expect(denied.reasonCode).toBe("provider_runtime_policy_missing");
+  });
+
+  it("allows production real execution only with explicit activation", () => {
+    const allowed = prepareHostedRunForExecution({
+      run: baseRun({
+        runtime: "codex",
+        provider: "openai",
+        model: "gpt-5",
+        runtimeMode: "codex.exec_json"
+      }),
+      queuePayload: { runId: "run_1", placement: "hosted", runtimeMode: "codex.exec_json" },
+      allowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      realRuntimeExecution: "enabled",
+      providerActivation: {
+        valid: true,
+        enabledRealModes: ["codex.exec_json"],
+        reasons: [],
+        redactedSummary: {}
+      }
+    });
+    expect(allowed.ok).toBe(true);
+  });
+
   it("rejects unsafe codex sandbox metadata", () => {
     const denied = prepareHostedRunForExecution({
       run: baseRun({
@@ -141,5 +209,18 @@ describe("hosted runtime catalog", () => {
     expect(denied.ok).toBe(false);
     if (denied.ok) return;
     expect(denied.reasonCode).toBe("hosted_codex_sandbox_denied");
+  });
+
+  it("evaluates production support from activation instead of static catalog flags", () => {
+    expect(HOSTED_RUNTIME_CATALOG["codex.exec_json"].productionAllowed).toBe(false);
+    expect(isHostedRuntimeProductionAllowed("codex.exec_json")).toBe(false);
+    expect(
+      isHostedRuntimeProductionAllowed("codex.exec_json", {
+        valid: true,
+        enabledRealModes: ["codex.exec_json"],
+        reasons: [],
+        redactedSummary: {}
+      })
+    ).toBe(true);
   });
 });

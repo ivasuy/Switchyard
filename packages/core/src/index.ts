@@ -45,6 +45,7 @@ export * from "./services/tool-router.js";
 export * from "./services/local-policy-gate.js";
 export * from "./services/hosted-sandbox-service.js";
 export * from "./services/hosted-runtime-catalog.js";
+export * from "./services/provider-runtime-policy.js";
 export * from "./services/production-config-guards.js";
 export * from "./services/hosted-run-service.js";
 export * from "./services/hosted-worker-service.js";

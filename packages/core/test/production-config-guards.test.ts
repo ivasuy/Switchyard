@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isPlaceholderSecret,
   validateProductionCwdPrefixes,
-  validateProductionFakeOnlyAllowlist,
+  validateProductionHostedRuntimeAllowlist,
   validateProductionHttpsUrl,
   validateProductionSecret,
   validateProductionUrlCredential
@@ -81,16 +81,58 @@ describe("production config guards", () => {
     });
   });
 
-  it("enforces fake-only production runtime allowlist", () => {
-    expect(validateProductionFakeOnlyAllowlist(["fake.deterministic"])).toEqual({ ok: true });
-    expect(validateProductionFakeOnlyAllowlist(["fake.deterministic", "codex.exec_json"])).toEqual({
+  it("enforces provider-aware production runtime allowlist while preserving fake-only defaults", () => {
+    expect(
+      validateProductionHostedRuntimeAllowlist({
+        allowlist: ["fake.deterministic"],
+        hostedRealRuntimeExecution: "disabled"
+      })
+    ).toEqual({ ok: true });
+
+    expect(
+      validateProductionHostedRuntimeAllowlist({
+        allowlist: ["fake.deterministic", "codex.exec_json"],
+        hostedRealRuntimeExecution: "disabled"
+      })
+    ).toEqual({
       ok: false,
-      code: "hosted_real_runtime_production_forbidden",
+      code: "hosted_real_runtime_disabled",
       variable: "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
     });
-    expect(validateProductionFakeOnlyAllowlist(["codex.exec_json"], "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES")).toEqual({
+
+    expect(
+      validateProductionHostedRuntimeAllowlist({
+        allowlist: ["fake.deterministic", "codex.exec_json"],
+        hostedRealRuntimeExecution: "enabled"
+      })
+    ).toEqual({
       ok: false,
-      code: "hosted_real_runtime_production_forbidden",
+      code: "provider_runtime_policy_missing",
+      variable: "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
+    });
+
+    expect(
+      validateProductionHostedRuntimeAllowlist({
+        allowlist: ["fake.deterministic", "codex.exec_json"],
+        hostedRealRuntimeExecution: "enabled",
+        providerActivation: {
+          valid: true,
+          enabledRealModes: ["codex.exec_json"],
+          reasons: [],
+          redactedSummary: {}
+        }
+      })
+    ).toEqual({ ok: true });
+
+    expect(
+      validateProductionHostedRuntimeAllowlist({
+        allowlist: ["codex.exec_json"],
+        hostedRealRuntimeExecution: "enabled",
+        variable: "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES"
+      })
+    ).toEqual({
+      ok: false,
+      code: "provider_runtime_policy_missing",
       variable: "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES"
     });
   });
