@@ -48,6 +48,12 @@ export interface HostedMetricsSnapshot {
     redactions: number;
   };
   node: { register: number; heartbeat: number; claim: number; sync: number; complete: number; reject: number };
+  auth: { required: number; failed: number; succeeded: number; conflict: number };
+  tenant: { denied: number };
+  entitlement: { denied: number };
+  quota: { denied: number; reserved: number; released: number };
+  audit: { appended: number; failed: number };
+  controlPlane: { ready: number; notReady: number };
   dependencies: { ready: number; notReady: number };
   config: { failures: number };
 }
@@ -83,6 +89,12 @@ export class HostedMetrics {
       redactions: 0
     },
     node: { register: 0, heartbeat: 0, claim: 0, sync: 0, complete: 0, reject: 0 },
+    auth: { required: 0, failed: 0, succeeded: 0, conflict: 0 },
+    tenant: { denied: 0 },
+    entitlement: { denied: 0 },
+    quota: { denied: 0, reserved: 0, released: 0 },
+    audit: { appended: 0, failed: 0 },
+    controlPlane: { ready: 0, notReady: 0 },
     dependencies: { ready: 0, notReady: 0 },
     config: { failures: 0 }
   };

@@ -8,7 +8,7 @@ try {
   await app.listen({ host: config.host, port: config.port });
   console.info("server.listening", { host: config.host, port: config.port, config: config.redactedSummary });
 } catch (error) {
-  console.error("server.startup_failed", {
+  console.error("server.start_failed", {
     code: error instanceof Error ? error.message : String(error),
     config: (error as { redactedConfig?: unknown }).redactedConfig ?? {}
   });

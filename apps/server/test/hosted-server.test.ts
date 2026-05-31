@@ -2,12 +2,170 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
+import { hashApiKey } from "@switchyard/core";
 import { resolveHostedSandboxConfig } from "@switchyard/core";
 import { resolveObjectStoreConfig } from "@switchyard/storage";
 import { createServerApp } from "../src/app.js";
 import { loadServerConfig } from "../src/config.js";
+import { probeServerReadiness } from "../src/readiness.js";
 
 const defaultSandbox = () => resolveHostedSandboxConfig({ deploymentMode: "test", env: {} });
+const NOW = "2026-05-31T00:00:00.000Z";
+const API_KEY_PEPPER = "pepper_super_secret";
+const ADMIN_RAW_KEY = "sk_sw_test_admin";
+const METRICS_ONLY_RAW_KEY = "sk_sw_test_metrics";
+const NODE_SHARED_TOKEN = "bound-node-token";
+
+function createBootstrapJson(options?: {
+  includeBindings?: boolean;
+  includeRawKey?: boolean;
+  deactivatePlan?: boolean;
+  deactivateRecords?: boolean;
+  duplicateApiKeyId?: boolean;
+}) {
+  const includeBindings = options?.includeBindings ?? true;
+  const includeRawKey = options?.includeRawKey ?? false;
+  const deactivatePlan = options?.deactivatePlan ?? false;
+  const deactivateRecords = options?.deactivateRecords ?? false;
+  const duplicateApiKeyId = options?.duplicateApiKeyId ?? false;
+
+  const adminKey: Record<string, unknown> = {
+    id: "api_key_admin",
+    accountId: "account_1",
+    tenantId: "tenant_1",
+    projectId: "project_1",
+    userId: "user_1",
+    name: "admin-key",
+    keyPrefix: "sk_sw",
+    secretHash: hashApiKey(ADMIN_RAW_KEY, API_KEY_PEPPER),
+    scopes: ["runs:write", "runs:read", "metrics:read", "admin:read", "nodes:write", "registry:read", "artifacts:read"],
+    status: deactivateRecords ? "revoked" : "active",
+    createdAt: NOW
+  };
+  if (includeRawKey) {
+    adminKey["rawKey"] = ADMIN_RAW_KEY;
+    delete adminKey["secretHash"];
+  }
+
+  const metricsOnlyKey: Record<string, unknown> = {
+    id: duplicateApiKeyId ? "api_key_admin" : "api_key_metrics",
+    accountId: "account_1",
+    tenantId: "tenant_1",
+    projectId: "project_1",
+    userId: "user_1",
+    name: "metrics-only-key",
+    keyPrefix: "sk_sw",
+    secretHash: hashApiKey(METRICS_ONLY_RAW_KEY, API_KEY_PEPPER),
+    scopes: ["metrics:read"],
+    status: deactivateRecords ? "revoked" : "active",
+    createdAt: NOW
+  };
+
+  return JSON.stringify({
+    accounts: [
+      {
+        id: "account_1",
+        name: "Acme",
+        status: deactivateRecords ? "suspended" : "active",
+        billingPlanId: "billing_plan_1",
+        createdAt: NOW
+      }
+    ],
+    tenants: [
+      {
+        id: "tenant_1",
+        accountId: "account_1",
+        slug: "acme",
+        displayName: "Acme",
+        status: deactivateRecords ? "suspended" : "active",
+        createdAt: NOW
+      }
+    ],
+    projects: [
+      {
+        id: "project_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        slug: "project",
+        displayName: "Project",
+        status: deactivateRecords ? "archived" : "active",
+        createdAt: NOW
+      }
+    ],
+    users: [
+      {
+        id: "user_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        displayName: "Owner",
+        email: "owner@example.com",
+        status: deactivateRecords ? "suspended" : "active",
+        createdAt: NOW
+      }
+    ],
+    apiKeys: [adminKey, metricsOnlyKey],
+    billingPlans: [
+      {
+        id: "billing_plan_1",
+        slug: "enterprise",
+        displayName: "Enterprise",
+        status: deactivatePlan ? "archived" : "active",
+        entitlements: {
+          allowedPlacements: ["hosted", "local", "connected_local_node"],
+          allowedRuntimeModes: ["fake.deterministic"],
+          allowHostedRealRuntime: false,
+          allowConnectedNodes: true,
+          allowArtifactContentRead: true,
+          allowMetricsRead: true,
+          allowAuditRead: true
+        },
+        quotas: {
+          maxRunsPerHour: 100,
+          maxActiveRuns: 50,
+          maxRunTimeoutSeconds: 600,
+          maxConnectedNodes: 5,
+          maxArtifactContentReadBytesPerHour: 1024 * 1024
+        },
+        createdAt: NOW
+      }
+    ],
+    nodeTokenBindings: includeBindings
+      ? [{ token: NODE_SHARED_TOKEN, apiKeyId: "api_key_admin" }]
+      : []
+  });
+}
+
+function createStagingEnv(overrides?: Record<string, string>) {
+  return {
+    SWITCHYARD_DEPLOYMENT_MODE: "staging",
+    SWITCHYARD_POSTGRES_URL: "postgres://localhost/switchyard",
+    SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
+    SWITCHYARD_OBJECT_STORE_BACKEND: "local",
+    SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-store",
+    SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic",
+    SWITCHYARD_NODE_SHARED_TOKEN: NODE_SHARED_TOKEN,
+    SWITCHYARD_SERVER_AUTH_MODE: "api_key",
+    SWITCHYARD_API_KEY_PEPPER: API_KEY_PEPPER,
+    SWITCHYARD_CONTROL_PLANE_STORE: "memory",
+    SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON: createBootstrapJson(),
+    ...overrides
+  };
+}
+
+function createAuthEnabledTestEnv(overrides?: Record<string, string>) {
+  return {
+    SWITCHYARD_DEPLOYMENT_MODE: "test",
+    SWITCHYARD_OBJECT_STORE_BACKEND: "local",
+    SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-store",
+    SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic",
+    SWITCHYARD_SERVER_AUTH_MODE: "api_key",
+    SWITCHYARD_API_KEY_PEPPER: API_KEY_PEPPER,
+    SWITCHYARD_CONTROL_PLANE_STORE: "memory",
+    SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON: createBootstrapJson(),
+    SWITCHYARD_NODE_SHARED_TOKEN: NODE_SHARED_TOKEN,
+    ...overrides
+  };
+}
 
 describe("hosted server", () => {
   it("does not expose middleware tool invocation routes on hosted server", async () => {
@@ -132,8 +290,12 @@ describe("hosted server", () => {
       SWITCHYARD_QUEUE_NAME: "switchyard-hosted",
       SWITCHYARD_OBJECT_STORE_BACKEND: "local",
       SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-objects",
-      SWITCHYARD_NODE_SHARED_TOKEN: "token",
+      SWITCHYARD_NODE_SHARED_TOKEN: NODE_SHARED_TOKEN,
       SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic",
+      SWITCHYARD_SERVER_AUTH_MODE: "api_key",
+      SWITCHYARD_API_KEY_PEPPER: API_KEY_PEPPER,
+      SWITCHYARD_CONTROL_PLANE_STORE: "postgres",
+      SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON: createBootstrapJson(),
       SWITCHYARD_DEPLOYMENT_MODE: "staging"
     });
 
@@ -143,6 +305,7 @@ describe("hosted server", () => {
     expect(config.objectStore.backend).toBe("local");
     expect(config.deploymentMode).toBe("staging");
     expect(config.hostedRealRuntimeExecution).toBe("disabled");
+    expect(config.serverAuthMode).toBe("api_key");
   });
 
   it("rejects invalid hosted real runtime gate value", () => {
@@ -162,7 +325,11 @@ describe("hosted server", () => {
         SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
         SWITCHYARD_OBJECT_STORE_BACKEND: "local",
         SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store",
-        SWITCHYARD_NODE_SHARED_TOKEN: "token",
+        SWITCHYARD_NODE_SHARED_TOKEN: NODE_SHARED_TOKEN,
+        SWITCHYARD_SERVER_AUTH_MODE: "api_key",
+        SWITCHYARD_API_KEY_PEPPER: API_KEY_PEPPER,
+        SWITCHYARD_CONTROL_PLANE_STORE: "postgres",
+        SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON: createBootstrapJson(),
         SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
         SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled"
       })
@@ -289,6 +456,172 @@ describe("hosted server", () => {
     ).toThrow("config_required:SWITCHYARD_REDIS_URL");
   });
 
+  it("rejects staging when auth mode is disabled", () => {
+    expect(() =>
+      loadServerConfig(
+        createStagingEnv({
+          SWITCHYARD_SERVER_AUTH_MODE: "disabled"
+        })
+      )
+    ).toThrow(/config_forbidden:SWITCHYARD_SERVER_AUTH_MODE|config_required:SWITCHYARD_SERVER_AUTH_MODE/);
+  });
+
+  it("rejects staging when api key pepper is missing", () => {
+    const env = createStagingEnv();
+    delete env.SWITCHYARD_API_KEY_PEPPER;
+    expect(() => loadServerConfig(env)).toThrow("config_required:SWITCHYARD_API_KEY_PEPPER");
+  });
+
+  it("rejects staging when control plane store is memory", () => {
+    expect(() => loadServerConfig(createStagingEnv())).toThrow("config_forbidden:SWITCHYARD_CONTROL_PLANE_STORE");
+  });
+
+  it("rejects staging when bootstrap is missing", () => {
+    const env = createStagingEnv();
+    delete env.SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON;
+    expect(() => loadServerConfig(env)).toThrow("control_plane_bootstrap_missing");
+  });
+
+  it("rejects production public metrics", () => {
+    expect(() =>
+      loadServerConfig(
+        createStagingEnv({
+          SWITCHYARD_DEPLOYMENT_MODE: "production",
+          SWITCHYARD_CONTROL_PLANE_STORE: "postgres",
+          SWITCHYARD_PUBLIC_METRICS: "1"
+        })
+      )
+    ).toThrow("config_forbidden:SWITCHYARD_PUBLIC_METRICS");
+  });
+
+  it("protects /metrics in staging and requires admin plus metrics scopes", async () => {
+    const config = loadServerConfig(
+      createAuthEnabledTestEnv()
+    );
+    const app = await createServerApp(config);
+    try {
+      const noAuth = await app.inject({ method: "GET", url: "/metrics" });
+      expect([401, 403]).toContain(noAuth.statusCode);
+
+      const metricsOnly = await app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: {
+          authorization: `Bearer ${METRICS_ONLY_RAW_KEY}`
+        }
+      });
+      expect(metricsOnly.statusCode).toBe(403);
+
+      const admin = await app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: {
+          authorization: `Bearer ${ADMIN_RAW_KEY}`
+        }
+      });
+      expect(admin.statusCode).toBe(200);
+      expect(admin.json().auth).toBeDefined();
+      expect(admin.json().controlPlane).toBeDefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("redacts bootstrap raw key and pepper from summaries and errors", () => {
+    const env = createStagingEnv({
+      SWITCHYARD_DEPLOYMENT_MODE: "local",
+      SWITCHYARD_CONTROL_PLANE_STORE: "memory",
+      SWITCHYARD_SERVER_AUTH_MODE: "api_key",
+      SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON: createBootstrapJson({ includeRawKey: true, duplicateApiKeyId: true })
+    });
+
+    expect(() => loadServerConfig(env)).toThrow();
+    try {
+      loadServerConfig(env);
+    } catch (error) {
+      const payload = JSON.stringify((error as { redactedConfig?: unknown }).redactedConfig ?? {});
+      expect(payload).not.toContain(ADMIN_RAW_KEY);
+      expect(payload).not.toContain(API_KEY_PEPPER);
+      expect(payload).not.toContain("rawKey");
+    }
+  });
+
+  it("includes R18 readiness checks", async () => {
+    const config = loadServerConfig(
+      createAuthEnabledTestEnv()
+    );
+    const app = await createServerApp(config);
+    try {
+      const ready = await app.inject({ method: "GET", url: "/ready" });
+      const checks = ready.json().checks;
+      expect(checks.controlPlaneStore).toBeDefined();
+      expect(checks.apiKeyAuth).toBeDefined();
+      expect(checks.apiKeyPepper).toBeDefined();
+      expect(checks.bootstrap).toBeDefined();
+      expect(checks.billingPlan).toBeDefined();
+      expect(checks.quotaStore).toBeDefined();
+      expect(checks.auditStore).toBeDefined();
+      expect(checks.unownedResources).toBeDefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("marks readiness unowned_resources_present when unowned resources exist", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(createAuthEnabledTestEnv()),
+      postgres: undefined,
+      queue: {
+        enqueue: async () => "job",
+        claim: async () => null,
+        ack: async () => {},
+        fail: async () => {},
+        retry: async () => {},
+        discard: async () => {},
+        getJob: async () => null,
+        recoverStaleClaims: async () => 0,
+        stats: async () => ({ queued: 0, claimed: 0 })
+      },
+      artifactContent: {
+        writeText: async () => ({ location: "x" }),
+        writeBytes: async () => ({ location: "x" }),
+        read: async () => ({ body: Buffer.from(""), contentType: "application/octet-stream" }),
+        probe: async () => {}
+      },
+      controlPlane: {
+        mode: "enabled",
+        hasApiKeyPepper: true,
+        hasBootstrap: true,
+        bootstrapActiveCounts: {
+          accounts: 1,
+          tenants: 1,
+          projects: 1,
+          users: 1,
+          apiKeys: 1,
+          billingPlans: 1
+        },
+        storeReady: true,
+        unownedResources: {
+          runs: 1,
+          runEvents: 0,
+          artifacts: 0,
+          placements: 0,
+          nodes: 0,
+          assignments: 0,
+          auditEvents: 0,
+          quotaReservations: 0
+        },
+        hasQuotaStore: true,
+        hasAuditStore: true,
+        nodeTokenBound: true
+      }
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.unownedResources.ok).toBe(false);
+    expect(report.checks.unownedResources.code).toBe("unowned_resources_present");
+  });
+
   it("fails closed in staging when hosted allowlist is missing", () => {
     expect(() =>
       loadServerConfig({
@@ -297,7 +630,11 @@ describe("hosted server", () => {
         SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
         SWITCHYARD_OBJECT_STORE_BACKEND: "local",
         SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store",
-        SWITCHYARD_NODE_SHARED_TOKEN: "token"
+        SWITCHYARD_NODE_SHARED_TOKEN: NODE_SHARED_TOKEN,
+        SWITCHYARD_SERVER_AUTH_MODE: "api_key",
+        SWITCHYARD_API_KEY_PEPPER: API_KEY_PEPPER,
+        SWITCHYARD_CONTROL_PLANE_STORE: "postgres",
+        SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON: createBootstrapJson()
       })
     ).toThrow("config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST");
   });

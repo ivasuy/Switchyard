@@ -1,6 +1,8 @@
 import Fastify from "fastify";
 import {
   ArtifactSyncService,
+  ControlPlaneError,
+  ControlPlaneService,
   EventBus,
   EventSyncService,
   HOSTED_RUNTIME_CATALOG,
@@ -25,11 +27,14 @@ import {
 } from "@switchyard/core";
 import {
   registerArtifactRoutes,
+  registerEnterpriseRoutes,
   registerErrorEnvelope,
+  registerHostedAuthHooks,
   registerRegistryRoutes,
-  registerRunRoutes
+  registerRunRoutes,
+  sendHttpError
 } from "@switchyard/protocol-rest";
-import { registerNodeRoutes } from "@switchyard/protocol-node";
+import { registerNodeRoutes, type NodeTokenBinding } from "@switchyard/protocol-node";
 import { BullMqRunQueue, MemoryRunQueue } from "@switchyard/queue";
 import {
   createArtifactContentStoreFromObjectConfig,
@@ -43,14 +48,20 @@ import {
   PostgresRegistryStore,
   PostgresRunStore,
   PostgresSessionStore,
+  PostgresControlPlaneStore,
   openPostgresDatabase
 } from "@switchyard/storage";
 import { FakeHostedSandboxExecutor, FakeRuntimeAdapter } from "@switchyard/testkit";
-import type { ServerConfig } from "./config.js";
+import { ConfigError, type ControlPlaneBootstrapConfig, type ServerConfig } from "./config.js";
 import { HostedMetrics } from "./metrics.js";
 import { probeServerReadiness } from "./readiness.js";
 
 export async function createServerApp(config: ServerConfig) {
+  const serverAuthMode = config.serverAuthMode ?? "disabled";
+  const controlPlaneStore = config.controlPlaneStore ?? "memory";
+  const publicMetrics = typeof config.publicMetrics === "boolean"
+    ? config.publicMetrics
+    : (config.deploymentMode === "local" || config.deploymentMode === "test");
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
   registerErrorEnvelope(app);
   const metrics = new HostedMetrics();
@@ -79,6 +90,50 @@ export async function createServerApp(config: ServerConfig) {
   app.addHook("onClose", async () => {
     await queue.close?.();
   });
+
+  let controlPlaneStoreInstance: PostgresControlPlaneStore | undefined;
+  let controlPlane: ControlPlaneService | undefined;
+  let bootstrapActiveCounts: ControlPlaneBootstrapConfig["active"] | undefined;
+  let nodeTokenBindings: readonly NodeTokenBinding[] = [];
+  if (serverAuthMode === "api_key") {
+    if (!config.apiKeyPepper) {
+      throw new ConfigError("config_required:SWITCHYARD_API_KEY_PEPPER", "SWITCHYARD_API_KEY_PEPPER", config.redactedSummary);
+    }
+    if (!config.controlPlaneBootstrap) {
+      throw new ConfigError(
+        "control_plane_bootstrap_missing",
+        "SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH",
+        config.redactedSummary
+      );
+    }
+    if (controlPlaneStore === "postgres" && !postgres) {
+      throw new ConfigError("config_required:SWITCHYARD_POSTGRES_URL", "SWITCHYARD_POSTGRES_URL", config.redactedSummary);
+    }
+    controlPlaneStoreInstance = new PostgresControlPlaneStore(controlPlaneStore === "postgres" ? postgres : undefined);
+    try {
+      const summary = await controlPlaneStoreInstance.bootstrap(config.controlPlaneBootstrap.records);
+      bootstrapActiveCounts = summary.active;
+    } catch (error) {
+      const code = typeof (error as { code?: unknown })?.code === "string"
+        ? (error as { code: string }).code
+        : "control_plane_bootstrap_malformed";
+      throw new ConfigError(code, "SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH", config.redactedSummary);
+    }
+
+    controlPlane = new ControlPlaneService({
+      store: controlPlaneStoreInstance,
+      apiKeyPepper: config.apiKeyPepper
+    });
+    nodeTokenBindings = buildNodeTokenBindings(config.controlPlaneBootstrap);
+
+    if (
+      (config.deploymentMode === "staging" || config.deploymentMode === "production") &&
+      config.nodeSharedToken &&
+      !nodeTokenBindings.some((entry) => tokenMatches(entry.token, config.nodeSharedToken!))
+    ) {
+      throw new ConfigError("control_plane_bootstrap_node_token_unbound", "SWITCHYARD_NODE_SHARED_TOKEN", config.redactedSummary);
+    }
+  }
 
   const runs: RunStore = new PostgresRunStore(postgres);
   const events: EventStore = new PostgresEventStore(postgres);
@@ -217,14 +272,86 @@ export async function createServerApp(config: ServerConfig) {
     content: artifactContent
   });
 
+  registerHostedAuthHooks(app, {
+    ...(controlPlane ? { controlPlane } : {}),
+    authRequired: serverAuthMode === "api_key",
+    auditRouteDecisions: true
+  });
+
+  app.addHook("onRequest", async (request, reply) => {
+    if (!isMetricsRoute(request.method, request.url)) {
+      return;
+    }
+    if (!shouldProtectMetrics(config, serverAuthMode, publicMetrics)) {
+      return;
+    }
+    if (!controlPlane) {
+      metrics.inc("auth.required");
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+
+    try {
+      const authInput: Parameters<ControlPlaneService["authenticateRequest"]>[0] = {
+        headers: request.headers as Record<string, string | string[] | undefined>
+      };
+      const query = asRecord(request.query);
+      if (query) {
+        authInput.query = query;
+      }
+      const auth = await controlPlane.authenticateRequest(authInput);
+      controlPlane.requireScope(auth, "metrics:read");
+      controlPlane.requireScope(auth, "admin:read");
+      metrics.inc("auth.succeeded");
+    } catch (error) {
+      if (error instanceof ControlPlaneError) {
+        recordControlPlaneErrorMetric(error, metrics);
+        return sendHttpError(reply, error.code, error.reasonCode, [{ path: "reasonCode", issue: error.reasonCode }]);
+      }
+      throw error;
+    }
+  });
+
   app.get("/health", async () => ({ ok: true }));
   app.get("/ready", async (_request, reply) => {
-    const ready = await probeServerReadiness({ config, postgres, queue, artifactContent });
+    const readinessControlPlane = controlPlaneStoreInstance
+      ? {
+          mode: "enabled" as const,
+          hasApiKeyPepper: Boolean(config.apiKeyPepper),
+          hasBootstrap: Boolean(config.controlPlaneBootstrap),
+          bootstrapActiveCounts,
+          storeReady: true,
+          hasQuotaStore: true,
+          hasAuditStore: true,
+          nodeTokenBound: config.nodeSharedToken
+            ? nodeTokenBindings.some((entry) => tokenMatches(entry.token, config.nodeSharedToken!))
+            : true,
+          unownedResources: await controlPlaneStoreInstance.countUnownedResources()
+        }
+      : {
+          mode: serverAuthMode === "api_key" ? "missing" as const : "disabled" as const,
+          hasApiKeyPepper: Boolean(config.apiKeyPepper),
+          hasBootstrap: Boolean(config.controlPlaneBootstrap),
+          bootstrapActiveCounts,
+          storeReady: false,
+          hasQuotaStore: false,
+          hasAuditStore: false,
+          nodeTokenBound: config.nodeSharedToken ? false : true,
+          unownedResources: undefined
+        };
+    const ready = await probeServerReadiness({
+      config,
+      postgres,
+      queue,
+      artifactContent,
+      controlPlane: readinessControlPlane
+    });
     if (!ready.ok) {
       metrics.inc("dependencies.notReady");
+      metrics.inc("controlPlane.notReady");
       return reply.code(503).send(ready);
     }
     metrics.inc("dependencies.ready");
+    metrics.inc("controlPlane.ready");
     return ready;
   });
   app.get("/metrics", async () => {
@@ -238,6 +365,10 @@ export async function createServerApp(config: ServerConfig) {
     }
   });
 
+  if (controlPlane) {
+    registerEnterpriseRoutes(app, { controlPlane });
+  }
+
   registerRunRoutes(app, {
     runService,
     hostedRuns,
@@ -246,12 +377,14 @@ export async function createServerApp(config: ServerConfig) {
     artifacts,
     eventBus,
     registry,
-    registryService
+    registryService,
+    ...(controlPlane ? { controlPlane } : {})
   });
 
   registerArtifactRoutes(app, {
     artifacts,
-    artifactContent
+    artifactContent,
+    ...(controlPlane ? { controlPlane } : {})
   });
 
   registerRegistryRoutes(app, {
@@ -302,12 +435,17 @@ export async function createServerApp(config: ServerConfig) {
     eventSync,
     artifactSync,
     requireAuth: config.deploymentMode === "staging" || config.deploymentMode === "production",
+    deploymentMode: config.deploymentMode,
+    nodeTokenBindings,
     jsonBodyLimitBytes: 512 * 1024,
     artifactBodyLimitBytes: 2 * 1024 * 1024
   } as const;
+  const nodeRouteDepsWithControl = controlPlane
+    ? { ...nodeRouteDeps, controlPlane }
+    : nodeRouteDeps;
   registerNodeRoutes(app, config.nodeSharedToken
-    ? { ...nodeRouteDeps, sharedToken: config.nodeSharedToken }
-    : nodeRouteDeps);
+    ? { ...nodeRouteDepsWithControl, sharedToken: config.nodeSharedToken }
+    : nodeRouteDepsWithControl);
 
   return app;
 }
@@ -519,4 +657,249 @@ function summarizeRuntimeStates(states: string[]): {
     }
   }
   return summary;
+}
+
+function isMetricsRoute(method: string, url: string): boolean {
+  if (method.toUpperCase() !== "GET") {
+    return false;
+  }
+  const [path] = url.split("?", 1);
+  if (!path) {
+    return false;
+  }
+  const normalized = path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
+  return normalized === "/metrics";
+}
+
+function shouldProtectMetrics(config: ServerConfig, serverAuthMode: "disabled" | "api_key", publicMetrics: boolean): boolean {
+  if (config.deploymentMode === "staging" || config.deploymentMode === "production") {
+    return true;
+  }
+  if (serverAuthMode === "api_key") {
+    return true;
+  }
+  return !publicMetrics;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function recordControlPlaneErrorMetric(error: ControlPlaneError, metrics: HostedMetrics): void {
+  if (error.code === "auth_required") {
+    metrics.inc("auth.required");
+    return;
+  }
+  if (error.code === "auth_failed") {
+    metrics.inc("auth.failed");
+    return;
+  }
+  if (error.code === "auth_conflict") {
+    metrics.inc("auth.conflict");
+    return;
+  }
+  if (error.code === "tenant_access_denied") {
+    metrics.inc("tenant.denied");
+    return;
+  }
+  if (error.code === "entitlement_denied") {
+    metrics.inc("entitlement.denied");
+    return;
+  }
+  if (error.code === "quota_exceeded") {
+    metrics.inc("quota.denied");
+    return;
+  }
+  metrics.inc("controlPlane.notReady");
+}
+
+function tokenMatches(got: string, expected: string): boolean {
+  return got.length === expected.length && got === expected;
+}
+
+function buildNodeTokenBindings(bootstrap: ControlPlaneBootstrapConfig): readonly NodeTokenBinding[] {
+  const records = bootstrap.records as Record<string, unknown>;
+  const accounts = readRecordArray(records["accounts"]);
+  const tenants = readRecordArray(records["tenants"]);
+  const projects = readRecordArray(records["projects"]);
+  const users = readRecordArray(records["users"]);
+  const apiKeys = readRecordArray(records["apiKeys"]);
+  const plans = readRecordArray(records["billingPlans"]);
+
+  const accountById = toRecordMap(accounts);
+  const tenantById = toRecordMap(tenants);
+  const projectById = toRecordMap(projects);
+  const userById = toRecordMap(users);
+  const apiKeyById = toRecordMap(apiKeys);
+  const planById = toRecordMap(plans);
+
+  const bindings: NodeTokenBinding[] = [];
+  for (const binding of bootstrap.nodeTokenBindings) {
+    const key = apiKeyById.get(binding.apiKeyId);
+    if (!key || String(key["status"] ?? "") !== "active") {
+      continue;
+    }
+    const account = accountById.get(String(key["accountId"] ?? ""));
+    const tenant = tenantById.get(String(key["tenantId"] ?? ""));
+    const project = projectById.get(String(key["projectId"] ?? ""));
+    const user = userById.get(String(key["userId"] ?? ""));
+    if (!account || !tenant || !project || !user) {
+      continue;
+    }
+    if (String(account["status"] ?? "") !== "active") {
+      continue;
+    }
+    if (String(tenant["status"] ?? "") !== "active") {
+      continue;
+    }
+    if (String(project["status"] ?? "") !== "active") {
+      continue;
+    }
+    if (String(user["status"] ?? "active") !== "active") {
+      continue;
+    }
+
+    const plan = planById.get(String(account["billingPlanId"] ?? ""));
+    if (!plan || String(plan["status"] ?? "") !== "active") {
+      continue;
+    }
+
+    const auth = toAuthContext(account, tenant, project, user, key, plan);
+    bindings.push({ token: binding.token, auth });
+  }
+
+  return bindings;
+}
+
+type NodeAuthContext = NodeTokenBinding["auth"];
+
+function toAuthContext(
+  account: Record<string, unknown>,
+  tenant: Record<string, unknown>,
+  project: Record<string, unknown>,
+  user: Record<string, unknown>,
+  apiKey: Record<string, unknown>,
+  plan: Record<string, unknown>
+): NodeAuthContext {
+  const now = new Date().toISOString();
+  const entitlements = asRecord(plan["entitlements"]) ?? {};
+  const quotas = asRecord(plan["quotas"]) ?? {};
+  const scopes = Array.isArray(apiKey["scopes"]) ? apiKey["scopes"].filter((entry): entry is string => typeof entry === "string") : [];
+
+  return {
+    account: {
+      id: String(account["id"]),
+      name: String(account["name"]),
+      status: String(account["status"]) as "active" | "suspended" | "deleted",
+      billingPlanId: String(account["billingPlanId"]),
+      createdAt: String(account["createdAt"]),
+      updatedAt: typeof account["updatedAt"] === "string" ? String(account["updatedAt"]) : undefined
+    },
+    tenant: {
+      id: String(tenant["id"]),
+      accountId: String(tenant["accountId"]),
+      slug: String(tenant["slug"]),
+      displayName: String(tenant["displayName"]),
+      status: String(tenant["status"]) as "active" | "suspended" | "deleted",
+      createdAt: String(tenant["createdAt"]),
+      updatedAt: typeof tenant["updatedAt"] === "string" ? String(tenant["updatedAt"]) : undefined
+    },
+    project: {
+      id: String(project["id"]),
+      accountId: String(project["accountId"]),
+      tenantId: String(project["tenantId"]),
+      slug: String(project["slug"]),
+      displayName: String(project["displayName"]),
+      status: String(project["status"]) as "active" | "archived" | "deleted",
+      createdAt: String(project["createdAt"]),
+      updatedAt: typeof project["updatedAt"] === "string" ? String(project["updatedAt"]) : undefined
+    },
+    user: {
+      id: String(user["id"]),
+      accountId: String(user["accountId"]),
+      tenantId: String(user["tenantId"]),
+      displayName: String(user["displayName"]),
+      email: typeof user["email"] === "string" ? String(user["email"]) : undefined,
+      status: typeof user["status"] === "string" ? String(user["status"]) as "active" | "suspended" | "deleted" : "active",
+      createdAt: String(user["createdAt"]),
+      updatedAt: typeof user["updatedAt"] === "string" ? String(user["updatedAt"]) : undefined
+    },
+    apiKey: {
+      id: String(apiKey["id"]),
+      accountId: String(apiKey["accountId"]),
+      tenantId: String(apiKey["tenantId"]),
+      projectId: String(apiKey["projectId"]),
+      userId: String(apiKey["userId"]),
+      name: String(apiKey["name"]),
+      keyPrefix: String(apiKey["keyPrefix"]),
+      scopes: scopes as NodeAuthContext["apiKey"]["scopes"],
+      status: String(apiKey["status"]) as "active" | "revoked" | "expired",
+      expiresAt: typeof apiKey["expiresAt"] === "string" ? String(apiKey["expiresAt"]) : undefined,
+      lastUsedAt: typeof apiKey["lastUsedAt"] === "string" ? String(apiKey["lastUsedAt"]) : undefined,
+      createdAt: String(apiKey["createdAt"]),
+      revokedAt: typeof apiKey["revokedAt"] === "string" ? String(apiKey["revokedAt"]) : undefined
+    },
+    entitlement: {
+      accountId: String(account["id"]),
+      tenantId: String(tenant["id"]),
+      projectId: String(project["id"]),
+      planId: String(plan["id"]),
+      planSlug: String(plan["slug"]),
+      planDisplayName: String(plan["displayName"]),
+      planStatus: String(plan["status"]) as "active" | "archived",
+      entitlements: {
+        allowedPlacements: arrayStrings(entitlements["allowedPlacements"]) as NodeAuthContext["entitlement"]["entitlements"]["allowedPlacements"],
+        allowedRuntimeModes: arrayStrings(entitlements["allowedRuntimeModes"]),
+        allowHostedRealRuntime: Boolean(entitlements["allowHostedRealRuntime"]),
+        allowConnectedNodes: Boolean(entitlements["allowConnectedNodes"]),
+        allowArtifactContentRead: Boolean(entitlements["allowArtifactContentRead"]),
+        allowMetricsRead: Boolean(entitlements["allowMetricsRead"]),
+        allowAuditRead: Boolean(entitlements["allowAuditRead"])
+      },
+      quotas: {
+        maxRunsPerHour: toNumber(quotas["maxRunsPerHour"]),
+        maxActiveRuns: toNumber(quotas["maxActiveRuns"]),
+        maxRunTimeoutSeconds: toNumber(quotas["maxRunTimeoutSeconds"]),
+        maxConnectedNodes: toNumber(quotas["maxConnectedNodes"]),
+        maxArtifactContentReadBytesPerHour: toNumber(quotas["maxArtifactContentReadBytesPerHour"])
+      },
+      scopes: scopes as NodeAuthContext["entitlement"]["scopes"],
+      capturedAt: now
+    }
+  };
+}
+
+function readRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null);
+}
+
+function toRecordMap(records: readonly Record<string, unknown>[]): Map<string, Record<string, unknown>> {
+  const map = new Map<string, Record<string, unknown>>();
+  for (const entry of records) {
+    const id = typeof entry["id"] === "string" ? entry["id"] : "";
+    if (id.length > 0) {
+      map.set(id, entry);
+    }
+  }
+  return map;
+}
+
+function arrayStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function toNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  return 0;
 }
