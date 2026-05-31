@@ -7,7 +7,13 @@ import {
   type RunQueuePort
 } from "@switchyard/core";
 import type { ProbeableArtifactContentStore } from "@switchyard/storage";
-import { probePostgresDatabase, type PostgresDatabaseHandle } from "@switchyard/storage";
+import {
+  checkPostgresSchemaCompatibility,
+  POSTGRES_SCHEMA_VERSION,
+  probePostgresDatabase,
+  type PostgresDatabaseHandle,
+  type PostgresSchemaCompatibility
+} from "@switchyard/storage";
 import type { ServerConfig } from "./config.js";
 
 export interface ReadinessReport {
@@ -51,6 +57,7 @@ export async function probeServerReadiness(input: {
   queue: RunQueuePort;
   artifactContent: ProbeableArtifactContentStore;
   controlPlane?: ControlPlaneReadinessInput;
+  checkSchemaCompatibility?: (handle: PostgresDatabaseHandle) => Promise<PostgresSchemaCompatibility>;
 }): Promise<ReadinessReport> {
   const checks: ReadinessReport["checks"] = {};
 
@@ -58,11 +65,48 @@ export async function probeServerReadiness(input: {
     try {
       await probePostgresDatabase(input.postgres);
       checks.postgres = { ok: true };
+      if (input.config.deploymentMode === "staging" || input.config.deploymentMode === "production") {
+        const schemaCheck = await (input.checkSchemaCompatibility ?? checkPostgresSchemaCompatibility)(input.postgres);
+        if (schemaCheck.ok) {
+          checks.schema = {
+            ok: true,
+            code: schemaCheck.code,
+            diagnostics: {
+              version: schemaCheck.version,
+              expectedVersion: POSTGRES_SCHEMA_VERSION
+            }
+          };
+        } else {
+          checks.schema = {
+            ok: false,
+            code: schemaCheck.code,
+            diagnostics: redactSecrets({
+              expectedVersion: POSTGRES_SCHEMA_VERSION,
+              ...(typeof schemaCheck.version === "number" ? { version: schemaCheck.version } : {}),
+              ...(schemaCheck.diagnostics ? schemaCheck.diagnostics : {})
+            })
+          };
+        }
+      }
     } catch {
       checks.postgres = { ok: false, code: "postgres_unavailable" };
+      if (input.config.deploymentMode === "staging" || input.config.deploymentMode === "production") {
+        checks.schema = {
+          ok: false,
+          code: "postgres_unavailable",
+          diagnostics: { expectedVersion: POSTGRES_SCHEMA_VERSION }
+        };
+      }
     }
   } else {
     checks.postgres = { ok: input.config.deploymentMode === "local" || input.config.deploymentMode === "test", code: "postgres_not_configured" };
+    if (input.config.deploymentMode === "staging" || input.config.deploymentMode === "production") {
+      checks.schema = {
+        ok: false,
+        code: "postgres_unavailable",
+        diagnostics: { expectedVersion: POSTGRES_SCHEMA_VERSION }
+      };
+    }
   }
 
   try {
