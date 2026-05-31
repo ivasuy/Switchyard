@@ -21,7 +21,7 @@ Implemented:
 Not implemented yet:
 
 - PTY or TUI automation.
-- Hosted Claude runtime execution.
+- Hosted runtime expansion beyond the R21 known-provider opt-in slice.
 - Hosted approval bridge/input bridge/terminal bridge for provider runtime execution.
 - Session resume for `claude_code.sdk`.
 - Unbounded live-prompt checks in doctor/smoke/CI.

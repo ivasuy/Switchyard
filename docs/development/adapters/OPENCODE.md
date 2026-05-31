@@ -18,7 +18,7 @@ Implemented in R5:
 
 Not implemented in R5:
 
-- Hosted OpenCode execution.
+- Hosted runtime expansion beyond the R21 known-provider opt-in slice.
 - Hosted approval bridge/input bridge/terminal bridge for ACP permission requests.
 - Post-start input (`POST /runs/:id/input` is unsupported).
 - Session resume/load/fork/list exposure through Switchyard.

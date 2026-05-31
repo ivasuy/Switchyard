@@ -50,6 +50,18 @@ const FORBIDDEN_EXACT_PATHS = [
   "/fetch",
   "/repo"
 ];
+const FORBIDDEN_HOSTED_PROVIDER_EXPANSION_PATH_PREFIX =
+  /^\/(cursor|openclaw|paperclip|debates\/participants\/real|debates\/judge|model-judge|judging)(\/|$)/;
+const FORBIDDEN_HOSTED_PROVIDER_EXPANSION_OPERATION_TOKENS = [
+  "cursor",
+  "openclaw",
+  "paperclip",
+  "debateparticipantreal",
+  "realdebateparticipant",
+  "modeljudge",
+  "debatejudge",
+  "judging"
+];
 
 function readRootFile(relativePath: string): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -298,6 +310,42 @@ describe("openapi generation", () => {
         }
         expect(FORBIDDEN_OPERATION_TOKENS.some((token) => lower.includes(token.toLowerCase()))).toBe(false);
       }
+    }
+  });
+
+  it("keeps hosted OpenAPI free of non-R21 provider routes and hosted debate judging surfaces", () => {
+    const hosted = generateOpenApiDocument({ surface: "hosted_server" });
+    const paths = Object.keys(hosted.paths);
+    for (const path of paths) {
+      const lower = path.toLowerCase();
+      expect(FORBIDDEN_HOSTED_PROVIDER_EXPANSION_PATH_PREFIX.test(lower)).toBe(false);
+      expect(lower).not.toContain("/cursor/");
+      expect(lower).not.toContain("/openclaw/");
+      expect(lower).not.toContain("/paperclip/");
+      expect(lower).not.toContain("/debates/participants/real");
+      expect(lower).not.toContain("/debates/judge");
+      expect(lower).not.toContain("/model-judge");
+      expect(lower).not.toContain("/judging");
+    }
+
+    const operations = Object.entries(hosted.paths).flatMap(([path, methods]) =>
+      Object.values(methods).map((operation) => ({ path, operation: operation as Record<string, unknown> }))
+    );
+    for (const { path, operation } of operations) {
+      const operationId = String(operation["operationId"] ?? "");
+      const lowerId = operationId.toLowerCase();
+      const summary = String(operation["summary"] ?? "").toLowerCase();
+      const tags = Array.isArray(operation["tags"]) ? operation["tags"].map((tag) => String(tag).toLowerCase()) : [];
+      const combined = `${path.toLowerCase()} ${lowerId} ${summary} ${tags.join(" ")}`;
+      const looksLikeForbiddenExpansion =
+        /cursor|openclaw|paperclip|debate|participant|judge|judging|model/.test(combined);
+      if (!looksLikeForbiddenExpansion) {
+        continue;
+      }
+      expect(
+        FORBIDDEN_HOSTED_PROVIDER_EXPANSION_OPERATION_TOKENS.some((token) => lowerId.includes(token.toLowerCase()))
+      ).toBe(false);
+      expect(combined).not.toMatch(/debates\/participants\/real|model[ _-]?judge|debate[ _-]?judge|judging/);
     }
   });
 
