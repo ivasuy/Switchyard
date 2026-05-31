@@ -47,13 +47,20 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/phase-11-r12-production-hosting-foundation` at commit `2b025ed18450ffe97403bb37422b0ef72df61024`.
+Snapshot source: `agent/phase-17-r18-enterprise-auth-billing-tenant-controls` at commit `9ef92e3b32103ace28cfaaed110209e56ecec47b`.
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like worker execution for fake deterministic plus operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; and shipped S3/R2-compatible object-store client wiring for hosted artifact content.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like worker execution for fake deterministic plus operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; shipped S3/R2-compatible object-store client wiring for hosted artifact content; and shipped the R18 API-first hosted/server enterprise control-plane foundation (API key auth, tenant/project ownership, entitlement/quota contracts, audit events, fail-closed staging/production checks, and hosted OpenAPI surface).
 
-The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, and the R12 self-hosted staging deployment foundation. It is not yet a managed hosted platform, and production hosted real-runtime execution remains forbidden.
+The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, the R12 self-hosted staging deployment foundation, and the R18 hosted enterprise auth/tenant/quota/audit control-plane baseline. It is not yet a managed hosted platform, and production hosted real-runtime execution remains forbidden.
 
 Important runtime wording: `codex.exec_json` remains the default inferred Codex one-shot mode. `codex.interactive` is a separate explicit local-only mode for bounded post-start input and resume/session-state flows.
+
+R18 hosted boundary wording:
+
+- Hosted/server APIs now require API key auth in staging/production fail-closed mode.
+- Hosted `/metrics` is global operator/admin telemetry (`metrics:read` plus `admin:read`) and is not tenant-scoped in R18.
+- Local daemon defaults remain no-auth and backwards compatible for local fake runs, SDK usage, CLI fake runs, and local OpenAPI export.
+- R18 does not ship dashboard, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting, public tenant self-service, OAuth/OIDC/SAML/SSO/SCIM, hosted or connected-node real tools, browser automation, arbitrary process/PTY execution routes, Cursor/OpenClaw/Paperclip, or runtime-specific approval bridge expansion.
 
 ## What Exists Today
 
@@ -257,6 +264,9 @@ The current workspace has passing package coverage for:
 These are planned or designed in docs, but not shipped product:
 
 - Managed production hosted platform deployment with tenant isolation, cloud networking, production secrets, and operator controls.
+- Payment provider integration (invoices, checkout, webhooks, tax, dunning, subscription lifecycle).
+- Public tenant self-service signup/billing/key-management UI.
+- OAuth/OIDC/SAML/SSO/SCIM, session-cookie auth, and browser login flows.
 - Production hosted real-runtime worker deployment for Codex, Claude Code, OpenCode, arbitrary process, or PTY execution.
 - Production sandboxing for arbitrary subprocess/PTY workloads (R15 still ships no managed production arbitrary subprocess/PTY substrate).
 - Presigned direct upload/download URLs, bucket provisioning automation, lifecycle policy management, provider-managed encryption setup, and CDN integration.

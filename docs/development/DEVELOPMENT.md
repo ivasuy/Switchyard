@@ -68,6 +68,51 @@ SDK quick one-liner:
 node --import tsx -e 'import {SwitchyardClient} from \"@switchyard/sdk\"; const c=new SwitchyardClient({baseUrl:\"http://127.0.0.1:4545\"}); const r=await c.health(); console.log(r.ok);'
 ```
 
+## R18 No-Spend Verification (Copy/Paste)
+
+These checks are deterministic and no-spend. They use fake/runtime-only harnesses and must not call payment providers, model providers, AWS/R2, live GitHub, external search, hosted browser, or arbitrary process/PTY execution.
+
+```bash
+pnpm --filter @switchyard/daemon test -- smoke
+pnpm --filter @switchyard/sdk test -- client
+pnpm --filter @switchyard/cli test -- run-cli
+pnpm --filter @switchyard/contracts openapi:check
+pnpm --filter @switchyard/contracts openapi:check:hosted
+pnpm typecheck
+git diff --check
+```
+
+Hosted OpenAPI generation/check (for hosted contract drift):
+
+```bash
+pnpm --filter @switchyard/contracts openapi:generate:hosted
+pnpm --filter @switchyard/contracts openapi:check:hosted
+```
+
+## R18 Hosted Rollout / Rollback
+
+Rollout order (required):
+
+1. Deploy additive Postgres schema changes first (new control-plane and ownership tables/indexes).
+2. Deploy auth/control-plane code after schema readiness is confirmed.
+3. Enable hosted auth/config for staging/production:
+   - `SWITCHYARD_SERVER_AUTH_MODE=api_key`
+   - `SWITCHYARD_API_KEY_PEPPER=<non-empty>`
+   - `SWITCHYARD_CONTROL_PLANE_STORE=postgres`
+   - `SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH=<path>` or bootstrap JSON env
+
+Fail-closed staging/production behavior:
+
+- Startup/readiness fails if auth mode is disabled, pepper/bootstrap/store requirements are incomplete, or control-plane checks fail.
+- `/metrics` is not public in hosted auth mode; it requires API key auth plus `metrics:read` and `admin:read`.
+- Existing unowned hosted resources are never silently adopted into a tenant; readiness fails until explicit operator migration is performed.
+
+Rollback behavior:
+
+- Roll back code after schema rollout leaves additive tables inert/unused.
+- Rollback does not delete or rewrite the new schema data.
+- Re-enabling R18 code must pass the same fail-closed readiness/bootstrap checks before protected hosted traffic is accepted.
+
 ## Runtime Capability Smoke
 
 ```bash

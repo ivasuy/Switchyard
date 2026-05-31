@@ -1,6 +1,32 @@
 # Official API Contract
 
-This is the current local daemon API contract. It documents what an app can call today.
+This document covers the shipped API surfaces:
+
+- Local daemon (`local_daemon` OpenAPI surface): no-auth by default, local-first runtime/middleware contract.
+- Hosted server (`hosted_server` OpenAPI surface): API-key-authenticated enterprise control-plane foundation for tenant/project ownership, entitlements/quotas, and audit events.
+
+R18 scope note: hosted/server auth/billing/tenant controls are now shipped as a foundation only. Payment collection, public self-service, OAuth/SSO, dashboard, TUI, hosted real tools, browser automation, and arbitrary process/PTY execution remain unshipped.
+
+## R18 Hosted Enterprise Control-Plane Foundation
+
+Shipped hosted/server control-plane capabilities:
+
+- `SWITCHYARD_SERVER_AUTH_MODE=api_key` for hosted protected routes.
+- `SWITCHYARD_API_KEY_PEPPER` hashing requirement in staging/production.
+- `SWITCHYARD_CONTROL_PLANE_STORE=postgres` requirement in staging/production (`memory` remains local/test-only).
+- `SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH` or bootstrap JSON env requirement before staging/production startup.
+- Tenant/project ownership checks plus entitlement/quota contracts before hosted side effects.
+- `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events` on hosted surface.
+- Hosted `/metrics` requires authenticated operator/admin scope (`metrics:read` plus `admin:read`) when hosted auth is enabled; tenant-scoped metrics are not shipped in R18.
+
+OpenAPI commands:
+
+```bash
+pnpm --filter @switchyard/contracts openapi:generate
+pnpm --filter @switchyard/contracts openapi:check
+pnpm --filter @switchyard/contracts openapi:generate:hosted
+pnpm --filter @switchyard/contracts openapi:check:hosted
+```
 
 ## R10-R15 Hosted And Hybrid Execution (Safe Slice)
 
@@ -58,7 +84,7 @@ Current implementation status:
 - Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), local-daemon real tool invocation routing for configured `fetch`/`web_search`/`github`/`repo`/command-catalog `shell` (deny-by-default, approval-by-default), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex one-shot (`codex.exec_json`), local Codex interactive (`codex.interactive`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
-- Not implemented yet: trace endpoint, dashboards, TUI, authentication, rate limiting, public PTY/terminal APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, and model-based debate judging.
+- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public PTY/terminal APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, per-run HTTP base URL overrides, remote artifact URL fetching, hosted/connected-node real tools, browser automation, real debate participant runtimes, and model-based debate judging.
 
 ## Error Contract
 

@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 import { type FastifyInstance } from "fastify";
 import { type CodexCatalogProbe, type GithubClient, type LocalProcessFactory, type SearchClient } from "@switchyard/adapters";
 import { createDisabledRealToolPolicyConfig } from "@switchyard/core";
+import { generateOpenApiDocument } from "@switchyard/contracts";
 import {
   createFakeClaudeCodeClient,
   createFakeClaudeCodeCliProcessFactory,
@@ -180,6 +181,87 @@ describe("daemon app", () => {
       } catch {
         // Ensure test cleanup continues if close fails.
       }
+    }
+  });
+
+  it("keeps default local fake run/read/metrics and local OpenAPI auth-free with no-spend harnesses", async () => {
+    let fetchCalls = 0;
+    let searchCalls = 0;
+    let githubCalls = 0;
+    let processCalls = 0;
+
+    const app = await createDaemonApp(undefined, {
+      codexProbe: unavailableCodexProbe,
+      toolFetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response("unexpected external fetch", { status: 200 });
+      },
+      toolSearchClient: {
+        async search() {
+          searchCalls += 1;
+          return [{ title: "unexpected", url: "https://example.com", snippet: "unexpected" }];
+        }
+      } satisfies SearchClient,
+      toolGithubClient: {
+        async call() {
+          githubCalls += 1;
+          return { ok: true };
+        }
+      } satisfies GithubClient,
+      toolProcessFactory: {
+        spawn() {
+          processCalls += 1;
+          throw new Error("local fake run should not spawn shell/process tools");
+        }
+      } satisfies LocalProcessFactory
+    });
+
+    try {
+      const create = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "fake",
+          provider: "test",
+          model: "test-model",
+          adapterType: "process",
+          cwd: "/repo",
+          task: "local no-auth compatibility"
+        }
+      });
+      expect(create.statusCode).toBe(201);
+      const runId = create.json().run.id as string;
+      expect(create.json().run.status).toBe("completed");
+
+      const fetched = await app.inject({
+        method: "GET",
+        url: `/runs/${runId}`
+      });
+      expect(fetched.statusCode).toBe(200);
+      expect(fetched.json().run.id).toBe(runId);
+
+      const metrics = await app.inject({
+        method: "GET",
+        url: "/metrics"
+      });
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.json()).toMatchObject({
+        requestsTotal: expect.any(Number),
+        errorsTotal: expect.any(Number),
+        runStatusCounts: expect.any(Object)
+      });
+
+      const localOpenApi = generateOpenApiDocument();
+      expect(localOpenApi.info.title).toBe("Switchyard Local Daemon API");
+      expect(localOpenApi.components.securitySchemes).toBeUndefined();
+      expect(localOpenApi.paths["/metrics"]?.get?.security).toBeUndefined();
+
+      expect(fetchCalls).toBe(0);
+      expect(searchCalls).toBe(0);
+      expect(githubCalls).toBe(0);
+      expect(processCalls).toBe(0);
+    } finally {
+      await app.close();
     }
   });
 

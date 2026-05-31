@@ -118,6 +118,56 @@ describe("SwitchyardClient", () => {
     expect(content.body.length).toBeGreaterThan(0);
   });
 
+  it("keeps local fake run/event/artifact/registry flows credential-free by default", async () => {
+    const { baseUrl } = await startServer();
+    const expectedOrigin = new URL(baseUrl).origin;
+    let requestCount = 0;
+
+    const client = new SwitchyardClient({
+      baseUrl,
+      fetch: async (input, init) => {
+        const request = new Request(input as RequestInfo, init);
+        const target = new URL(request.url);
+        expect(target.origin).toBe(expectedOrigin);
+        expect(request.headers.get("authorization")).toBeNull();
+        expect(request.headers.get("x-switchyard-api-key")).toBeNull();
+        requestCount += 1;
+        return await fetch(request);
+      }
+    });
+
+    const created = await client.createRun({
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "sdk no-key local flow",
+      timeoutSeconds: 10
+    }, { wait: true });
+    expect(created.run.status).toBe("completed");
+
+    const fetched = await client.getRun(created.run.id);
+    expect(fetched.run.id).toBe(created.run.id);
+
+    const events = await client.listRunEvents(created.run.id);
+    expect(events.some((event) => event.type === "runtime.output")).toBe(true);
+
+    const runArtifacts = await client.listRunArtifacts(created.run.id);
+    expect(runArtifacts.artifacts.length).toBeGreaterThan(0);
+    const artifact = await client.getArtifact(runArtifacts.artifacts[0]!.id);
+    const content = await client.getArtifactContent(artifact.id);
+    expect(content.body.length).toBeGreaterThan(0);
+
+    const providers = await client.listProviders();
+    const runtimes = await client.listRuntimes();
+    const models = await client.listModels();
+    expect(providers.providers.length).toBeGreaterThan(0);
+    expect(runtimes.runtimes.length).toBeGreaterThan(0);
+    expect(models.models.length).toBeGreaterThan(0);
+    expect(requestCount).toBeGreaterThanOrEqual(8);
+  });
+
   it("throws SwitchyardHttpError with status/code/requestId", async () => {
     const { baseUrl } = await startServer();
     const client = new SwitchyardClient({ baseUrl });

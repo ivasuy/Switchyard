@@ -33,6 +33,10 @@ GET  /artifacts/:id/content
 
 R11 adds a shipped local TypeScript SDK (`@switchyard/sdk`), a shipped local CLI (`@switchyard/cli`), deterministic OpenAPI export/check under `@switchyard/contracts`, and startup/metrics hardening for local operations.
 
+R18 adds a shipped API-first enterprise control-plane foundation for hosted/server APIs: API key auth, tenant/project ownership, plan/entitlement/quota contracts, audit events, hosted OpenAPI surface generation, and fail-closed staging/production readiness checks. The local daemon remains no-auth by default and continues to support credential-free fake/local flows.
+
+R18 non-goals remain explicit: no dashboard, no TUI, no payment-provider integration (invoices/checkout/webhooks), no managed production hosting platform, no public tenant self-service, no OAuth/OIDC/SAML/SSO/SCIM, no hosted or connected-node real tools, no browser automation, no arbitrary process/PTY execution routes, no Cursor/OpenClaw/Paperclip integration, and no runtime-specific approval bridge expansion.
+
 Switchyard lets frontends, backends, CLIs, automations, bots, and internal systems treat every agent runtime like a backend service.
 
 ## Problem

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SwitchyardHttpError } from "@switchyard/sdk";
+import { generateOpenApiDocument, renderOpenApiJson } from "@switchyard/contracts";
 import { runCli, type CliDependencies } from "./run-cli.js";
 
 function createDeps(overrides: Partial<CliDependencies> = {}): { deps: CliDependencies; output: { stdout: string; stderr: string } } {
@@ -105,6 +106,55 @@ describe("runCli", () => {
       timeoutSeconds: 33
     });
     expect(output.stdout).toContain("run_wait");
+  });
+
+  it("runs local fake command without auth env vars and without daemon/process side effects", async () => {
+    const createRun = vi.fn(async () => ({ run: { id: "run_local_no_auth", status: "completed" } }));
+    const createClient = vi.fn(() => ({
+      doctor: async () => ({}),
+      checkRuntimeMode: async () => ({ runtimeMode: "fake.deterministic", canRun: true, state: "available" }),
+      createRun,
+      getRun: async () => ({ run: {}, events: [] }),
+      listRunEvents: async () => [],
+      listRunArtifacts: async () => ({ artifacts: [] }),
+      getArtifactContent: async () => ({ contentType: "text/plain", text: () => "" })
+    }));
+    const startDaemon = vi.fn(async () => ({ close: async () => {} }));
+    const waitForDaemonReady = vi.fn(async () => {});
+    const waitForStop = vi.fn(async () => {});
+    const { deps, output } = createDeps({
+      createClient,
+      startDaemon,
+      waitForDaemonReady,
+      waitForStop
+    });
+
+    const originalApiKey = process.env["SWITCHYARD_API_KEY"];
+    const originalAuthMode = process.env["SWITCHYARD_SERVER_AUTH_MODE"];
+    delete process.env["SWITCHYARD_API_KEY"];
+    delete process.env["SWITCHYARD_SERVER_AUTH_MODE"];
+
+    try {
+      const code = await runCli(["run", "fake", "--base-url", "http://127.0.0.1:4545", "--wait"], deps);
+      expect(code).toBe(0);
+      expect(createClient).toHaveBeenCalledWith("http://127.0.0.1:4545");
+      expect(createRun).toHaveBeenCalledTimes(1);
+      expect(startDaemon).not.toHaveBeenCalled();
+      expect(waitForDaemonReady).not.toHaveBeenCalled();
+      expect(waitForStop).not.toHaveBeenCalled();
+      expect(output.stdout).toContain("run_local_no_auth");
+    } finally {
+      if (originalApiKey === undefined) {
+        delete process.env["SWITCHYARD_API_KEY"];
+      } else {
+        process.env["SWITCHYARD_API_KEY"] = originalApiKey;
+      }
+      if (originalAuthMode === undefined) {
+        delete process.env["SWITCHYARD_SERVER_AUTH_MODE"];
+      } else {
+        process.env["SWITCHYARD_SERVER_AUTH_MODE"] = originalAuthMode;
+      }
+    }
   });
 
   it("returns usage exit for invalid run fake timeout", async () => {
@@ -223,6 +273,38 @@ describe("runCli", () => {
       expect(output.stdout).toContain(outPath);
       const written = readFileSync(outPath, "utf8");
       expect(written).toContain("openapi");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exports local daemon OpenAPI by default without hosted API key scheme", async () => {
+    const startDaemon = vi.fn(async () => ({ close: async () => {} }));
+    const waitForDaemonReady = vi.fn(async () => {});
+    const waitForStop = vi.fn(async () => {});
+    const { deps, output } = createDeps({
+      renderOpenApi: () => renderOpenApiJson(generateOpenApiDocument()),
+      startDaemon,
+      waitForDaemonReady,
+      waitForStop
+    });
+    const dir = mkdtempSync(join(tmpdir(), "switchyard-cli-contract-local-default-"));
+    const outPath = join(dir, "openapi-local-default.json");
+
+    try {
+      const code = await runCli(["contract", "export", "--output", outPath], deps);
+      expect(code).toBe(0);
+      expect(output.stdout).toContain(outPath);
+      expect(startDaemon).not.toHaveBeenCalled();
+      expect(waitForDaemonReady).not.toHaveBeenCalled();
+      expect(waitForStop).not.toHaveBeenCalled();
+
+      const written = JSON.parse(readFileSync(outPath, "utf8")) as {
+        info: { title: string };
+        components?: { securitySchemes?: Record<string, unknown> };
+      };
+      expect(written.info.title).toBe("Switchyard Local Daemon API");
+      expect(written.components?.securitySchemes?.["SwitchyardApiKey"]).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
