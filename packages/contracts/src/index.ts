@@ -18,6 +18,7 @@ export * from "./message.js";
 export * from "./node.js";
 export * from "./openapi.js";
 export * from "./placement.js";
+export * from "./provider-runtime-policy.js";
 export * from "./registry.js";
 export * from "./run.js";
 export * from "./sandbox.js";
