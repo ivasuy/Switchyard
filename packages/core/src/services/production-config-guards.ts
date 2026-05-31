@@ -37,8 +37,10 @@ export function isPlaceholderSecret(value: string | undefined): boolean {
   }
 
   const lowered = normalized.toLowerCase();
-  if (PLACEHOLDER_WORDS.has(lowered)) {
-    return true;
+  for (const word of PLACEHOLDER_WORDS) {
+    if (lowered.includes(word)) {
+      return true;
+    }
   }
   if (lowered.startsWith("replace-with-")) {
     return true;
@@ -92,15 +94,16 @@ export function validateProductionUrlCredential(
 }
 
 export function validateProductionFakeOnlyAllowlist(
-  allowlist: readonly string[]
+  allowlist: readonly string[],
+  variable = "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
 ): ProductionValidationOk | ProductionValidationFail {
   if (allowlist.length === 0) {
-    return fail("config_required:SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST", "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST");
+    return fail(`config_required:${variable}`, variable);
   }
   if (allowlist.length === 1 && allowlist[0] === FAKE_RUNTIME_ALLOWLIST) {
     return { ok: true };
   }
-  return fail("hosted_real_runtime_production_forbidden", "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST");
+  return fail("hosted_real_runtime_production_forbidden", variable);
 }
 
 export function validateProductionHttpsUrl(

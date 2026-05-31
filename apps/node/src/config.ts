@@ -31,6 +31,7 @@ export function loadNodeConfig(env: NodeJS.ProcessEnv = process.env): NodeAppCon
   const capabilitiesEnv = optional(env["SWITCHYARD_NODE_CAPABILITIES"]);
   const allowRuntimeModesEnv = optional(env["SWITCHYARD_NODE_ALLOW_RUNTIME_MODES"]);
   const allowCwdPrefixesEnv = optional(env["SWITCHYARD_NODE_ALLOW_CWD_PREFIXES"]);
+  const rawAllowCwdPrefixes = (allowCwdPrefixesEnv ?? "/repo").split(",").map((value) => value.trim());
   const config: NodeAppConfig = {
     deploymentMode,
     serverUrl: env["SWITCHYARD_SERVER_URL"] ?? "http://127.0.0.1:4646",
@@ -38,7 +39,7 @@ export function loadNodeConfig(env: NodeJS.ProcessEnv = process.env): NodeAppCon
     policy: {
       allowRuntimeModes: (allowRuntimeModesEnv ?? "fake.deterministic").split(",").map((value) => value.trim()).filter(Boolean),
       denyAdapterTypes: [],
-      allowCwdPrefixes: (allowCwdPrefixesEnv ?? "/repo").split(",").map((value) => value.trim()).filter(Boolean),
+      allowCwdPrefixes: rawAllowCwdPrefixes.filter(Boolean),
       allowEventTypes: [],
       artifactSync: "full"
     },
@@ -87,8 +88,11 @@ export function loadNodeConfig(env: NodeJS.ProcessEnv = process.env): NodeAppCon
         value: config.sharedToken,
         minLength: 32
       }), config);
-      enforceProductionValidation(validateProductionFakeOnlyAllowlist(config.policy.allowRuntimeModes), config);
-      enforceProductionValidation(validateProductionCwdPrefixes(config.policy.allowCwdPrefixes), config);
+      enforceProductionValidation(
+        validateProductionFakeOnlyAllowlist(config.policy.allowRuntimeModes, "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES"),
+        config
+      );
+      enforceProductionValidation(validateProductionCwdPrefixes(rawAllowCwdPrefixes), config);
     }
   }
   config.redactedSummary = buildSummary(config);

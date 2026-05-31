@@ -4,8 +4,8 @@ import { ConfigError, loadWorkerConfig } from "../src/config.js";
 function createProductionEnv(overrides: Record<string, string> = {}): Record<string, string> {
   return {
     SWITCHYARD_DEPLOYMENT_MODE: "production",
-    SWITCHYARD_POSTGRES_URL: "postgres://switchyard:worker-strong-password@postgres.example.com:5432/switchyard",
-    SWITCHYARD_REDIS_URL: "redis://default:worker-strong-password@redis.example.com:6379/0",
+    SWITCHYARD_POSTGRES_URL: "postgres://switchyard:worker-strong-credential@postgres.example.com:5432/switchyard",
+    SWITCHYARD_REDIS_URL: "redis://default:worker-strong-credential@redis.example.com:6379/0",
     SWITCHYARD_OBJECT_STORE_BACKEND: "local",
     SWITCHYARD_OBJECT_STORE_DIR: "/var/switchyard/objects",
     SWITCHYARD_OBJECT_STORE_PROBE: "write_read_delete",
@@ -34,7 +34,7 @@ describe("production worker config", () => {
     expect(config.hostedRealRuntimeExecution).toBe("disabled");
 
     const serializedSummary = JSON.stringify(config.redactedSummary);
-    expect(serializedSummary).not.toContain("worker-strong-password");
+    expect(serializedSummary).not.toContain("worker-strong-credential");
   });
 
   it("fails when required production dependencies are missing", () => {
@@ -64,6 +64,28 @@ describe("production worker config", () => {
     );
     expect(redisError.code).toBe("secret_placeholder:SWITCHYARD_REDIS_URL");
     expect(JSON.stringify(redisError.redactedConfig)).not.toContain("replace-with-worker-redis-password");
+  });
+
+  it("rejects low-signal substrings in URL passwords and redacts them", () => {
+    const postgresError = expectConfigError(() =>
+      loadWorkerConfig(
+        createProductionEnv({
+          SWITCHYARD_POSTGRES_URL: "postgres://switchyard:my-secret-value-12345678901234567890@postgres.example.com:5432/switchyard"
+        })
+      )
+    );
+    expect(postgresError.code).toBe("secret_placeholder:SWITCHYARD_POSTGRES_URL");
+    expect(JSON.stringify(postgresError.redactedConfig)).not.toContain("my-secret-value");
+
+    const redisError = expectConfigError(() =>
+      loadWorkerConfig(
+        createProductionEnv({
+          SWITCHYARD_REDIS_URL: "redis://default:example-key-12345678901234567890@redis.example.com:6379/0"
+        })
+      )
+    );
+    expect(redisError.code).toBe("secret_placeholder:SWITCHYARD_REDIS_URL");
+    expect(JSON.stringify(redisError.redactedConfig)).not.toContain("example-key");
   });
 
   it("rejects placeholder object-store credentials and redacts them", () => {

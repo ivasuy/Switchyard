@@ -30,8 +30,8 @@ function createProductionEnv(overrides: Record<string, string> = {}): Record<str
   const nodeToken = secret32("node-token-");
   return {
     SWITCHYARD_DEPLOYMENT_MODE: "production",
-    SWITCHYARD_POSTGRES_URL: "postgres://switchyard:really-strong-password@postgres.example.com:5432/switchyard",
-    SWITCHYARD_REDIS_URL: "redis://default:really-strong-password@redis.example.com:6379/0",
+    SWITCHYARD_POSTGRES_URL: "postgres://switchyard:really-strong-credential@postgres.example.com:5432/switchyard",
+    SWITCHYARD_REDIS_URL: "redis://default:really-strong-credential@redis.example.com:6379/0",
     SWITCHYARD_OBJECT_STORE_BACKEND: "local",
     SWITCHYARD_OBJECT_STORE_DIR: "/var/switchyard/objects",
     SWITCHYARD_NODE_SHARED_TOKEN: nodeToken,
@@ -69,7 +69,7 @@ describe("production server config", () => {
     });
 
     const serializedSummary = JSON.stringify(config.redactedSummary);
-    expect(serializedSummary).not.toContain("really-strong-password");
+    expect(serializedSummary).not.toContain("really-strong-credential");
     expect(serializedSummary).not.toContain("api-pepper-");
     expect(serializedSummary).not.toContain("node-token-");
   });
@@ -89,6 +89,16 @@ describe("production server config", () => {
     expect(() => loadServerConfig(createProductionEnv({ SWITCHYARD_API_KEY_PEPPER: "short-pepper" }))).toThrow(
       "secret_too_short:SWITCHYARD_API_KEY_PEPPER"
     );
+  });
+
+  it("rejects low-signal substrings in direct production secrets", () => {
+    expect(() =>
+      loadServerConfig(createProductionEnv({ SWITCHYARD_API_KEY_PEPPER: "my-secret-value-12345678901234567890" }))
+    ).toThrow("secret_placeholder:SWITCHYARD_API_KEY_PEPPER");
+
+    expect(() =>
+      loadServerConfig(createProductionEnv({ SWITCHYARD_NODE_SHARED_TOKEN: "switchyard-prod-token-1234567890123456" }))
+    ).toThrow("secret_placeholder:SWITCHYARD_NODE_SHARED_TOKEN");
   });
 
   it("rejects placeholder and too-short node shared token", () => {
@@ -121,6 +131,28 @@ describe("production server config", () => {
     );
     expect(redisError.code).toBe("secret_placeholder:SWITCHYARD_REDIS_URL");
     expect(JSON.stringify(redisError.redactedConfig)).not.toContain("replace-with-redis-password");
+  });
+
+  it("rejects low-signal substrings in URL passwords and redacts them", () => {
+    const pgError = expectConfigError(() =>
+      loadServerConfig(
+        createProductionEnv({
+          SWITCHYARD_POSTGRES_URL: "postgres://switchyard:my-secret-value-12345678901234567890@postgres.example.com:5432/switchyard"
+        })
+      )
+    );
+    expect(pgError.code).toBe("secret_placeholder:SWITCHYARD_POSTGRES_URL");
+    expect(JSON.stringify(pgError.redactedConfig)).not.toContain("my-secret-value");
+
+    const redisError = expectConfigError(() =>
+      loadServerConfig(
+        createProductionEnv({
+          SWITCHYARD_REDIS_URL: "redis://default:example-key-12345678901234567890@redis.example.com:6379/0"
+        })
+      )
+    );
+    expect(redisError.code).toBe("secret_placeholder:SWITCHYARD_REDIS_URL");
+    expect(JSON.stringify(redisError.redactedConfig)).not.toContain("example-key");
   });
 
   it("rejects placeholder object-store credentials and redacts them", () => {

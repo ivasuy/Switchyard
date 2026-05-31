@@ -13,7 +13,10 @@ describe("production config guards", () => {
     expect(isPlaceholderSecret(" replace-me ")).toBe(true);
     expect(isPlaceholderSecret("replace-with-api-key-pepper")).toBe(true);
     expect(isPlaceholderSecret("SECRET")).toBe(true);
-    expect(isPlaceholderSecret("real-secret-value-1234567890")).toBe(false);
+    expect(isPlaceholderSecret("switchyard-prod-token-1234567890123456")).toBe(true);
+    expect(isPlaceholderSecret("my-secret-value-12345678901234567890")).toBe(true);
+    expect(isPlaceholderSecret("example-key-12345678901234567890")).toBe(true);
+    expect(isPlaceholderSecret("real-credential-value-1234567890")).toBe(false);
   });
 
   it("rejects missing, placeholder, and short production secrets", () => {
@@ -23,6 +26,11 @@ describe("production config guards", () => {
       variable: "SWITCHYARD_API_KEY_PEPPER"
     });
     expect(validateProductionSecret({ variable: "SWITCHYARD_API_KEY_PEPPER", value: "replace-me" })).toEqual({
+      ok: false,
+      code: "secret_placeholder:SWITCHYARD_API_KEY_PEPPER",
+      variable: "SWITCHYARD_API_KEY_PEPPER"
+    });
+    expect(validateProductionSecret({ variable: "SWITCHYARD_API_KEY_PEPPER", value: "my-secret-value-12345678901234567890", minLength: 32 })).toEqual({
       ok: false,
       code: "secret_placeholder:SWITCHYARD_API_KEY_PEPPER",
       variable: "SWITCHYARD_API_KEY_PEPPER"
@@ -55,8 +63,18 @@ describe("production config guards", () => {
     });
 
     expect(validateProductionUrlCredential({
+      variable: "SWITCHYARD_REDIS_URL",
+      value: "redis://default:example-key-12345678901234567890@redis:6379/0",
+      credential: "password"
+    })).toEqual({
+      ok: false,
+      code: "secret_placeholder:SWITCHYARD_REDIS_URL",
+      variable: "SWITCHYARD_REDIS_URL"
+    });
+
+    expect(validateProductionUrlCredential({
       variable: "SWITCHYARD_POSTGRES_URL",
-      value: "postgres://switchyard:prod-password@db:5432/switchyard",
+      value: "postgres://switchyard:prod-credential-1234567890@db:5432/switchyard",
       credential: "password"
     })).toEqual({
       ok: true
@@ -69,6 +87,11 @@ describe("production config guards", () => {
       ok: false,
       code: "hosted_real_runtime_production_forbidden",
       variable: "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
+    });
+    expect(validateProductionFakeOnlyAllowlist(["codex.exec_json"], "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES")).toEqual({
+      ok: false,
+      code: "hosted_real_runtime_production_forbidden",
+      variable: "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES"
     });
   });
 

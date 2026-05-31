@@ -57,6 +57,9 @@ describe("production node config", () => {
     expect(() => loadNodeConfig(createProductionEnv({ SWITCHYARD_NODE_SHARED_TOKEN: "replace-me" }))).toThrow(
       "secret_placeholder:SWITCHYARD_NODE_SHARED_TOKEN"
     );
+    expect(() => loadNodeConfig(createProductionEnv({ SWITCHYARD_NODE_SHARED_TOKEN: "switchyard-prod-token-1234567890123456" }))).toThrow(
+      "secret_placeholder:SWITCHYARD_NODE_SHARED_TOKEN"
+    );
     expect(() => loadNodeConfig(createProductionEnv({ SWITCHYARD_NODE_SHARED_TOKEN: "short-token" }))).toThrow(
       "secret_too_short:SWITCHYARD_NODE_SHARED_TOKEN"
     );
@@ -76,6 +79,9 @@ describe("production node config", () => {
       "config_invalid:SWITCHYARD_NODE_ALLOW_CWD_PREFIXES"
     );
     expect(() => loadNodeConfig(createProductionEnv({ SWITCHYARD_NODE_ALLOW_CWD_PREFIXES: "C:\\" }))).toThrow(
+      "config_invalid:SWITCHYARD_NODE_ALLOW_CWD_PREFIXES"
+    );
+    expect(() => loadNodeConfig(createProductionEnv({ SWITCHYARD_NODE_ALLOW_CWD_PREFIXES: "/repo,   " }))).toThrow(
       "config_invalid:SWITCHYARD_NODE_ALLOW_CWD_PREFIXES"
     );
   });
@@ -101,6 +107,7 @@ describe("production node config", () => {
     );
 
     expect(error.code).toBe("hosted_real_runtime_production_forbidden");
+    expect(error.variable).toBe("SWITCHYARD_NODE_ALLOW_RUNTIME_MODES");
     expect(JSON.stringify(error.redactedConfig)).not.toContain("node-shared-token-");
   });
 });
