@@ -2,6 +2,8 @@
 
 This guide is only for OpenCode ACP local debugging. Use the [Official API Contract](../API.md) for endpoint shapes and [Local Development](../DEVELOPMENT.md) for daemon startup and full verification commands.
 
+R21 hosted note: `opencode.acp` is in the known provider set for production hosted execution, but activation is operator opt-in only. Fake-only remains default, no-spend smoke is required before rollout, spend-gated canary is required before real traffic, and rollback returns to fake-only by config restart.
+
 ## Current OpenCode Scope
 
 Implemented in R5:
@@ -17,7 +19,7 @@ Implemented in R5:
 Not implemented in R5:
 
 - Hosted OpenCode execution.
-- Approval workflow bridge for ACP permission requests.
+- Hosted approval bridge/input bridge/terminal bridge for ACP permission requests.
 - Post-start input (`POST /runs/:id/input` is unsupported).
 - Session resume/load/fork/list exposure through Switchyard.
 - Per-run OpenCode command or ACP transport/env overrides.

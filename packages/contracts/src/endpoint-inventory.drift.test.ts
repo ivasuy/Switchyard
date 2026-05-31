@@ -2,6 +2,27 @@ import { describe, expect, it } from "vitest";
 import { createDaemonApp } from "../../../apps/daemon/src/app.js";
 import { HOSTED_SERVER_ROUTE_INVENTORY, LOCAL_DAEMON_ROUTE_INVENTORY } from "./endpoint-inventory.js";
 
+const FORBIDDEN_PUBLIC_ROUTE_PREFIX =
+  /^\/(exec|shell|process|command|pty|terminal|sandbox|browser|search|github|fetch|repo|dashboard|tui)(\/|$)/;
+const FORBIDDEN_OPERATION_TOKENS = [
+  "sandbox",
+  "terminal",
+  "exec",
+  "pty",
+  "shell",
+  "process",
+  "command",
+  "browser",
+  "search",
+  "github",
+  "fetch",
+  "repo",
+  "dashboard",
+  "tui",
+  "genericProcess",
+  "arbitraryProcess"
+];
+
 function collectMethodPathSet(printRoutes: string): Set<string> {
   const set = new Set<string>();
   const stack: string[] = [];
@@ -51,6 +72,18 @@ describe("local daemon route inventory", () => {
       expect(inventory).toEqual(routes);
     } finally {
       await app.close();
+    }
+  });
+
+  it("keeps local and hosted inventory free of forbidden public execution/dashboard routes", () => {
+    for (const entry of [...LOCAL_DAEMON_ROUTE_INVENTORY, ...HOSTED_SERVER_ROUTE_INVENTORY]) {
+      const lowerPath = entry.path.toLowerCase();
+      expect(FORBIDDEN_PUBLIC_ROUTE_PREFIX.test(lowerPath)).toBe(false);
+      expect(entry.path).not.toMatch(/^\/(dashboard|tui)(\/|$)/i);
+      if (entry.path === "/memory/search" && entry.operationId === "searchMemory") {
+        continue;
+      }
+      expect(FORBIDDEN_OPERATION_TOKENS.some((token) => entry.operationId.toLowerCase().includes(token))).toBe(false);
     }
   });
 });

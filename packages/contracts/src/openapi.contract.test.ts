@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   LOCAL_DAEMON_ROUTE_INVENTORY,
@@ -6,6 +9,52 @@ import {
   renderOpenApiJson
 } from "./openapi.js";
 import { runOpenApiCli } from "./openapi-cli.js";
+
+const FORBIDDEN_PUBLIC_ROUTE_PREFIX =
+  /^\/(exec|shell|process|command|pty|terminal|sandbox|browser|search|github|fetch|repo|dashboard|tui)(\/|$)/;
+const FORBIDDEN_OPERATION_TOKENS = [
+  "sandbox",
+  "terminal",
+  "exec",
+  "pty",
+  "shell",
+  "process",
+  "command",
+  "browser",
+  "search",
+  "github",
+  "fetch",
+  "repo",
+  "dashboard",
+  "tui",
+  "genericProcess",
+  "arbitraryProcess"
+];
+const FORBIDDEN_EXACT_PATHS = [
+  "/tenant/signup",
+  "/billing/checkout",
+  "/billing/webhook",
+  "/payments",
+  "/dashboard",
+  "/tui",
+  "/exec",
+  "/shell",
+  "/process",
+  "/command",
+  "/pty",
+  "/terminal",
+  "/sandbox",
+  "/browser",
+  "/search",
+  "/github",
+  "/fetch",
+  "/repo"
+];
+
+function readRootFile(relativePath: string): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return readFileSync(join(here, "../../..", relativePath), "utf8");
+}
 
 describe("openapi generation", () => {
   it("generates deterministic bytes", () => {
@@ -208,72 +257,76 @@ describe("openapi generation", () => {
   it("keeps public arbitrary execution routes out of OpenAPI", () => {
     const local = generateOpenApiDocument();
     const hosted = generateOpenApiDocument({ surface: "hosted_server" });
-    const forbiddenTopLevelExecutionRoute = /^\/(sandbox|exec|pty|terminal|shell|process|command|browser|search)(\/|$)/;
-    const forbiddenPaths = [
-      "/tenant/signup",
-      "/billing/checkout",
-      "/billing/webhook",
-      "/payments",
-      "/dashboard",
-      "/tui",
-      "/exec",
-      "/shell",
-      "/process",
-      "/command",
-      "/pty",
-      "/terminal",
-      "/sandbox"
-    ];
 
     for (const document of [local, hosted]) {
       const paths = Object.keys(document.paths);
       for (const path of paths) {
         const lower = path.toLowerCase();
-        expect(forbiddenTopLevelExecutionRoute.test(lower)).toBe(false);
+        expect(FORBIDDEN_PUBLIC_ROUTE_PREFIX.test(lower)).toBe(false);
         if (lower.startsWith("/tools/") && lower !== "/tools/invocations" && !lower.startsWith("/tools/invocations/")) {
-          expect(lower).not.toMatch(/search|exec|shell|terminal|pty|process|browser|command/);
+          expect(lower).not.toMatch(/search|exec|shell|terminal|pty|process|browser|command|github|fetch|repo/);
         }
       }
-      for (const forbiddenPath of forbiddenPaths) {
+      for (const forbiddenPath of FORBIDDEN_EXACT_PATHS) {
         expect(paths.some((path) => path === forbiddenPath || path.startsWith(`${forbiddenPath}/`))).toBe(false);
       }
     }
 
     expect(local.paths["/memory/search"]?.get?.operationId).toBe("searchMemory");
+    expect(hosted.paths["/tools/invocations"]).toBeUndefined();
   });
 
   it("keeps arbitrary execution operation ids out of OpenAPI", () => {
-    const document = generateOpenApiDocument();
-    const forbiddenOperationTokens = [
-      "sandbox",
-      "terminal",
-      "exec",
-      "pty",
-      "shell",
-      "process",
-      "command",
-      "genericProcess",
-      "arbitraryProcess"
-    ];
-    const operations = Object.entries(document.paths).flatMap(([path, methods]) =>
-      Object.values(methods).map((operation) => ({ path, operation: operation as Record<string, unknown> }))
-    );
-    for (const { path, operation } of operations) {
-      const operationId = String(operation["operationId"] ?? "");
-      const lower = operationId.toLowerCase();
-      if (operationId === "searchMemory" && path === "/memory/search") {
-        continue;
-      }
-      const summary = String(operation["summary"] ?? "").toLowerCase();
-      const tags = Array.isArray(operation["tags"]) ? operation["tags"].map((tag) => String(tag).toLowerCase()) : [];
-      const looksExecutionSurface = /tool|run|runtime|exec|shell|command|process|terminal|pty|browser/.test(
-        `${path.toLowerCase()} ${summary} ${tags.join(" ")}`
+    for (const document of [generateOpenApiDocument(), generateOpenApiDocument({ surface: "hosted_server" })]) {
+      const operations = Object.entries(document.paths).flatMap(([path, methods]) =>
+        Object.values(methods).map((operation) => ({ path, operation: operation as Record<string, unknown> }))
       );
-      if (!looksExecutionSurface) {
-        continue;
+      for (const { path, operation } of operations) {
+        const operationId = String(operation["operationId"] ?? "");
+        const lower = operationId.toLowerCase();
+        if (operationId === "searchMemory" && path === "/memory/search") {
+          continue;
+        }
+        const summary = String(operation["summary"] ?? "").toLowerCase();
+        const tags = Array.isArray(operation["tags"]) ? operation["tags"].map((tag) => String(tag).toLowerCase()) : [];
+        const looksExecutionSurface =
+          /tool|run|runtime|exec|shell|command|process|terminal|pty|browser|search|github|fetch|repo/.test(
+            `${path.toLowerCase()} ${summary} ${tags.join(" ")}`
+          );
+        if (!looksExecutionSurface) {
+          continue;
+        }
+        expect(FORBIDDEN_OPERATION_TOKENS.some((token) => lower.includes(token.toLowerCase()))).toBe(false);
       }
-      expect(forbiddenOperationTokens.some((token) => lower.includes(token.toLowerCase()))).toBe(false);
     }
+  });
+
+  it("documents R21 hosted-provider boundary in product docs", () => {
+    const product = readRootFile("PRODUCT.md");
+    const readme = readRootFile("README.md");
+    const api = readRootFile("docs/development/API.md");
+    const development = readRootFile("docs/development/DEVELOPMENT.md");
+    const codex = readRootFile("docs/development/adapters/CODEX.md");
+    const claude = readRootFile("docs/development/adapters/CLAUDE_CODE.md");
+    const opencode = readRootFile("docs/development/adapters/OPENCODE.md");
+    const developerDocs = [readme, api, development, codex, claude, opencode].join("\n");
+
+    expect(product).toContain("R21");
+    expect(product).toMatch(/known provider/i);
+    expect(product).toMatch(/fake-only remains default/i);
+    expect(product).toMatch(/operator opt-in/i);
+    expect(product).toMatch(/rollback/i);
+
+    expect(developerDocs).toMatch(/known provider/i);
+    expect(developerDocs).toMatch(/operator opt-in/i);
+    expect(developerDocs).toMatch(/no-spend smoke/i);
+    expect(developerDocs).toMatch(/spend-gated canary/i);
+    expect(developerDocs).toMatch(/rollback/i);
+    expect(developerDocs).toMatch(/does not ship generic process\/pty runtime adapters/i);
+    expect(developerDocs).toMatch(/does not ship cursor\/openclaw\/paperclip/i);
+    expect(developerDocs).toMatch(/does not ship hosted browser\/search\/github\/fetch\/repo tools/i);
+    expect(developerDocs).toMatch(/does not ship hosted debate real participants or hosted model judging/i);
+    expect(developerDocs).toMatch(/does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge/i);
   });
 
   it("documents tool invocation create/get/list envelopes with invocation field names", () => {

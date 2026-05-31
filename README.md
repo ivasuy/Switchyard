@@ -17,7 +17,7 @@ Switchyard is a runtime gateway that exposes multiple agent runtimes and wrapper
 [![Redis](https://img.shields.io/badge/Redis-queues-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 [![pnpm](https://img.shields.io/badge/pnpm-workspaces-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
 
-Instead of integrating separately with Claude Code, Codex, OpenCode, OpenClaw, Paperclip, AgentField, Cursor, browser/search agents, and custom HTTP agents, applications integrate once with Switchyard.
+Instead of integrating separately with shipped runtime interfaces (Claude Code, Codex, OpenCode, AgentField, and Generic HTTP wrappers), applications integrate once with Switchyard.
 
 ```text
 POST /runs
@@ -37,7 +37,18 @@ R18 adds the shipped API-first enterprise control-plane foundation for hosted/se
 
 R19 ships production hosted deployment readiness for the existing safe hosted boundary: provider-neutral production manifests, explicit `production:preflight` and `production:migrate` gates, rollout/rollback runbook gates, API-key-protected hosted `/metrics`, named readiness/schema failure codes, and a deterministic no-spend `production:canary` flow (`fake.deterministic` only). This is self-hosted/managed-hosting-ready operability work, not a managed hosted platform or public tenant self-service launch.
 
-R19 non-goals remain explicit: no managed SaaS/public signup, no payment-provider integration (invoices/checkout/webhooks), no OAuth/OIDC/SAML/SSO/SCIM, no dashboard, no TUI, no production hosted real-runtime execution, no public `/exec`/`/sandbox`/`/terminal`/`/pty` routes, no hosted or connected-node real tools, no browser automation, no Cursor/OpenClaw/Paperclip adapters, no runtime-specific hosted approval bridges, and no hosted debate participant execution/model judging.
+R21 ships production hosted provider activation only for the known provider set `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+Production hosted real-provider execution is operator opt-in and fake-only remains default.
+Required production posture: explicit known provider allowlist + provider policy + no-spend smoke + spend-gated canary + rollback-by-config-restart.
+
+R21 boundary non-goals remain explicit:
+
+- does not ship generic process/pty runtime adapters.
+- does not ship cursor/openclaw/paperclip.
+- does not ship hosted browser/search/github/fetch/repo tools.
+- does not ship hosted debate real participants or hosted model judging.
+- does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
+- no managed SaaS/public signup, no payment-provider integration (invoices/checkout/webhooks), no OAuth/OIDC/SAML/SSO/SCIM, no dashboard, and no TUI.
 
 Switchyard lets frontends, backends, CLIs, automations, bots, and internal systems treat every agent runtime like a backend service.
 
@@ -118,7 +129,7 @@ Switchyard is designed for:
 - Internal ops tools that need approvals and audit trails.
 - Teams that want hosted orchestration with local execution nodes.
 
-Clients do not need to know how Claude Code, Codex, OpenClaw, Paperclip, AgentField, or any other runtime works internally. They only call Switchyard.
+Clients do not need to know how Claude Code, Codex, OpenCode, AgentField, or other integrated runtimes work internally. They only call Switchyard.
 
 ## Core API Surface
 
@@ -181,9 +192,9 @@ Example registry facts:
 ```text
 Claude Code available: yes
 Codex available: yes
-OpenClaw URL configured: yes
+OpenClaw URL configured: not shipped in R21
 AgentField URL configured: yes
-Paperclip adapter configured: no
+Paperclip adapter configured: not shipped in R21
 ```
 
 The registry is also used by placement policy to decide where and how work should run.
@@ -192,21 +203,20 @@ The registry is also used by placement policy to decide where and how work shoul
 
 Switchyard is designed to normalize direct runtimes and wrapper runtimes.
 
-Direct runtimes:
+Shipped runtime interfaces:
 
 - Claude Code
 - Codex CLI
 - OpenCode
+- AgentField async REST wrapper
+- Generic HTTP async REST wrapper
+
+Not shipped in R21:
+
 - Cursor
-- Browser/Search agents
-- Gemini or other CLI runtimes
-
-Wrapper/control runtimes:
-
 - OpenClaw
 - Paperclip
-- AgentField
-- Generic HTTP agents
+- Browser/Search hosted tools
 
 Switchyard treats them through the same lifecycle:
 

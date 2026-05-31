@@ -3,6 +3,8 @@
 This guide is only for Codex-specific local debugging. Use the [Official API Contract](../API.md) for endpoint shapes and [Local Development](../DEVELOPMENT.md) for daemon startup, SQLite, process, and verification commands.
 Manual smoke in this file depends on a locally installed `codex` CLI on your machine (`PATH`-reachable). It does not cover hosted Codex interactive execution.
 
+R21 hosted note: `codex.exec_json` is in the known provider set for production hosted execution, but activation is operator opt-in only. Fake-only remains default, no-spend smoke is required before rollout, spend-gated canary is required before real traffic, and rollback returns to fake-only by config restart.
+
 ## Current Codex Scope
 
 Implemented:
@@ -27,6 +29,7 @@ Not implemented yet:
 - Hosted interactive Codex create/input/approval bridge.
 - Public PTY/terminal route or TUI automation.
 - Generic process/PTY adapter promotion for Codex.
+- Hosted input/approval/terminal bridges for provider runtime execution.
 
 R3 check behavior:
 

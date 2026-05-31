@@ -5,9 +5,19 @@ This document covers the shipped API surfaces:
 - Local daemon (`local_daemon` OpenAPI surface): no-auth by default, local-first runtime/middleware contract.
 - Hosted server (`hosted_server` OpenAPI surface): API-key-authenticated enterprise control-plane foundation for tenant/project ownership, entitlements/quotas, and audit events.
 
+R21 scope note: production hosted provider execution is now shipped for the known provider set `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`, but only as explicit operator opt-in. Fake-only remains default. Operators must run no-spend smoke first, then a spend-gated canary before routing real traffic, and keep rollback to fake-only available via config change + restart.
+
 R19 scope note: production hosted deployment readiness is shipped for the existing safe hosted boundary. This release is API/ops-first (manifests, preflight/migrate/canary, readiness/schema codes, rollback posture), not a managed SaaS launch.
 
 R20 boundary note: production subprocess/PTY sandboxing is an internal hosted-worker substrate only. There is still no public arbitrary execution API on either local or hosted surfaces: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` route exists.
+
+R21 hosted boundary note:
+
+- does not ship generic process/pty runtime adapters.
+- does not ship cursor/openclaw/paperclip.
+- does not ship hosted browser/search/github/fetch/repo tools.
+- does not ship hosted debate real participants or hosted model judging.
+- does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
 
 ## R19 Production Hosted Deployment Readiness
 
