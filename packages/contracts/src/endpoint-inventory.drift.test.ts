@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDaemonApp } from "../../../apps/daemon/src/app.js";
-import { LOCAL_DAEMON_ROUTE_INVENTORY } from "./endpoint-inventory.js";
+import { HOSTED_SERVER_ROUTE_INVENTORY, LOCAL_DAEMON_ROUTE_INVENTORY } from "./endpoint-inventory.js";
 
 function collectMethodPathSet(printRoutes: string): Set<string> {
   const set = new Set<string>();
@@ -34,6 +34,11 @@ function joinPath(parent: string, child: string): string {
 }
 
 describe("local daemon route inventory", () => {
+  it("keeps local drift anchored to daemon-only surface", () => {
+    expect(LOCAL_DAEMON_ROUTE_INVENTORY.every((entry) => entry.surface === "local_daemon")).toBe(true);
+    expect(HOSTED_SERVER_ROUTE_INVENTORY.every((entry) => entry.surface === "hosted_server")).toBe(true);
+  });
+
   it("matches createDaemonApp route registration", async () => {
     const app = await createDaemonApp();
     try {

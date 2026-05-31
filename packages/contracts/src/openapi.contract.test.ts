@@ -5,6 +5,7 @@ import {
   generateOpenApiDocument,
   renderOpenApiJson
 } from "./openapi.js";
+import { runOpenApiCli } from "./openapi-cli.js";
 
 describe("openapi generation", () => {
   it("generates deterministic bytes", () => {
@@ -14,7 +15,9 @@ describe("openapi generation", () => {
   });
 
   it("rejects empty inventory", () => {
-    expect(() => generateOpenApiDocument({ inventory: [] })).toThrow(/empty route inventory/i);
+    expect(() => generateOpenApiDocument({ inventory: [] })).toThrow(
+      'OpenAPI route inventory is empty for surface "local_daemon".'
+    );
   });
 
   it("rejects unsupported content kinds", () => {
@@ -25,18 +28,59 @@ describe("openapi generation", () => {
   it("rejects unsupported schema references", () => {
     const bad: RouteInventoryEntry[] = [
       {
+        surface: "local_daemon",
+        errorEnvelopeOwner: "contracts",
         method: "get",
         path: "/bad",
+        operationId: "badSchema",
         summary: "Bad schema",
         tags: ["broken"],
+        noRequestBody: true,
         success: {
           status: 200,
           contentKind: "json",
-          schemaRef: "UnknownSchema"
+          schemaRef: "UnknownSchema",
+          description: "Broken schema"
         }
       }
     ];
     expect(() => generateOpenApiDocument({ inventory: bad })).toThrow(/unknown schema reference/i);
+  });
+
+  it("rejects unknown surfaces with deterministic error message", () => {
+    expect(() => generateOpenApiDocument({ surface: "unknown" as never })).toThrow(
+      'Unknown OpenAPI surface "unknown". Expected one of: local_daemon, hosted_server.'
+    );
+  });
+
+  it("cli reports deterministic unknown surface message", async () => {
+    const stderr: string[] = [];
+    const exitCode = await runOpenApiCli(["generate", "--surface", "unknown"], {
+      cwd: () => "/tmp",
+      stdout: () => {},
+      stderr: (text) => stderr.push(text),
+      readFile: () => "",
+      writeFile: () => {}
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("")).toContain(
+      'Unknown OpenAPI surface "unknown". Expected one of: local_daemon, hosted_server.'
+    );
+  });
+
+  it("cli reports deterministic drift message with surface script", async () => {
+    const stderr: string[] = [];
+    const exitCode = await runOpenApiCli(["check", "--surface", "hosted_server"], {
+      cwd: () => "/tmp",
+      stdout: () => {},
+      stderr: (text) => stderr.push(text),
+      readFile: () => "stale",
+      writeFile: () => {}
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("")).toContain(
+      "OpenAPI artifact drift for openapi.hosted-server.json; run openapi:generate:hosted to regenerate."
+    );
   });
 
   it("documents artifact content raw behavior with extension", () => {
@@ -70,18 +114,106 @@ describe("openapi generation", () => {
     expect(getRun?.["x-switchyard-error-envelope"]).toBe("contracts");
   });
 
-  it("keeps public arbitrary execution routes out of OpenAPI", () => {
+  it("keeps local daemon OpenAPI unauthenticated and hosted-only routes absent", () => {
     const document = generateOpenApiDocument();
+
+    expect(document.info.title).toBe("Switchyard Local Daemon API");
+    expect(document.servers).toEqual([{ url: "http://127.0.0.1:4545" }]);
+    expect(document.components.securitySchemes).toBeUndefined();
+    expect(document.paths["/auth/whoami"]).toBeUndefined();
+    expect(document.paths["/entitlements"]).toBeUndefined();
+    expect(document.paths["/audit/events"]).toBeUndefined();
+  });
+
+  it("adds hosted OpenAPI title, server, and security scheme", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    expect(document.info.title).toBe("Switchyard Hosted Server API");
+    expect(document.servers).toEqual([{ url: "https://api.switchyard.local" }]);
+    expect(document.components.securitySchemes).toEqual({
+      SwitchyardApiKey: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "Switchyard API key",
+        description: "Use Authorization: Bearer <switchyard_api_key> or x-switchyard-api-key."
+      }
+    });
+  });
+
+  it("includes hosted enterprise routes", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    expect(document.paths["/auth/whoami"]?.get?.operationId).toBe("whoami");
+    expect(document.paths["/entitlements"]?.get?.operationId).toBe("getEntitlements");
+    expect(document.paths["/audit/events"]?.get?.operationId).toBe("listAuditEvents");
+  });
+
+  it("keeps hosted /health and /ready public", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    expect(document.paths["/health"]?.get?.security).toBeUndefined();
+    expect(document.paths["/ready"]?.get?.security).toBeUndefined();
+  });
+
+  it("protects hosted runs and node routes with SwitchyardApiKey", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const expectedSecurity = [{ SwitchyardApiKey: [] }];
+
+    expect(document.paths["/runs"]?.post?.security).toEqual(expectedSecurity);
+    expect(document.paths["/runs/{id}/events"]?.get?.security).toEqual(expectedSecurity);
+    expect(document.paths["/nodes/register"]?.post?.security).toEqual(expectedSecurity);
+    expect(document.paths["/nodes/{id}"]?.get?.security).toEqual(expectedSecurity);
+  });
+
+  it("documents hosted /metrics as protected operator-only global metrics", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const metricsGet = document.paths["/metrics"]?.get as Record<string, unknown> | undefined;
+    expect(metricsGet?.security).toEqual([{ SwitchyardApiKey: [] }]);
+    expect(String(metricsGet?.summary ?? "")).toMatch(/operator-only global metrics/i);
+    const requiredScopes = metricsGet?.["x-switchyard-required-scopes"] as string[] | undefined;
+    expect(requiredScopes).toEqual(["metrics:read", "admin:read"]);
+    expect(document.paths["/metrics/tenant"]).toBeUndefined();
+  });
+
+  it("includes hosted audit query schema", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const listAudit = document.paths["/audit/events"]?.get as Record<string, unknown> | undefined;
+    const parameters = listAudit?.parameters as Array<{ name: string }>;
+    expect(parameters.map((parameter) => parameter.name)).toEqual(["cursor", "limit"]);
+  });
+
+  it("keeps public arbitrary execution routes out of OpenAPI", () => {
+    const local = generateOpenApiDocument();
+    const hosted = generateOpenApiDocument({ surface: "hosted_server" });
     const forbiddenTopLevelExecutionRoute = /^\/(sandbox|exec|pty|terminal|shell|process|command|browser|search)(\/|$)/;
-    const paths = Object.keys(document.paths);
-    for (const path of paths) {
-      const lower = path.toLowerCase();
-      expect(forbiddenTopLevelExecutionRoute.test(lower)).toBe(false);
-      if (lower.startsWith("/tools/") && lower !== "/tools/invocations" && !lower.startsWith("/tools/invocations/")) {
-        expect(lower).not.toMatch(/search|exec|shell|terminal|pty|process|browser|command/);
+    const forbiddenPaths = [
+      "/tenant/signup",
+      "/billing/checkout",
+      "/billing/webhook",
+      "/payments",
+      "/dashboard",
+      "/tui",
+      "/exec",
+      "/shell",
+      "/process",
+      "/command",
+      "/pty",
+      "/terminal",
+      "/sandbox"
+    ];
+
+    for (const document of [local, hosted]) {
+      const paths = Object.keys(document.paths);
+      for (const path of paths) {
+        const lower = path.toLowerCase();
+        expect(forbiddenTopLevelExecutionRoute.test(lower)).toBe(false);
+        if (lower.startsWith("/tools/") && lower !== "/tools/invocations" && !lower.startsWith("/tools/invocations/")) {
+          expect(lower).not.toMatch(/search|exec|shell|terminal|pty|process|browser|command/);
+        }
+      }
+      for (const forbiddenPath of forbiddenPaths) {
+        expect(paths.some((path) => path === forbiddenPath || path.startsWith(`${forbiddenPath}/`))).toBe(false);
       }
     }
-    expect(document.paths["/memory/search"]?.get?.operationId).toBe("searchMemory");
+
+    expect(local.paths["/memory/search"]?.get?.operationId).toBe("searchMemory");
   });
 
   it("keeps arbitrary execution operation ids out of OpenAPI", () => {

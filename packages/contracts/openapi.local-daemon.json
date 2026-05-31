@@ -2574,7 +2574,16 @@
                   "artifact_content_empty",
                   "artifact_sync_failed",
                   "hosted_runtime_not_allowed",
-                  "payload_too_large"
+                  "payload_too_large",
+                  "auth_required",
+                  "auth_failed",
+                  "auth_conflict",
+                  "auth_store_unavailable",
+                  "tenant_access_denied",
+                  "project_access_denied",
+                  "entitlement_denied",
+                  "quota_exceeded",
+                  "audit_log_unavailable"
                 ],
                 "type": "string"
               },

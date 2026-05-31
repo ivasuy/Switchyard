@@ -26,6 +26,11 @@ import { debateSchema } from "./debate.js";
 import { httpErrorEnvelopeSchema } from "./http-error.js";
 import { nodeSchema } from "./node.js";
 import {
+  whoamiResponseSchema,
+  entitlementsResponseSchema,
+  auditEventsResponseSchema
+} from "./enterprise.js";
+import {
   assignmentSchema,
   assignmentClaimRequestSchema,
   assignmentClaimResponseSchema,
@@ -38,7 +43,12 @@ import {
   nodeHeartbeatRequestSchema,
   nodeRegisterRequestSchema
 } from "./assignment.js";
-import { LOCAL_DAEMON_ROUTE_INVENTORY, type ResponseContentKind, type RouteInventoryEntry } from "./endpoint-inventory.js";
+import {
+  LOCAL_DAEMON_ROUTE_INVENTORY,
+  HOSTED_SERVER_ROUTE_INVENTORY,
+  type ResponseContentKind,
+  type RouteInventoryEntry
+} from "./endpoint-inventory.js";
 
 interface SchemaObject {
   [key: string]: unknown;
@@ -54,13 +64,27 @@ export interface OpenApiDocument {
   paths: Record<string, Record<string, SchemaObject>>;
   components: {
     schemas: Record<string, SchemaObject>;
+    securitySchemes?: Record<string, SchemaObject>;
   };
 }
+
+export type OpenApiSurface = "local_daemon" | "hosted_server";
 
 const SUPPORTED_CONTENT_KINDS = new Set<ResponseContentKind>(["json", "sse", "binary", "text"]);
 
 const SCHEMA_BY_REF: Record<string, z.ZodTypeAny> = {
   HealthResponse: z.object({ ok: z.boolean() }),
+  ReadyResponse: z.object({
+    ok: z.boolean(),
+    checks: z.record(
+      z.string(),
+      z.object({
+        ok: z.boolean(),
+        code: z.string().optional(),
+        diagnostics: z.record(z.string(), z.unknown()).optional()
+      })
+    )
+  }),
   MetricsResponse: z.object({
     requestsTotal: z.number().int().nonnegative(),
     errorsTotal: z.number().int().nonnegative(),
@@ -71,6 +95,25 @@ const SCHEMA_BY_REF: Record<string, z.ZodTypeAny> = {
       alreadyTerminal: z.number().int().nonnegative(),
       duplicateStarts: z.number().int().nonnegative()
     })
+  }),
+  HostedMetricsResponse: z.object({
+    requests: z.record(z.string(), z.number().or(z.boolean())),
+    errors: z.record(z.string(), z.number().or(z.boolean())),
+    placement: z.record(z.string(), z.number().or(z.boolean())),
+    hostedRuntime: z.record(z.string(), z.number().or(z.boolean())),
+    queue: z.record(z.string(), z.number().or(z.boolean())),
+    worker: z.record(z.string(), z.number().or(z.boolean())),
+    objectStore: z.record(z.string(), z.number().or(z.boolean())),
+    sandbox: z.record(z.string(), z.number().or(z.boolean())),
+    node: z.record(z.string(), z.number().or(z.boolean())),
+    auth: z.record(z.string(), z.number().or(z.boolean())),
+    tenant: z.record(z.string(), z.number().or(z.boolean())),
+    entitlement: z.record(z.string(), z.number().or(z.boolean())),
+    quota: z.record(z.string(), z.number().or(z.boolean())),
+    audit: z.record(z.string(), z.number().or(z.boolean())),
+    controlPlane: z.record(z.string(), z.number().or(z.boolean())),
+    dependencies: z.record(z.string(), z.number().or(z.boolean())),
+    config: z.record(z.string(), z.number().or(z.boolean()))
   }),
   CreateRunQuery: z.object({ wait: z.enum(["1"]).optional() }),
   CreateRunRequest: z.object({
@@ -288,15 +331,49 @@ const SCHEMA_BY_REF: Record<string, z.ZodTypeAny> = {
   AssignmentArtifactContentResponse: z.object({ accepted: z.boolean(), artifactId: z.string().min(1) }),
   AssignmentCompleteRequest: assignmentCompleteRequestSchema,
   AssignmentResponse: z.object({ assignment: assignmentSchema }),
+  ListNodesQuery: z.object({}),
+  ListNodesResponse: z.object({ nodes: z.array(nodeSchema) }),
+  NodeResponse: z.object({ node: nodeSchema }),
+  WhoamiResponse: whoamiResponseSchema,
+  EntitlementsResponse: entitlementsResponseSchema,
+  AuditEventsQuery: z.object({
+    limit: z.coerce.number().int().positive().max(200).optional(),
+    cursor: z.string().min(1).optional()
+  }),
+  AuditEventsResponse: auditEventsResponseSchema,
 
   SseEventStream: z.string(),
   HttpErrorEnvelope: httpErrorEnvelopeSchema
 };
 
-export function generateOpenApiDocument(options: { inventory?: readonly RouteInventoryEntry[] } = {}): OpenApiDocument {
-  const inventory = options.inventory ?? LOCAL_DAEMON_ROUTE_INVENTORY;
+const SURFACE_SPECS: Record<OpenApiSurface, {
+  readonly title: string;
+  readonly serverUrl: string;
+  readonly inventory: readonly RouteInventoryEntry[];
+}> = {
+  local_daemon: {
+    title: "Switchyard Local Daemon API",
+    serverUrl: "http://127.0.0.1:4545",
+    inventory: LOCAL_DAEMON_ROUTE_INVENTORY
+  },
+  hosted_server: {
+    title: "Switchyard Hosted Server API",
+    serverUrl: "https://api.switchyard.local",
+    inventory: HOSTED_SERVER_ROUTE_INVENTORY
+  }
+};
+
+interface GenerateOpenApiDocumentOptions {
+  surface?: OpenApiSurface;
+  inventory?: readonly RouteInventoryEntry[];
+}
+
+export function generateOpenApiDocument(options: GenerateOpenApiDocumentOptions = {}): OpenApiDocument {
+  const surface = parseSurface(options.surface);
+  const surfaceSpec = SURFACE_SPECS[surface];
+  const inventory = options.inventory ?? surfaceSpec.inventory;
   if (inventory.length === 0) {
-    throw new Error("Empty route inventory is not allowed.");
+    throw new Error(`OpenAPI route inventory is empty for surface "${surface}".`);
   }
 
   const schemaRefs = collectSchemaRefs(inventory);
@@ -358,6 +435,12 @@ export function generateOpenApiDocument(options: { inventory?: readonly RouteInv
         supportsBinary: true
       };
     }
+    if (surface === "hosted_server" && isHostedProtectedOperation(entry)) {
+      operation["security"] = [{ SwitchyardApiKey: [] }];
+    }
+    if (surface === "hosted_server" && isHostedMetricsOperation(entry)) {
+      operation["x-switchyard-required-scopes"] = ["metrics:read", "admin:read"];
+    }
 
     if (!paths[openApiPath]) {
       paths[openApiPath] = {};
@@ -368,13 +451,25 @@ export function generateOpenApiDocument(options: { inventory?: readonly RouteInv
   const document: OpenApiDocument = {
     openapi: "3.1.0",
     info: {
-      title: "Switchyard Local Daemon API",
+      title: surfaceSpec.title,
       version: "0.0.0"
     },
-    servers: [{ url: "http://127.0.0.1:4545" }],
+    servers: [{ url: surfaceSpec.serverUrl }],
     paths,
     components: {
-      schemas: components
+      schemas: components,
+      ...(surface === "hosted_server"
+        ? {
+            securitySchemes: {
+              SwitchyardApiKey: {
+                type: "http",
+                scheme: "bearer",
+                bearerFormat: "Switchyard API key",
+                description: "Use Authorization: Bearer <switchyard_api_key> or x-switchyard-api-key."
+              }
+            }
+          }
+        : {})
     }
   };
 
@@ -383,6 +478,27 @@ export function generateOpenApiDocument(options: { inventory?: readonly RouteInv
 
 export function renderOpenApiJson(document: OpenApiDocument): string {
   return `${JSON.stringify(stableObject(document), null, 2)}\n`;
+}
+
+function parseSurface(surface: OpenApiSurface | undefined): OpenApiSurface {
+  if (surface === undefined) {
+    return "local_daemon";
+  }
+  if (surface === "local_daemon" || surface === "hosted_server") {
+    return surface;
+  }
+  throw new Error(`Unknown OpenAPI surface "${surface}". Expected one of: local_daemon, hosted_server.`);
+}
+
+function isHostedProtectedOperation(entry: RouteInventoryEntry): boolean {
+  if (entry.method === "get" && (entry.path === "/health" || entry.path === "/ready")) {
+    return false;
+  }
+  return true;
+}
+
+function isHostedMetricsOperation(entry: RouteInventoryEntry): boolean {
+  return entry.method === "get" && entry.path === "/metrics";
 }
 
 function collectSchemaRefs(inventory: readonly RouteInventoryEntry[]): Set<string> {
@@ -499,4 +615,4 @@ function stableObject(value: unknown): unknown {
   return Object.fromEntries(entries);
 }
 
-export { LOCAL_DAEMON_ROUTE_INVENTORY, type RouteInventoryEntry };
+export { LOCAL_DAEMON_ROUTE_INVENTORY, HOSTED_SERVER_ROUTE_INVENTORY, type RouteInventoryEntry };

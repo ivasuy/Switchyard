@@ -5,7 +5,8 @@
   "type": "module",
   "files": [
     "dist",
-    "openapi.local-daemon.json"
+    "openapi.local-daemon.json",
+    "openapi.hosted-server.json"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,7 +22,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "openapi:generate": "tsx src/openapi-cli.ts generate",
-    "openapi:check": "tsx src/openapi-cli.ts check"
+    "openapi:check": "tsx src/openapi-cli.ts check",
+    "openapi:generate:hosted": "tsx src/openapi-cli.ts generate --surface hosted_server",
+    "openapi:check:hosted": "tsx src/openapi-cli.ts check --surface hosted_server"
   },
   "dependencies": {
     "zod": "^4.1.13"

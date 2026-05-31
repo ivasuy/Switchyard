@@ -2,7 +2,7 @@ export type RouteMethod = "get" | "post" | "put";
 
 export type ResponseContentKind = "json" | "sse" | "binary" | "text";
 
-export type EndpointSurface = "local_daemon" | "hosted_node";
+export type EndpointSurface = "local_daemon" | "hosted_node" | "hosted_server";
 
 export interface RouteInventorySuccess {
   status: number;
@@ -34,6 +34,7 @@ export interface RouteInventoryEntry {
 
 const LOCAL_SURFACE: EndpointSurface = "local_daemon";
 const HOSTED_NODE_SURFACE: EndpointSurface = "hosted_node";
+const HOSTED_SERVER_SURFACE: EndpointSurface = "hosted_server";
 
 function withDefaults(entry: Omit<RouteInventoryEntry, "surface" | "errorEnvelopeOwner">): RouteInventoryEntry {
   return {
@@ -46,6 +47,14 @@ function withDefaults(entry: Omit<RouteInventoryEntry, "surface" | "errorEnvelop
 function withHostedNodeDefaults(entry: Omit<RouteInventoryEntry, "surface" | "errorEnvelopeOwner">): RouteInventoryEntry {
   return {
     surface: HOSTED_NODE_SURFACE,
+    errorEnvelopeOwner: "contracts",
+    ...entry
+  };
+}
+
+function withHostedServerDefaults(entry: Omit<RouteInventoryEntry, "surface" | "errorEnvelopeOwner">): RouteInventoryEntry {
+  return {
+    surface: HOSTED_SERVER_SURFACE,
     errorEnvelopeOwner: "contracts",
     ...entry
   };
@@ -569,4 +578,133 @@ export const HOSTED_NODE_ROUTE_INVENTORY: readonly RouteInventoryEntry[] = [
     noRequestBody: false,
     success: { status: 200, contentKind: "json", schemaRef: "AssignmentResponse", description: "Assignment completion response" }
   })
+];
+
+function routeKey(entry: Pick<RouteInventoryEntry, "method" | "path">): string {
+  return `${entry.method.toUpperCase()} ${entry.path}`;
+}
+
+function asHostedServerEntry(entry: RouteInventoryEntry): RouteInventoryEntry {
+  return withHostedServerDefaults({
+    method: entry.method,
+    path: entry.path,
+    operationId: entry.operationId,
+    summary: entry.summary,
+    tags: entry.tags,
+    ...(entry.querySchemaRef ? { querySchemaRef: entry.querySchemaRef } : {}),
+    ...(entry.requestBody ? { requestBody: entry.requestBody } : {}),
+    noRequestBody: entry.noRequestBody,
+    success: entry.success
+  });
+}
+
+const HOSTED_SERVER_LOCAL_ROUTE_KEYS = new Set<string>([
+  "POST /runs",
+  "GET /runs",
+  "GET /runs/:id",
+  "GET /runs/:id/events",
+  "GET /runs/:id/artifacts",
+  "POST /runs/:id/input",
+  "POST /runs/:id/cancel",
+  "GET /providers",
+  "GET /providers/:id",
+  "GET /runtimes",
+  "GET /runtimes/:id",
+  "GET /models",
+  "GET /models/:id",
+  "GET /runtime-modes",
+  "GET /runtime-modes/:id",
+  "POST /runtime-modes/:id/check",
+  "GET /doctor",
+  "GET /artifacts/:id",
+  "GET /artifacts/:id/content"
+]);
+
+const HOSTED_SERVER_REUSED_LOCAL_ROUTES = LOCAL_DAEMON_ROUTE_INVENTORY
+  .filter((entry) => HOSTED_SERVER_LOCAL_ROUTE_KEYS.has(routeKey(entry)))
+  .map((entry) => asHostedServerEntry(entry));
+
+const HOSTED_SERVER_NODE_QUERY = { schemaRef: "ListNodesQuery" as const, required: false };
+
+const HOSTED_SERVER_NODE_ROUTES: readonly RouteInventoryEntry[] = [
+  withHostedServerDefaults({
+    method: "get",
+    path: "/nodes",
+    operationId: "listNodes",
+    summary: "List connected nodes",
+    tags: ["node"],
+    querySchemaRef: HOSTED_SERVER_NODE_QUERY.schemaRef,
+    noRequestBody: true,
+    success: { status: 200, contentKind: "json", schemaRef: "ListNodesResponse", description: "Node list" }
+  }),
+  withHostedServerDefaults({
+    method: "get",
+    path: "/nodes/:id",
+    operationId: "getNode",
+    summary: "Get connected node",
+    tags: ["node"],
+    noRequestBody: true,
+    success: { status: 200, contentKind: "json", schemaRef: "NodeResponse", description: "Node" }
+  }),
+  ...HOSTED_NODE_ROUTE_INVENTORY.map((entry) => asHostedServerEntry(entry))
+];
+
+export const HOSTED_SERVER_ROUTE_INVENTORY: readonly RouteInventoryEntry[] = [
+  withHostedServerDefaults({
+    method: "get",
+    path: "/health",
+    operationId: "getHealth",
+    summary: "Hosted server health",
+    tags: ["system"],
+    noRequestBody: true,
+    success: { status: 200, contentKind: "json", schemaRef: "HealthResponse", description: "Health status" }
+  }),
+  withHostedServerDefaults({
+    method: "get",
+    path: "/ready",
+    operationId: "getReady",
+    summary: "Hosted server readiness",
+    tags: ["system"],
+    noRequestBody: true,
+    success: { status: 200, contentKind: "json", schemaRef: "ReadyResponse", description: "Readiness status" }
+  }),
+  withHostedServerDefaults({
+    method: "get",
+    path: "/metrics",
+    operationId: "getHostedMetrics",
+    summary: "Operator-only global metrics",
+    tags: ["system"],
+    noRequestBody: true,
+    success: { status: 200, contentKind: "json", schemaRef: "HostedMetricsResponse", description: "Hosted metrics snapshot" }
+  }),
+  withHostedServerDefaults({
+    method: "get",
+    path: "/auth/whoami",
+    operationId: "whoami",
+    summary: "Get authenticated actor context",
+    tags: ["enterprise"],
+    noRequestBody: true,
+    success: { status: 200, contentKind: "json", schemaRef: "WhoamiResponse", description: "Authenticated actor" }
+  }),
+  withHostedServerDefaults({
+    method: "get",
+    path: "/entitlements",
+    operationId: "getEntitlements",
+    summary: "Get active entitlement snapshot",
+    tags: ["enterprise"],
+    noRequestBody: true,
+    success: { status: 200, contentKind: "json", schemaRef: "EntitlementsResponse", description: "Entitlement snapshot" }
+  }),
+  withHostedServerDefaults({
+    method: "get",
+    path: "/audit/events",
+    operationId: "listAuditEvents",
+    summary: "List scoped audit events",
+    tags: ["enterprise"],
+    querySchemaRef: "AuditEventsQuery",
+    noRequestBody: true,
+    success: { status: 200, contentKind: "json", schemaRef: "AuditEventsResponse", description: "Audit events" }
+  }),
+  ...HOSTED_SERVER_REUSED_LOCAL_ROUTES,
+  ...HOSTED_SERVER_NODE_ROUTES
 ];
