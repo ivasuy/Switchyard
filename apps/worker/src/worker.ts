@@ -42,7 +42,8 @@ export interface WorkerReadinessReport {
     queue?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     objectStore?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     hostedRuntimeGate?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
-    hostedRuntimeAdapters?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
+    providerRuntimePolicy?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
+    providerRuntimeAdapters?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     sandbox?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
   };
 }
@@ -117,11 +118,18 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     queue,
     runs,
     events,
-    startRun: async (runId) => runService.startRun(runId),
+    startRun: async (runId: string) => runService.startRun(runId),
     hostedRuntimeAllowlist: config.hostedRuntimeAllowlist,
     deploymentMode: config.deploymentMode,
-    hostedRealRuntimeExecution: config.hostedRealRuntimeExecution
-  });
+    hostedRealRuntimeExecution: config.hostedRealRuntimeExecution,
+    providerActivation: config.providerRuntimeActivation,
+    providerEnvironment: process.env,
+    adapterRuntimeModes: new Set([
+      ...(adapters.has("codex") ? ["codex.exec_json"] : []),
+      ...(adapters.has("claude_code") ? ["claude_code.sdk"] : []),
+      ...(adapters.has("opencode") ? ["opencode.acp"] : [])
+    ])
+  } as any);
 
   let cachedReadiness: { checkedAtMs: number; status: WorkerReadinessReport } | undefined;
 
@@ -249,14 +257,39 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       const hasRealAllowlist = config.hostedRuntimeAllowlist.some((mode) => mode !== "fake.deterministic");
       if (!hasRealAllowlist) {
         checks.hostedRuntimeGate = { ok: true };
+        checks.providerRuntimePolicy = {
+          ok: true,
+          diagnostics: {
+            source: config.providerRuntimeActivation.redactedSummary.source.kind,
+            enabledRealModeCount: config.providerRuntimeActivation.redactedSummary.enabledRealModeCount
+          }
+        };
       } else if (config.hostedRealRuntimeExecution !== "enabled") {
         checks.hostedRuntimeGate = { ok: false, code: "hosted_real_runtime_disabled" };
         return markFailure("hosted_real_runtime_disabled");
-      } else if (config.deploymentMode === "production") {
-        checks.hostedRuntimeGate = { ok: false, code: "hosted_real_runtime_production_forbidden" };
-        return markFailure("hosted_real_runtime_production_forbidden");
       } else {
         checks.hostedRuntimeGate = { ok: true };
+        if (config.deploymentMode === "production" && !config.providerRuntimeActivation.valid) {
+          const code = config.providerRuntimeActivation.reasons[0]?.code ?? "provider_runtime_policy_missing";
+          checks.providerRuntimePolicy = {
+            ok: false,
+            code,
+            diagnostics: redactSecrets({
+              source: config.providerRuntimeActivation.redactedSummary.source.kind,
+              reasonCodes: config.providerRuntimeActivation.redactedSummary.reasonCodes,
+              modeStatuses: config.providerRuntimeActivation.redactedSummary.modeStatuses
+            })
+          };
+          return markFailure(code);
+        }
+        checks.providerRuntimePolicy = {
+          ok: true,
+          diagnostics: redactSecrets({
+            source: config.providerRuntimeActivation.redactedSummary.source.kind,
+            reasonCodes: config.providerRuntimeActivation.redactedSummary.reasonCodes,
+            modeStatuses: config.providerRuntimeActivation.redactedSummary.modeStatuses
+          })
+        };
       }
 
       const gateValidation = validateHostedRuntimeAllowlist({
@@ -270,7 +303,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       }
 
       const adapterCheck = await (deps?.checkConfiguredAdapters ?? checkConfiguredHostedAdapters)(config, deps?.adapters);
-      checks.hostedRuntimeAdapters = adapterCheck.ok
+      checks.providerRuntimeAdapters = adapterCheck.ok
         ? { ok: true, diagnostics: { modes: adapterCheck.modes } }
         : {
           ok: false,

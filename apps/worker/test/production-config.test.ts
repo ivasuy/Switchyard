@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { ConfigError, loadWorkerConfig } from "../src/config.js";
 
@@ -24,6 +27,39 @@ function expectConfigError(fn: () => unknown): ConfigError {
     return error as ConfigError;
   }
   throw new Error("expected ConfigError");
+}
+
+function validCodexPolicy(overrides: {
+  executablePath?: string;
+  enabled?: boolean;
+  spendControls?: {
+    maxActiveRuns: number;
+    maxRunsPerHour: number;
+    maxRunTimeoutSeconds: number;
+    maxPromptBytes: number;
+  };
+} = {}): string {
+  return JSON.stringify({
+    version: 1,
+    modes: {
+      "codex.exec_json": {
+        enabled: overrides.enabled ?? true,
+        executablePath: overrides.executablePath ?? "/bin/echo",
+        cwdPrefixes: ["/srv/switchyard/work"],
+        envAllowlist: ["OPENAI_API_KEY", "PATH"],
+        requiredEnv: ["OPENAI_API_KEY"],
+        fixedArgs: ["exec", "--json"],
+        allowUserArgs: false,
+        sandbox: "read_only",
+        spendControls: overrides.spendControls ?? {
+          maxActiveRuns: 2,
+          maxRunsPerHour: 20,
+          maxRunTimeoutSeconds: 120,
+          maxPromptBytes: 1024
+        }
+      }
+    }
+  });
 }
 
 describe("production worker config", () => {
@@ -114,37 +150,100 @@ describe("production worker config", () => {
     );
   });
 
-  it("rejects unsafe runtime posture and invalid worker settings", () => {
-    expect(() =>
-      loadWorkerConfig(
-        createProductionEnv({
-          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json"
-        })
-      )
-    ).toThrow("hosted_real_runtime_production_forbidden");
-
-    expect(() =>
-      loadWorkerConfig(
-        createProductionEnv({
-          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled"
-        })
-      )
-    ).toThrow("config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION");
-
+  it("rejects invalid worker settings", () => {
     expect(() => loadWorkerConfig(createProductionEnv({ SWITCHYARD_WORKER_IDLE_MS: "0" }))).toThrow(
       "config_invalid:SWITCHYARD_WORKER_IDLE_MS"
     );
   });
 
-  it("surfaces sandbox policy missing when real execution is enabled without policy", () => {
+  it("accepts production real mode only when provider activation is valid", () => {
+    const config = loadWorkerConfig(
+      createProductionEnv({
+        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+        SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+        SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: validCodexPolicy(),
+        OPENAI_API_KEY: "present-openai-key"
+      })
+    );
+    expect(config.providerRuntimeActivation.valid).toBe(true);
+    expect(config.providerRuntimeActivation.enabledRealModes).toEqual(["codex.exec_json"]);
+  });
+
+  it("fails production real mode startup when policy is missing or malformed", () => {
+    expect(() =>
+      loadWorkerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled"
+        })
+      )
+    ).toThrow("provider_runtime_policy_missing");
+
+    expect(() =>
+      loadWorkerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: "{"
+        })
+      )
+    ).toThrow("provider_runtime_policy_malformed");
+  });
+
+  it("fails production real mode for disabled policy, missing credentials, invalid spend controls, and missing binary", () => {
     const error = expectConfigError(() =>
       loadWorkerConfig(
         createProductionEnv({
-          SWITCHYARD_SANDBOX_REAL_EXECUTION: "enabled"
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: validCodexPolicy({ enabled: false }),
+          OPENAI_API_KEY: "present-openai-key"
         })
       )
     );
-    expect(error.code).toBe("sandbox_policy_missing");
+    expect(error.code).toBe("provider_runtime_policy_disabled");
+
+    const missingCredentials = expectConfigError(() =>
+      loadWorkerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: validCodexPolicy()
+        })
+      )
+    );
+    expect(missingCredentials.code).toBe("provider_credentials_missing");
+
+    const invalidSpend = expectConfigError(() =>
+      loadWorkerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: validCodexPolicy({
+            spendControls: {
+              maxActiveRuns: 2,
+              maxRunsPerHour: 20,
+              maxRunTimeoutSeconds: 120,
+              maxPromptBytes: 0
+            }
+          }),
+          OPENAI_API_KEY: "present-openai-key"
+        })
+      )
+    );
+    expect(invalidSpend.code).toBe("provider_spend_controls_invalid");
+
+    const missingBinary = expectConfigError(() =>
+      loadWorkerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: validCodexPolicy({ executablePath: "/definitely/missing/codex-bin" }),
+          OPENAI_API_KEY: "present-openai-key"
+        })
+      )
+    );
+    expect(missingBinary.code).toBe("provider_binary_unavailable");
   });
 
   it("keeps local defaults backwards-compatible", () => {
@@ -154,5 +253,90 @@ describe("production worker config", () => {
     expect(config.redisUrl).toBeUndefined();
     expect(config.hostedRuntimeAllowlist).toEqual(["fake.deterministic"]);
     expect(config.hostedRealRuntimeExecution).toBe("disabled");
+  });
+
+  it("fails closed for provider policy path loading states and json/path conflict", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-provider-policy-"));
+    const unreadablePath = join(dir, "missing.json");
+    const emptyPath = join(dir, "empty.json");
+    const oversizedPath = join(dir, "oversized.json");
+    const invalidJsonPath = join(dir, "invalid.json");
+    const invalidUtf8Path = join(dir, "invalid-utf8.json");
+
+    try {
+      await writeFile(emptyPath, "");
+      await writeFile(oversizedPath, "x".repeat(70_000));
+      await writeFile(invalidJsonPath, "{");
+      await writeFile(invalidUtf8Path, Buffer.from([0xff, 0xfe, 0xfd]));
+
+      expectConfigError(() =>
+        loadWorkerConfig(
+          createProductionEnv({
+            SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+            SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+            SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH: unreadablePath,
+            OPENAI_API_KEY: "present-openai-key"
+          })
+        )
+      );
+      expectConfigError(() =>
+        loadWorkerConfig(
+          createProductionEnv({
+            SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+            SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+            SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH: emptyPath,
+            OPENAI_API_KEY: "present-openai-key"
+          })
+        )
+      );
+      expectConfigError(() =>
+        loadWorkerConfig(
+          createProductionEnv({
+            SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+            SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+            SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH: oversizedPath,
+            OPENAI_API_KEY: "present-openai-key"
+          })
+        )
+      );
+      expectConfigError(() =>
+        loadWorkerConfig(
+          createProductionEnv({
+            SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+            SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+            SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH: invalidJsonPath,
+            OPENAI_API_KEY: "present-openai-key"
+          })
+        )
+      );
+      expectConfigError(() =>
+        loadWorkerConfig(
+          createProductionEnv({
+            SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+            SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+            SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH: invalidUtf8Path,
+            OPENAI_API_KEY: "present-openai-key"
+          })
+        )
+      );
+
+      const conflict = expectConfigError(() =>
+        loadWorkerConfig(
+          createProductionEnv({
+            SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+            SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+            SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: validCodexPolicy(),
+            SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH: invalidJsonPath,
+            OPENAI_API_KEY: "present-openai-key"
+          })
+        )
+      );
+      expect(conflict.code).toBe("provider_runtime_policy_malformed");
+      const summary = JSON.stringify(conflict.redactedConfig);
+      expect(summary).not.toContain(invalidJsonPath);
+      expect(summary).not.toContain("SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

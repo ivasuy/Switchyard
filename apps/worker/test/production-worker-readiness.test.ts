@@ -43,6 +43,20 @@ function baseConfig(): WorkerConfig {
       cancelTimeoutMs: 5000,
       maxMessageBytes: 1024 * 1024
     },
+    providerRuntimeActivation: {
+      valid: true,
+      enabledRealModes: [],
+      reasons: [],
+      redactedSummary: {
+        deploymentMode: "production",
+        hostedRealRuntimeExecution: "disabled",
+        realModeCount: 0,
+        enabledRealModeCount: 0,
+        source: { kind: "none" },
+        modeStatuses: [],
+        reasonCodes: []
+      }
+    },
     redactedSummary: {
       deploymentMode: "production"
     }
@@ -182,6 +196,56 @@ describe("production worker readiness", () => {
           mode: "disabled",
           policyCount: 0,
           ptyDriverConfigured: false
+        }
+      });
+      expect(readiness.checks?.providerRuntimePolicy).toMatchObject({
+        ok: true,
+        diagnostics: {
+          source: "none"
+        }
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it("fails readiness when production provider policy activation is invalid", async () => {
+    const worker = createHostedWorker({
+      ...baseConfig(),
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      hostedRealRuntimeExecution: "enabled",
+      providerRuntimeActivation: {
+        valid: false,
+        enabledRealModes: [],
+        reasons: [{ code: "provider_runtime_policy_missing", runtimeMode: "codex.exec_json" }],
+        redactedSummary: {
+          deploymentMode: "production",
+          hostedRealRuntimeExecution: "enabled",
+          realModeCount: 1,
+          enabledRealModeCount: 0,
+          source: { kind: "path" },
+          modeStatuses: [{ runtimeMode: "codex.exec_json", ready: false, reasons: ["provider_runtime_policy_missing"] }],
+          reasonCodes: ["provider_runtime_policy_missing"]
+        }
+      }
+    }, {
+      queue: new MemoryRunQueue(),
+      runs: new InMemoryRunStore(),
+      events: new InMemoryEventStore(),
+      postgres: fakePostgresHandle(),
+      ensurePostgresSchema: async () => {},
+      probePostgres: async () => {},
+      checkSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 })
+    });
+
+    try {
+      const readiness = await worker.ready();
+      expect(readiness.ok).toBe(false);
+      expect(readiness.checks?.providerRuntimePolicy).toMatchObject({
+        ok: false,
+        code: "provider_runtime_policy_missing",
+        diagnostics: {
+          source: "path"
         }
       });
     } finally {

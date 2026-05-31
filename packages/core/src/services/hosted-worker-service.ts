@@ -2,10 +2,17 @@ import type { RunQueuePort, RunQueueClaimedJob } from "../ports/queue.js";
 import type { RunStore } from "../ports/run-store.js";
 import type { EventStore } from "../ports/event-store.js";
 import type { Run, SwitchyardEvent } from "@switchyard/contracts";
+import { providerRuntimeModeSchema } from "@switchyard/contracts";
 import {
+  isRealHostedRuntimeMode,
   prepareHostedRunForExecution,
   type HostedRealRuntimeExecution
 } from "./hosted-runtime-catalog.js";
+import {
+  buildProviderResolvedCommand,
+  checkProviderSpendControlsForRun,
+  type ProviderRuntimeActivationResult
+} from "./provider-runtime-policy.js";
 
 export interface HostedWorkerServiceDependencies {
   queue: RunQueuePort;
@@ -15,6 +22,9 @@ export interface HostedWorkerServiceDependencies {
   hostedRuntimeAllowlist: string[];
   deploymentMode: string;
   hostedRealRuntimeExecution: HostedRealRuntimeExecution;
+  providerActivation?: ProviderRuntimeActivationResult | undefined;
+  providerEnvironment?: Readonly<Record<string, string | undefined>> | undefined;
+  adapterRuntimeModes?: ReadonlySet<string> | undefined;
   now?: () => string;
   metrics?: { inc(path: string): void };
   logger?: {
@@ -25,9 +35,15 @@ export interface HostedWorkerServiceDependencies {
 
 export class HostedWorkerService {
   private readonly now: () => string;
+  private readonly nowMs: () => number;
 
   constructor(private readonly deps: HostedWorkerServiceDependencies) {
     this.now = deps.now ?? (() => new Date().toISOString());
+    this.nowMs = () => {
+      const iso = this.now();
+      const parsed = Date.parse(iso);
+      return Number.isFinite(parsed) ? parsed : Date.now();
+    };
   }
 
   async processNext(): Promise<boolean> {
@@ -49,11 +65,13 @@ export class HostedWorkerService {
       queuePayload: job.payload,
       allowlist: this.deps.hostedRuntimeAllowlist,
       deploymentMode: this.deps.deploymentMode,
-      realRuntimeExecution: this.deps.hostedRealRuntimeExecution
+      realRuntimeExecution: this.deps.hostedRealRuntimeExecution,
+      providerActivation: this.deps.providerActivation
     });
 
     if (!prepared.ok) {
       this.deps.metrics?.inc("hostedRuntime.denied");
+      this.emitLifecycle("denied", run.runtimeMode, prepared.reasonCode);
       this.deps.logger?.warn("hosted.worker.claim.rejected", {
         runId: run.id,
         runtimeMode: run.runtimeMode,
@@ -64,9 +82,24 @@ export class HostedWorkerService {
       return true;
     }
 
+    const claimGuard = await this.revalidateClaimGuards(prepared.run);
+    if (!claimGuard.ok) {
+      this.deps.metrics?.inc("hostedRuntime.denied");
+      this.emitLifecycle(claimGuard.outcome, run.runtimeMode, claimGuard.reasonCode);
+      this.deps.logger?.warn("hosted.worker.claim.rejected", {
+        runId: run.id,
+        runtimeMode: run.runtimeMode,
+        reasonCode: claimGuard.reasonCode
+      });
+      await this.failRun(run, claimGuard.reasonCode);
+      await this.deps.queue.fail(job.id, { reasonCode: claimGuard.reasonCode, message: claimGuard.reasonCode });
+      return true;
+    }
+
     const persisted = await this.persistPreparedRun(run, prepared.run);
     if (!persisted.ok) {
       this.deps.metrics?.inc("hostedRuntime.denied");
+      this.emitLifecycle("denied", run.runtimeMode, "hosted_run_state_invalid");
       this.deps.logger?.warn("hosted.worker.claim.rejected", {
         runId: run.id,
         runtimeMode: run.runtimeMode,
@@ -78,8 +111,16 @@ export class HostedWorkerService {
     }
 
     try {
-      await this.deps.startRun(run.id);
+      this.emitLifecycle("accepted", run.runtimeMode, "claim_revalidated");
+      const started = await this.deps.startRun(run.id);
       this.deps.metrics?.inc("hostedRuntime.started");
+      if (started.status === "failed") {
+        this.emitLifecycle("failed", run.runtimeMode, "runtime_failed");
+      } else if (started.status === "timeout") {
+        this.emitLifecycle("timed_out", run.runtimeMode, "runtime_timeout");
+      } else if (started.status === "cancelled") {
+        this.emitLifecycle("cancelled", run.runtimeMode, "runtime_cancelled");
+      }
       this.deps.logger?.info("hosted.worker.claim.revalidated", {
         runId: run.id,
         runtimeMode: run.runtimeMode
@@ -89,6 +130,111 @@ export class HostedWorkerService {
     } catch (error) {
       return this.handleRunFailure(job, persisted.run, error);
     }
+  }
+
+  private async revalidateClaimGuards(
+    run: Run
+  ): Promise<
+    | { ok: true }
+    | {
+      ok: false;
+      reasonCode: string;
+      outcome: "denied" | "spend_control_denied";
+    }
+  > {
+    if (this.deps.deploymentMode !== "production") {
+      return { ok: true };
+    }
+
+    if (!run.runtimeMode || !isRealHostedRuntimeMode(run.runtimeMode)) {
+      return { ok: true };
+    }
+    const runtimeMode = toProviderRuntimeMode(run.runtimeMode);
+    if (!runtimeMode) {
+      return {
+        ok: false,
+        reasonCode: "provider_runtime_policy_unknown_mode",
+        outcome: "denied"
+      };
+    }
+
+    const activation = this.deps.providerActivation;
+    if (!activation?.valid) {
+      return {
+        ok: false,
+        reasonCode: activation?.reasons[0]?.code ?? "provider_runtime_policy_missing",
+        outcome: "denied"
+      };
+    }
+    if (!activation.enabledRealModes.includes(runtimeMode)) {
+      return {
+        ok: false,
+        reasonCode: "provider_runtime_policy_disabled",
+        outcome: "denied"
+      };
+    }
+
+    if (this.deps.adapterRuntimeModes && !this.deps.adapterRuntimeModes.has(runtimeMode)) {
+      return {
+        ok: false,
+        reasonCode: "hosted_runtime_adapter_unavailable",
+        outcome: "denied"
+      };
+    }
+
+    const activeRuns = await this.countActiveRunsForRuntimeMode(runtimeMode, run.id);
+    const runsInPastHour = await this.countRunsInPastHourForRuntimeMode(runtimeMode, run.id);
+    const spend = checkProviderSpendControlsForRun({
+      activation,
+      runtimeMode,
+      promptBytes: Buffer.byteLength(run.task, "utf8"),
+      activeRuns,
+      runsInPastHour,
+      timeoutSeconds: run.timeoutSeconds
+    });
+    if (!spend.ok) {
+      return {
+        ok: false,
+        reasonCode: spend.code,
+        outcome: "spend_control_denied"
+      };
+    }
+
+    const command = buildProviderResolvedCommand({
+      activation,
+      runtimeMode,
+      cwd: run.cwd,
+      env: this.deps.providerEnvironment ?? process.env,
+      metadata: run.metadata
+    });
+    if (!command.ok) {
+      return {
+        ok: false,
+        reasonCode: command.code,
+        outcome: "denied"
+      };
+    }
+
+    return { ok: true };
+  }
+
+  private async countActiveRunsForRuntimeMode(runtimeMode: string, ignoreRunId: string): Promise<number> {
+    const active = await this.deps.runs.list({
+      status: ["starting", "running", "waiting_for_input", "waiting_for_approval"],
+      placement: ["hosted"],
+      limit: 5000
+    });
+    return active.runs.filter((candidate) => candidate.runtimeMode === runtimeMode && candidate.id !== ignoreRunId).length;
+  }
+
+  private async countRunsInPastHourForRuntimeMode(runtimeMode: string, ignoreRunId: string): Promise<number> {
+    const since = new Date(this.nowMs() - 3_600_000).toISOString();
+    const recent = await this.deps.runs.list({
+      placement: ["hosted"],
+      since,
+      limit: 5000
+    });
+    return recent.runs.filter((candidate) => candidate.runtimeMode === runtimeMode && candidate.id !== ignoreRunId).length;
   }
 
   private async persistPreparedRun(
@@ -129,16 +275,33 @@ export class HostedWorkerService {
 
   private async handleRunFailure(job: RunQueueClaimedJob, run: Run, error: unknown): Promise<boolean> {
     const reasonCode = toReasonCode(error);
+    if (isNonRetryableReason(reasonCode)) {
+      await this.failRun(run, reasonCode);
+      await this.deps.queue.fail(job.id, { reasonCode, message: reasonCode });
+      this.emitLifecycle("failed", run.runtimeMode, reasonCode);
+      return true;
+    }
     const exhausted = job.attempts >= job.maxAttempts;
 
     if (exhausted) {
       await this.failRun(run, "worker_retry_exhausted");
       await this.deps.queue.fail(job.id, { reasonCode: "worker_retry_exhausted", message: reasonCode });
+      this.emitLifecycle("failed", run.runtimeMode, "worker_retry_exhausted");
       return true;
     }
 
     await this.deps.queue.retry(job.id);
     return true;
+  }
+
+  private emitLifecycle(
+    outcome: "accepted" | "denied" | "failed" | "timed_out" | "cancelled" | "spend_control_denied",
+    runtimeMode: string | undefined,
+    reasonCode: string
+  ): void {
+    const mode = sanitizeMetricLabel(runtimeMode ?? "unknown");
+    const reason = sanitizeMetricLabel(reasonCode);
+    this.deps.metrics?.inc(`hostedRuntime.lifecycle.outcome.${outcome}.runtime_mode.${mode}.reason.${reason}`);
   }
 
   private async failRun(run: Run, reasonCode: string): Promise<void> {
@@ -180,11 +343,64 @@ export class HostedWorkerService {
 }
 
 function toReasonCode(error: unknown): string {
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    const reasonCode = record["reasonCode"];
+    if (typeof reasonCode === "string" && reasonCode.length > 0) {
+      return reasonCode;
+    }
+  }
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("provider_")) {
+    const direct = message.match(/provider_[a-z_]+/);
+    if (direct?.[0]) {
+      return direct[0];
+    }
+  }
+  if (message.includes("hosted_input_bridge_unsupported")) {
+    return "hosted_input_bridge_unsupported";
+  }
+  if (message.includes("hosted_approval_bridge_unsupported")) {
+    return "hosted_approval_bridge_unsupported";
+  }
+  if (message.includes("provider_command_denied")) {
+    return "provider_command_denied";
+  }
   if (message.includes("object_store_write_failed")) {
     return "object_store_write_failed";
   }
   return "worker_job_failed";
+}
+
+function isNonRetryableReason(reasonCode: string): boolean {
+  return reasonCode === "provider_runtime_policy_missing"
+    || reasonCode === "provider_runtime_policy_empty"
+    || reasonCode === "provider_runtime_policy_malformed"
+    || reasonCode === "provider_runtime_policy_unknown_mode"
+    || reasonCode === "provider_runtime_policy_disabled"
+    || reasonCode === "provider_command_policy_invalid"
+    || reasonCode === "provider_binary_unavailable"
+    || reasonCode === "provider_credentials_missing"
+    || reasonCode === "provider_spend_controls_invalid"
+    || reasonCode === "provider_prompt_too_large"
+    || reasonCode === "provider_spend_limit_exceeded"
+    || reasonCode === "provider_command_denied"
+    || reasonCode === "hosted_runtime_adapter_unavailable"
+    || reasonCode === "hosted_input_bridge_unsupported"
+    || reasonCode === "hosted_approval_bridge_unsupported";
+}
+
+function sanitizeMetricLabel(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 96) || "unknown";
+}
+
+function toProviderRuntimeMode(value: string): "codex.exec_json" | "claude_code.sdk" | "opencode.acp" | undefined {
+  const parsed = providerRuntimeModeSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function isTerminalRun(run: Run): boolean {

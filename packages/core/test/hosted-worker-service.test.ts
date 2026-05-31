@@ -426,6 +426,166 @@ describe("HostedWorkerService", () => {
     expect(events.items.at(-1)?.payload?.reasonCode).toBe("hosted_run_state_invalid");
   });
 
+  it("revalidates production provider activation before adapter start", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const run = await runs.create({
+      id: "run_provider_revalidate_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/srv/switchyard/work/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: { sandbox: "read-only" },
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    let started = 0;
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      providerActivation: {
+        valid: false,
+        enabledRealModes: [],
+        reasons: [{ code: "provider_runtime_policy_disabled", runtimeMode: "codex.exec_json" }],
+        redactedSummary: {
+          deploymentMode: "production",
+          hostedRealRuntimeExecution: "enabled",
+          realModeCount: 1,
+          enabledRealModeCount: 0,
+          source: { kind: "json" },
+          modeStatuses: [
+            { runtimeMode: "codex.exec_json", ready: false, reasons: ["provider_runtime_policy_disabled"] }
+          ],
+          reasonCodes: ["provider_runtime_policy_disabled"]
+        }
+      },
+      startRun: async () => {
+        started += 1;
+        throw new Error("must_not_start");
+      },
+      now: () => "2026-05-30T00:00:10.000Z"
+    });
+
+    await svc.processNext();
+    expect(started).toBe(0);
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    expect((await queue.getJob("job_1"))?.failure?.reasonCode).toBe("provider_runtime_policy_disabled");
+  });
+
+  it("rejects oversized provider prompts before adapter start", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const run = await runs.create({
+      id: "run_provider_prompt_limit_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/srv/switchyard/work/repo",
+      task: "x".repeat(33),
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: { sandbox: "read-only" },
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    let started = 0;
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      providerActivation: validCodexActivation({
+        spendControls: {
+          maxActiveRuns: 5,
+          maxRunsPerHour: 10,
+          maxRunTimeoutSeconds: 120,
+          maxPromptBytes: 32
+        }
+      }),
+      providerEnvironment: { OPENAI_API_KEY: "present", PATH: "/usr/bin" },
+      adapterRuntimeModes: new Set(["codex.exec_json"]),
+      startRun: async () => {
+        started += 1;
+        throw new Error("must_not_start");
+      },
+      now: () => "2026-05-30T00:00:10.000Z"
+    });
+
+    await svc.processNext();
+    expect(started).toBe(0);
+    expect((await runs.get(run.id))?.status).toBe("failed");
+    expect((await queue.getJob("job_1"))?.failure?.reasonCode).toBe("provider_prompt_too_large");
+  });
+
+  it("does not retry non-retryable provider command denials", async () => {
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const run = await runs.create({
+      id: "run_provider_non_retryable_1",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/srv/switchyard/work/repo",
+      task: "task",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: { sandbox: "read-only" },
+      runtimeMode: "codex.exec_json",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    await queue.enqueue({ runId: run.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    let starts = 0;
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      providerActivation: validCodexActivation(),
+      providerEnvironment: { OPENAI_API_KEY: "present", PATH: "/usr/bin" },
+      adapterRuntimeModes: new Set(["codex.exec_json"]),
+      startRun: async () => {
+        starts += 1;
+        const error = new Error("provider_command_denied");
+        (error as Error & { reasonCode?: string }).reasonCode = "provider_command_denied";
+        throw error;
+      },
+      now: () => "2026-05-30T00:00:00.000Z"
+    });
+
+    await svc.processNext();
+    expect(starts).toBe(1);
+    expect((await queue.getJob("job_1"))?.state).toBe("failed");
+    expect((await queue.getJob("job_1"))?.failure?.reasonCode).toBe("provider_command_denied");
+  });
+
   it("fails durable run when stale claimed job is exhausted during recovery", async () => {
     const queue = new MemoryQueue();
     const runs = new InMemoryRunStore();
@@ -473,4 +633,199 @@ describe("HostedWorkerService", () => {
     expect((await runs.get("run_stale_exhausted_1"))?.status).toBe("failed");
     expect(events.items.at(-1)?.payload?.reasonCode).toBe("worker_retry_exhausted");
   });
+
+  it("emits provider lifecycle metrics for accepted, denied, failed, timed_out, cancelled, and spend_control_denied", async () => {
+    const metrics: string[] = [];
+    const now = "2026-05-30T00:00:00.000Z";
+
+    const runAccepted = {
+      id: "run_metrics_accept",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      cwd: "/srv/switchyard/work/repo",
+      task: "ok",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: { sandbox: "read-only" },
+      runtimeMode: "codex.exec_json",
+      createdAt: now
+    };
+
+    const runSpendDenied = { ...runAccepted, id: "run_metrics_spend", task: "x".repeat(200) };
+    const runFailed = { ...runAccepted, id: "run_metrics_failed" };
+    const runTimedOut = { ...runAccepted, id: "run_metrics_timeout" };
+    const runCancelled = { ...runAccepted, id: "run_metrics_cancelled" };
+    const runDenied = { ...runAccepted, id: "run_metrics_denied" };
+
+    const queue = new MemoryQueue();
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    await runs.create(runAccepted);
+    await runs.create(runSpendDenied);
+    await runs.create(runFailed);
+    await runs.create(runTimedOut);
+    await runs.create(runCancelled);
+    await runs.create(runDenied);
+    await queue.enqueue({ runId: runAccepted.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+    await queue.enqueue({ runId: runSpendDenied.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+    await queue.enqueue({ runId: runFailed.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+    await queue.enqueue({ runId: runTimedOut.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+    await queue.enqueue({ runId: runCancelled.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+    await queue.enqueue({ runId: runDenied.id, placement: "hosted", runtimeMode: "codex.exec_json" });
+
+    let invocation = 0;
+    const svc = new HostedWorkerService({
+      queue: queue as any,
+      runs,
+      events,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      providerActivation: validCodexActivation({
+        spendControls: {
+          maxActiveRuns: 10,
+          maxRunsPerHour: 50,
+          maxRunTimeoutSeconds: 120,
+          maxPromptBytes: 64
+        }
+      }),
+      providerEnvironment: { OPENAI_API_KEY: "present", PATH: "/usr/bin" },
+      adapterRuntimeModes: new Set(["codex.exec_json"]),
+      metrics: { inc: (path) => metrics.push(path) },
+      startRun: async (runId) => {
+        invocation += 1;
+        if (runId === "run_metrics_failed") {
+          const failed = { ...(await runs.get(runId)), status: "failed", endedAt: "2026-05-30T00:00:01.000Z" };
+          await runs.update(failed);
+          return failed;
+        }
+        if (runId === "run_metrics_timeout") {
+          const timeout = { ...(await runs.get(runId)), status: "timeout", endedAt: "2026-05-30T00:00:01.000Z" };
+          await runs.update(timeout);
+          return timeout;
+        }
+        if (runId === "run_metrics_cancelled") {
+          const cancelled = { ...(await runs.get(runId)), status: "cancelled", endedAt: "2026-05-30T00:00:01.000Z" };
+          await runs.update(cancelled);
+          return cancelled;
+        }
+        if (runId === "run_metrics_denied") {
+          throw Object.assign(new Error("provider_command_denied"), { reasonCode: "provider_command_denied" });
+        }
+        const completed = { ...(await runs.get(runId)), status: "completed", endedAt: "2026-05-30T00:00:01.000Z" };
+        await runs.update(completed);
+        return completed;
+      },
+      now: () => now
+    });
+
+    await svc.processNext();
+    await svc.processNext();
+    await svc.processNext();
+    await svc.processNext();
+    await svc.processNext();
+    await svc.processNext();
+
+    expect(invocation).toBe(5);
+
+    const deniedQueue = new MemoryQueue();
+    const deniedRuns = new InMemoryRunStore();
+    const deniedEvents = new InMemoryEventStore();
+    await deniedRuns.create({
+      ...runAccepted,
+      id: "run_metrics_policy_denied"
+    });
+    await deniedQueue.enqueue({
+      runId: "run_metrics_policy_denied",
+      placement: "hosted",
+      runtimeMode: "codex.exec_json"
+    });
+    const deniedSvc = new HostedWorkerService({
+      queue: deniedQueue as any,
+      runs: deniedRuns,
+      events: deniedEvents,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      providerActivation: {
+        valid: false,
+        enabledRealModes: [],
+        reasons: [{ code: "provider_runtime_policy_disabled", runtimeMode: "codex.exec_json" }],
+        redactedSummary: {
+          deploymentMode: "production",
+          hostedRealRuntimeExecution: "enabled",
+          realModeCount: 1,
+          enabledRealModeCount: 0,
+          source: { kind: "json" },
+          modeStatuses: [{ runtimeMode: "codex.exec_json", ready: false, reasons: ["provider_runtime_policy_disabled"] }],
+          reasonCodes: ["provider_runtime_policy_disabled"]
+        }
+      },
+      providerEnvironment: { OPENAI_API_KEY: "present", PATH: "/usr/bin" },
+      adapterRuntimeModes: new Set(["codex.exec_json"]),
+      metrics: { inc: (path) => metrics.push(path) },
+      startRun: async () => {
+        throw new Error("must_not_start");
+      },
+      now: () => now
+    });
+    await deniedSvc.processNext();
+
+    const joined = metrics.join("\n");
+    expect(joined).toContain("outcome.accepted");
+    expect(joined).toContain("outcome.denied");
+    expect(joined).toContain("outcome.failed");
+    expect(joined).toContain("outcome.timed_out");
+    expect(joined).toContain("outcome.cancelled");
+    expect(joined).toContain("outcome.spend_control_denied");
+  });
 });
+
+function validCodexActivation(overrides: {
+  spendControls?: {
+    maxActiveRuns: number;
+    maxRunsPerHour: number;
+    maxRunTimeoutSeconds: number;
+    maxPromptBytes: number;
+  };
+} = {}) {
+  return {
+    valid: true as const,
+    enabledRealModes: ["codex.exec_json"],
+    reasons: [],
+    redactedSummary: {
+      deploymentMode: "production" as const,
+      hostedRealRuntimeExecution: "enabled" as const,
+      realModeCount: 1,
+      enabledRealModeCount: 1,
+      source: { kind: "json" as const },
+      modeStatuses: [{ runtimeMode: "codex.exec_json" as const, ready: true, reasons: [] }],
+      reasonCodes: []
+    },
+    policy: {
+      version: 1 as const,
+      modes: {
+        "codex.exec_json": {
+          enabled: true,
+          executablePath: "/opt/switchyard/bin/codex",
+          cwdPrefixes: ["/srv/switchyard/work"],
+          envAllowlist: ["OPENAI_API_KEY", "PATH"],
+          requiredEnv: ["OPENAI_API_KEY"],
+          fixedArgs: ["exec", "--json"],
+          allowUserArgs: false as const,
+          sandbox: "read_only" as const,
+          spendControls: overrides.spendControls ?? {
+            maxActiveRuns: 5,
+            maxRunsPerHour: 10,
+            maxRunTimeoutSeconds: 120,
+            maxPromptBytes: 1024
+          }
+        }
+      }
+    }
+  };
+}

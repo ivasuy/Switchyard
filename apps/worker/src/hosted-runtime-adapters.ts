@@ -3,8 +3,11 @@ import {
   CodexExecJsonAdapter,
   OpenCodeAcpAdapter,
   createClaudeCodeCliClient,
+  type ClaudeCodeAdapterOptions,
+  type ClaudeCodeCliClientOptions,
   type ClaudeCodeClient,
   type ClaudeCodeCliProcessFactory,
+  type CodexExecJsonAdapterOptions,
   type CodexProcessFactory,
   type OpenCodeAcpAdapterOptions
 } from "@switchyard/adapters";
@@ -18,6 +21,10 @@ import {
 } from "@switchyard/core";
 import { FakeRuntimeAdapter } from "@switchyard/testkit";
 import type { WorkerConfig } from "./config.js";
+import {
+  buildProviderResolvedCommand,
+  type BuildProviderResolvedCommandInput
+} from "../../../packages/core/dist/services/provider-runtime-policy.js";
 
 export interface HostedWorkerAdapterFactoryDeps {
   codexProcessFactory?: CodexProcessFactory;
@@ -37,40 +44,63 @@ export function buildHostedWorkerAdapters(
   const safeLogger = createHostedSafeLogger(deps.logger);
 
   if (shouldEnableRealMode(config, "codex.exec_json")) {
-    adapters.set("codex", new CodexExecJsonAdapter({
-      ...(deps.codexProcessFactory ? { processFactory: deps.codexProcessFactory } : {}),
-      logger: safeLogger
-    }));
+    const hostedProviderCommand = config.deploymentMode === "production"
+      ? resolveHostedProviderCommand(config, "codex.exec_json", { sandbox: "read-only" })
+      : undefined;
+    if (config.deploymentMode !== "production" || hostedProviderCommand) {
+      const options: CodexExecJsonAdapterOptions = {
+        ...(deps.codexProcessFactory ? { processFactory: deps.codexProcessFactory } : {}),
+        logger: safeLogger,
+        ...(hostedProviderCommand ? { hostedProviderCommand } : {})
+      };
+      adapters.set("codex", new CodexExecJsonAdapter(options));
+    }
   }
 
   if (shouldEnableRealMode(config, "claude_code.sdk")) {
-    const client = deps.claudeClient ?? createClaudeCodeCliClient({
-      command: config.claudeCode.command,
-      ...(deps.claudeProcessFactory ? { processFactory: deps.claudeProcessFactory } : {}),
-      permissionMode: "read_only",
-      disabledTools: ["Bash", "WebFetch", "WebSearch"]
-    });
-    adapters.set("claude_code", new ClaudeCodeAdapter({
-      client,
-      command: config.claudeCode.command,
-      requestTimeoutMs: config.claudeCode.requestTimeoutMs,
-      liveProbe: config.claudeCode.liveProbe,
-      maxBudgetUsd: config.claudeCode.maxBudgetUsd,
-      permissionMode: "read_only",
-      disabledTools: ["Bash", "WebFetch", "WebSearch"],
-      ...(safeLogger ? { logger: safeLogger } : {})
-    }));
+    const hostedProviderCommand = config.deploymentMode === "production"
+      ? resolveHostedProviderCommand(config, "claude_code.sdk")
+      : undefined;
+    if (config.deploymentMode !== "production" || hostedProviderCommand) {
+      const clientOptions: ClaudeCodeCliClientOptions = {
+        command: config.claudeCode.command,
+        ...(deps.claudeProcessFactory ? { processFactory: deps.claudeProcessFactory } : {}),
+        permissionMode: "read_only",
+        disabledTools: ["Bash", "WebFetch", "WebSearch"],
+        ...(hostedProviderCommand ? { hostedProviderCommand } : {})
+      };
+      const client = deps.claudeClient ?? createClaudeCodeCliClient(clientOptions);
+      const adapterOptions: ClaudeCodeAdapterOptions = {
+        client,
+        command: config.claudeCode.command,
+        requestTimeoutMs: config.claudeCode.requestTimeoutMs,
+        liveProbe: config.claudeCode.liveProbe,
+        maxBudgetUsd: config.claudeCode.maxBudgetUsd,
+        permissionMode: "read_only",
+        disabledTools: ["Bash", "WebFetch", "WebSearch"],
+        ...(hostedProviderCommand ? { hostedProviderCommand } : {}),
+        ...(safeLogger ? { logger: safeLogger } : {})
+      };
+      adapters.set("claude_code", new ClaudeCodeAdapter(adapterOptions));
+    }
   }
 
   if (shouldEnableRealMode(config, "opencode.acp")) {
-    adapters.set("opencode", new OpenCodeAcpAdapter({
-      command: config.opencode.command,
-      requestTimeoutMs: config.acp.requestTimeoutMs,
-      cancelTimeoutMs: config.acp.cancelTimeoutMs,
-      maxMessageBytes: config.acp.maxMessageBytes,
-      ...(deps.opencodeProcessFactory ? { processFactory: deps.opencodeProcessFactory } : {}),
-      logger: safeLogger
-    }));
+    const hostedProviderCommand = config.deploymentMode === "production"
+      ? resolveHostedProviderCommand(config, "opencode.acp")
+      : undefined;
+    if (config.deploymentMode !== "production" || hostedProviderCommand) {
+      const options: OpenCodeAcpAdapterOptions = {
+        command: config.opencode.command,
+        requestTimeoutMs: config.acp.requestTimeoutMs,
+        cancelTimeoutMs: config.acp.cancelTimeoutMs,
+        maxMessageBytes: config.acp.maxMessageBytes,
+        ...(deps.opencodeProcessFactory ? { processFactory: deps.opencodeProcessFactory } : {}),
+        logger: safeLogger,
+        ...(hostedProviderCommand ? { hostedProviderCommand } : {})
+      };
+      adapters.set("opencode", new OpenCodeAcpAdapter(options));
+    }
   }
 
   return adapters;
@@ -237,7 +267,8 @@ function shouldEnableRealMode(config: WorkerConfig, mode: HostedRuntimeModeSlug)
     return true;
   }
   if (config.deploymentMode === "production") {
-    return false;
+    return config.providerRuntimeActivation.valid
+      && config.providerRuntimeActivation.enabledRealModes.includes(mode as "codex.exec_json" | "claude_code.sdk" | "opencode.acp");
   }
   if (config.hostedRealRuntimeExecution !== "enabled") {
     return false;
@@ -257,13 +288,46 @@ function statusForMode(
   if (!allowlisted) {
     return { ok: true, code: "not_allowlisted" };
   }
-  if (config.deploymentMode === "production") {
-    return { ok: false, code: "hosted_real_runtime_production_forbidden" };
+  if (config.deploymentMode === "production" && !config.providerRuntimeActivation.valid) {
+    return {
+      ok: false,
+      code: config.providerRuntimeActivation.reasons[0]?.code ?? "provider_runtime_policy_missing"
+    };
+  }
+  if (config.deploymentMode === "production" && !config.providerRuntimeActivation.enabledRealModes.includes(mode as "codex.exec_json" | "claude_code.sdk" | "opencode.acp")) {
+    return { ok: false, code: "provider_runtime_policy_disabled" };
   }
   if (config.hostedRealRuntimeExecution !== "enabled") {
     return { ok: false, code: "hosted_real_runtime_disabled" };
   }
   return isConstructed ? { ok: true } : { ok: false, code: "adapter_not_constructed" };
+}
+
+function resolveHostedProviderCommand(
+  config: WorkerConfig,
+  runtimeMode: Extract<HostedRuntimeModeSlug, "codex.exec_json" | "claude_code.sdk" | "opencode.acp">,
+  metadata: Record<string, unknown> = {}
+) {
+  const activation = config.providerRuntimeActivation;
+  if (!activation.valid || !activation.policy) {
+    return undefined;
+  }
+  const policyEntry = activation.policy.modes[runtimeMode as "codex.exec_json" | "claude_code.sdk" | "opencode.acp"];
+  if (!policyEntry || policyEntry.cwdPrefixes.length === 0) {
+    return undefined;
+  }
+  const commandInput: BuildProviderResolvedCommandInput = {
+    activation,
+    runtimeMode,
+    cwd: policyEntry.cwdPrefixes[0]!,
+    env: process.env,
+    metadata
+  };
+  const resolved = buildProviderResolvedCommand(commandInput);
+  if (!resolved.ok) {
+    return undefined;
+  }
+  return resolved.command;
 }
 
 export function hostedRuntimeModesFromAllowlist(allowlist: string[]): HostedRuntimeModeSlug[] {

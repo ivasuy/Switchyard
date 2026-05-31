@@ -1,7 +1,8 @@
+import { accessSync, constants, readFileSync } from "node:fs";
+import { TextDecoder } from "node:util";
 import {
   redactSecrets,
   resolveHostedSandboxConfig,
-  validateProductionFakeOnlyAllowlist,
   validateProductionSecret,
   validateProductionUrlCredential,
   validateHostedRuntimeAllowlist,
@@ -13,8 +14,14 @@ import {
   resolveObjectStoreConfig,
   type ResolvedObjectStoreConfig
 } from "@switchyard/storage";
+import {
+  resolveProviderRuntimePolicy,
+  type ProviderRuntimePolicyPathPayload,
+  type ProviderRuntimeActivationResult
+} from "../../../packages/core/dist/services/provider-runtime-policy.js";
 
 export type DeploymentMode = "local" | "test" | "staging" | "production";
+const PROVIDER_POLICY_MAX_BYTES = 65_536;
 
 export class ConfigError extends Error {
   constructor(readonly code: string, readonly variable: string, readonly redactedConfig: Record<string, unknown>) {
@@ -46,6 +53,7 @@ export interface WorkerConfig {
     cancelTimeoutMs: number;
     maxMessageBytes: number;
   };
+  providerRuntimeActivation: ProviderRuntimeActivationResult;
   redactedSummary: Record<string, unknown>;
 }
 
@@ -53,6 +61,8 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   const deploymentMode = parseDeploymentMode(env["SWITCHYARD_DEPLOYMENT_MODE"]);
   const hostedRuntimeAllowlistEnv = optional(env["SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"]);
   const hostedRealRuntimeExecution = parseHostedRealRuntimeExecution(env["SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"]);
+  const providerPolicyJson = optional(env["SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON"]);
+  const providerPolicyPath = optional(env["SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH"]);
   const config: WorkerConfig = {
     deploymentMode,
     hostedRuntimeAllowlist: parseCsv(hostedRuntimeAllowlistEnv, "fake.deterministic"),
@@ -74,6 +84,20 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
       requestTimeoutMs: parsePositiveInteger(optional(env["SWITCHYARD_ACP_REQUEST_TIMEOUT_MS"]) ?? "5000", "SWITCHYARD_ACP_REQUEST_TIMEOUT_MS"),
       cancelTimeoutMs: parsePositiveInteger(optional(env["SWITCHYARD_ACP_CANCEL_TIMEOUT_MS"]) ?? "5000", "SWITCHYARD_ACP_CANCEL_TIMEOUT_MS"),
       maxMessageBytes: parsePositiveInteger(optional(env["SWITCHYARD_ACP_MAX_MESSAGE_BYTES"]) ?? "1048576", "SWITCHYARD_ACP_MAX_MESSAGE_BYTES")
+    },
+    providerRuntimeActivation: {
+      valid: true,
+      enabledRealModes: [],
+      reasons: [],
+      redactedSummary: {
+        deploymentMode,
+        hostedRealRuntimeExecution,
+        realModeCount: 0,
+        enabledRealModeCount: 0,
+        source: { kind: "none" },
+        modeStatuses: [],
+        reasonCodes: []
+      }
     },
     redactedSummary: {}
   };
@@ -114,15 +138,6 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
       value: config.redisUrl,
       credential: "password"
     }), config);
-    enforceProductionValidation(validateProductionFakeOnlyAllowlist(config.hostedRuntimeAllowlist), config);
-
-    if (config.hostedRealRuntimeExecution !== "disabled") {
-      throw new ConfigError(
-        "config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
-        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
-        buildSummary(config)
-      );
-    }
 
     if (config.objectStore.backend === "s3-compatible") {
       enforceProductionValidation(validateProductionSecret({
@@ -136,10 +151,31 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     }
   }
 
+  const providerPathPayload = loadProviderRuntimePolicyPathPayload(providerPolicyPath);
+  const providerPolicy = resolveProviderRuntimePolicy({
+    deploymentMode: config.deploymentMode,
+    hostedRealRuntimeExecution: config.hostedRealRuntimeExecution,
+    hostedRuntimeAllowlist: config.hostedRuntimeAllowlist,
+    ...(providerPolicyJson ? { policyJson: providerPolicyJson } : {}),
+    ...(providerPathPayload !== undefined ? { policyPathContents: providerPathPayload } : {}),
+    env,
+    binaryProbe: ({ executablePath }) => isExecutablePathAvailable(executablePath)
+  });
+  config.providerRuntimeActivation = providerPolicy.activation;
+
+  if (config.deploymentMode === "production" && !providerPolicy.activation.valid) {
+    throw new ConfigError(
+      providerPolicy.activation.reasons[0]?.code ?? "provider_runtime_policy_missing",
+      providerPolicyVariable(providerPolicyJson, providerPolicyPath, providerPolicy.activation.redactedSummary.source.kind),
+      buildSummary(config)
+    );
+  }
+
   const allowlistValidation = validateHostedRuntimeAllowlist({
     allowlist: config.hostedRuntimeAllowlist,
     deploymentMode: config.deploymentMode,
-    realRuntimeExecution: config.hostedRealRuntimeExecution
+    realRuntimeExecution: config.hostedRealRuntimeExecution,
+    providerActivation: config.providerRuntimeActivation
   });
   if (!allowlistValidation.ok) {
     const variable = allowlistValidation.code.includes("REAL_RUNTIME_EXECUTION")
@@ -214,6 +250,65 @@ function parsePositiveNumber(value: string, variable: string): number {
   return parsed;
 }
 
+function loadProviderRuntimePolicyPathPayload(pathValue: string | undefined): string | ProviderRuntimePolicyPathPayload | undefined {
+  if (!pathValue) {
+    return undefined;
+  }
+  let raw: Buffer;
+  try {
+    raw = readFileSync(pathValue);
+  } catch {
+    return { state: "unreadable" };
+  }
+  if (raw.length === 0) {
+    return { state: "empty" };
+  }
+  if (raw.length > PROVIDER_POLICY_MAX_BYTES) {
+    return { state: "too_large" };
+  }
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+  } catch {
+    return { state: "invalid_utf8" };
+  }
+  if (!decoded.trim()) {
+    return { state: "empty" };
+  }
+  try {
+    JSON.parse(decoded);
+  } catch {
+    return { state: "invalid_json" };
+  }
+  return { state: "ok", contents: decoded };
+}
+
+function isExecutablePathAvailable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function providerPolicyVariable(
+  policyJson: string | undefined,
+  policyPath: string | undefined,
+  sourceKind: "none" | "json" | "path"
+): string {
+  if (policyJson && policyPath) {
+    return "SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON";
+  }
+  if (sourceKind === "json") {
+    return "SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON";
+  }
+  if (sourceKind === "path") {
+    return "SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH";
+  }
+  return "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST";
+}
+
 function enforceProductionValidation(
   validation: { ok: true } | { ok: false; code: string; variable: string },
   config: WorkerConfig
@@ -268,6 +363,12 @@ function buildSummary(config: WorkerConfig): Record<string, unknown> {
       requestTimeoutMs: config.acp.requestTimeoutMs,
       cancelTimeoutMs: config.acp.cancelTimeoutMs,
       maxMessageBytes: config.acp.maxMessageBytes
+    },
+    providerRuntimePolicy: {
+      valid: config.providerRuntimeActivation.valid,
+      source: config.providerRuntimeActivation.redactedSummary.source.kind,
+      enabledRealModeCount: config.providerRuntimeActivation.redactedSummary.enabledRealModeCount,
+      reasonCodes: config.providerRuntimeActivation.redactedSummary.reasonCodes
     }
   });
 }

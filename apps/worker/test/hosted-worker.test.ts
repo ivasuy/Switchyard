@@ -153,6 +153,24 @@ describe("hosted worker app", () => {
     expect(adapters.has("shell")).toBe(false);
   });
 
+  it("builds production adapters only for provider-activated modes", () => {
+    const config = {
+      ...baseConfig(),
+      deploymentMode: "production" as const,
+      hostedRealRuntimeExecution: "enabled" as const,
+      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
+      providerRuntimeActivation: validProductionActivation(["codex.exec_json", "opencode.acp"])
+    };
+    const adapters = buildHostedWorkerAdapters(config, {
+      codexProcessFactory: createCodexHappyProcessFactory(),
+      opencodeProcessFactory: createFakeAcpProcessFactory({ scenario: "happy" })
+    });
+    expect(adapters.has("fake")).toBe(true);
+    expect(adapters.has("codex")).toBe(true);
+    expect(adapters.has("opencode")).toBe(true);
+    expect(adapters.has("claude_code")).toBe(false);
+  });
+
   it("reports hosted runtime gate disabled in readiness", async () => {
     const worker = createHostedWorker({
       ...baseConfig(),
@@ -355,7 +373,7 @@ describe("hosted worker app", () => {
     expect(workerSource).not.toContain("shell");
   });
 
-  it("parses real-runtime worker config and rejects production real allowlist", () => {
+  it("parses real-runtime worker config and rejects production real allowlist without policy activation", () => {
     const parsed = loadWorkerConfig({
       SWITCHYARD_POSTGRES_URL: "postgres://user:pass@localhost:5432/switchyard",
       SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
@@ -377,11 +395,11 @@ describe("hosted worker app", () => {
         SWITCHYARD_REDIS_URL: "redis://localhost:6379/0",
         SWITCHYARD_OBJECT_STORE_BACKEND: "local",
         SWITCHYARD_OBJECT_STORE_DIR: "/tmp/store",
-        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "claude_code.sdk",
+        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,claude_code.sdk",
         SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
         SWITCHYARD_DEPLOYMENT_MODE: "production"
       })
-    ).toThrow(/config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION|hosted_real_runtime_production_forbidden/);
+    ).toThrow(/provider_runtime_policy_missing|provider_runtime_policy_malformed/);
   });
 
   it("rejects invalid numeric worker config", () => {
@@ -440,7 +458,92 @@ function baseConfig() {
       cancelTimeoutMs: 5000,
       maxMessageBytes: 1_048_576
     },
+    providerRuntimeActivation: {
+      valid: true,
+      enabledRealModes: [],
+      reasons: [],
+      redactedSummary: {
+        deploymentMode: "test",
+        hostedRealRuntimeExecution: "disabled",
+        realModeCount: 0,
+        enabledRealModeCount: 0,
+        source: { kind: "none" },
+        modeStatuses: [],
+        reasonCodes: []
+      }
+    },
     redactedSummary: {}
+  };
+}
+
+function validProductionActivation(enabledModes: Array<"codex.exec_json" | "claude_code.sdk" | "opencode.acp">) {
+  return {
+    valid: true as const,
+    enabledRealModes: enabledModes,
+    reasons: [],
+    redactedSummary: {
+      deploymentMode: "production" as const,
+      hostedRealRuntimeExecution: "enabled" as const,
+      realModeCount: enabledModes.length,
+      enabledRealModeCount: enabledModes.length,
+      source: { kind: "json" as const },
+      modeStatuses: enabledModes.map((runtimeMode) => ({ runtimeMode, ready: true, reasons: [] as string[] })),
+      reasonCodes: []
+    },
+    policy: {
+      version: 1 as const,
+      modes: {
+        "codex.exec_json": {
+          enabled: enabledModes.includes("codex.exec_json"),
+          executablePath: "/bin/echo",
+          cwdPrefixes: ["/srv/switchyard/work"],
+          envAllowlist: ["PATH"],
+          requiredEnv: ["PATH"],
+          fixedArgs: ["exec", "--json"],
+          allowUserArgs: false as const,
+          sandbox: "read_only" as const,
+          spendControls: {
+            maxActiveRuns: 5,
+            maxRunsPerHour: 20,
+            maxRunTimeoutSeconds: 120,
+            maxPromptBytes: 4096
+          }
+        },
+        "claude_code.sdk": {
+          enabled: enabledModes.includes("claude_code.sdk"),
+          executablePath: "/bin/echo",
+          cwdPrefixes: ["/srv/switchyard/work"],
+          envAllowlist: ["PATH"],
+          requiredEnv: ["PATH"],
+          fixedArgs: [],
+          allowUserArgs: false as const,
+          permissionMode: "read_only" as const,
+          disabledTools: ["Bash", "WebFetch", "WebSearch"],
+          spendControls: {
+            maxActiveRuns: 5,
+            maxRunsPerHour: 20,
+            maxRunTimeoutSeconds: 120,
+            maxPromptBytes: 4096
+          }
+        },
+        "opencode.acp": {
+          enabled: enabledModes.includes("opencode.acp"),
+          executablePath: "/bin/echo",
+          cwdPrefixes: ["/srv/switchyard/work"],
+          envAllowlist: ["PATH"],
+          requiredEnv: ["PATH"],
+          fixedArgs: ["acp"],
+          allowUserArgs: false as const,
+          onePromptPerRun: true as const,
+          spendControls: {
+            maxActiveRuns: 5,
+            maxRunsPerHour: 20,
+            maxRunTimeoutSeconds: 120,
+            maxPromptBytes: 4096
+          }
+        }
+      }
+    }
   };
 }
 
