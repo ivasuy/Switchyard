@@ -153,7 +153,7 @@ environment:
 4. Add `.env.example` with visibly invalid placeholders (`replace-with-...`) for every production secret and required setting. Defaults must include `SWITCHYARD_DEPLOYMENT_MODE=production`, `SWITCHYARD_SERVER_AUTH_MODE=api_key`, `SWITCHYARD_CONTROL_PLANE_STORE=postgres`, `SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic`, `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`, `SWITCHYARD_OBJECT_STORE_PROBE=write_read_delete`, and `SWITCHYARD_PUBLIC_METRICS=0` or absent.
 5. Add `bootstrap.example.json` with one active account, tenant, project, user, API key record using `rawKey` placeholder, active billing plan allowing only `fake.deterministic`, and a node-token binding placeholder. No real-looking secret or hash should appear.
 6. Write `deploy/production/README.md` as the production runbook: dependency requirements, secret generation expectations, preflight/migrate/canary commands from P18-T5, rollout order, rollback order, readiness/metrics interpretation, canary record retention, and optional live dependency checks clearly marked as operator-owned and not CI/audit-required.
-7. Write `production-manifest.test.ts` with deterministic tests that JSON-parse `manifest.json` and text-scan `docker-compose.yml`/`.env.example` for required defaults, production commands, required health/readiness checks, fake-only runtime posture, invalid placeholders, and forbidden services/routes/toggles.
+7. Write `production-manifest.test.ts` with deterministic tests that JSON-parse `manifest.json` and text-scan `docker-compose.yml`/`.env.example` for required defaults, production commands, required health/readiness checks, fake-only runtime posture, invalid placeholders, and forbidden services/routes/toggles. Keep malformed operator-supplied manifest path handling in P18-T5; this task only proves the committed static manifest is parseable and that a local malformed JSON fixture fails the static parse helper.
 
 **acceptance:**
 - `deploy/production/` exists and is separate from `deploy/self-hosted/`.
@@ -169,7 +169,7 @@ environment:
 - `git diff --check deploy/production`
 
 **error_rescue_map:**
-- `{ "codepath": "manifest.json parse", "failure": "manifest missing or malformed JSON", "exception": "SyntaxError", "rescue": "Fail manifest test/preflight with manifest_missing or manifest_invalid", "user_sees": "Preflight JSON includes check=manifest status=fail code=manifest_invalid" }`
+- `{ "codepath": "static manifest.json parse in production-manifest.test.ts", "failure": "committed manifest JSON is malformed", "exception": "SyntaxError from JSON.parse", "rescue": "Fail the static manifest test and fix deploy/production/manifest.json before preflight integration", "user_sees": "No production manifest is released unless the machine-readable JSON parses" }`
 - `{ "codepath": "production command validation", "failure": "service command uses dev/install/source bind mount", "exception": "Vitest assertion failure", "rescue": "Replace with built Node entrypoint command", "user_sees": "Production runbook shows built artifact commands only" }`
 - `{ "codepath": "env example validation", "failure": "placeholder looks usable or secret is omitted", "exception": "Vitest assertion failure", "rescue": "Use replace-with-* placeholders and include all required env keys", "user_sees": "Operators cannot accidentally copy a valid-looking example secret" }`
 - `{ "codepath": "forbidden surface scan", "failure": "manifest declares dashboard/TUI/payment/OAuth/exec/browser/real-tool/real-runtime service", "exception": "Vitest assertion failure", "rescue": "Remove service/env toggle from production manifest", "user_sees": "R19 deploy pack remains API/ops-only" }`
@@ -180,6 +180,8 @@ environment:
 - `failure_metric`: `manifest validation failure code such as manifest_invalid, manifest_forbidden_command, or manifest_forbidden_surface`
 
 **test_cases:**
+- `{ "name": "manifest JSON parses statically", "lens": "happy", "given": "read deploy/production/manifest.json and call JSON.parse before service assertions", "expect": "parse succeeds and returns an object" }`
+- `{ "name": "malformed manifest JSON fails static parse", "lens": "error_path", "given": "production-manifest.test.ts parse helper with malformed JSON fixture '{'", "expect": "SyntaxError is surfaced by the static test helper; operator-supplied missing/malformed manifest paths remain covered by P18-T5" }`
 - `{ "name": "manifest has production server and worker", "lens": "happy", "given": "JSON.parse(deploy/production/manifest.json)", "expect": "services.server and services.worker exist with deploymentMode production" }`
 - `{ "name": "optional node is fake-only", "lens": "happy", "given": "manifest services.node if present", "expect": "runtime allowlist is fake.deterministic and no real-tool capability appears" }`
 - `{ "name": "dev commands rejected", "lens": "error_path", "given": "docker-compose.yml text", "expect": "does not contain pnpm install, pnpm --filter @switchyard/server dev, or @switchyard/worker dev" }`
@@ -224,8 +226,8 @@ environment:
 1. Work in this sequence inside the same worktree to keep the broad task controlled: first add shared guard tests and helpers in `packages/core`, then wire server config, then worker config, then node config, then add cross-app redaction/local-compatibility tests. Do not edit readiness, scripts, manifests, docs, or storage schema in this task.
 2. Add shared core helpers that return structured validation failures rather than throwing app-specific errors: `validateProductionSecret`, `validateProductionUrlCredential`, `validateProductionFakeOnlyAllowlist`, `validateProductionHttpsUrl`, `validateProductionCwdPrefixes`, and `isPlaceholderSecret`. Reuse existing `redactSecrets` for any summary payload.
 3. Placeholder/low-signal strings rejected in production must include empty/whitespace, `replace-me`, `replace-with-*`, `switchyard`, `password`, `secret`, `test`, and `example` case-insensitively. `SWITCHYARD_API_KEY_PEPPER` and `SWITCHYARD_NODE_SHARED_TOKEN` must be at least 32 characters in production.
-4. Server production validation must require Postgres, Redis, object-store backend-specific settings via the existing resolver, node shared token, hosted allowlist exactly `fake.deterministic`, hosted real runtime disabled or absent, API-key auth, API-key pepper, Postgres control-plane store, bootstrap path or JSON, and public metrics absent/false. Reject placeholder credentials in API-key pepper, node token, Postgres URL password, Redis URL password, S3 access key id, and S3 secret access key. Keep staging at least as strict as today but do not break existing local/test no-auth defaults.
-5. Worker production validation must require Postgres, Redis, object store, non-disabled object-store probe via existing resolver, hosted allowlist exactly `fake.deterministic`, hosted real runtime disabled or absent, valid sandbox config, valid idle interval, and fake deterministic adapter-check posture. Reject placeholder URL credentials and S3 credentials.
+4. Server production validation must require Postgres, Redis, object-store backend-specific settings via the existing resolver, node shared token, hosted allowlist exactly `fake.deterministic`, hosted real runtime disabled or absent, API-key auth, API-key pepper, Postgres control-plane store, bootstrap path or JSON, and public metrics absent/false. Reject placeholder credentials in API-key pepper, node token, Postgres URL password, Redis URL password, `SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID`, and `SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY`. Keep staging at least as strict as today but do not break existing local/test no-auth defaults.
+5. Worker production validation must require Postgres, Redis, object store, non-disabled object-store probe via existing resolver, hosted allowlist exactly `fake.deterministic`, hosted real runtime disabled or absent, valid sandbox config, valid idle interval, and fake deterministic adapter-check posture. Reject placeholder URL credentials, `SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID`, and `SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY`.
 6. Node production validation must require `SWITCHYARD_SERVER_URL`, `SWITCHYARD_NODE_SHARED_TOKEN`, `SWITCHYARD_NODE_CAPABILITIES`, `SWITCHYARD_NODE_ALLOW_RUNTIME_MODES`, and `SWITCHYARD_NODE_ALLOW_CWD_PREFIXES`. Production server URL must be `https://`. Runtime allowlist must be exactly `fake.deterministic`. CWD prefixes must be non-empty and must reject `/`, `.`/`..`, blank strings, backslash paths, and drive-root-style values in production.
 7. Ensure all `ConfigError.redactedConfig` payloads expose only booleans, counts, deployment mode, endpoint scheme/host from existing redacted object-store summary, and allowlist names. They must not include raw URLs with credentials, API keys, node tokens, object keys, or raw bootstrap values.
 8. Add focused production config tests for happy, nil, empty, placeholder, malformed, unsafe allowlist, public metrics, bad URL, invalid numeric, and redaction paths. Include explicit local/test compatibility assertions for no-auth local daemon-adjacent behavior: defaults continue to parse without API keys, Postgres, Redis, object store, or node token.
@@ -233,6 +235,8 @@ environment:
 **acceptance:**
 - Production server rejects missing/empty/malformed Postgres, Redis, object store, node token, auth mode, API-key pepper, control-plane store, bootstrap, public metrics, placeholder secrets, unsafe hosted runtime allowlists, and enabled hosted real runtime execution.
 - Production worker rejects missing dependencies, placeholder secrets, unsafe hosted runtime allowlist, enabled hosted real runtime execution, disabled object-store probe, invalid worker settings, and invalid sandbox config.
+- Production server and worker reject placeholder Redis URL passwords and placeholder S3-compatible object-store credentials in `SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID` and `SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY`.
+- Config error and redaction tests prove raw Redis passwords and raw object-store access/secret key values do not appear in `ConfigError.redactedConfig`, serialized startup/preflight summaries, or test-captured logs for server or worker config paths.
 - Production node rejects missing server URL/token/capabilities/runtime/CWD policy, empty allowlists, broad `/` CWD prefixes, placeholder token, non-fake runtime allowlist, and insecure `http://` URL.
 - Config errors use named codes and redacted summaries.
 - Local/test server, worker, and node defaults remain backwards compatible.
@@ -266,9 +270,13 @@ environment:
 - `{ "name": "missing production server postgres fails", "lens": "happy_shadow_nil", "given": "delete SWITCHYARD_POSTGRES_URL", "expect": "throws config_required:SWITCHYARD_POSTGRES_URL" }`
 - `{ "name": "empty production server pepper fails", "lens": "happy_shadow_empty", "given": "SWITCHYARD_API_KEY_PEPPER='   '", "expect": "throws config_required:SWITCHYARD_API_KEY_PEPPER or secret_placeholder:SWITCHYARD_API_KEY_PEPPER without leaking value" }`
 - `{ "name": "placeholder production secrets rejected", "lens": "error_path", "given": "pepper replace-with-pepper, node token replace-me, Postgres password=password", "expect": "throws secret_placeholder for the matching variable and serialized error omits raw values" }`
+- `{ "name": "server Redis password placeholder rejected and redacted", "lens": "error_path", "given": "loadServerConfig production env with SWITCHYARD_REDIS_URL=redis://default:replace-with-redis-password@redis:6379/0", "expect": "throws secret_placeholder:SWITCHYARD_REDIS_URL or equivalent URL credential code and JSON.stringify(error.redactedConfig) omits replace-with-redis-password" }`
+- `{ "name": "server object-store credential placeholders rejected and redacted", "lens": "error_path", "given": "loadServerConfig production env with SWITCHYARD_OBJECT_STORE_BACKEND=s3, SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID=replace-with-access-key, SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY=replace-with-secret-key", "expect": "throws secret_placeholder for the object-store credential variable and serialized error/log summary omits both raw values" }`
 - `{ "name": "production public metrics forbidden", "lens": "error_path", "given": "SWITCHYARD_PUBLIC_METRICS=1", "expect": "throws config_forbidden:SWITCHYARD_PUBLIC_METRICS" }`
 - `{ "name": "production real runtime allowlist rejected", "lens": "error_path", "given": "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic,codex.exec_json", "expect": "throws hosted_real_runtime_production_forbidden" }`
 - `{ "name": "valid production worker env parses", "lens": "happy", "given": "production worker env with fake.deterministic, Redis, Postgres, object store, probe write_read_delete", "expect": "loadWorkerConfig returns production and hostedRealRuntimeExecution disabled" }`
+- `{ "name": "worker Redis password placeholder rejected and redacted", "lens": "error_path", "given": "loadWorkerConfig production env with SWITCHYARD_REDIS_URL=redis://default:replace-with-worker-redis-password@redis:6379/0", "expect": "throws secret_placeholder:SWITCHYARD_REDIS_URL or equivalent URL credential code and serialized error/log summary omits replace-with-worker-redis-password" }`
+- `{ "name": "worker object-store credential placeholders rejected and redacted", "lens": "error_path", "given": "loadWorkerConfig production env with SWITCHYARD_OBJECT_STORE_BACKEND=s3, SWITCHYARD_OBJECT_STORE_ACCESS_KEY_ID=replace-with-worker-access-key, SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY=replace-with-worker-secret-key", "expect": "throws secret_placeholder for the object-store credential variable and serialized error/log summary omits both raw values" }`
 - `{ "name": "worker disabled probe rejected", "lens": "error_path", "given": "SWITCHYARD_OBJECT_STORE_PROBE=disabled in production", "expect": "throws config_invalid:SWITCHYARD_OBJECT_STORE_PROBE" }`
 - `{ "name": "node production requires https", "lens": "error_path", "given": "SWITCHYARD_SERVER_URL=http://server:4646 with production mode", "expect": "throws config_invalid:SWITCHYARD_SERVER_URL" }`
 - `{ "name": "node broad cwd rejected", "lens": "error_path", "given": "SWITCHYARD_NODE_ALLOW_CWD_PREFIXES=/", "expect": "throws config_invalid:SWITCHYARD_NODE_ALLOW_CWD_PREFIXES" }`
@@ -392,7 +400,7 @@ environment:
 - `apps/server/src/metrics.ts` - existing hosted metrics counters required by canary/runbooks.
 - `apps/worker/src/worker.ts` - current worker `ready()` and `tick()` behavior.
 - `apps/node/src/main.ts` - current node startup loop lacking redacted start/failure summaries.
-- `packages/storage/src/postgres/database.ts` - schema compatibility exports from P18-T3.
+- `packages/storage/src/postgres/database.ts` - current Postgres readiness/probe and schema helper surface.
 
 **instructions:**
 1. Add a schema check to `probeServerReadiness`. When production/staging has a Postgres handle, call `checkPostgresSchemaCompatibility`; report `checks.schema = { ok: true, code:'postgres_schema_ready', diagnostics:{ version, expectedVersion } }` on success and `ok:false` with the compatibility code on failure. Local/test without Postgres should remain ready.
@@ -486,10 +494,10 @@ environment:
 - `docs/superpowers/specs/2026-05-31-phase-18-r19-production-hosted-deployment.md` - FR3/FR4 preflight, migration, env parsing, failure-code, and no-spend constraints.
 - `package.json` - root script naming pattern for smoke and production commands.
 - `scripts/self-hosted-smoke.ts` - existing CLI argument, structured result, and named failure style.
-- `apps/server/src/config.ts` - server config resolver from P18-T2.
-- `apps/worker/src/config.ts` - worker config resolver from P18-T2.
-- `apps/node/src/config.ts` - node config resolver from P18-T2.
-- `packages/storage/src/postgres/database.ts` - schema compatibility and migration exports from P18-T3.
+- `apps/server/src/config.ts` - current server config resolver shape and ConfigError contract.
+- `apps/worker/src/config.ts` - current worker config resolver shape and hosted runtime config surface.
+- `apps/node/src/config.ts` - current node config resolver shape and production policy inputs.
+- `packages/storage/src/postgres/database.ts` - current Postgres schema/probe functions and migration surface.
 
 **instructions:**
 1. Add root scripts in `package.json`: `production:preflight` as `tsx scripts/production-preflight.ts`, `production:migrate` as `tsx scripts/production-migrate.ts`, and `production:canary` as `tsx scripts/production-canary.ts`. The canary script file is owned by P18-T6; this task only owns the package script entry so docs and operators have one stable command set.
@@ -509,10 +517,10 @@ environment:
    - When input parsing succeeds, run server, worker, optional node config, and manifest rule validation independently and collect all failures instead of stopping at the first config failure.
    - If any config or manifest rule fails, skip live/injected dependency checks to avoid misleading network probes against known-unsafe config.
    - If config and manifest validation pass, run schema, queue, object-store, control-plane bootstrap/store/quota/audit/unowned-resource, and hosted runtime gate checks independently with bounded timeouts and collect all failures in one JSON response.
-5. `production-preflight.ts` must accept `--env-file <path>`, `--manifest <path>`, `--include-node`, and `--json` (JSON default is acceptable). It must merge parsed env values over current process env only after env parsing succeeds, then call `loadServerConfig`, `loadWorkerConfig`, and optionally `loadNodeConfig` from P18-T2.
+5. `production-preflight.ts` must accept `--env-file <path>`, `--manifest <path>`, `--include-node`, and `--json` (JSON default is acceptable). It must merge parsed env values over current process env only after env parsing succeeds, then call the `loadServerConfig`, `loadWorkerConfig`, and optional `loadNodeConfig` exports named in this task's integration contracts.
 6. Preflight output shape is `{ ok:boolean, checks:Array<{ name:string; status:'pass'|'fail'|'skip'; code:string; diagnostics?:object }>, summary:{ deploymentMode:'production'; manifest:string; checkedAt:string } }`. Diagnostics must be redacted and low-cardinality.
 7. Preflight must expose named failure codes for at least: `postgres_schema_migration_required`, `postgres_schema_version_unsupported`, `postgres_unavailable`, `queue_unavailable`, `object_store_unavailable`, `control_plane_bootstrap_missing`, `control_plane_bootstrap_account_missing`, `control_plane_bootstrap_tenant_missing`, `control_plane_bootstrap_project_missing`, `control_plane_bootstrap_user_missing`, `control_plane_bootstrap_api_key_missing`, `control_plane_bootstrap_billing_plan_missing`, `control_plane_node_token_unbound`, `quota_store_unavailable`, `audit_store_unavailable`, `unowned_resources_present`, and `hosted_runtime_gate_failed`.
-8. `production-migrate.ts` must accept `--env-file <path>` and run only `migratePostgresSchema` from P18-T3 against the configured Postgres URL. It must print redacted JSON and exit nonzero with named codes on missing/empty/invalid env, unavailable Postgres, or migration failure.
+8. `production-migrate.ts` must accept `--env-file <path>` and run only the `migratePostgresSchema` export named in this task's integration contracts against the configured Postgres URL. It must print redacted JSON and exit nonzero with named codes on missing/empty/invalid env, unavailable Postgres, or migration failure.
 9. Tests must call exported runner functions with fake env files, fake queue/object/control-plane/schema dependencies, and no live network. Required tests must not call live AWS/R2, model providers, payment providers, GitHub, search, browsers, arbitrary commands, PTY, or public network dependencies.
 
 **acceptance:**
@@ -618,7 +626,7 @@ environment:
 
 **context_files:**
 - `docs/superpowers/specs/2026-05-31-phase-18-r19-production-hosted-deployment.md` - FR5 canary, failure-code, redaction, and no-spend constraints.
-- `package.json` - `production:canary` script entry owned by P18-T5.
+- `package.json` - current root script naming pattern and script section format.
 - `scripts/self-hosted-smoke.ts` - existing CLI argument, fetch, poll, timeout, and structured failure style.
 - `packages/contracts/src/endpoint-inventory.ts` - existing hosted route paths the canary is allowed to call.
 - `packages/contracts/src/openapi.ts` - hosted `/ready`, run, artifact, metrics, and enterprise route contract shapes.
