@@ -666,6 +666,136 @@ describe("runProductionPreflight", () => {
     expect(serialized).not.toContain("replace-with-secret-token");
   });
 
+  test("reports unreadable provider policy path with named code and skips adapter checks", async () => {
+    const activation = makeProviderActivation({
+      valid: false,
+      enabledRealModes: [],
+      reasons: [{ code: "provider_runtime_policy_missing", runtimeMode: "codex.exec_json" }],
+      source: "path",
+      reasonCodes: ["provider_runtime_policy_missing"]
+    });
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({ ok: true })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual({
+      name: "providerRuntimePolicy",
+      status: "fail",
+      code: "provider_runtime_policy_missing",
+      diagnostics: {
+        source: "path",
+        reasonCodes: ["provider_runtime_policy_missing"],
+        modeStatuses: [
+          {
+            runtimeMode: "codex.exec_json",
+            ready: false,
+            reasons: ["provider_runtime_policy_missing"]
+          }
+        ]
+      }
+    });
+    expect(result.checks).toContainEqual({
+      name: "providerAdapterChecks",
+      status: "skip",
+      code: "skipped_provider_policy_invalid"
+    });
+  });
+
+  test("reports invalid UTF-8 provider policy path with named code and skips adapter checks", async () => {
+    const activation = makeProviderActivation({
+      valid: false,
+      enabledRealModes: [],
+      reasons: [{ code: "provider_runtime_policy_malformed", runtimeMode: "codex.exec_json" }],
+      source: "path",
+      reasonCodes: ["provider_runtime_policy_malformed"]
+    });
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({ ok: true })
+    });
+
+    expect(result.ok).toBe(false);
+    const providerPolicy = result.checks.find((entry) => entry.name === "providerRuntimePolicy");
+    expect(providerPolicy).toMatchObject({
+      status: "fail",
+      code: "provider_runtime_policy_malformed",
+      diagnostics: {
+        source: "path"
+      }
+    });
+    expect(result.checks).toContainEqual({
+      name: "providerAdapterChecks",
+      status: "skip",
+      code: "skipped_provider_policy_invalid"
+    });
+  });
+
+  test("reports invalid spend controls with named code and skips adapter checks", async () => {
+    const activation = makeProviderActivation({
+      valid: false,
+      enabledRealModes: [],
+      reasons: [{ code: "provider_spend_controls_invalid", runtimeMode: "codex.exec_json" }],
+      source: "json",
+      reasonCodes: ["provider_spend_controls_invalid"]
+    });
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({ ok: true })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual({
+      name: "providerRuntimePolicy",
+      status: "fail",
+      code: "provider_spend_controls_invalid",
+      diagnostics: {
+        source: "json",
+        reasonCodes: ["provider_spend_controls_invalid"],
+        modeStatuses: [
+          {
+            runtimeMode: "codex.exec_json",
+            ready: false,
+            reasons: ["provider_spend_controls_invalid"]
+          }
+        ]
+      }
+    });
+    expect(result.checks).toContainEqual({
+      name: "providerAdapterChecks",
+      status: "skip",
+      code: "skipped_provider_policy_invalid"
+    });
+  });
+
   test("returns input blockers and skips config/dependency checks", async () => {
     const loadServerConfig = vi.fn();
     const result = await runProductionPreflight({

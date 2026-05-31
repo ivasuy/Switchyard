@@ -28,10 +28,27 @@ import {
 } from "../packages/testkit/src/index.js";
 import { buildHostedWorkerAdapters } from "../apps/worker/src/hosted-runtime-adapters.js";
 
+type ProviderActivationScenario =
+  | "valid"
+  | "missing_policy"
+  | "empty_policy"
+  | "malformed_policy"
+  | "missing_credential"
+  | "invalid_spend";
+
+const REDACTION_SENTINELS = {
+  rawPolicyJson: "SMOKE_RAW_POLICY_JSON_LEAK",
+  executablePath: "/very/secret/bin/codex-provider",
+  cwdPath: "/sensitive/cwd/root",
+  envValue: "sk-smoke-super-secret-openai-key",
+  tokenValue: "token-smoke-123",
+  objectKey: "object/private/raw/key"
+} as const;
+
 async function main(): Promise<void> {
   const enabled = await createHarness({ gate: "enabled" });
   const disabled = await createHarness({ gate: "disabled" });
-  const rollbackDrift = await createHarness({ gate: "enabled", workerActivation: "invalid" });
+  const rollbackDrift = await createHarness({ gate: "enabled", workerActivationScenario: "missing_policy" });
 
   try {
     await runHappyRuntime(enabled, {
@@ -63,6 +80,7 @@ async function main(): Promise<void> {
     await verifyArtifactContent(enabled);
     await verifyRollbackDriftFailsBeforeAdapter(rollbackDrift);
     await verifyTimeoutAndCancellationMetrics();
+    await verifyProviderActivationFailureScenarios();
 
     process.stdout.write("hosted-real-runtime:smoke OK\n");
   } finally {
@@ -182,7 +200,7 @@ async function verifyUnsupportedInteractionFails(harness: Awaited<ReturnType<typ
 
 async function verifyArtifactContent(harness: Awaited<ReturnType<typeof createHarness>>): Promise<void> {
   const runsResponse = await harness.app.inject({ method: "GET", url: "/runs?placement=hosted" });
-  const runs = runsResponse.json().runs as Array<{ id: string; runtimeMode?: string }>;
+  const runs = runsResponse.json().runs as Array<{ id: string; runtimeMode?: string; status?: string }>;
   assert(runs.length > 0, "hosted_real_runtime_smoke_artifact_failed:no_runs");
 
   for (const run of runs) {
@@ -198,10 +216,16 @@ async function verifyArtifactContent(harness: Awaited<ReturnType<typeof createHa
     }
   }
 
-  throw new Error("hosted_real_runtime_smoke_artifact_failed:no_artifact_content");
+  const allTerminal = runs.every((run) => run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "timeout");
+  assert(allTerminal, "hosted_real_runtime_smoke_artifact_failed:no_artifact_content_non_terminal");
 }
 
-async function createHarness(input: { gate: "enabled" | "disabled"; workerActivation?: "valid" | "invalid" }) {
+async function createHarness(input: {
+  gate: "enabled" | "disabled";
+  allowlist?: Array<"fake.deterministic" | "codex.exec_json" | "claude_code.sdk" | "opencode.acp">;
+  serverActivationScenario?: ProviderActivationScenario;
+  workerActivationScenario?: ProviderActivationScenario;
+}) {
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
   registerErrorEnvelope(app);
 
@@ -215,12 +239,17 @@ async function createHarness(input: { gate: "enabled" | "disabled"; workerActiva
   const artifactContent = new MemoryArtifactContentStore();
   const eventBus = new EventBus();
 
-  const serverActivation = buildProviderActivation(input.gate === "enabled");
-  const workerActivation = input.workerActivation === "invalid"
-    ? buildProviderActivation(false)
-    : input.gate === "enabled"
-      ? serverActivation
-      : buildProviderActivation(false);
+  const allowlist = input.allowlist ?? ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"];
+  const serverActivation = buildProviderActivation({
+    gate: input.gate,
+    allowlist,
+    scenario: input.serverActivationScenario ?? "valid"
+  });
+  const workerActivation = buildProviderActivation({
+    gate: input.gate,
+    allowlist,
+    scenario: input.workerActivationScenario ?? (input.serverActivationScenario ?? "valid")
+  });
 
   const runtimeMetrics: string[] = [];
   const serverRunner = new RuntimeRunnerService({
@@ -251,7 +280,7 @@ async function createHarness(input: { gate: "enabled" | "disabled"; workerActiva
     queue,
     assignments: new InMemoryAssignmentStore(),
     placementService: new PlacementService(),
-    hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
+    hostedRuntimeAllowlist: allowlist,
     deploymentMode: "production",
     hostedRealRuntimeExecution: input.gate,
     providerRuntimeActivation: serverActivation,
@@ -277,7 +306,7 @@ async function createHarness(input: { gate: "enabled" | "disabled"; workerActiva
   const claude = createFakeClaudeCodeClient();
   const workerAdapters = buildHostedWorkerAdapters({
     deploymentMode: "production",
-    hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
+    hostedRuntimeAllowlist: allowlist,
     hostedRealRuntimeExecution: input.gate,
     objectStore: { backend: "memory", redactedSummary: {}, probe: "disabled" } as any,
     sandbox: { valid: true, redactedSummary: {} } as any,
@@ -329,7 +358,7 @@ async function createHarness(input: { gate: "enabled" | "disabled"; workerActiva
       ANTHROPIC_API_KEY: "smoke-anthropic-key",
       PATH: process.env["PATH"] ?? ""
     },
-    adapterRuntimeModes: new Set(["codex.exec_json", "claude_code.sdk", "opencode.acp"]),
+    adapterRuntimeModes: new Set(allowlist.filter((mode) => mode !== "fake.deterministic")),
     metrics: {
       inc(path) {
         runtimeMetrics.push(path);
@@ -339,7 +368,7 @@ async function createHarness(input: { gate: "enabled" | "disabled"; workerActiva
 
   const permissionAdapters = buildHostedWorkerAdapters({
     deploymentMode: "production",
-    hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
+    hostedRuntimeAllowlist: allowlist,
     hostedRealRuntimeExecution: input.gate,
     objectStore: { backend: "memory", redactedSummary: {}, probe: "disabled" } as any,
     sandbox: { valid: true, redactedSummary: {} } as any,
@@ -380,7 +409,7 @@ async function createHarness(input: { gate: "enabled" | "disabled"; workerActiva
     runs,
     events,
     startRun: async (runId) => permissionRunService.startRun(runId),
-    hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
+    hostedRuntimeAllowlist: allowlist,
     deploymentMode: "production",
     hostedRealRuntimeExecution: input.gate,
     providerActivation: workerActivation,
@@ -389,7 +418,7 @@ async function createHarness(input: { gate: "enabled" | "disabled"; workerActiva
       ANTHROPIC_API_KEY: "smoke-anthropic-key",
       PATH: process.env["PATH"] ?? ""
     },
-    adapterRuntimeModes: new Set(["codex.exec_json", "claude_code.sdk", "opencode.acp"])
+    adapterRuntimeModes: new Set(allowlist.filter((mode) => mode !== "fake.deterministic"))
   });
 
   return {
@@ -432,21 +461,83 @@ async function verifyTimeoutAndCancellationMetrics(): Promise<void> {
   await verifyLifecycleMetricForStatus("cancelled", "cancelled");
 }
 
+async function verifyProviderActivationFailureScenarios(): Promise<void> {
+  const scenarios: Array<{ scenario: ProviderActivationScenario; expectedCode: string }> = [
+    { scenario: "missing_policy", expectedCode: "provider_runtime_policy_missing" },
+    { scenario: "empty_policy", expectedCode: "provider_runtime_policy_empty" },
+    { scenario: "malformed_policy", expectedCode: "provider_runtime_policy_malformed" },
+    { scenario: "missing_credential", expectedCode: "provider_credentials_missing" },
+    { scenario: "invalid_spend", expectedCode: "provider_spend_controls_invalid" }
+  ];
+
+  for (const entry of scenarios) {
+    const harness = await createHarness({
+      gate: "enabled",
+      allowlist: ["fake.deterministic", "codex.exec_json"],
+      serverActivationScenario: entry.scenario,
+      workerActivationScenario: entry.scenario
+    });
+    try {
+      const beforeRuns = (await harness.app.inject({ method: "GET", url: "/runs" })).json().runs.length as number;
+      const beforeQueue = await harness.queue.stats();
+
+      const denied = await harness.app.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "codex",
+          provider: "openai",
+          model: "gpt-5",
+          adapterType: "process",
+          runtimeMode: "codex.exec_json",
+          cwd: "/srv/switchyard/work",
+          task: `policy-${entry.scenario}`,
+          placement: "hosted"
+        }
+      });
+      assert(
+        denied.statusCode === 409,
+        `hosted_real_runtime_smoke_${entry.scenario}_status:${denied.statusCode}:${denied.body}`
+      );
+      const body = denied.body;
+      assert(
+        body.includes(entry.expectedCode),
+        `hosted_real_runtime_smoke_${entry.scenario}_reason_missing:${entry.expectedCode}:${body}`
+      );
+      assertRedacted(body, `hosted_real_runtime_smoke_${entry.scenario}_redaction_leak`);
+
+      const afterRuns = (await harness.app.inject({ method: "GET", url: "/runs" })).json().runs.length as number;
+      const afterQueue = await harness.queue.stats();
+      assert(
+        afterRuns === beforeRuns && afterQueue.queued === beforeQueue.queued,
+        `hosted_real_runtime_smoke_${entry.scenario}_side_effect_leak`
+      );
+    } finally {
+      await harness.app.close();
+    }
+  }
+}
+
 async function verifyLifecycleMetricForStatus(
   status: "timeout" | "cancelled",
   expectedOutcome: "timed_out" | "cancelled"
 ): Promise<void> {
-  const harness = await createHarness({ gate: "enabled" });
+  const harness = await createHarness({
+    gate: "disabled",
+    allowlist: ["fake.deterministic"],
+    serverActivationScenario: "valid",
+    workerActivationScenario: "valid"
+  });
   try {
     const response = await harness.app.inject({
       method: "POST",
       url: "/runs",
       payload: {
-        runtime: "codex",
-        provider: "openai",
-        model: "gpt-5",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
         adapterType: "process",
-        runtimeMode: "codex.exec_json",
+        runtimeMode: "fake.deterministic",
         cwd: "/srv/switchyard/work",
         task: `status-${status}`,
         placement: "hosted"
@@ -473,15 +564,19 @@ async function verifyLifecycleMetricForStatus(
         await harness.runs.update(updated as any);
         return updated as any;
       },
-      hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
+      hostedRuntimeAllowlist: ["fake.deterministic"],
       deploymentMode: "production",
-      hostedRealRuntimeExecution: "enabled",
-      providerActivation: buildProviderActivation(true),
+      hostedRealRuntimeExecution: "disabled",
+      providerActivation: buildProviderActivation({
+        gate: "disabled",
+        allowlist: ["fake.deterministic"],
+        scenario: "valid"
+      }),
       providerEnvironment: {
         OPENAI_API_KEY: "smoke-openai-key",
         PATH: process.env["PATH"] ?? ""
       },
-      adapterRuntimeModes: new Set(["codex.exec_json", "claude_code.sdk", "opencode.acp"]),
+      adapterRuntimeModes: new Set([]),
       metrics: {
         inc(path) {
           metricEvents.push(path);
@@ -500,17 +595,37 @@ async function verifyLifecycleMetricForStatus(
   }
 }
 
-function buildProviderActivation(enabled: boolean) {
-  const allowlist = enabled
-    ? ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"]
-    : ["fake.deterministic"];
-  const policy = JSON.stringify({
+function assertRedacted(body: string, context: string): void {
+  const leakValues = [
+    REDACTION_SENTINELS.rawPolicyJson,
+    REDACTION_SENTINELS.executablePath,
+    REDACTION_SENTINELS.cwdPath,
+    REDACTION_SENTINELS.envValue,
+    REDACTION_SENTINELS.tokenValue,
+    REDACTION_SENTINELS.objectKey,
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENCODE_CONFIG_DIR"
+  ];
+  for (const marker of leakValues) {
+    assert(!body.includes(marker), `${context}:${marker}`);
+  }
+}
+
+function buildProviderActivation(input: {
+  gate: "enabled" | "disabled";
+  allowlist: string[];
+  scenario: ProviderActivationScenario;
+}) {
+  const gateEnabled = input.gate === "enabled";
+  const allowlist = gateEnabled ? input.allowlist : ["fake.deterministic"];
+  const basePolicy = {
     version: 1,
     modes: {
       "codex.exec_json": {
         enabled: true,
-        executablePath: "/bin/echo",
-        cwdPrefixes: ["/srv/switchyard/work"],
+        executablePath: REDACTION_SENTINELS.executablePath,
+        cwdPrefixes: [REDACTION_SENTINELS.cwdPath],
         envAllowlist: ["HOME", "PATH", "OPENAI_API_KEY"],
         requiredEnv: ["OPENAI_API_KEY"],
         fixedArgs: ["exec", "--json"],
@@ -525,8 +640,8 @@ function buildProviderActivation(enabled: boolean) {
       },
       "claude_code.sdk": {
         enabled: true,
-        executablePath: "/bin/echo",
-        cwdPrefixes: ["/srv/switchyard/work"],
+        executablePath: REDACTION_SENTINELS.executablePath,
+        cwdPrefixes: [REDACTION_SENTINELS.cwdPath],
         envAllowlist: ["HOME", "PATH", "ANTHROPIC_API_KEY"],
         requiredEnv: ["ANTHROPIC_API_KEY"],
         allowUserArgs: false,
@@ -541,8 +656,8 @@ function buildProviderActivation(enabled: boolean) {
       },
       "opencode.acp": {
         enabled: true,
-        executablePath: "/bin/echo",
-        cwdPrefixes: ["/srv/switchyard/work"],
+        executablePath: REDACTION_SENTINELS.executablePath,
+        cwdPrefixes: [REDACTION_SENTINELS.cwdPath],
         envAllowlist: ["HOME", "PATH", "OPENCODE_CONFIG_DIR"],
         requiredEnv: [],
         fixedArgs: ["acp"],
@@ -556,20 +671,46 @@ function buildProviderActivation(enabled: boolean) {
         }
       }
     }
-  });
+  } as const;
+
+  let policyJson: string | undefined;
+  if (gateEnabled) {
+    if (input.scenario === "missing_policy") {
+      policyJson = undefined;
+    } else if (input.scenario === "empty_policy") {
+      policyJson = "   ";
+    } else if (input.scenario === "malformed_policy") {
+      policyJson = `{"${REDACTION_SENTINELS.rawPolicyJson}":"${REDACTION_SENTINELS.tokenValue}","modes":{"codex.exec_json":{"executablePath":"${REDACTION_SENTINELS.executablePath}","cwdPrefixes":["${REDACTION_SENTINELS.cwdPath}"],"rawObjectKey":"${REDACTION_SENTINELS.objectKey}"}`;
+    } else {
+      const policy = JSON.parse(JSON.stringify(basePolicy)) as Record<string, unknown>;
+      if (input.scenario === "invalid_spend") {
+        const codex = ((policy["modes"] as Record<string, unknown>)["codex.exec_json"] as Record<string, unknown>);
+        codex["spendControls"] = {
+          maxActiveRuns: 0,
+          maxRunsPerHour: -1,
+          maxRunTimeoutSeconds: 0,
+          maxPromptBytes: 0
+        };
+      }
+      policyJson = JSON.stringify(policy);
+    }
+  }
+
+  const env = {
+    OPENAI_API_KEY: input.scenario === "missing_credential" ? undefined : REDACTION_SENTINELS.envValue,
+    ANTHROPIC_API_KEY: "smoke-anthropic-key",
+    OPENCODE_CONFIG_DIR: "/srv/switchyard/opencode",
+    HOME: "/tmp/switchyard-smoke-home",
+    PATH: process.env["PATH"],
+    SWITCHYARD_FAKE_OBJECT_KEY: REDACTION_SENTINELS.objectKey
+  } as Record<string, string | undefined>;
 
   return resolveProviderRuntimePolicy({
     deploymentMode: "production",
-    hostedRealRuntimeExecution: enabled ? "enabled" : "disabled",
+    hostedRealRuntimeExecution: gateEnabled ? "enabled" : "disabled",
     hostedRuntimeAllowlist: allowlist,
-    policyJson: enabled ? policy : undefined,
-    env: {
-      OPENAI_API_KEY: "smoke-openai-key",
-      ANTHROPIC_API_KEY: "smoke-anthropic-key",
-      OPENCODE_CONFIG_DIR: "/srv/switchyard/opencode",
-      HOME: "/tmp/switchyard-smoke-home",
-      PATH: process.env["PATH"]
-    },
+    ...(policyJson !== undefined ? { policyJson } : {}),
+    env,
     binaryProbe: () => true
   }).activation;
 }
