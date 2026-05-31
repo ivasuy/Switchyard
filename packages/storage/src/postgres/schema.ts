@@ -1,4 +1,4 @@
-import { boolean, index, integer, jsonb, pgTable, text } from "drizzle-orm/pg-core";
+import { boolean, index, integer, jsonb, pgTable, text, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const runs = pgTable("runs", {
   id: text("id").primaryKey(),
@@ -146,3 +146,156 @@ export const assignments = pgTable("assignments", {
   error: text("error"),
   createdAt: text("created_at").notNull()
 }, (table) => [index("assignments_claim_idx").on(table.nodeId, table.status)]);
+
+export const billingPlans = pgTable("billing_plans", {
+  id: text("id").primaryKey(),
+  slug: text("slug").notNull(),
+  displayName: text("display_name").notNull(),
+  status: text("status").notNull(),
+  entitlements: jsonb("entitlements").notNull(),
+  quotas: jsonb("quotas").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at")
+}, (table) => [uniqueIndex("billing_plans_slug_idx").on(table.slug)]);
+
+export const accounts = pgTable("accounts", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  status: text("status").notNull(),
+  billingPlanId: text("billing_plan_id").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at")
+}, (table) => [index("accounts_plan_idx").on(table.billingPlanId)]);
+
+export const tenants = pgTable("tenants", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  slug: text("slug").notNull(),
+  displayName: text("display_name").notNull(),
+  status: text("status").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at")
+}, (table) => [
+  uniqueIndex("tenants_account_slug_idx").on(table.accountId, table.slug),
+  index("tenants_account_status_idx").on(table.accountId, table.status)
+]);
+
+export const projects = pgTable("projects", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  slug: text("slug").notNull(),
+  displayName: text("display_name").notNull(),
+  status: text("status").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at")
+}, (table) => [
+  uniqueIndex("projects_tenant_slug_idx").on(table.tenantId, table.slug),
+  index("projects_scope_status_idx").on(table.accountId, table.tenantId, table.status)
+]);
+
+export const enterpriseUsers = pgTable("enterprise_users", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  displayName: text("display_name").notNull(),
+  email: text("email"),
+  status: text("status").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at")
+}, (table) => [index("enterprise_users_scope_status_idx").on(table.accountId, table.tenantId, table.status)]);
+
+export const apiKeys = pgTable("api_keys", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  projectId: text("project_id").notNull(),
+  userId: text("user_id").notNull(),
+  name: text("name").notNull(),
+  keyPrefix: text("key_prefix").notNull(),
+  secretHash: text("secret_hash").notNull(),
+  scopes: jsonb("scopes").notNull(),
+  status: text("status").notNull(),
+  expiresAt: text("expires_at"),
+  lastUsedAt: text("last_used_at"),
+  createdAt: text("created_at").notNull(),
+  revokedAt: text("revoked_at")
+}, (table) => [
+  index("api_keys_prefix_idx").on(table.keyPrefix),
+  index("api_keys_hash_idx").on(table.secretHash),
+  index("api_keys_scope_status_idx").on(table.accountId, table.tenantId, table.projectId, table.status)
+]);
+
+export const quotaReservations = pgTable("quota_reservations", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  projectId: text("project_id").notNull(),
+  quotaKind: text("quota_kind").notNull(),
+  amount: integer("amount").notNull(),
+  state: text("state").notNull(),
+  reasonCode: text("reason_code").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at"),
+  expiresAt: text("expires_at").notNull(),
+  finalizedAt: text("finalized_at")
+}, (table) => [
+  index("quota_reservations_scope_state_idx").on(
+    table.accountId,
+    table.tenantId,
+    table.projectId,
+    table.quotaKind,
+    table.state,
+    table.expiresAt
+  )
+]);
+
+export const quotaUsage = pgTable("quota_usage", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  projectId: text("project_id").notNull(),
+  quotaKind: text("quota_kind").notNull(),
+  windowStart: text("window_start").notNull(),
+  windowEnd: text("window_end").notNull(),
+  used: integer("used").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  uniqueIndex("quota_usage_scope_kind_idx").on(table.accountId, table.tenantId, table.projectId, table.quotaKind)
+]);
+
+export const auditLogEvents = pgTable("audit_log_events", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  projectId: text("project_id"),
+  actorType: text("actor_type").notNull(),
+  actorUserId: text("actor_user_id"),
+  apiKeyId: text("api_key_id"),
+  eventType: text("event_type").notNull(),
+  resourceType: text("resource_type"),
+  resourceId: text("resource_id"),
+  decision: text("decision").notNull(),
+  reasonCode: text("reason_code"),
+  ipHash: text("ip_hash"),
+  userAgent: text("user_agent"),
+  requestId: text("request_id"),
+  payload: jsonb("payload").notNull(),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  index("audit_log_events_scope_idx").on(table.accountId, table.tenantId, table.projectId, table.createdAt, table.id)
+]);
+
+export const resourceOwnership = pgTable("resource_ownership", {
+  resourceType: text("resource_type").notNull(),
+  resourceId: text("resource_id").notNull(),
+  accountId: text("account_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  projectId: text("project_id").notNull(),
+  userId: text("user_id").notNull(),
+  apiKeyId: text("api_key_id").notNull(),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  uniqueIndex("resource_ownership_resource_idx").on(table.resourceType, table.resourceId),
+  index("resource_ownership_scope_idx").on(table.resourceType, table.accountId, table.tenantId, table.projectId, table.resourceId)
+]);

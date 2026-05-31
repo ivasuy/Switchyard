@@ -10,6 +10,7 @@ import {
   MemoryArtifactContentStore,
   ObjectArtifactContentStore,
   LocalObjectArtifactContentStore,
+  PostgresControlPlaneStore,
   PostgresAssignmentStore,
   PostgresArtifactStore,
   PostgresEventStore,
@@ -106,6 +107,7 @@ describe("storage package", () => {
     expect(typeof PostgresPlacementStore).toBe("function");
     expect(typeof PostgresNodeStore).toBe("function");
     expect(typeof PostgresAssignmentStore).toBe("function");
+    expect(typeof PostgresControlPlaneStore).toBe("function");
     expect(typeof MemoryArtifactContentStore).toBe("function");
     expect(typeof ObjectArtifactContentStore).toBe("function");
     expect(typeof LocalObjectArtifactContentStore).toBe("function");

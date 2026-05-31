@@ -176,6 +176,153 @@ CREATE TABLE IF NOT EXISTS assignments (
   created_at text NOT NULL
 );
 CREATE INDEX IF NOT EXISTS assignments_claim_idx ON assignments(node_id, status);
+
+CREATE TABLE IF NOT EXISTS billing_plans (
+  id text PRIMARY KEY,
+  slug text NOT NULL,
+  display_name text NOT NULL,
+  status text NOT NULL,
+  entitlements jsonb NOT NULL,
+  quotas jsonb NOT NULL,
+  created_at text NOT NULL,
+  updated_at text
+);
+CREATE UNIQUE INDEX IF NOT EXISTS billing_plans_slug_idx ON billing_plans(slug);
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  status text NOT NULL,
+  billing_plan_id text NOT NULL,
+  created_at text NOT NULL,
+  updated_at text
+);
+CREATE INDEX IF NOT EXISTS accounts_plan_idx ON accounts(billing_plan_id);
+
+CREATE TABLE IF NOT EXISTS tenants (
+  id text PRIMARY KEY,
+  account_id text NOT NULL,
+  slug text NOT NULL,
+  display_name text NOT NULL,
+  status text NOT NULL,
+  created_at text NOT NULL,
+  updated_at text
+);
+CREATE UNIQUE INDEX IF NOT EXISTS tenants_account_slug_idx ON tenants(account_id, slug);
+CREATE INDEX IF NOT EXISTS tenants_account_status_idx ON tenants(account_id, status);
+
+CREATE TABLE IF NOT EXISTS projects (
+  id text PRIMARY KEY,
+  account_id text NOT NULL,
+  tenant_id text NOT NULL,
+  slug text NOT NULL,
+  display_name text NOT NULL,
+  status text NOT NULL,
+  created_at text NOT NULL,
+  updated_at text
+);
+CREATE UNIQUE INDEX IF NOT EXISTS projects_tenant_slug_idx ON projects(tenant_id, slug);
+CREATE INDEX IF NOT EXISTS projects_scope_status_idx ON projects(account_id, tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS enterprise_users (
+  id text PRIMARY KEY,
+  account_id text NOT NULL,
+  tenant_id text NOT NULL,
+  display_name text NOT NULL,
+  email text,
+  status text NOT NULL,
+  created_at text NOT NULL,
+  updated_at text
+);
+CREATE INDEX IF NOT EXISTS enterprise_users_scope_status_idx ON enterprise_users(account_id, tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  id text PRIMARY KEY,
+  account_id text NOT NULL,
+  tenant_id text NOT NULL,
+  project_id text NOT NULL,
+  user_id text NOT NULL,
+  name text NOT NULL,
+  key_prefix text NOT NULL,
+  secret_hash text NOT NULL,
+  scopes jsonb NOT NULL,
+  status text NOT NULL,
+  expires_at text,
+  last_used_at text,
+  created_at text NOT NULL,
+  revoked_at text
+);
+CREATE INDEX IF NOT EXISTS api_keys_prefix_idx ON api_keys(key_prefix);
+CREATE INDEX IF NOT EXISTS api_keys_hash_idx ON api_keys(secret_hash);
+CREATE INDEX IF NOT EXISTS api_keys_scope_status_idx ON api_keys(account_id, tenant_id, project_id, status);
+
+CREATE TABLE IF NOT EXISTS quota_reservations (
+  id text PRIMARY KEY,
+  account_id text NOT NULL,
+  tenant_id text NOT NULL,
+  project_id text NOT NULL,
+  quota_kind text NOT NULL,
+  amount integer NOT NULL,
+  state text NOT NULL,
+  reason_code text NOT NULL,
+  created_at text NOT NULL,
+  updated_at text,
+  expires_at text NOT NULL,
+  finalized_at text
+);
+CREATE INDEX IF NOT EXISTS quota_reservations_scope_state_idx
+  ON quota_reservations(account_id, tenant_id, project_id, quota_kind, state, expires_at);
+
+CREATE TABLE IF NOT EXISTS quota_usage (
+  id text PRIMARY KEY,
+  account_id text NOT NULL,
+  tenant_id text NOT NULL,
+  project_id text NOT NULL,
+  quota_kind text NOT NULL,
+  window_start text NOT NULL,
+  window_end text NOT NULL,
+  used integer NOT NULL,
+  updated_at text NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS quota_usage_scope_kind_idx
+  ON quota_usage(account_id, tenant_id, project_id, quota_kind);
+
+CREATE TABLE IF NOT EXISTS audit_log_events (
+  id text PRIMARY KEY,
+  account_id text NOT NULL,
+  tenant_id text NOT NULL,
+  project_id text,
+  actor_type text NOT NULL,
+  actor_user_id text,
+  api_key_id text,
+  event_type text NOT NULL,
+  resource_type text,
+  resource_id text,
+  decision text NOT NULL,
+  reason_code text,
+  ip_hash text,
+  user_agent text,
+  request_id text,
+  payload jsonb NOT NULL,
+  created_at text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS audit_log_events_scope_idx
+  ON audit_log_events(account_id, tenant_id, project_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS resource_ownership (
+  resource_type text NOT NULL,
+  resource_id text NOT NULL,
+  account_id text NOT NULL,
+  tenant_id text NOT NULL,
+  project_id text NOT NULL,
+  user_id text NOT NULL,
+  api_key_id text NOT NULL,
+  created_at text NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS resource_ownership_resource_idx
+  ON resource_ownership(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS resource_ownership_scope_idx
+  ON resource_ownership(resource_type, account_id, tenant_id, project_id, resource_id);
 `);
 }
 
