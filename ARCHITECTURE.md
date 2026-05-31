@@ -4,6 +4,15 @@ Switchyard is a protocol-neutral runtime gateway. Its job is to expose many agen
 
 This document is both a reference for the current architecture and the target architecture Switchyard is building toward. Some packages and routes shown here are planned but not shipped yet. Use `PRODUCT.md` for the current shipped surface and release roadmap.
 
+## R20 Sandbox Boundary (Current Shipped Truth)
+
+R20 ships a production subprocess/PTY sandbox foundation as an internal hosted-worker substrate only.
+
+- Sandbox construction is worker-only (`apps/worker`) and is not exposed as a public API route.
+- Policy resolves commands before execution: executors receive only policy-owned resolved command values (`executablePath`, `argv`, `cwd`, `env`, adapter type).
+- PTY is fail-closed: if no PTY driver is configured, requests fail with a named boundary error and never fall back to unsafe process execution.
+- No public arbitrary execution API exists in this release (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox` remain absent).
+
 The core architectural idea is separation:
 
 ```text

@@ -7,6 +7,8 @@ This document covers the shipped API surfaces:
 
 R19 scope note: production hosted deployment readiness is shipped for the existing safe hosted boundary. This release is API/ops-first (manifests, preflight/migrate/canary, readiness/schema codes, rollback posture), not a managed SaaS launch.
 
+R20 boundary note: production subprocess/PTY sandboxing is an internal hosted-worker substrate only. There is still no public arbitrary execution API on either local or hosted surfaces: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` route exists.
+
 ## R19 Production Hosted Deployment Readiness
 
 Shipped hosted/server production-readiness capabilities:
@@ -87,7 +89,7 @@ R14 diagnostics additions:
 
 - `GET /ready` includes `checks.sandbox` with `ok=true` or one of `sandbox_disabled`, `sandbox_policy_invalid`, or `sandbox_config_invalid`.
 - `GET /metrics` includes low-cardinality `sandbox` counters (`jobs`, `allowed`, `denied`, `completed`, `failed`, `timeout`, `cancelled`, `outputTruncated`, `artifactTruncated`, `redactions`).
-- There is still no public `/sandbox`, `/exec`, `/pty`, or `/terminal` route.
+- There is still no public `/sandbox`, `/exec`, `/shell`, `/process`, `/command`, `/pty`, or `/terminal` route.
 
 R15 diagnostics additions:
 
@@ -126,7 +128,7 @@ Current implementation status:
 - Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), local-daemon real tool invocation routing for configured `fetch`/`web_search`/`github`/`repo`/command-catalog `shell` (deny-by-default, approval-by-default), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex one-shot (`codex.exec_json`), local Codex interactive (`codex.interactive`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
-- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service/signup, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public `/exec`/`/sandbox`/`/pty`/`/terminal` APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, per-run HTTP base URL overrides, remote artifact URL fetching, hosted/connected-node real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, production hosted real-runtime execution, real debate participant runtimes, and model-based debate judging.
+- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service/signup, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public `/exec`/`/shell`/`/process`/`/command`/`/sandbox`/`/pty`/`/terminal` APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, per-run HTTP base URL overrides, remote artifact URL fetching, hosted/connected-node real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, production hosted real-runtime execution, real debate participant runtimes, and model-based debate judging.
 
 ## Error Contract
 

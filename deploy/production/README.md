@@ -1,8 +1,8 @@
-# Switchyard Production Manifest Pack (R19)
+# Switchyard Production Manifest Pack (R20)
 
-This directory contains a provider-neutral production example for the hosted server, hosted worker, and optional connected node. It is intentionally API/ops-only and keeps production hosted runtime execution fake-only (`fake.deterministic`).
+This directory contains a provider-neutral production example for the hosted server, hosted worker, and optional connected node. It is intentionally API/ops-only and keeps production hosted runtime execution fake-only (`fake.deterministic`) while shipping only an internal worker sandbox substrate.
 
-The worker service uses the currently available built entrypoint (`node apps/worker/dist/main.js`). The R19 P18-T4 worker readiness task owns the startup/claim gate that must fail before queue claiming.
+The worker service uses the currently available built entrypoint (`node apps/worker/dist/main.js`). Worker readiness must fail closed before queue claiming when runtime/sandbox/control-plane requirements are not satisfied.
 
 ## Included Files
 
@@ -33,12 +33,17 @@ Generate unique high-entropy values for at least:
 - Object-store credentials
 - Bootstrap API key and node token records
 
-## Runtime Boundary (R19)
+## Runtime Boundary (R20)
 
 Production runtime policy is fake-only:
 
 - `SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic`
 - `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`
+- `SWITCHYARD_SANDBOX_REAL_EXECUTION=disabled` (safe default)
+
+If an operator intentionally sets `SWITCHYARD_SANDBOX_REAL_EXECUTION=enabled`, they must also provide valid `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` or readiness fails closed (`sandbox_policy_missing` / `sandbox_policy_invalid`).
+
+No public arbitrary execution route is shipped in this phase (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox` remain absent).
 
 Do not enable hosted real runtime modes in this phase.
 
@@ -59,6 +64,8 @@ Do not enable hosted real runtime modes in this phase.
    - `docker compose -f deploy/production/docker-compose.yml --profile optional-node up -d node`
 10. Run canary:
     - `pnpm tsx scripts/production-canary.ts --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key`
+11. Run production sandbox smoke:
+    - `pnpm production:sandbox-smoke`
 
 ## Rollback Order
 

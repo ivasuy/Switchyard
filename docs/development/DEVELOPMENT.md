@@ -68,7 +68,7 @@ SDK quick one-liner:
 node --import tsx -e 'import {SwitchyardClient} from \"@switchyard/sdk\"; const c=new SwitchyardClient({baseUrl:\"http://127.0.0.1:4545\"}); const r=await c.health(); console.log(r.ok);'
 ```
 
-## R19 No-Spend Verification (Copy/Paste)
+## R20 No-Spend Verification (Copy/Paste)
 
 These required checks are deterministic and no-spend. They must not call payment providers, model providers, AWS/R2 live services, live GitHub, external search, hosted browsers, or arbitrary process/PTY execution.
 
@@ -76,6 +76,8 @@ These required checks are deterministic and no-spend. They must not call payment
 pnpm --filter @switchyard/daemon test -- smoke
 pnpm --filter @switchyard/sdk test -- client
 pnpm --filter @switchyard/cli test -- run-cli
+pnpm production:sandbox-smoke
+pnpm exec vitest run scripts/production-sandbox-smoke.test.ts
 pnpm exec vitest run deploy/production/production-manifest.test.ts scripts/production-preflight.test.ts scripts/production-migrate.test.ts scripts/production-canary.test.ts
 pnpm --filter @switchyard/contracts openapi:check
 pnpm --filter @switchyard/contracts openapi:check:hosted
@@ -90,7 +92,7 @@ pnpm --filter @switchyard/contracts openapi:generate:hosted
 pnpm --filter @switchyard/contracts openapi:check:hosted
 ```
 
-## R19 Production Operator Commands
+## R20 Production Operator Commands
 
 Preflight (required before deploy):
 
@@ -111,6 +113,18 @@ pnpm production:canary -- --base-url https://replace-with-public-server-url --ap
 ```
 
 Canary supports `SWITCHYARD_CANARY_API_KEY` as an alternative to `--api-key`.
+
+Sandbox smoke (required before enabling worker claims in production posture):
+
+```bash
+pnpm production:sandbox-smoke
+```
+
+Safe default sandbox env posture (required unless an operator intentionally enables real execution with policy):
+
+- `SWITCHYARD_SANDBOX_REAL_EXECUTION=disabled`
+- `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` unset when real execution is disabled.
+- If `SWITCHYARD_SANDBOX_REAL_EXECUTION=enabled`, `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` must be present and valid or readiness fails closed (`sandbox_policy_missing`/`sandbox_policy_invalid`).
 
 ## R19 Hosted Rollout / Rollback
 

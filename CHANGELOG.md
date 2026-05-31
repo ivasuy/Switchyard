@@ -45,6 +45,24 @@ All notable changes to Switchyard will be documented in this file.
 - Updated run create route boundaries for interactive Codex: `POST /runs?wait=1` + `runtimeMode: "codex.interactive"` now fails fast with `interactive_wait_unsupported`, and hosted placement for local-only interactive modes fails with `hosted_runtime_not_allowed`.
 - Updated OpenAPI contract guard tests to reject additional arbitrary-execution tokens (`/shell`, `/process`, `/command`) while keeping shipped middleware tool routes intact.
 
+## 2026-05-31 - Roadmap Release Train R20 Production Subprocess/PTY Sandbox Foundation
+
+### Added
+
+- Added root no-spend production sandbox smoke command: `pnpm production:sandbox-smoke`.
+- Added deterministic `scripts/production-sandbox-smoke.test.ts` coverage for process, PTY, denial, timeout, cancel, output-limit, artifact capture, transcript redaction, readiness gates, and both local/hosted OpenAPI no-route boundaries.
+- Added hosted sandbox smoke report/assertion coverage for disabled-by-default real execution posture plus fail-closed `sandbox_policy_missing` behavior when real execution is enabled without policy.
+
+### Changed
+
+- Updated product truth/docs for R20 to mark production subprocess/PTY sandbox as an internal hosted-worker substrate with policy-first handoff and fail-closed PTY driver boundaries.
+- Updated API/development/production operator docs with `production:sandbox-smoke`, explicit preflight references, and safe default environment posture for real execution.
+
+### Safety Boundaries
+
+- R20 does not ship public arbitrary execution routes (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`).
+- R20 does not ship production hosted Codex/Claude/OpenCode execution, hosted real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, dashboard/TUI, or hosted debate participant runtime execution.
+
 ## 2026-05-30 - Roadmap Release Train R13 S3/R2 Object-Store Client Wiring
 
 ### Added

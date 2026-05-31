@@ -13,6 +13,7 @@
     "release:smoke-local": "pnpm --filter @switchyard/cli release:smoke-local",
     "self-hosted:smoke": "tsx scripts/self-hosted-smoke.ts",
     "sandbox:smoke": "tsx scripts/hosted-sandbox-smoke.ts",
+    "production:sandbox-smoke": "tsx scripts/hosted-sandbox-smoke.ts",
     "hosted-real-runtime:smoke": "tsx scripts/hosted-real-runtime-smoke.ts",
     "production:preflight": "tsx scripts/production-preflight.ts",
     "production:migrate": "tsx scripts/production-migrate.ts",

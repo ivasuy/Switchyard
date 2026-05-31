@@ -47,21 +47,22 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/phase-18-r19-production-hosted-deployment` (R19 production hosted deployment readiness baseline).
+Snapshot source: `agent/phase-19-r20-production-subprocess-pty` (R20 production subprocess/PTY sandbox foundation baseline).
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like worker execution for fake deterministic plus operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; shipped S3/R2-compatible object-store client wiring for hosted artifact content; shipped the R18 API-first hosted/server enterprise control-plane foundation; and shipped R19 production hosted deployment readiness (provider-neutral production manifest pack, fail-closed production preflight/migration gates, explicit schema/readiness diagnostics, and deterministic no-spend production canary).
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like worker execution for fake deterministic plus operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; shipped S3/R2-compatible object-store client wiring for hosted artifact content; shipped the R18 API-first hosted/server enterprise control-plane foundation; shipped R19 production hosted deployment readiness (provider-neutral production manifest pack, fail-closed production preflight/migration gates, explicit schema/readiness diagnostics, and deterministic no-spend production canary); and shipped R20 internal production subprocess/PTY sandbox foundation plus production ops gates (policy-first worker substrate, fail-closed readiness, deterministic no-spend production sandbox smoke).
 
-The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, the R12 self-hosted staging deployment foundation, the R18 hosted enterprise auth/tenant/quota/audit control-plane baseline, and the R19 production hosted deployment operability workflow (`production:preflight`, `production:migrate`, `production:canary`) for fake-only hosted execution. It is not yet a managed hosted platform, and production hosted real-runtime execution remains forbidden.
+The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, the R12 self-hosted staging deployment foundation, the R18 hosted enterprise auth/tenant/quota/audit control-plane baseline, the R19 production hosted deployment operability workflow (`production:preflight`, `production:migrate`, `production:canary`) for fake-only hosted execution, and the R20 production sandbox operability smoke (`production:sandbox-smoke`) for internal worker sandbox validation. It is not yet a managed hosted platform, and production hosted real-runtime execution remains forbidden.
 
 Important runtime wording: `codex.exec_json` remains the default inferred Codex one-shot mode. `codex.interactive` is a separate explicit local-only mode for bounded post-start input and resume/session-state flows.
 
-R19 production hosted boundary wording:
+R20 production hosted + sandbox boundary wording:
 
-- Hosted/server APIs now require API key auth in staging/production fail-closed mode.
-- Hosted `/metrics` remains global operator/admin telemetry (`metrics:read` plus `admin:read`) and is not tenant-scoped in R19.
-- Production readiness includes named schema compatibility codes and diagnostics (`checks.schema`) and deterministic no-spend canary verification.
+- Hosted/server APIs require API key auth in staging/production fail-closed mode.
+- Hosted `/metrics` remains global operator/admin telemetry (`metrics:read` plus `admin:read`) and is not tenant-scoped in R20.
+- Production readiness includes named schema compatibility codes and diagnostics (`checks.schema`) plus sandbox readiness diagnostics (`checks.sandbox`) and deterministic no-spend canary/smoke verification.
+- R20 sandbox execution is a worker-internal substrate only. It is policy-first, deny-by-default, and fail-closed when real execution is enabled without policy.
 - Local daemon defaults remain no-auth and backwards compatible for local fake runs, SDK usage, CLI fake runs, and local OpenAPI export.
-- R19 does not ship managed SaaS/public signup, payment provider integration (invoices/checkout/webhooks), OAuth/OIDC/SAML/SSO/SCIM, dashboard, TUI, production hosted real-runtime execution, public `/exec`/`/sandbox`/`/terminal`/`/pty` routes, hosted or connected-node real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, runtime-specific hosted approval bridge expansion, or hosted debate participant execution/model judging.
+- R20 does not ship managed SaaS/public signup, payment provider integration (invoices/checkout/webhooks), OAuth/OIDC/SAML/SSO/SCIM, dashboard, TUI, production hosted real-runtime execution, public `/exec`/`/shell`/`/process`/`/command`/`/pty`/`/terminal`/`/sandbox` routes, hosted or connected-node real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, runtime-specific hosted approval bridge expansion, or hosted debate participant execution/model judging.
 
 ## What Exists Today
 
@@ -269,7 +270,7 @@ These are planned or designed in docs, but not shipped product:
 - Public tenant self-service signup/billing/key-management UI.
 - OAuth/OIDC/SAML/SSO/SCIM, session-cookie auth, and browser login flows.
 - Production hosted real-runtime worker deployment for Codex, Claude Code, OpenCode, arbitrary process, or PTY execution.
-- Production sandboxing for arbitrary subprocess/PTY workloads (R15 still ships no managed production arbitrary subprocess/PTY substrate).
+- Public arbitrary subprocess/PTY execution APIs and generic process/PTY product adapters are not shipped.
 - Presigned direct upload/download URLs, bucket provisioning automation, lifecycle policy management, provider-managed encryption setup, and CDN integration.
 - WebSocket protocol package.
 - Policy package beyond current contracts/ports.
