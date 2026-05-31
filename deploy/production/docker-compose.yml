@@ -25,7 +25,7 @@ services:
       - .env
     command: ["node", "apps/server/dist/main.js"]
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4646/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      test: ["CMD-SHELL", "node -e \"Promise.all([fetch('http://127.0.0.1:4646/health'),fetch('http://127.0.0.1:4646/ready')]).then(([health,ready])=>process.exit(health.ok&&ready.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    command: ["sh", "-lc", "node apps/worker/dist/ready.js && node apps/worker/dist/main.js"]
+    command: ["node", "apps/worker/dist/main.js"]
     depends_on:
       server:
         condition: service_healthy

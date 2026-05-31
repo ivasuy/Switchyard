@@ -26,11 +26,7 @@
     },
     "worker": {
       "deploymentMode": "production",
-      "command": [
-        "sh",
-        "-lc",
-        "node apps/worker/dist/ready.js && node apps/worker/dist/main.js"
-      ],
+      "command": ["node", "apps/worker/dist/main.js"],
       "requiredEnv": [
         "SWITCHYARD_DEPLOYMENT_MODE",
         "SWITCHYARD_POSTGRES_URL",
@@ -41,7 +37,7 @@
         "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
       ],
       "readinessChecks": [
-        "node apps/worker/dist/ready.js"
+        "P18-T4 worker startup/claim gate"
       ],
       "privateDependencies": ["postgres", "redis", "object-store"]
     },

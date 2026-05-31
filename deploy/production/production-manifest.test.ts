@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -7,6 +7,7 @@ interface ServiceManifest {
   command: string[];
   requiredEnv: string[];
   healthChecks?: string[];
+  readinessChecks?: string[];
 }
 
 interface ProductionManifest {
@@ -25,6 +26,22 @@ function deployPath(file: string): string {
 
 function parseManifestJson(text: string): ProductionManifest {
   return JSON.parse(text) as ProductionManifest;
+}
+
+function serviceBlock(composeText: string, serviceName: string): string {
+  const match = composeText.match(new RegExp(`\\n  ${serviceName}:\\n([\\s\\S]*?)(?=\\n  \\S|\\nvolumes:|$)`));
+  if (!match) {
+    throw new Error(`missing compose service: ${serviceName}`);
+  }
+  return match[1];
+}
+
+function expectCurrentBuiltEntrypoint(command: string[]): void {
+  expect(command[0]).toBe("node");
+  const distEntrypoint = command[1];
+  expect(distEntrypoint).toMatch(/^apps\/[^/]+\/dist\/main\.js$/);
+  const sourceEntrypoint = distEntrypoint.replace("/dist/main.js", "/src/main.ts");
+  expect(existsSync(resolve(import.meta.dirname, "../..", sourceEntrypoint))).toBe(true);
 }
 
 describe("production manifest pack", () => {
@@ -65,21 +82,29 @@ describe("production manifest pack", () => {
 
   it("uses built production commands only", () => {
     const compose = readFileSync(deployPath("docker-compose.yml"), "utf8");
+    const manifest = parseManifestJson(readFileSync(deployPath("manifest.json"), "utf8"));
 
     expect(compose).not.toMatch(/pnpm\s+install/i);
     expect(compose).not.toMatch(/\bdev\b/i);
     expect(compose).not.toContain("../..:/workspace");
     expect(compose).toMatch(/command:\s*\["node",\s*"apps\/server\/dist\/main\.js"\]/);
-    expect(compose).toMatch(/node apps\/worker\/dist\/ready\.js/);
-    expect(compose).toMatch(/node apps\/worker\/dist\/main\.js/);
+    expect(compose).toMatch(/command:\s*\["node",\s*"apps\/worker\/dist\/main\.js"\]/);
+    expect(compose).not.toMatch(/apps\/worker\/dist\/ready\.js/);
+    expectCurrentBuiltEntrypoint(manifest.services.server.command);
+    expectCurrentBuiltEntrypoint(manifest.services.worker.command);
+    if (manifest.services.node) {
+      expectCurrentBuiltEntrypoint(manifest.services.node.command);
+    }
   });
 
-  it("contains health and readiness checks", () => {
+  it("contains server service health and readiness checks", () => {
     const compose = readFileSync(deployPath("docker-compose.yml"), "utf8");
+    const serverService = serviceBlock(compose, "server");
 
-    expect(compose).toContain("/health");
-    expect(compose).toContain("/ready");
-    expect(compose).toContain("node apps/worker/dist/ready.js");
+    expect(serverService).toContain("healthcheck:");
+    expect(serverService).toContain("/health");
+    expect(serverService).toContain("/ready");
+    expect(serverService).toContain("health.ok&&ready.ok");
   });
 
   it("uses invalid placeholders and required production defaults", () => {

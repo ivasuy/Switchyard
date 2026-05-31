@@ -2,6 +2,8 @@
 
 This directory contains a provider-neutral production example for the hosted server, hosted worker, and optional connected node. It is intentionally API/ops-only and keeps production hosted runtime execution fake-only (`fake.deterministic`).
 
+The worker service uses the currently available built entrypoint (`node apps/worker/dist/main.js`). The R19 P18-T4 worker readiness task owns the startup/claim gate that must fail before queue claiming.
+
 ## Included Files
 
 - `docker-compose.yml`: production-shaped compose example with built entrypoints and runtime checks.
