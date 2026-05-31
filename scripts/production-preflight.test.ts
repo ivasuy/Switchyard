@@ -103,7 +103,12 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
           "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
           "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
         ],
-        healthChecks: ["GET /health", "GET /ready"]
+        healthChecks: ["GET /health", "GET /ready"],
+        policy: {
+          runtimeAllowlist: ["fake.deterministic"],
+          hostedRealRuntimeExecution: "disabled",
+          objectStoreProbe: "write_read_delete"
+        }
       },
       worker: {
         deploymentMode: "production",
@@ -114,7 +119,14 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
           "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
           "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
         ],
-        readinessChecks: ["P18-T4 worker startup/claim gate"]
+        readinessGate: {
+          command: ["node", "apps/worker/dist/ready.js"]
+        },
+        policy: {
+          runtimeAllowlist: ["fake.deterministic"],
+          hostedRealRuntimeExecution: "disabled",
+          objectStoreProbe: "write_read_delete"
+        }
       },
       node: {
         deploymentMode: "production",
@@ -140,6 +152,7 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
       "SWITCHYARD_POSTGRES_URL",
       "SWITCHYARD_REDIS_URL",
       "SWITCHYARD_OBJECT_STORE_BACKEND",
+      "SWITCHYARD_OBJECT_STORE_PROBE",
       "SWITCHYARD_NODE_SHARED_TOKEN",
       "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
       "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
@@ -318,7 +331,25 @@ describe("validateProductionManifest", () => {
     await withTempDir(async (dir) => {
       const manifestPath = join(dir, "manifest.json");
       const manifest = validManifest();
-      (manifest.services as any).worker.readinessChecks = ["queue stats only"];
+      delete (manifest.services as any).worker.readinessGate;
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors).toContainEqual({ code: "manifest_invalid", service: "worker" });
+    });
+  });
+
+  test("rejects free-text worker readiness substitutes", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      (manifest.services as any).worker.readinessGate = {
+        command: ["P18-T4 worker startup/claim gate"]
+      };
       await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
 
       const result = await validateProductionManifest(manifestPath);
@@ -335,7 +366,9 @@ describe("validateProductionManifest", () => {
       const manifestPath = join(dir, "manifest.json");
       const manifest = validManifest();
       (manifest.services as any).worker.policy = {
-        runtimeAllowlist: ["fake.deterministic", "codex.exec_json"]
+        runtimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+        hostedRealRuntimeExecution: "disabled",
+        objectStoreProbe: "write_read_delete"
       };
       await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
 
@@ -348,14 +381,47 @@ describe("validateProductionManifest", () => {
     });
   });
 
+  test("rejects omitted explicit runtime posture", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      delete (manifest.services as any).server.policy.runtimeAllowlist;
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors).toContainEqual({ code: "manifest_forbidden_surface", service: "server" });
+    });
+  });
+
   test("rejects disabled object-store probe posture", async () => {
     await withTempDir(async (dir) => {
       const manifestPath = join(dir, "manifest.json");
       const manifest = validManifest();
       (manifest.services as any).worker.policy = {
         runtimeAllowlist: ["fake.deterministic"],
+        hostedRealRuntimeExecution: "disabled",
         objectStoreProbe: "disabled"
       };
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors).toContainEqual({ code: "manifest_invalid", service: "worker" });
+    });
+  });
+
+  test("rejects missing object-store probe posture", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      delete (manifest.services as any).worker.policy.objectStoreProbe;
       await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
 
       const result = await validateProductionManifest(manifestPath);
@@ -542,6 +608,18 @@ describe("runProductionPreflight", () => {
       "control_plane_bootstrap_billing_plan_missing",
       "control_plane_node_token_unbound"
     ]));
+  });
+
+  test("surfaces missing control-plane bootstrap itself", async () => {
+    const result = await runDependencyPreflight({
+      checkControlPlane: async () => ({
+        checks: [
+          { name: "bootstrap", ok: false, code: "control_plane_bootstrap_missing" }
+        ]
+      })
+    });
+
+    expect(failedCodes(result)).toContain("control_plane_bootstrap_missing");
   });
 
   test("redacts diagnostics in output", async () => {

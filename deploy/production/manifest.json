@@ -22,6 +22,11 @@
         "GET /health",
         "GET /ready"
       ],
+      "policy": {
+        "runtimeAllowlist": ["fake.deterministic"],
+        "hostedRealRuntimeExecution": "disabled",
+        "objectStoreProbe": "write_read_delete"
+      },
       "privateDependencies": ["postgres", "redis", "object-store"]
     },
     "worker": {
@@ -36,9 +41,14 @@
         "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
         "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
       ],
-      "readinessChecks": [
-        "P18-T4 worker startup/claim gate"
-      ],
+      "readinessGate": {
+        "command": ["node", "apps/worker/dist/ready.js"]
+      },
+      "policy": {
+        "runtimeAllowlist": ["fake.deterministic"],
+        "hostedRealRuntimeExecution": "disabled",
+        "objectStoreProbe": "write_read_delete"
+      },
       "privateDependencies": ["postgres", "redis", "object-store"]
     },
     "node": {
@@ -54,6 +64,7 @@
       ],
       "policy": {
         "runtimeAllowlist": ["fake.deterministic"],
+        "hostedRealRuntimeExecution": "disabled",
         "realTools": "forbidden"
       },
       "privateDependencies": ["server"]
@@ -66,6 +77,7 @@
     "SWITCHYARD_POSTGRES_URL",
     "SWITCHYARD_REDIS_URL",
     "SWITCHYARD_OBJECT_STORE_BACKEND",
+    "SWITCHYARD_OBJECT_STORE_PROBE",
     "SWITCHYARD_NODE_SHARED_TOKEN",
     "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
     "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"

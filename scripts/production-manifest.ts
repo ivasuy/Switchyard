@@ -6,13 +6,18 @@ export interface ProductionManifestService {
   requiredEnv?: string[];
   healthChecks?: string[];
   readinessChecks?: string[];
+  readinessGate?: {
+    command?: string[] | string;
+  };
   privateDependencies?: string[];
   policy?: {
     runtimeAllowlist?: string[];
+    hostedRealRuntimeExecution?: string;
     realTools?: string;
     objectStoreProbe?: string;
   };
   runtimeAllowlist?: string[];
+  hostedRealRuntimeExecution?: string;
   objectStoreProbe?: string;
 }
 
@@ -65,6 +70,7 @@ const REQUIRED_TOP_LEVEL_ENV = [
   "SWITCHYARD_POSTGRES_URL",
   "SWITCHYARD_REDIS_URL",
   "SWITCHYARD_OBJECT_STORE_BACKEND",
+  "SWITCHYARD_OBJECT_STORE_PROBE",
   "SWITCHYARD_NODE_SHARED_TOKEN",
   "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
   "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
@@ -225,11 +231,9 @@ function validateReadinessChecks(
   }
 
   const readinessChecks = worker.readinessChecks ?? [];
-  const hasR19WorkerGate = readinessChecks.some((entry) => {
-    const normalized = entry.toLowerCase();
-    return normalized.includes("startup/claim gate") || normalized.includes("apps/worker/dist/ready.js");
-  });
-  if (!hasR19WorkerGate) {
+  const legacyFreeText = readinessChecks.some((entry) => entry.trim().length > 0);
+  const readinessGateCommand = normalizeCommand(worker.readinessGate?.command);
+  if (legacyFreeText || readinessGateCommand !== "node apps/worker/dist/ready.js") {
     errors.push({ code: "manifest_invalid", service: "worker" });
   }
 }
@@ -243,11 +247,9 @@ function validateRuntimePosture(
       continue;
     }
     const allowlist = service.policy?.runtimeAllowlist ?? service.runtimeAllowlist;
-    if (!allowlist) {
-      continue;
-    }
-    const fakeOnly = allowlist.length === 1 && allowlist[0] === "fake.deterministic";
-    if (!fakeOnly) {
+    const hostedRealRuntimeExecution = service.policy?.hostedRealRuntimeExecution ?? service.hostedRealRuntimeExecution;
+    const fakeOnly = allowlist?.length === 1 && allowlist[0] === "fake.deterministic";
+    if (!fakeOnly || hostedRealRuntimeExecution !== "disabled") {
       errors.push({ code: "manifest_forbidden_surface", service: name });
     }
   }
@@ -261,11 +263,21 @@ function validateObjectStoreProbePosture(
     if (!service) {
       continue;
     }
+    if (name !== "server" && name !== "worker") {
+      continue;
+    }
     const probe = service.policy?.objectStoreProbe ?? service.objectStoreProbe;
-    if (probe !== undefined && probe !== "write_read_delete") {
+    if (probe !== "write_read_delete") {
       errors.push({ code: "manifest_invalid", service: name });
     }
   }
+}
+
+function normalizeCommand(command: string[] | string | undefined): string {
+  if (Array.isArray(command)) {
+    return command.join(" ").trim();
+  }
+  return typeof command === "string" ? command.trim() : "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
