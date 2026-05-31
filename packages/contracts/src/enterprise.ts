@@ -8,19 +8,41 @@ import {
   metadataSchema,
   projectIdSchema,
   quotaReservationIdSchema,
+  runtimeModeSlugSchema,
   tenantIdSchema,
   userIdSchema
 } from "./ids.js";
+import { executionPlacementSchema } from "./run.js";
 import { userSchema } from "./user.js";
 
-const statusSchema = z.string().min(1);
-const scopeSchema = z.string().min(1);
+const slugSchema = z
+  .string()
+  .regex(/^[a-z0-9]+(?:[a-z0-9_-]*[a-z0-9])?$/, "must be a lowercase slug");
+
+export const accountStatusSchema = z.enum(["active", "suspended", "deleted"]);
+export const tenantStatusSchema = z.enum(["active", "suspended", "deleted"]);
+export const projectStatusSchema = z.enum(["active", "archived", "deleted"]);
+export const apiKeyStatusSchema = z.enum(["active", "revoked", "expired"]);
+export const billingPlanStatusSchema = z.enum(["active", "archived"]);
+
+export const authScopeSchema = z.enum([
+  "runs:write",
+  "runs:read",
+  "artifacts:read",
+  "registry:read",
+  "nodes:write",
+  "metrics:read",
+  "audit:read",
+  "entitlements:read",
+  "admin:read"
+]);
 
 export const accountSchema = z
   .object({
     id: accountIdSchema,
     name: z.string().min(1),
-    status: statusSchema,
+    status: accountStatusSchema,
+    billingPlanId: billingPlanIdSchema,
     createdAt: isoDateSchema,
     updatedAt: isoDateSchema.optional()
   })
@@ -30,8 +52,9 @@ export const tenantSchema = z
   .object({
     id: tenantIdSchema,
     accountId: accountIdSchema,
-    name: z.string().min(1),
-    status: statusSchema,
+    slug: slugSchema,
+    displayName: z.string().min(1),
+    status: tenantStatusSchema,
     createdAt: isoDateSchema,
     updatedAt: isoDateSchema.optional()
   })
@@ -42,8 +65,9 @@ export const projectSchema = z
     id: projectIdSchema,
     accountId: accountIdSchema,
     tenantId: tenantIdSchema,
-    name: z.string().min(1),
-    status: statusSchema,
+    slug: slugSchema,
+    displayName: z.string().min(1),
+    status: projectStatusSchema,
     createdAt: isoDateSchema,
     updatedAt: isoDateSchema.optional()
   })
@@ -57,11 +81,11 @@ const apiKeyBaseSchema = z.object({
   userId: userIdSchema,
   name: z.string().min(1),
   keyPrefix: z.string().min(1),
-  scopes: z.array(scopeSchema),
-  status: statusSchema,
-  createdAt: isoDateSchema,
-  updatedAt: isoDateSchema.optional(),
+  scopes: z.array(authScopeSchema),
+  status: apiKeyStatusSchema,
   expiresAt: isoDateSchema.optional(),
+  lastUsedAt: isoDateSchema.optional(),
+  createdAt: isoDateSchema,
   revokedAt: isoDateSchema.optional()
 });
 
@@ -73,21 +97,36 @@ export const apiKeyStoredSchema = apiKeyBaseSchema
   })
   .strict();
 
+export const billingPlanEntitlementsSchema = z
+  .object({
+    allowedPlacements: z.array(executionPlacementSchema),
+    allowedRuntimeModes: z.array(runtimeModeSlugSchema),
+    allowHostedRealRuntime: z.boolean(),
+    allowConnectedNodes: z.boolean(),
+    allowArtifactContentRead: z.boolean(),
+    allowMetricsRead: z.boolean(),
+    allowAuditRead: z.boolean()
+  })
+  .strict();
+
+export const billingPlanQuotasSchema = z
+  .object({
+    maxRunsPerHour: z.number().int().nonnegative(),
+    maxActiveRuns: z.number().int().nonnegative(),
+    maxRunTimeoutSeconds: z.number().int().positive(),
+    maxConnectedNodes: z.number().int().nonnegative(),
+    maxArtifactContentReadBytesPerHour: z.number().int().nonnegative()
+  })
+  .strict();
+
 export const billingPlanSchema = z
   .object({
     id: billingPlanIdSchema,
-    accountId: accountIdSchema,
-    tenantId: tenantIdSchema,
-    name: z.string().min(1),
-    status: statusSchema,
-    allowedPlacements: z.array(z.string().min(1)),
-    allowedRuntimeModes: z.array(z.string().min(1)),
-    allowHostedRealRuntime: z.boolean(),
-    maxTimeoutSeconds: z.number().int().positive(),
-    maxRunsPerHour: z.number().int().nonnegative(),
-    maxActiveRuns: z.number().int().nonnegative(),
-    maxConnectedNodes: z.number().int().nonnegative(),
-    maxArtifactContentReadBytesPerHour: z.number().int().nonnegative(),
+    slug: slugSchema,
+    displayName: z.string().min(1),
+    status: billingPlanStatusSchema,
+    entitlements: billingPlanEntitlementsSchema,
+    quotas: billingPlanQuotasSchema,
     createdAt: isoDateSchema,
     updatedAt: isoDateSchema.optional()
   })
@@ -106,16 +145,12 @@ export const entitlementSnapshotSchema = z
     tenantId: tenantIdSchema,
     projectId: projectIdSchema,
     planId: billingPlanIdSchema,
-    planName: z.string().min(1),
-    allowedPlacements: z.array(z.string().min(1)),
-    allowedRuntimeModes: z.array(z.string().min(1)),
-    allowHostedRealRuntime: z.boolean(),
-    maxTimeoutSeconds: z.number().int().positive(),
-    maxRunsPerHour: z.number().int().nonnegative(),
-    maxActiveRuns: z.number().int().nonnegative(),
-    maxConnectedNodes: z.number().int().nonnegative(),
-    maxArtifactContentReadBytesPerHour: z.number().int().nonnegative(),
-    scopes: z.array(scopeSchema),
+    planSlug: slugSchema,
+    planDisplayName: z.string().min(1),
+    planStatus: billingPlanStatusSchema.optional(),
+    entitlements: billingPlanEntitlementsSchema,
+    quotas: billingPlanQuotasSchema,
+    scopes: z.array(authScopeSchema),
     capturedAt: isoDateSchema
   })
   .strict();
@@ -151,9 +186,21 @@ export const quotaReservationSchema = z
   })
   .strict();
 
+export const resourceOwnershipTypeSchema = z.enum([
+  "run",
+  "run_event",
+  "artifact",
+  "placement_decision",
+  "node",
+  "assignment",
+  "audit_log_event",
+  "quota",
+  "auth"
+]);
+
 export const resourceOwnershipSchema = z
   .object({
-    resourceType: z.string().min(1),
+    resourceType: resourceOwnershipTypeSchema,
     resourceId: z.string().min(1),
     accountId: accountIdSchema,
     tenantId: tenantIdSchema,
@@ -175,21 +222,59 @@ export const authContextSchema = z
   })
   .strict();
 
-export const auditLogOutcomeSchema = z.enum(["allowed", "denied", "failed"]);
+export const auditActorTypeSchema = z.enum(["api_key", "node_token", "system"]);
+export const auditDecisionSchema = z.enum(["allow", "deny", "error"]);
+export const auditEventTypeSchema = z.enum([
+  "api_key.auth_failed",
+  "api_key.auth_succeeded",
+  "tenant.access_denied",
+  "run.create_allowed",
+  "run.create_denied",
+  "quota.denied",
+  "entitlement.denied",
+  "artifact.read_allowed",
+  "artifact.read_denied",
+  "node.auth_failed",
+  "node.register_allowed",
+  "node.register_denied",
+  "config.fail_closed",
+  "api_key.revoked"
+]);
+
+export const auditResourceTypeSchema = z.enum([
+  "auth",
+  "run",
+  "artifact",
+  "node",
+  "assignment",
+  "quota",
+  "entitlement",
+  "config",
+  "tenant",
+  "project",
+  "account",
+  "metrics",
+  "audit_log_event",
+  "placement_decision"
+]);
 
 export const auditLogEventSchema = z
   .object({
     id: auditLogEventIdSchema,
     accountId: accountIdSchema,
     tenantId: tenantIdSchema,
-    projectId: projectIdSchema,
+    projectId: projectIdSchema.optional(),
+    actorType: auditActorTypeSchema,
     actorUserId: userIdSchema.optional(),
-    actorApiKeyId: apiKeyIdSchema.optional(),
-    action: z.string().min(1),
-    resourceType: z.string().min(1),
+    apiKeyId: apiKeyIdSchema.optional(),
+    eventType: auditEventTypeSchema,
+    resourceType: auditResourceTypeSchema.optional(),
     resourceId: z.string().min(1).optional(),
-    outcome: auditLogOutcomeSchema,
+    decision: auditDecisionSchema,
     reasonCode: z.string().min(1).optional(),
+    ipHash: z.string().min(1).optional(),
+    userAgent: z.string().min(1).optional(),
+    requestId: z.string().min(1).optional(),
     payload: metadataSchema,
     createdAt: isoDateSchema
   })

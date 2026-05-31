@@ -48,6 +48,7 @@ import {
   runtimeModeSlugSchema,
   runtimeSchema,
   runtimeSessionSchema,
+  executionPlacementSchema,
   createToolInvocationRequestSchema,
   toolInvocationSchema,
   userSchema,
@@ -1056,6 +1057,14 @@ describe("Switchyard contracts", () => {
     expect(enterprise.accountId).toBe("account_123");
     expect(enterprise.tenantId).toBe("tenant_123");
     expect(enterprise.status).toBe("active");
+    expect(() =>
+      userSchema.parse({
+        id: "user_bad",
+        displayName: "Bad",
+        status: "invited",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
   });
 
   it("enforces api key secret visibility boundaries", () => {
@@ -1086,6 +1095,7 @@ describe("Switchyard contracts", () => {
       secretHash: "sha256:abc",
       scopes: ["runs:read"],
       status: "active",
+      lastUsedAt: "2026-05-12T00:00:00.000Z",
       createdAt: "2026-05-11T00:00:00.000Z"
     });
     expect(stored.secretHash).toBe("sha256:abc");
@@ -1110,6 +1120,7 @@ describe("Switchyard contracts", () => {
       id: "account_1",
       name: "Acme Account",
       status: "active",
+      billingPlanId: "billing_plan_1",
       createdAt: "2026-05-11T00:00:00.000Z",
       updatedAt: "2026-05-11T00:00:00.000Z"
     });
@@ -1118,7 +1129,8 @@ describe("Switchyard contracts", () => {
     const tenant = enterpriseTenantSchema.parse({
       id: "tenant_1",
       accountId: "account_1",
-      name: "Acme Tenant",
+      slug: "acme-tenant",
+      displayName: "Acme Tenant",
       status: "active",
       createdAt: "2026-05-11T00:00:00.000Z",
       updatedAt: "2026-05-11T00:00:00.000Z"
@@ -1129,7 +1141,8 @@ describe("Switchyard contracts", () => {
       id: "project_1",
       accountId: "account_1",
       tenantId: "tenant_1",
-      name: "Production",
+      slug: "production",
+      displayName: "Production",
       status: "active",
       createdAt: "2026-05-11T00:00:00.000Z",
       updatedAt: "2026-05-11T00:00:00.000Z"
@@ -1138,37 +1151,54 @@ describe("Switchyard contracts", () => {
 
     const plan = billingPlanSchema.parse({
       id: "billing_plan_1",
-      accountId: "account_1",
-      tenantId: "tenant_1",
-      name: "enterprise",
+      slug: "enterprise_standard",
+      displayName: "Enterprise Standard",
       status: "active",
-      allowedPlacements: ["hosted", "local"],
-      allowedRuntimeModes: ["fake.deterministic"],
-      allowHostedRealRuntime: false,
-      maxTimeoutSeconds: 1800,
-      maxRunsPerHour: 100,
-      maxActiveRuns: 10,
-      maxConnectedNodes: 5,
-      maxArtifactContentReadBytesPerHour: 1048576,
+      entitlements: {
+        allowedPlacements: ["hosted", "local", "connected_local_node"],
+        allowedRuntimeModes: ["fake.deterministic"],
+        allowHostedRealRuntime: false,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowMetricsRead: true,
+        allowAuditRead: true
+      },
+      quotas: {
+        maxRunsPerHour: 100,
+        maxActiveRuns: 10,
+        maxRunTimeoutSeconds: 1800,
+        maxConnectedNodes: 5,
+        maxArtifactContentReadBytesPerHour: 1048576
+      },
       createdAt: "2026-05-11T00:00:00.000Z",
       updatedAt: "2026-05-11T00:00:00.000Z"
     });
-    expect(plan.maxRunsPerHour).toBe(100);
+    expect(plan.quotas.maxRunsPerHour).toBe(100);
+    expect(plan.entitlements.allowedPlacements).toContain("hosted");
 
     const entitlement = entitlementSnapshotSchema.parse({
       accountId: "account_1",
       tenantId: "tenant_1",
       projectId: "project_1",
       planId: "billing_plan_1",
-      planName: "enterprise",
-      allowedPlacements: ["hosted", "local"],
-      allowedRuntimeModes: ["fake.deterministic"],
-      allowHostedRealRuntime: false,
-      maxTimeoutSeconds: 1800,
-      maxRunsPerHour: 100,
-      maxActiveRuns: 10,
-      maxConnectedNodes: 5,
-      maxArtifactContentReadBytesPerHour: 1048576,
+      planSlug: "enterprise_standard",
+      planDisplayName: "Enterprise Standard",
+      entitlements: {
+        allowedPlacements: ["hosted", "local", "connected_local_node"],
+        allowedRuntimeModes: ["fake.deterministic"],
+        allowHostedRealRuntime: false,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowMetricsRead: true,
+        allowAuditRead: true
+      },
+      quotas: {
+        maxRunsPerHour: 100,
+        maxActiveRuns: 10,
+        maxRunTimeoutSeconds: 1800,
+        maxConnectedNodes: 5,
+        maxArtifactContentReadBytesPerHour: 1048576
+      },
       scopes: ["runs:read", "runs:write"],
       capturedAt: "2026-05-11T00:00:00.000Z"
     });
@@ -1236,6 +1266,7 @@ describe("Switchyard contracts", () => {
         keyPrefix: "sk_sw",
         scopes: ["runs:read"],
         status: "active",
+        lastUsedAt: "2026-05-12T00:00:00.000Z",
         createdAt: "2026-05-11T00:00:00.000Z"
       },
       entitlement
@@ -1247,12 +1278,13 @@ describe("Switchyard contracts", () => {
       accountId: "account_1",
       tenantId: "tenant_1",
       projectId: "project_1",
+      actorType: "api_key",
       actorUserId: "user_1",
-      actorApiKeyId: "api_key_1",
-      action: "auth.denied",
+      apiKeyId: "api_key_1",
+      eventType: "api_key.auth_failed",
       resourceType: "auth",
       resourceId: "api_key_1",
-      outcome: "denied",
+      decision: "deny",
       reasonCode: "auth_required",
       payload: {
         authorization: "[REDACTED]",
@@ -1262,6 +1294,17 @@ describe("Switchyard contracts", () => {
       createdAt: "2026-05-11T00:00:00.000Z"
     });
     expect(auditEvent.payload.authorization).toBe("[REDACTED]");
+    const systemAuditEvent = auditLogEventSchema.parse({
+      id: "audit_2",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      actorType: "system",
+      eventType: "config.fail_closed",
+      decision: "error",
+      payload: { reason: "missing_bootstrap" },
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(systemAuditEvent.projectId).toBeUndefined();
 
     expect(
       whoamiResponseSchema.parse({
@@ -1275,10 +1318,114 @@ describe("Switchyard contracts", () => {
     ).toBe("account_1");
     expect(
       auditEventsResponseSchema.parse({
-        events: [auditEvent],
+        events: [auditEvent, systemAuditEvent],
         nextCursor: "cursor_2"
       }).events.length
-    ).toBe(1);
+    ).toBe(2);
+  });
+
+  it("rejects invalid bounded enterprise values and out-of-contract shapes", () => {
+    expect(() =>
+      accountSchema.parse({
+        id: "account_1",
+        name: "Acme Account",
+        status: "pending",
+        billingPlanId: "billing_plan_1",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      billingPlanSchema.parse({
+        id: "billing_plan_1",
+        slug: "enterprise_standard",
+        displayName: "Enterprise Standard",
+        status: "active",
+        entitlements: {
+          allowedPlacements: ["edge"],
+          allowedRuntimeModes: ["fake.deterministic"],
+          allowHostedRealRuntime: false,
+          allowConnectedNodes: true,
+          allowArtifactContentRead: true,
+          allowMetricsRead: true,
+          allowAuditRead: true
+        },
+        quotas: {
+          maxRunsPerHour: 100,
+          maxActiveRuns: 10,
+          maxRunTimeoutSeconds: 1800,
+          maxConnectedNodes: 5,
+          maxArtifactContentReadBytesPerHour: 1048576
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      billingPlanSchema.parse({
+        id: "billing_plan_1",
+        slug: "enterprise_standard",
+        displayName: "Enterprise Standard",
+        status: "active",
+        entitlements: {
+          allowedPlacements: ["hosted"],
+          allowedRuntimeModes: ["UPPERCASE"],
+          allowHostedRealRuntime: false,
+          allowConnectedNodes: true,
+          allowArtifactContentRead: true,
+          allowMetricsRead: true,
+          allowAuditRead: true
+        },
+        quotas: {
+          maxRunsPerHour: 100,
+          maxActiveRuns: 10,
+          maxRunTimeoutSeconds: 1800,
+          maxConnectedNodes: 5,
+          maxArtifactContentReadBytesPerHour: 1048576
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      billingPlanSchema.parse({
+        id: "billing_plan_1",
+        slug: "enterprise_standard",
+        displayName: "Enterprise Standard",
+        status: "active",
+        entitlements: {
+          allowedPlacements: [executionPlacementSchema.parse("hosted")],
+          allowedRuntimeModes: ["fake.deterministic"],
+          allowHostedRealRuntime: false,
+          allowConnectedNodes: true,
+          allowArtifactContentRead: true,
+          allowMetricsRead: true,
+          allowAuditRead: true
+        },
+        quotas: {
+          maxRunsPerHour: 100,
+          maxActiveRuns: 10,
+          maxRunTimeoutSeconds: 1800,
+          maxConnectedNodes: 5,
+          maxArtifactContentReadBytesPerHour: 1048576
+        },
+        createdAt: "2026-05-11T00:00:00.000Z",
+        accountId: "account_1"
+      })
+    ).toThrow();
+
+    expect(() =>
+      auditLogEventSchema.parse({
+        id: "audit_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        actorType: "user",
+        eventType: "random.event",
+        decision: "allowish",
+        payload: {},
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
   });
 
   it("rejects missing required fields for every public contract schema", () => {
