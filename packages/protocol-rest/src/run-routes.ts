@@ -49,6 +49,13 @@ export interface RunRouteDependencies {
   controlPlane?: ControlPlaneService;
 }
 
+type OwnershipAttachFailure = {
+  code: "ownership_attach_failed";
+  reasonCode: "ownership_attach_failed";
+  resourceType: "run" | "run_event" | "placement_decision" | "assignment";
+  resourceId: string;
+};
+
 export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependencies): void {
   app.post("/runs", async (request, reply) => {
     const auth = getHostedAuthContext(request);
@@ -143,30 +150,30 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
           runId: run.id
         });
         if (!ownership.ok) {
-          await terminalizeCreatedRun(deps, run.id);
-          if (reservationId) {
-            await deps.controlPlane.releaseQuotaReservation({
-              auth: controlPlaneAuth,
-              reservationId,
-              outcome: "failed",
-              reasonCode: ownership.reasonCode
-            });
-          }
-          await deps.controlPlane.recordAudit({
+          await handleOwnershipAttachFailure(deps, {
             auth: controlPlaneAuth,
-            eventType: "run.create_denied",
-            decision: "error",
-            reasonCode: "ownership_attach_failed",
-            resourceType: "run",
-            resourceId: run.id,
+            reservationId,
+            runId: run.id,
             requestId: request.id,
-            payload: { routeId: "runs.create", reasonCode: "ownership_attach_failed" }
+            failure: { ...ownership, resourceType: "run", resourceId: run.id }
           });
           return sendHttpError(reply, "internal_error", "ownership_attach_failed", [
             { path: "reasonCode", issue: "ownership_attach_failed" }
           ]);
         }
-        await attachRunSideEffectOwnership(deps, controlPlaneAuth, run.id);
+        const sideEffectOwnership = await attachRunSideEffectOwnership(deps, controlPlaneAuth, run.id);
+        if (sideEffectOwnership) {
+          await handleOwnershipAttachFailure(deps, {
+            auth: controlPlaneAuth,
+            reservationId,
+            runId: run.id,
+            requestId: request.id,
+            failure: sideEffectOwnership
+          });
+          return sendHttpError(reply, "internal_error", "ownership_attach_failed", [
+            { path: "reasonCode", issue: "ownership_attach_failed" }
+          ]);
+        }
       }
 
       if (wait) {
@@ -807,48 +814,97 @@ async function findRecoverableQueuedRunId(input: {
   return undefined;
 }
 
-async function attachRunSideEffectOwnership(
+async function handleOwnershipAttachFailure(
   deps: RunRouteDependencies,
-  auth: NonNullable<ReturnType<typeof getHostedAuthContext>>,
-  runId: string
+  input: {
+    auth: NonNullable<ReturnType<typeof getHostedAuthContext>>;
+    reservationId: string | undefined;
+    runId: string;
+    requestId: string;
+    failure: OwnershipAttachFailure;
+  }
 ): Promise<void> {
   if (!deps.controlPlane) {
     return;
   }
+  await terminalizeCreatedRun(deps, input.runId);
+  if (input.reservationId) {
+    await deps.controlPlane.releaseQuotaReservation({
+      auth: input.auth,
+      reservationId: input.reservationId,
+      outcome: "failed",
+      reasonCode: input.failure.reasonCode
+    });
+  }
+  await deps.controlPlane.recordAudit({
+    auth: input.auth,
+    eventType: "run.create_denied",
+    decision: "error",
+    reasonCode: input.failure.reasonCode,
+    resourceType: input.failure.resourceType,
+    resourceId: input.failure.resourceId,
+    requestId: input.requestId,
+    payload: {
+      routeId: "runs.create",
+      reasonCode: input.failure.reasonCode,
+      resourceType: input.failure.resourceType
+    }
+  });
+}
+
+async function attachRunSideEffectOwnership(
+  deps: RunRouteDependencies,
+  auth: NonNullable<ReturnType<typeof getHostedAuthContext>>,
+  runId: string
+): Promise<OwnershipAttachFailure | null> {
+  if (!deps.controlPlane) {
+    return null;
+  }
 
   const events = await deps.events.listByRun(runId);
   for (const event of events) {
-    await deps.controlPlane.ensureOwnedOrAttachFromRun({
+    const ownership = await deps.controlPlane.ensureOwnedOrAttachFromRun({
       auth,
       resourceType: "run_event",
       resourceId: event.id,
       runId
     });
+    if (!ownership.ok) {
+      return { ...ownership, resourceType: "run_event", resourceId: event.id };
+    }
   }
 
   if (deps.placements) {
     const placements = await deps.placements.listByRun(runId);
     for (const placement of placements) {
-      await deps.controlPlane.ensureOwnedOrAttachFromRun({
+      const ownership = await deps.controlPlane.ensureOwnedOrAttachFromRun({
         auth,
         resourceType: "placement_decision",
         resourceId: placement.id,
         runId
       });
+      if (!ownership.ok) {
+        return { ...ownership, resourceType: "placement_decision", resourceId: placement.id };
+      }
     }
   }
 
   if (deps.listAssignmentsByRun) {
     const assignments = await deps.listAssignmentsByRun(runId);
     for (const assignment of assignments) {
-      await deps.controlPlane.ensureOwnedOrAttachFromRun({
+      const ownership = await deps.controlPlane.ensureOwnedOrAttachFromRun({
         auth,
         resourceType: "assignment",
         resourceId: assignment.id,
         runId
       });
+      if (!ownership.ok) {
+        return { ...ownership, resourceType: "assignment", resourceId: assignment.id };
+      }
     }
   }
+
+  return null;
 }
 
 function noopEventBus(): EventBus {

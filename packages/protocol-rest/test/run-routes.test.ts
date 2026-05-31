@@ -1235,6 +1235,92 @@ describe("run routes hosted auth", () => {
     }));
   });
 
+  it("fails create when assignment ownership attach fails and leaves no queued unowned run visible", async () => {
+    const assignmentIdsByRun = new Map<string, readonly { id: string }[]>();
+    const releaseQuotaReservation = vi.fn(async () => ({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "failed",
+      reasonCode: "ownership_attach_failed",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      expiresAt: "2026-05-31T00:05:00.000Z",
+      finalizedAt: "2026-05-31T00:00:00.000Z"
+    }));
+    const recordAudit = vi.fn(async () => ({ ok: true }));
+    const ensureOwnedOrAttachFromRun = vi.fn(async ({ resourceType }: { resourceType: string }) => {
+      if (resourceType === "assignment") {
+        return { ok: false as const, code: "ownership_attach_failed" as const, reasonCode: "ownership_attach_failed" as const };
+      }
+      return { ok: true as const, created: true };
+    });
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      preflightRunCreate: vi.fn(async () => ({
+        id: "quota_reservation_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        quotaKind: "runs_per_hour",
+        amount: 1,
+        state: "reserved",
+        reasonCode: "run_create",
+        createdAt: "2026-05-31T00:00:00.000Z",
+        expiresAt: "2026-05-31T00:05:00.000Z"
+      })),
+      ensureOwnedOrAttachFromRun,
+      releaseQuotaReservation,
+      recordAudit,
+      authorizeResource: vi.fn(async () => ({ ok: false, decision: "not_found", code: "run_not_found", reasonCode: "resource_not_owned" }))
+    };
+
+    let harness: RouteHarness;
+    const hostedRuns = {
+      createRun: vi.fn(async (input: Parameters<RunService["createRun"]>[0]) => {
+        const run = await harness.runService.createRun({ ...input, placement: "connected_local_node" });
+        assignmentIdsByRun.set(run.id, [{ id: "assignment_connected_2" }]);
+        return { run };
+      })
+    };
+    harness = createRouteHarness({
+      withLauncher: false,
+      controlPlane: controlPlane as never,
+      hostedRuns: hostedRuns as never,
+      listAssignmentsByRun: async (runId) => assignmentIdsByRun.get(runId) ?? []
+    });
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: {
+        ...fakeRunPayload("assignment ownership attach failure run"),
+        placement: "connected_local_node"
+      }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(releaseQuotaReservation).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      reasonCode: "ownership_attach_failed"
+    }));
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "run.create_denied",
+      decision: "error",
+      reasonCode: "ownership_attach_failed",
+      resourceType: "assignment",
+      resourceId: "assignment_connected_2"
+    }));
+
+    const listed = await harness.runs.list({ limit: 20, status: ["queued"] });
+    expect(listed.runs.find((run) => run.task === "assignment ownership attach failure run")).toBeUndefined();
+  });
+
   it("terminalizes recoverable queued run and fails reservation on placement failure", async () => {
     const releaseQuotaReservation = vi.fn(async () => ({
       id: "quota_reservation_1",
