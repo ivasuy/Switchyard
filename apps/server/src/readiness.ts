@@ -4,7 +4,8 @@ import {
   isKnownHostedRuntimeMode,
   redactSecrets,
   validateHostedRuntimeAllowlist,
-  type RunQueuePort
+  type RunQueuePort,
+  type ProviderRuntimeActivationResult
 } from "@switchyard/core";
 import type { ProbeableArtifactContentStore } from "@switchyard/storage";
 import {
@@ -60,6 +61,7 @@ export async function probeServerReadiness(input: {
   checkSchemaCompatibility?: (handle: PostgresDatabaseHandle) => Promise<PostgresSchemaCompatibility>;
 }): Promise<ReadinessReport> {
   const checks: ReadinessReport["checks"] = {};
+  const providerRuntimeActivation = normalizeProviderRuntimeActivation(input.config);
 
   if (input.postgres) {
     try {
@@ -178,12 +180,49 @@ export async function probeServerReadiness(input: {
   const gateValidation = validateHostedRuntimeAllowlist({
     allowlist,
     deploymentMode: input.config.deploymentMode,
-    realRuntimeExecution: input.config.hostedRealRuntimeExecution
+    realRuntimeExecution: input.config.hostedRealRuntimeExecution,
+    providerActivation: providerRuntimeActivation
   });
   if (gateValidation.ok) {
     checks.hostedRuntimeGate = { ok: true };
   } else {
     checks.hostedRuntimeGate = { ok: false, code: gateValidation.code };
+  }
+
+  const hasRealAllowlist = allowlist.some((mode) => mode !== "fake.deterministic");
+  if (!hasRealAllowlist) {
+    checks.providerRuntimeActivation = {
+      ok: true,
+      diagnostics: {
+        source: providerRuntimeActivation.redactedSummary.source.kind,
+        enabledRealModeCount: providerRuntimeActivation.redactedSummary.enabledRealModeCount,
+        policyVersion: providerRuntimeActivation.redactedSummary.policyVersion
+      }
+    };
+  } else if (input.config.hostedRealRuntimeExecution !== "enabled") {
+    checks.providerRuntimeActivation = { ok: false, code: "hosted_real_runtime_disabled" };
+  } else if (input.config.deploymentMode === "production" && !providerRuntimeActivation.valid) {
+    checks.providerRuntimeActivation = {
+      ok: false,
+      code: providerRuntimeActivation.reasons[0]?.code ?? "provider_runtime_policy_missing",
+      diagnostics: redactSecrets({
+        source: providerRuntimeActivation.redactedSummary.source.kind,
+        reasonCodes: providerRuntimeActivation.redactedSummary.reasonCodes,
+        modeStatuses: providerRuntimeActivation.redactedSummary.modeStatuses,
+        policyVersion: providerRuntimeActivation.redactedSummary.policyVersion
+      })
+    };
+  } else {
+    checks.providerRuntimeActivation = {
+      ok: true,
+      diagnostics: redactSecrets({
+        source: providerRuntimeActivation.redactedSummary.source.kind,
+        reasonCodes: providerRuntimeActivation.redactedSummary.reasonCodes,
+        modeStatuses: providerRuntimeActivation.redactedSummary.modeStatuses,
+        enabledRealModeCount: providerRuntimeActivation.redactedSummary.enabledRealModeCount,
+        policyVersion: providerRuntimeActivation.redactedSummary.policyVersion
+      })
+    };
   }
 
   const sandbox = checkHostedSandboxReadiness(input.config.sandbox);
@@ -307,5 +346,26 @@ function buildSandboxDiagnostics(config: ServerConfig): Record<string, unknown> 
     policyCount: config.sandbox.realExecution.commandPolicy.length,
     ptyDriverConfigured: config.sandbox.realExecution.ptyDriverConfigured,
     errors: [...config.sandbox.errors]
+  };
+}
+
+function normalizeProviderRuntimeActivation(config: ServerConfig): ProviderRuntimeActivationResult {
+  if (config.providerRuntimeActivation) {
+    return config.providerRuntimeActivation;
+  }
+
+  return {
+    valid: true,
+    enabledRealModes: [],
+    reasons: [],
+    redactedSummary: {
+      deploymentMode: config.deploymentMode,
+      hostedRealRuntimeExecution: config.hostedRealRuntimeExecution,
+      realModeCount: 0,
+      enabledRealModeCount: 0,
+      source: { kind: "none" },
+      modeStatuses: [],
+      reasonCodes: []
+    }
   };
 }

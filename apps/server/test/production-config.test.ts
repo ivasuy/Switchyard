@@ -45,6 +45,71 @@ function createProductionEnv(overrides: Record<string, string> = {}): Record<str
   };
 }
 
+function createSpendControls(overrides: Partial<{
+  maxActiveRuns: number;
+  maxRunsPerHour: number;
+  maxRunTimeoutSeconds: number;
+  maxPromptBytes: number;
+}> = {}): {
+  maxActiveRuns: number;
+  maxRunsPerHour: number;
+  maxRunTimeoutSeconds: number;
+  maxPromptBytes: number;
+} {
+  return {
+    maxActiveRuns: 2,
+    maxRunsPerHour: 20,
+    maxRunTimeoutSeconds: 300,
+    maxPromptBytes: 60000,
+    ...overrides
+  };
+}
+
+function createCodexPolicyJson(overrides: Partial<{
+  enabled: boolean;
+  executablePath: string;
+  fixedArgs: ["exec", "--json"] | ["exec", "--xml"];
+  sandbox: "read_only" | "workspace-write";
+  requiredEnv: string[];
+  spendControls: ReturnType<typeof createSpendControls>;
+}> = {}): string {
+  return JSON.stringify({
+    version: 1,
+    modes: {
+      "codex.exec_json": {
+        enabled: overrides.enabled ?? true,
+        executablePath: overrides.executablePath ?? "/bin/echo",
+        cwdPrefixes: ["/tmp"],
+        envAllowlist: ["PATH", "OPENAI_API_KEY"],
+        requiredEnv: overrides.requiredEnv ?? ["OPENAI_API_KEY"],
+        allowUserArgs: false,
+        fixedArgs: overrides.fixedArgs ?? ["exec", "--json"],
+        sandbox: overrides.sandbox ?? "read_only",
+        spendControls: overrides.spendControls ?? createSpendControls()
+      }
+    }
+  });
+}
+
+function createOpencodePolicyJson(): string {
+  return JSON.stringify({
+    version: 1,
+    modes: {
+      "opencode.acp": {
+        enabled: true,
+        executablePath: "/bin/echo",
+        cwdPrefixes: ["/tmp"],
+        envAllowlist: ["PATH"],
+        requiredEnv: [],
+        allowUserArgs: false,
+        fixedArgs: ["acp"],
+        onePromptPerRun: true,
+        spendControls: createSpendControls()
+      }
+    }
+  });
+}
+
 function expectConfigError(fn: () => unknown): ConfigError {
   try {
     fn();
@@ -175,7 +240,7 @@ describe("production server config", () => {
     expect(serialized).not.toContain("replace-with-secret-key");
   });
 
-  it("rejects unsafe production runtime and metrics posture", () => {
+  it("rejects production real runtime when provider policy is missing", () => {
     expect(() =>
       loadServerConfig(
         createProductionEnv({
@@ -183,7 +248,112 @@ describe("production server config", () => {
           SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled"
         })
       )
-    ).toThrow(/hosted_real_runtime_production_forbidden|config_forbidden:SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION/);
+    ).toThrow("provider_runtime_policy_missing");
+  });
+
+  it("rejects malformed provider policy JSON", () => {
+    expect(() =>
+      loadServerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: "{not-json"
+        })
+      )
+    ).toThrow("provider_runtime_policy_malformed");
+  });
+
+  it("rejects unknown production hosted runtime mode", () => {
+    expect(() =>
+      loadServerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,generic_http.async_rest",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createOpencodePolicyJson()
+        })
+      )
+    ).toThrow("provider_runtime_policy_unknown_mode");
+  });
+
+  it("rejects disabled provider policy entry", () => {
+    expect(() =>
+      loadServerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createCodexPolicyJson({ enabled: false }),
+          SWITCHYARD_OPENAI_API_KEY: "test-openai-key"
+        })
+      )
+    ).toThrow("provider_runtime_policy_disabled");
+  });
+
+  it("rejects missing provider credentials", () => {
+    expect(() =>
+      loadServerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createCodexPolicyJson()
+        })
+      )
+    ).toThrow("provider_credentials_missing");
+  });
+
+  it("rejects invalid provider spend controls", () => {
+    expect(() =>
+      loadServerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createCodexPolicyJson({
+            spendControls: createSpendControls({ maxPromptBytes: 0 })
+          }),
+          SWITCHYARD_OPENAI_API_KEY: "test-openai-key"
+        })
+      )
+    ).toThrow("provider_spend_controls_invalid");
+  });
+
+  it("rejects invalid provider command policy", () => {
+    expect(() =>
+      loadServerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createCodexPolicyJson({
+            executablePath: "codex"
+          }),
+          SWITCHYARD_OPENAI_API_KEY: "test-openai-key"
+        })
+      )
+    ).toThrow("provider_command_policy_invalid");
+  });
+
+  it("accepts production real runtime when policy, credentials, and controls are valid", () => {
+    const config = loadServerConfig(
+      createProductionEnv({
+        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,opencode.acp",
+        SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+        SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createOpencodePolicyJson()
+      })
+    );
+
+    expect(config.providerRuntimeActivation.valid).toBe(true);
+    expect(config.providerRuntimeActivation.enabledRealModes).toEqual(["opencode.acp"]);
+    expect(config.redactedSummary).toMatchObject({
+      providerRuntimePolicy: {
+        valid: true,
+        source: "json",
+        enabledRealModeCount: 1
+      }
+    });
+    const serializedSummary = JSON.stringify(config.redactedSummary);
+    expect(serializedSummary).not.toContain("/bin/echo");
+    expect(serializedSummary).not.toContain("\"modes\"");
+  });
+
+  it("still rejects unsafe production metrics posture", () => {
 
     expect(() => loadServerConfig(createProductionEnv({ SWITCHYARD_PUBLIC_METRICS: "1" }))).toThrow(
       "config_forbidden:SWITCHYARD_PUBLIC_METRICS"

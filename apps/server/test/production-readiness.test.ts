@@ -90,6 +90,30 @@ function createAuthEnabledTestEnv(overrides?: Record<string, string>) {
   };
 }
 
+function createProviderPolicyJson(): string {
+  return JSON.stringify({
+    version: 1,
+    modes: {
+      "opencode.acp": {
+        enabled: true,
+        executablePath: "/bin/echo",
+        cwdPrefixes: ["/tmp"],
+        envAllowlist: ["PATH"],
+        requiredEnv: [],
+        allowUserArgs: false,
+        fixedArgs: ["acp"],
+        onePromptPerRun: true,
+        spendControls: {
+          maxActiveRuns: 2,
+          maxRunsPerHour: 20,
+          maxRunTimeoutSeconds: 300,
+          maxPromptBytes: 60000
+        }
+      }
+    }
+  });
+}
+
 describe("production readiness", () => {
   it("keeps /health cheap liveness while /ready can fail", async () => {
     const app = await createServerApp({
@@ -100,6 +124,20 @@ describe("production readiness", () => {
       hostedRealRuntimeExecution: "disabled",
       objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
       sandbox: resolveHostedSandboxConfig({ deploymentMode: "test", env: {} }),
+      providerRuntimeActivation: {
+        valid: true,
+        enabledRealModes: [],
+        reasons: [],
+        redactedSummary: {
+          deploymentMode: "test",
+          hostedRealRuntimeExecution: "disabled",
+          realModeCount: 0,
+          enabledRealModeCount: 0,
+          source: { kind: "none" },
+          modeStatuses: [],
+          reasonCodes: []
+        }
+      },
       redactedSummary: {}
     });
 
@@ -228,6 +266,107 @@ describe("production readiness", () => {
     expect(serialized).not.toContain("argv");
     expect(serialized).not.toContain("commandPolicy");
     expect(serialized).not.toContain("env");
+  });
+
+  it("includes redacted provider runtime activation diagnostics", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(
+        createAuthEnabledTestEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,opencode.acp",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createProviderPolicyJson()
+        })
+      ),
+      postgres: undefined,
+      queue: {
+        enqueue: async () => "job",
+        claim: async () => null,
+        ack: async () => {},
+        fail: async () => {},
+        retry: async () => {},
+        discard: async () => {},
+        getJob: async () => null,
+        recoverStaleClaims: async () => 0,
+        stats: async () => ({ queued: 0, claimed: 0 })
+      },
+      artifactContent: {
+        writeText: async () => ({ location: "x" }),
+        writeBytes: async () => ({ location: "x" }),
+        read: async () => ({ body: Buffer.from("ok"), contentType: "application/octet-stream" }),
+        probe: async () => {}
+      }
+    });
+
+    expect(report.checks.providerRuntimeActivation).toMatchObject({
+      ok: true,
+      diagnostics: {
+        source: "json",
+        enabledRealModeCount: 1
+      }
+    });
+
+    const serialized = JSON.stringify(report.checks.providerRuntimeActivation?.diagnostics ?? {});
+    expect(serialized).not.toContain("/bin/echo");
+    expect(serialized).not.toContain("cwdPrefixes");
+    expect(serialized).not.toContain("OPENAI_API_KEY");
+    expect(serialized).not.toContain("\"modes\"");
+  });
+
+  it("fails production readiness when provider activation is invalid", async () => {
+    const config = loadServerConfig(createAuthEnabledTestEnv());
+    const report = await probeServerReadiness({
+      config: {
+        ...config,
+        deploymentMode: "production",
+        hostedRuntimeAllowlist: ["fake.deterministic", "codex.exec_json"],
+        hostedRealRuntimeExecution: "enabled",
+        providerRuntimeActivation: {
+          valid: false,
+          enabledRealModes: [],
+          reasons: [{ code: "provider_credentials_missing", runtimeMode: "codex.exec_json", detail: "env_missing" }],
+          redactedSummary: {
+            deploymentMode: "production",
+            hostedRealRuntimeExecution: "enabled",
+            realModeCount: 1,
+            enabledRealModeCount: 0,
+            source: { kind: "json" },
+            policyVersion: 1,
+            modeStatuses: [{ runtimeMode: "codex.exec_json", ready: false, reasons: ["provider_credentials_missing"] }],
+            reasonCodes: ["provider_credentials_missing"]
+          }
+        }
+      },
+      postgres: {
+        pool: { query: async () => ({ rows: [] }) },
+        db: {} as never,
+        real: true,
+        close: async () => {}
+      },
+      queue: {
+        enqueue: async () => "job",
+        claim: async () => null,
+        ack: async () => {},
+        fail: async () => {},
+        retry: async () => {},
+        discard: async () => {},
+        getJob: async () => null,
+        recoverStaleClaims: async () => 0,
+        stats: async () => ({ queued: 0, claimed: 0 })
+      },
+      artifactContent: {
+        writeText: async () => ({ location: "x" }),
+        writeBytes: async () => ({ location: "x" }),
+        read: async () => ({ body: Buffer.from("ok"), contentType: "application/octet-stream" }),
+        probe: async () => {}
+      },
+      checkSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 })
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.providerRuntimeActivation).toMatchObject({
+      ok: false,
+      code: "provider_credentials_missing"
+    });
   });
 
   it("keeps metrics protected behind metrics:read plus admin:read", async () => {
