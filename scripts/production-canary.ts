@@ -778,7 +778,7 @@ function eventMatches(value: unknown, runId: string, canaryId: string): boolean 
   }
   const payload = event["payload"];
   if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    return containsAnyString(payload as Record<string, unknown>, [runId, canaryId, "r19-production"]);
+    return containsAnyString(payload as Record<string, unknown>, [runId, canaryId]);
   }
   return false;
 }

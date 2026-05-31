@@ -464,6 +464,56 @@ describe("runProductionCanary", () => {
     expect(result.steps.some((step) => step.code === "delayed_audit_evidence")).toBe(true);
   });
 
+  test("ignores older audit evidence that only has the static canary label", async () => {
+    const baseUrl = "https://switchyard.example";
+    const bytes = new TextEncoder().encode("ok");
+    let auditCount = 0;
+    const plan = buildHappyPlan(bytes, () => {
+      auditCount += 1;
+      if (auditCount === 1) {
+        return jsonResponse(200, {
+          events: [
+            {
+              id: "audit_old",
+              resourceType: "run",
+              resourceId: "run_old",
+              payload: { switchyardCanary: "r19-production" }
+            }
+          ]
+        });
+      }
+      return jsonResponse(200, {
+        events: [
+          {
+            id: "audit_current",
+            resourceType: "run",
+            resourceId: "run_1",
+            payload: { switchyardCanary: "r19-production" }
+          }
+        ]
+      });
+    });
+    plan.splice(10, 0, {
+      method: "GET",
+      path: "/audit/events",
+      responder: plan[9]!.responder
+    });
+
+    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
+
+    const result = await runProductionCanary({
+      baseUrl,
+      apiKey: "test-key",
+      fetchImpl,
+      timeoutMs: 5_000,
+      now: makeNow([0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1200])
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.summary.delayedAuditEvidence).toBe(true);
+    expect(result.steps.some((step) => step.code === "delayed_audit_evidence")).toBe(true);
+  });
+
   test("returns audit_lookup_failed when audit evidence does not appear", async () => {
     const baseUrl = "https://switchyard.example";
     const bytes = new TextEncoder().encode("ok");
