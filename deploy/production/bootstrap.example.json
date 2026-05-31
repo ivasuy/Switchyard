@@ -1,0 +1,67 @@
+{
+  "accounts": [
+    {
+      "id": "acct_prod_primary",
+      "name": "Production Account",
+      "status": "active"
+    }
+  ],
+  "tenants": [
+    {
+      "id": "tenant_prod_primary",
+      "accountId": "acct_prod_primary",
+      "slug": "prod-primary",
+      "name": "Production Tenant",
+      "status": "active"
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj_prod_core",
+      "tenantId": "tenant_prod_primary",
+      "slug": "core",
+      "name": "Core Production Project",
+      "status": "active"
+    }
+  ],
+  "users": [
+    {
+      "id": "user_prod_operator",
+      "tenantId": "tenant_prod_primary",
+      "email": "replace-with-operator-email",
+      "displayName": "Production Operator",
+      "status": "active"
+    }
+  ],
+  "plans": [
+    {
+      "id": "plan_fake_only",
+      "tenantId": "tenant_prod_primary",
+      "name": "Fake Runtime Only",
+      "status": "active",
+      "runtimeAllowlist": ["fake.deterministic"]
+    }
+  ],
+  "apiKeys": [
+    {
+      "id": "key_prod_operator",
+      "tenantId": "tenant_prod_primary",
+      "userId": "user_prod_operator",
+      "projectId": "proj_prod_core",
+      "label": "ops-admin",
+      "roles": ["admin:read", "metrics:read"],
+      "status": "active",
+      "rawKey": "replace-with-operator-api-key"
+    }
+  ],
+  "nodeTokens": [
+    {
+      "id": "node_token_prod_primary",
+      "tenantId": "tenant_prod_primary",
+      "projectId": "proj_prod_core",
+      "label": "prod-node",
+      "status": "active",
+      "token": "replace-with-node-registration-token"
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "version": "r19-production-manifest-v1",
+  "services": {
+    "server": {
+      "deploymentMode": "production",
+      "command": ["node", "apps/server/dist/main.js"],
+      "requiredEnv": [
+        "SWITCHYARD_DEPLOYMENT_MODE",
+        "SWITCHYARD_SERVER_AUTH_MODE",
+        "SWITCHYARD_API_KEY_PEPPER",
+        "SWITCHYARD_CONTROL_PLANE_STORE",
+        "SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH",
+        "SWITCHYARD_POSTGRES_URL",
+        "SWITCHYARD_REDIS_URL",
+        "SWITCHYARD_OBJECT_STORE_BACKEND",
+        "SWITCHYARD_NODE_SHARED_TOKEN",
+        "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        "SWITCHYARD_PUBLIC_METRICS"
+      ],
+      "healthChecks": [
+        "GET /health",
+        "GET /ready"
+      ],
+      "privateDependencies": ["postgres", "redis", "object-store"]
+    },
+    "worker": {
+      "deploymentMode": "production",
+      "command": [
+        "sh",
+        "-lc",
+        "node apps/worker/dist/ready.js && node apps/worker/dist/main.js"
+      ],
+      "requiredEnv": [
+        "SWITCHYARD_DEPLOYMENT_MODE",
+        "SWITCHYARD_POSTGRES_URL",
+        "SWITCHYARD_REDIS_URL",
+        "SWITCHYARD_OBJECT_STORE_BACKEND",
+        "SWITCHYARD_OBJECT_STORE_PROBE",
+        "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+      ],
+      "readinessChecks": [
+        "node apps/worker/dist/ready.js"
+      ],
+      "privateDependencies": ["postgres", "redis", "object-store"]
+    },
+    "node": {
+      "deploymentMode": "production",
+      "command": ["node", "apps/node/dist/main.js"],
+      "requiredEnv": [
+        "SWITCHYARD_DEPLOYMENT_MODE",
+        "SWITCHYARD_SERVER_URL",
+        "SWITCHYARD_NODE_SHARED_TOKEN",
+        "SWITCHYARD_NODE_CAPABILITIES",
+        "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES",
+        "SWITCHYARD_NODE_ALLOW_CWD_PREFIXES"
+      ],
+      "policy": {
+        "runtimeAllowlist": ["fake.deterministic"],
+        "realTools": "forbidden"
+      },
+      "privateDependencies": ["server"]
+    }
+  },
+  "requiredEnv": [
+    "SWITCHYARD_DEPLOYMENT_MODE",
+    "SWITCHYARD_SERVER_AUTH_MODE",
+    "SWITCHYARD_CONTROL_PLANE_STORE",
+    "SWITCHYARD_POSTGRES_URL",
+    "SWITCHYARD_REDIS_URL",
+    "SWITCHYARD_OBJECT_STORE_BACKEND",
+    "SWITCHYARD_NODE_SHARED_TOKEN",
+    "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+    "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+  ],
+  "forbiddenSurfaces": [
+    "dashboard",
+    "tui",
+    "payment",
+    "oauth",
+    "browser",
+    "/sandbox",
+    "/exec",
+    "/pty",
+    "/terminal",
+    "hosted-real-runtime",
+    "real-tool"
+  ]
+}
