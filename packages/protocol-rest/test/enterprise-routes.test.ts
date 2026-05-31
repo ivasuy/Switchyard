@@ -140,4 +140,50 @@ describe("enterprise routes", () => {
     expect(response.json().events).toHaveLength(1);
     expect(response.json().events[0].tenantId).toBe("tenant_1");
   });
+
+  it("appends audit-read allow events on successful audit list", async () => {
+    const controlPlane = createControlPlaneStub();
+    const app = Fastify();
+    registerErrorEnvelope(app);
+    registerHostedAuthHooks(app, { controlPlane: controlPlane as never });
+    registerEnterpriseRoutes(app, { controlPlane: controlPlane as never });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/audit/events?limit=5",
+      headers: { authorization: "Bearer sk_sw_test_1" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(controlPlane.recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "api_key.auth_succeeded",
+      decision: "allow",
+      reasonCode: "audit_read_allowed",
+      resourceType: "audit_log_event"
+    }));
+    expect(JSON.stringify(controlPlane.recordAudit.mock.calls)).not.toContain("sk_sw_test_1");
+  });
+
+  it("appends audit-read deny events on malformed cursor", async () => {
+    const controlPlane = createControlPlaneStub();
+    const app = Fastify();
+    registerErrorEnvelope(app);
+    registerHostedAuthHooks(app, { controlPlane: controlPlane as never });
+    registerEnterpriseRoutes(app, { controlPlane: controlPlane as never });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/audit/events?cursor=   ",
+      headers: { authorization: "Bearer sk_sw_test_1" }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(controlPlane.recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "api_key.auth_failed",
+      decision: "deny",
+      reasonCode: "audit_read_invalid_query",
+      resourceType: "audit_log_event"
+    }));
+    expect(JSON.stringify(controlPlane.recordAudit.mock.calls)).not.toContain("sk_sw_test_1");
+  });
 });

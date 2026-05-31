@@ -45,6 +45,7 @@ export interface RunRouteDependencies {
   registry?: RegistryStore;
   registryService?: RegistryService;
   placements?: PlacementStore;
+  listAssignmentsByRun?: (runId: string) => Promise<readonly { id: string }[]>;
   controlPlane?: ControlPlaneService;
 }
 
@@ -55,8 +56,11 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
     }
 
+    const requestStartedAt = new Date().toISOString();
     let reservationId: string | undefined;
     let controlPlaneAuth = auth;
+    let createdRunId: string | undefined;
+    let recoveryCreateInput: Parameters<RunService["createRun"]>[0] | undefined;
     try {
       const rawBody = isRecord(request.body) ? request.body : undefined;
       if (rawBody) {
@@ -98,6 +102,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       if (runtimeMode !== undefined) {
         createInput.runtimeMode = runtimeMode;
       }
+      recoveryCreateInput = createInput;
 
       if (deps.controlPlane && controlPlaneAuth) {
         const reservation = await deps.controlPlane.preflightRunCreate({
@@ -128,6 +133,7 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
         : { run: await deps.runService.createRun(createInput) };
 
       const run = runResult.run;
+      createdRunId = run.id;
 
       if (deps.controlPlane && controlPlaneAuth) {
         const ownership = await deps.controlPlane.ensureOwnedOrAttachFromRun({
@@ -243,6 +249,17 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       }
       return reply.code(202).send({ run });
     } catch (error) {
+      if (deps.controlPlane && controlPlaneAuth) {
+        const recoveredRunId = createdRunId ?? await findRecoverableQueuedRunId({
+          deps,
+          auth: controlPlaneAuth,
+          createInput: recoveryCreateInput,
+          requestStartedAt
+        });
+        if (recoveredRunId) {
+          await terminalizeCreatedRun(deps, recoveredRunId);
+        }
+      }
       if (deps.controlPlane && controlPlaneAuth && reservationId) {
         const failure = classifyRunCreateFailure(error);
         await deps.controlPlane.releaseQuotaReservation({
@@ -745,6 +762,51 @@ async function terminalizeCreatedRun(deps: RunRouteDependencies, runId: string):
   });
 }
 
+async function findRecoverableQueuedRunId(input: {
+  deps: RunRouteDependencies;
+  auth: NonNullable<ReturnType<typeof getHostedAuthContext>>;
+  createInput: Parameters<RunService["createRun"]>[0] | undefined;
+  requestStartedAt: string;
+}): Promise<string | undefined> {
+  const { deps, auth, createInput, requestStartedAt } = input;
+  if (!deps.controlPlane || !createInput) {
+    return undefined;
+  }
+
+  const filter: Parameters<RunStore["list"]>[0] = {
+    limit: 50,
+    status: ["queued"],
+    runtime: [createInput.runtime],
+    provider: [createInput.provider],
+    model: [createInput.model],
+    placement: [createInput.placement],
+    adapterType: [createInput.adapterType]
+  };
+  const page = await deps.runs.list(filter);
+  const startMs = Date.parse(requestStartedAt);
+
+  for (const run of page.runs) {
+    if (run.task !== createInput.task || run.status !== "queued") {
+      continue;
+    }
+    const createdMs = Date.parse(run.createdAt);
+    if (Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs + 5_000 < startMs) {
+      continue;
+    }
+    const owned = await deps.controlPlane.authorizeResource({
+      auth,
+      resourceType: "run",
+      resourceId: run.id,
+      notFoundCode: "run_not_found"
+    });
+    if (!owned.ok && owned.decision === "not_found") {
+      return run.id;
+    }
+  }
+
+  return undefined;
+}
+
 async function attachRunSideEffectOwnership(
   deps: RunRouteDependencies,
   auth: NonNullable<ReturnType<typeof getHostedAuthContext>>,
@@ -771,6 +833,18 @@ async function attachRunSideEffectOwnership(
         auth,
         resourceType: "placement_decision",
         resourceId: placement.id,
+        runId
+      });
+    }
+  }
+
+  if (deps.listAssignmentsByRun) {
+    const assignments = await deps.listAssignmentsByRun(runId);
+    for (const assignment of assignments) {
+      await deps.controlPlane.ensureOwnedOrAttachFromRun({
+        auth,
+        resourceType: "assignment",
+        resourceId: assignment.id,
         runId
       });
     }

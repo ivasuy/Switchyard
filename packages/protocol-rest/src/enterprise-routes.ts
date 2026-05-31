@@ -39,9 +39,24 @@ export function registerEnterpriseRoutes(app: FastifyInstance, deps: EnterpriseR
       return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
     }
 
-    const query = request.query as Record<string, unknown>;
-    const limit = parseLimit(query["limit"]);
-    const cursor = parseCursor(query["cursor"]);
+    let limit: number | undefined;
+    let cursor: string | undefined;
+    try {
+      const query = request.query as Record<string, unknown>;
+      limit = parseLimit(query["limit"]);
+      cursor = parseCursor(query["cursor"]);
+    } catch (error) {
+      await deps.controlPlane.recordAudit({
+        auth,
+        eventType: "api_key.auth_failed",
+        decision: "deny",
+        reasonCode: "audit_read_invalid_query",
+        resourceType: "audit_log_event",
+        requestId: request.id,
+        payload: { routeId: "audit.events", reasonCode: "audit_read_invalid_query" }
+      });
+      throw error;
+    }
 
     try {
       const listInput: Parameters<ControlPlaneService["listAuditEvents"]>[0] = { auth };
@@ -52,12 +67,39 @@ export function registerEnterpriseRoutes(app: FastifyInstance, deps: EnterpriseR
         listInput.cursor = cursor;
       }
       const payload = await deps.controlPlane.listAuditEvents(listInput);
+      await deps.controlPlane.recordAudit({
+        auth,
+        eventType: "api_key.auth_succeeded",
+        decision: "allow",
+        reasonCode: "audit_read_allowed",
+        resourceType: "audit_log_event",
+        requestId: request.id,
+        payload: { routeId: "audit.events" }
+      });
       return auditEventsResponseSchema.parse(payload);
     } catch (error) {
       if (error instanceof ControlPlaneError) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "api_key.auth_failed",
+          decision: "deny",
+          reasonCode: "audit_read_denied",
+          resourceType: "audit_log_event",
+          requestId: request.id,
+          payload: { routeId: "audit.events", denialCode: error.code, reasonCode: error.reasonCode }
+        });
         return sendHttpError(reply, error.code, error.reasonCode, [{ path: "reasonCode", issue: error.reasonCode }]);
       }
       if (error instanceof Error && error.message === "invalid_query") {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "api_key.auth_failed",
+          decision: "deny",
+          reasonCode: "audit_read_invalid_query",
+          resourceType: "audit_log_event",
+          requestId: request.id,
+          payload: { routeId: "audit.events", reasonCode: "audit_read_invalid_query" }
+        });
         throw new HttpProblem("invalid_query", "Invalid query parameters", [
           { path: "cursor", issue: "must be an opaque cursor from a previous response" }
         ]);

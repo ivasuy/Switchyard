@@ -844,6 +844,10 @@ interface RouteHarnessOptions {
   withArtifacts?: boolean;
   withLauncher?: boolean;
   withEventBus?: boolean;
+  controlPlane?: unknown;
+  hostedRuns?: unknown;
+  placements?: unknown;
+  listAssignmentsByRun?: (runId: string) => Promise<readonly { id: string }[]>;
 }
 
 function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
@@ -1024,6 +1028,10 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
     ...(artifacts ? { artifacts } : {}),
     ...(eventBus ? { eventBus } : {}),
     ...(launcher ? { launcher } : {}),
+    ...(options.controlPlane ? { controlPlane: options.controlPlane as never } : {}),
+    ...(options.hostedRuns ? { hostedRuns: options.hostedRuns as never } : {}),
+    ...(options.placements ? { placements: options.placements as never } : {}),
+    ...(options.listAssignmentsByRun ? { listAssignmentsByRun: options.listAssignmentsByRun } : {}),
     registry,
     registryService
   });
@@ -1153,4 +1161,300 @@ describe("run routes hosted auth", () => {
     expect(runCreateSpy).not.toHaveBeenCalled();
     expect(preParsingSpy).not.toHaveBeenCalled();
   });
+
+  it("attaches assignment ownership for connected_local_node hosted create before success", async () => {
+    const assignmentIdsByRun = new Map<string, readonly { id: string }[]>();
+    const ensureOwnedOrAttachFromRun = vi.fn(async () => ({ ok: true, created: true }));
+    const releaseQuotaReservation = vi.fn(async () => ({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "consumed",
+      reasonCode: "run_create",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      expiresAt: "2026-05-31T00:05:00.000Z",
+      finalizedAt: "2026-05-31T00:00:00.000Z"
+    }));
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      preflightRunCreate: vi.fn(async () => ({
+        id: "quota_reservation_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        quotaKind: "runs_per_hour",
+        amount: 1,
+        state: "reserved",
+        reasonCode: "run_create",
+        createdAt: "2026-05-31T00:00:00.000Z",
+        expiresAt: "2026-05-31T00:05:00.000Z"
+      })),
+      ensureOwnedOrAttachFromRun,
+      releaseQuotaReservation,
+      recordAudit: vi.fn(async () => ({ ok: true })),
+      authorizeResource: vi.fn(async () => ({ ok: false, decision: "not_found", code: "run_not_found", reasonCode: "resource_not_owned" }))
+    };
+
+    let harness: RouteHarness;
+    const hostedRuns = {
+      createRun: vi.fn(async (input: Parameters<RunService["createRun"]>[0]) => {
+        const run = await harness.runService.createRun({ ...input, placement: "connected_local_node" });
+        assignmentIdsByRun.set(run.id, [{ id: "assignment_connected_1" }]);
+        return { run };
+      })
+    };
+    harness = createRouteHarness({
+      withLauncher: false,
+      controlPlane: controlPlane as never,
+      hostedRuns: hostedRuns as never,
+      listAssignmentsByRun: async (runId) => assignmentIdsByRun.get(runId) ?? []
+    });
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: {
+        ...fakeRunPayload("connected run"),
+        placement: "connected_local_node"
+      }
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(ensureOwnedOrAttachFromRun).toHaveBeenCalledWith(expect.objectContaining({
+      resourceType: "assignment",
+      resourceId: "assignment_connected_1"
+    }));
+    expect(releaseQuotaReservation).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "consumed"
+    }));
+  });
+
+  it("terminalizes recoverable queued run and fails reservation on placement failure", async () => {
+    const releaseQuotaReservation = vi.fn(async () => ({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "failed",
+      reasonCode: "placement_store_failed",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      expiresAt: "2026-05-31T00:05:00.000Z",
+      finalizedAt: "2026-05-31T00:00:00.000Z"
+    }));
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      preflightRunCreate: vi.fn(async () => ({
+        id: "quota_reservation_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        quotaKind: "runs_per_hour",
+        amount: 1,
+        state: "reserved",
+        reasonCode: "run_create",
+        createdAt: "2026-05-31T00:00:00.000Z",
+        expiresAt: "2026-05-31T00:05:00.000Z"
+      })),
+      ensureOwnedOrAttachFromRun: vi.fn(async () => ({ ok: true, created: true })),
+      releaseQuotaReservation,
+      recordAudit: vi.fn(async () => ({ ok: true })),
+      authorizeResource: vi.fn(async ({ resourceId }: { resourceId: string }) => {
+        if (resourceId.startsWith("run_")) {
+          return { ok: false, decision: "not_found", code: "run_not_found", reasonCode: "resource_not_owned" };
+        }
+        return { ok: true };
+      })
+    };
+
+    let harness: RouteHarness;
+    const hostedRuns = {
+      createRun: vi.fn(async (input: Parameters<RunService["createRun"]>[0]) => {
+        await harness.runService.createRun(input);
+        const error = new Error("placement_store_failed");
+        (error as { code?: string }).code = "placement_denied";
+        throw error;
+      })
+    };
+
+    harness = createRouteHarness({
+      withLauncher: false,
+      controlPlane: controlPlane as never,
+      hostedRuns: hostedRuns as never
+    });
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: {
+        ...fakeRunPayload("placement failure run"),
+        placement: "connected_local_node"
+      }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(releaseQuotaReservation).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      reasonCode: "placement_store_failed"
+    }));
+    const listed = await harness.runs.list({ limit: 20, status: ["queued"] });
+    expect(listed.runs.find((run) => run.task === "placement failure run")).toBeUndefined();
+  });
+
+  it("terminalizes recoverable queued run and fails reservation on queue failure", async () => {
+    const releaseQuotaReservation = vi.fn(async () => ({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "failed",
+      reasonCode: "queue_enqueue_failed",
+      createdAt: "2026-05-31T00:00:00.000Z",
+      expiresAt: "2026-05-31T00:05:00.000Z",
+      finalizedAt: "2026-05-31T00:00:00.000Z"
+    }));
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      preflightRunCreate: vi.fn(async () => ({
+        id: "quota_reservation_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        quotaKind: "runs_per_hour",
+        amount: 1,
+        state: "reserved",
+        reasonCode: "run_create",
+        createdAt: "2026-05-31T00:00:00.000Z",
+        expiresAt: "2026-05-31T00:05:00.000Z"
+      })),
+      ensureOwnedOrAttachFromRun: vi.fn(async () => ({ ok: true, created: true })),
+      releaseQuotaReservation,
+      recordAudit: vi.fn(async () => ({ ok: true })),
+      authorizeResource: vi.fn(async () => ({ ok: false, decision: "not_found", code: "run_not_found", reasonCode: "resource_not_owned" }))
+    };
+
+    let harness: RouteHarness;
+    const hostedRuns = {
+      createRun: vi.fn(async (input: Parameters<RunService["createRun"]>[0]) => {
+        await harness.runService.createRun(input);
+        const error = new Error("queue_enqueue_failed");
+        (error as { code?: string }).code = "queue_unavailable";
+        throw error;
+      })
+    };
+
+    harness = createRouteHarness({
+      withLauncher: false,
+      controlPlane: controlPlane as never,
+      hostedRuns: hostedRuns as never
+    });
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: {
+        ...fakeRunPayload("queue failure run"),
+        placement: "connected_local_node"
+      }
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(releaseQuotaReservation).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      reasonCode: "queue_enqueue_failed"
+    }));
+    const listed = await harness.runs.list({ limit: 20, status: ["queued"] });
+    expect(listed.runs.find((run) => run.task === "queue failure run")).toBeUndefined();
+  });
 });
+
+function hostedAuthContext() {
+  return {
+    account: {
+      id: "account_1",
+      name: "Acme",
+      status: "active",
+      billingPlanId: "billing_plan_1",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    tenant: {
+      id: "tenant_1",
+      accountId: "account_1",
+      slug: "acme",
+      displayName: "Acme",
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    project: {
+      id: "project_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      slug: "prod",
+      displayName: "Prod",
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    user: {
+      id: "user_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      displayName: "Tester",
+      email: "t@example.com",
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    apiKey: {
+      id: "api_key_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      name: "primary",
+      keyPrefix: "sk_sw",
+      scopes: ["runs:write", "runs:read"],
+      status: "active",
+      createdAt: "2026-05-31T00:00:00.000Z"
+    },
+    entitlement: {
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      planId: "billing_plan_1",
+      planSlug: "enterprise",
+      planDisplayName: "Enterprise",
+      entitlements: {
+        allowedPlacements: ["local", "hosted", "connected_local_node"],
+        allowedRuntimeModes: ["fake.deterministic"],
+        allowHostedRealRuntime: false,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowMetricsRead: true,
+        allowAuditRead: true
+      },
+      quotas: {
+        maxRunsPerHour: 10,
+        maxActiveRuns: 5,
+        maxRunTimeoutSeconds: 600,
+        maxConnectedNodes: 3,
+        maxArtifactContentReadBytesPerHour: 1024 * 1024
+      },
+      scopes: ["runs:write", "runs:read"],
+      capturedAt: "2026-05-31T00:00:00.000Z"
+    }
+  };
+}
