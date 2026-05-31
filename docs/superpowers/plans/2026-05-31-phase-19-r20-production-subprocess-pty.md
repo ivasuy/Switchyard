@@ -130,8 +130,8 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
     {
       "name": "parses new named errors",
       "lens": "happy",
-      "given": "sandbox_pty_unavailable and sandbox_spawn_failed",
-      "expect": "schema parses; unknown errors throw."
+      "given": "sandbox_real_execution_disabled, sandbox_executable_denied, sandbox_cwd_denied, sandbox_env_denied, sandbox_pty_unavailable, sandbox_spawn_failed, and sandbox_isolation_unavailable",
+      "expect": "every R20 named error parses through sandboxNamedErrorSchema; unknown errors still throw."
     }
   ],
   "integration_contracts": {
@@ -354,6 +354,11 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
         "name": "HostedSandboxPolicy",
         "kind": "class",
         "signature": "decide(input: { request: SandboxJobRequest; limits: SandboxResourceLimits }) => SandboxPolicyDecision & { resolvedCommand?: SandboxResolvedCommand }"
+      },
+      {
+        "name": "HostedSandboxService",
+        "kind": "class",
+        "signature": "new HostedSandboxService({ config, executor, ...deps })"
       },
       {
         "name": "resolveHostedSandboxConfig",
@@ -731,7 +736,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       {
         "from_task": "P19-T3-production-sandbox-executor",
         "name": "ProductionHostedSandboxExecutor",
-        "signature": "new ProductionHostedSandboxExecutor({ processFactory?, ptyFactory?, logger? })"
+        "signature": "new ProductionHostedSandboxExecutor(options?: { processFactory?: SandboxProcessFactory; ptyFactory?: SandboxPtyFactory; logger?: RuntimeLogger }) implements HostedSandboxExecutorPort"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
@@ -890,7 +895,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       {
         "from_task": "P19-T4-worker-internal-sandbox-wiring",
         "name": "loadWorkerConfig",
-        "signature": "loadWorkerConfig(env?: NodeJS.ProcessEnv) => WorkerConfig"
+        "signature": "loadWorkerConfig(env?: NodeJS.ProcessEnv) => WorkerConfig with sandbox: ResolvedHostedSandboxConfig"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
@@ -1035,7 +1040,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       {
         "from_task": "P19-T2-core-sandbox-policy-gate",
         "name": "resolveHostedSandboxConfig",
-        "signature": "resolveHostedSandboxConfig({ env, deploymentMode }) => ResolvedHostedSandboxConfig"
+        "signature": "resolveHostedSandboxConfig(input) => ResolvedHostedSandboxConfig"
       },
       {
         "from_task": "P19-T2-core-sandbox-policy-gate",
@@ -1045,7 +1050,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       {
         "from_task": "P19-T3-production-sandbox-executor",
         "name": "ProductionHostedSandboxExecutor",
-        "signature": "docs/smoke reference only; no route or runtime adapter registration"
+        "signature": "new ProductionHostedSandboxExecutor(options?: { processFactory?: SandboxProcessFactory; ptyFactory?: SandboxPtyFactory; logger?: RuntimeLogger }) implements HostedSandboxExecutorPort"
       }
     ],
     "file_paths_consumed_by_other_tasks": []
