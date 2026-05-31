@@ -41,3 +41,8 @@ export type CodexProcessFactory = (
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv }
 ) => ChildProcessWithoutNullStreams;
+
+export interface CodexInteractiveRuntimeMetadata {
+  codexThreadId?: string;
+  codexResumeMode?: "exec_resume_json";
+}

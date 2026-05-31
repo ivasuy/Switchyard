@@ -5,7 +5,10 @@ import type { RunStore } from "../ports/run-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { RuntimeLogger } from "../ports/runtime-logger.js";
 import type { ToolRouter } from "./tool-router.js";
+import { AdapterProtocolError } from "../errors.js";
 import { redactSecrets } from "./local-policy-gate.js";
+
+type Cursor = { createdAt: string; id: string };
 
 class ServiceError extends Error {
   readonly code: string;
@@ -53,10 +56,16 @@ export interface ApprovalServiceDependencies {
   }) => Promise<void>;
   eventBus?: EventBus;
   logger?: RuntimeLogger;
+  clock?: () => Date;
+  scheduler?: {
+    setTimeout(fn: () => void, ms: number): ReturnType<typeof setTimeout>;
+    clearTimeout(handle: ReturnType<typeof setTimeout>): void;
+  };
 }
 
 export class ApprovalService {
   private readonly resolutionTails = new Map<string, Promise<void>>();
+  private readonly expirationTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly deps: ApprovalServiceDependencies) {}
 
@@ -73,7 +82,7 @@ export class ApprovalService {
       approvalType: input.approvalType,
       status: "pending",
       payload: redactSecrets(input.payload ?? {}),
-      createdAt: new Date().toISOString()
+      createdAt: this.nowIso()
     };
     if (input.runId) {
       approval.runId = input.runId;
@@ -85,7 +94,8 @@ export class ApprovalService {
       approvalType: approval.approvalType
     }));
 
-    return approval;
+    await this.scheduleOrExpireRuntimeApproval(approval);
+    return (await this.deps.approvals.get(approval.id)) ?? approval;
   }
 
   async list(filter: ListApprovalsFilter): Promise<ListApprovalsResult> {
@@ -104,6 +114,61 @@ export class ApprovalService {
     return this.resolve(id, "rejected", "approval.rejected", input);
   }
 
+  async expirePendingRuntimeApprovals(now = this.nowDate()): Promise<{ expired: number }> {
+    const pending = await this.listPendingRuntimeApprovals();
+    let expired = 0;
+    for (const approval of pending) {
+      const expiresAt = parseExpiresAt(approval);
+      if (!expiresAt || expiresAt > now) {
+        continue;
+      }
+      const transitioned = await this.transitionPendingRuntimeApproval(approval.id, {
+        status: "expired",
+        message: "expired by Switchyard",
+        eventType: "approval.expired"
+      });
+      if (!transitioned) {
+        continue;
+      }
+      expired += 1;
+      await this.sendRuntimeRejectionResolution(transitioned, "expired by Switchyard", "approval.expiration_resolution_failed");
+    }
+    return { expired };
+  }
+
+  async terminalizePendingRuntimeApprovalsForRun(
+    runId: string,
+    input: {
+      terminalEvent: "run.cancelled" | "run.failed" | "run.timeout" | "daemon_restarted";
+      approvalStatus: "rejected" | "expired";
+      message: string;
+    }
+  ): Promise<{ expired: number; rejected: number }> {
+    const listed = await this.deps.approvals.list({ runId, status: "pending", limit: 1000 });
+    let expired = 0;
+    let rejected = 0;
+    for (const approval of listed.approvals) {
+      if (!isRuntimeApproval(approval)) {
+        continue;
+      }
+      const transitioned = await this.transitionPendingRuntimeApproval(approval.id, {
+        status: input.approvalStatus,
+        message: input.message,
+        eventType: input.approvalStatus === "expired" ? "approval.expired" : "approval.rejected"
+      });
+      if (!transitioned) {
+        continue;
+      }
+      if (input.approvalStatus === "expired") {
+        expired += 1;
+      } else {
+        rejected += 1;
+      }
+      await this.sendRuntimeRejectionResolution(transitioned, input.message, "approval.terminalization_resolution_failed", input.terminalEvent);
+    }
+    return { expired, rejected };
+  }
+
   private async resolve(
     id: string,
     status: "approved" | "rejected",
@@ -119,6 +184,19 @@ export class ApprovalService {
         throw new ServiceError("approval_not_pending", `Approval is not pending: ${id}`);
       }
 
+      const expiresAt = parseExpiresAt(approval);
+      if (expiresAt && expiresAt <= this.nowDate()) {
+        const expired = await this.transitionPendingRuntimeApproval(id, {
+          status: "expired",
+          message: "expired by Switchyard",
+          eventType: "approval.expired"
+        });
+        if (expired) {
+          await this.sendRuntimeRejectionResolution(expired, "expired by Switchyard", "approval.expiration_resolution_failed");
+        }
+        throw new ServiceError("approval_not_pending", `Approval is not pending: ${id}`);
+      }
+
       const resolution: Record<string, unknown> = {};
       if (input.actor && input.actor.trim().length > 0) {
         resolution.actor = input.actor.trim();
@@ -130,7 +208,7 @@ export class ApprovalService {
         resolution.answers = redactSecrets(input.answers);
       }
 
-      const now = new Date().toISOString();
+      const now = this.nowIso();
       const nextApproval: Approval = {
         ...approval,
         status,
@@ -147,6 +225,7 @@ export class ApprovalService {
       if (!persisted) {
         throw new ServiceError("approval_not_pending", `Approval is not pending: ${id}`);
       }
+      this.clearExpirationTimer(id);
 
       await this.appendAndPublish(await this.eventForRun(persisted.runId, eventType, {
         approvalId: persisted.id,
@@ -255,13 +334,201 @@ export class ApprovalService {
       type,
       sequence,
       payload: redactSecrets(payload),
-      createdAt: new Date().toISOString()
+      createdAt: this.nowIso()
     };
     if (runId) {
       event.runId = runId;
     }
     return event;
   }
+
+  private nowDate(): Date {
+    return this.deps.clock ? this.deps.clock() : new Date();
+  }
+
+  private nowIso(): string {
+    return this.nowDate().toISOString();
+  }
+
+  private getScheduler() {
+    return this.deps.scheduler ?? {
+      setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
+      clearTimeout: (handle: ReturnType<typeof setTimeout>) => clearTimeout(handle)
+    };
+  }
+
+  private async scheduleOrExpireRuntimeApproval(approval: Approval): Promise<void> {
+    if (!isRuntimeApproval(approval)) {
+      return;
+    }
+    const expiresAt = parseExpiresAt(approval);
+    if (!expiresAt) {
+      return;
+    }
+    const now = this.nowDate();
+    if (expiresAt <= now) {
+      const expired = await this.transitionPendingRuntimeApproval(approval.id, {
+        status: "expired",
+        message: "expired by Switchyard",
+        eventType: "approval.expired"
+      });
+      if (expired) {
+        await this.sendRuntimeRejectionResolution(expired, "expired by Switchyard", "approval.expiration_resolution_failed");
+      }
+      return;
+    }
+
+    const scheduler = this.getScheduler();
+    const delayMs = Math.max(0, expiresAt.getTime() - now.getTime());
+    const handle = scheduler.setTimeout(() => {
+      void this.withResolutionLock(approval.id, async () => {
+        const expired = await this.transitionPendingRuntimeApproval(approval.id, {
+          status: "expired",
+          message: "expired by Switchyard",
+          eventType: "approval.expired"
+        });
+        if (expired) {
+          await this.sendRuntimeRejectionResolution(expired, "expired by Switchyard", "approval.expiration_resolution_failed");
+        }
+      }).catch((error) => {
+        this.deps.logger?.warn("approval.expiration_resolution_failed", {
+          approvalId: approval.id,
+          reasonCode: error instanceof AdapterProtocolError ? error.reasonCode : undefined,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }).finally(() => {
+        this.clearExpirationTimer(approval.id);
+      });
+    }, delayMs);
+    this.clearExpirationTimer(approval.id);
+    this.expirationTimers.set(approval.id, handle);
+  }
+
+  private clearExpirationTimer(approvalId: string): void {
+    const handle = this.expirationTimers.get(approvalId);
+    if (!handle) {
+      return;
+    }
+    this.getScheduler().clearTimeout(handle);
+    this.expirationTimers.delete(approvalId);
+  }
+
+  private async listPendingRuntimeApprovals(): Promise<Approval[]> {
+    const collected: Approval[] = [];
+    let before: Cursor | undefined;
+    while (true) {
+      const page = await this.deps.approvals.list({
+        status: "pending",
+        limit: 200,
+        ...(before ? { before } : {})
+      });
+      collected.push(...page.approvals.filter((approval) => isRuntimeApproval(approval)));
+      if (!page.nextCursor) {
+        break;
+      }
+      before = page.nextCursor;
+    }
+    return collected;
+  }
+
+  private async transitionPendingRuntimeApproval(
+    approvalId: string,
+    input: {
+      status: "expired" | "rejected";
+      message: string;
+      eventType: "approval.expired" | "approval.rejected";
+    }
+  ): Promise<Approval | null> {
+    return await this.withResolutionLock(approvalId, async () => {
+      const approval = await this.deps.approvals.get(approvalId);
+      if (!approval || approval.status !== "pending") {
+        return null;
+      }
+      const nextApproval: Approval = {
+        ...approval,
+        status: input.status,
+        resolvedAt: this.nowIso(),
+        payload: redactSecrets({
+          ...approval.payload,
+          resolution: {
+            actor: "switchyard",
+            reason: input.message
+          }
+        })
+      };
+      const persisted = await this.deps.approvals.updateIfStatus(approvalId, "pending", nextApproval);
+      if (!persisted) {
+        return null;
+      }
+      this.clearExpirationTimer(approvalId);
+      await this.appendAndPublish(await this.eventForRun(persisted.runId, input.eventType, {
+        approvalId: persisted.id,
+        status: persisted.status
+      }));
+      this.deps.logger?.info(input.eventType, {
+        approvalId: persisted.id,
+        runId: persisted.runId,
+        status: persisted.status
+      });
+      return persisted;
+    });
+  }
+
+  private async sendRuntimeRejectionResolution(
+    approval: Approval,
+    message: string,
+    logEvent: "approval.expiration_resolution_failed" | "approval.terminalization_resolution_failed",
+    terminalEvent?: "run.cancelled" | "run.failed" | "run.timeout" | "daemon_restarted"
+  ): Promise<void> {
+    const runtimeApprovalToken = typeof approval.payload["runtimeApprovalToken"] === "string"
+      ? approval.payload["runtimeApprovalToken"]
+      : undefined;
+    const runId = typeof approval.runId === "string" ? approval.runId : undefined;
+    if (!this.deps.runtimeResolutionSender || !runtimeApprovalToken || !runId) {
+      return;
+    }
+
+    try {
+      await this.deps.runtimeResolutionSender({
+        type: "approval_resolution",
+        approvalId: approval.id,
+        runId,
+        runtimeApprovalToken,
+        decision: "rejected",
+        message
+      });
+      this.deps.logger?.info("runtime.approval_resolution.sent", {
+        approvalId: approval.id,
+        runId,
+        decision: "rejected"
+      });
+    } catch (error) {
+      this.deps.logger?.warn(logEvent, {
+        approvalId: approval.id,
+        runId,
+        status: approval.status,
+        terminalEvent,
+        reasonCode: error instanceof AdapterProtocolError ? error.reasonCode : undefined,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+}
+
+function isRuntimeApproval(approval: Approval): boolean {
+  return typeof approval.payload["runtimeApprovalToken"] === "string";
+}
+
+function parseExpiresAt(approval: Approval): Date | undefined {
+  const raw = approval.payload["expiresAt"];
+  if (typeof raw !== "string") {
+    return undefined;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return undefined;
+  }
+  return parsed;
 }
 
 export { ServiceError as ApprovalServiceError };

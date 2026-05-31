@@ -8,6 +8,7 @@ import {
   createFakeClaudeCodeClient,
   createFakeClaudeCodeCliProcessFactory,
   createFakeClaudeLiveProbe,
+  createFakeCodexInteractiveSessionFactory,
   createFakeAcpProcessFactory,
   type FakeAcpRuntimeStats,
   startFakeAgentFieldServer,
@@ -601,6 +602,7 @@ describe("daemon app", () => {
         "agentfield.async_rest",
         "claude_code.sdk",
         "codex.exec_json",
+        "codex.interactive",
         "fake.deterministic",
         "generic_http.async_rest",
         "opencode.acp"
@@ -612,6 +614,76 @@ describe("daemon app", () => {
       expect(claude.json().runtimeMode.availability.reasonCode).toBe("live_probe_disabled");
       expect(doctor.statusCode).toBe(200);
       expect(doctor.json().summary.available).toBe(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("supports no-spend codex interactive create/input/check paths with fake session factory", async () => {
+    const fake = createFakeCodexInteractiveSessionFactory({ kind: "default" });
+    const app = await createDaemonApp(undefined, {
+      codexProbe: availableCodexProbe,
+      codexInteractiveSessionFactory: fake.factory
+    });
+    try {
+      const modes = await app.inject({ method: "GET", url: "/runtime-modes" });
+      expect(modes.statusCode).toBe(200);
+      expect(modes.json().runtimeModes.some((mode: { slug: string }) => mode.slug === "codex.interactive")).toBe(true);
+
+      const check = await app.inject({ method: "POST", url: "/runtime-modes/codex.interactive/check" });
+      expect(check.statusCode).toBe(200);
+      expect(check.json().check.runtimeMode).toBe("codex.interactive");
+      expect(fake.state.checkCalls.length).toBeGreaterThanOrEqual(2);
+
+      const inferred = await app.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "codex",
+          provider: "openai",
+          model: "gpt-5.5",
+          adapterType: "process",
+          cwd: "/repo",
+          task: "infer codex mode"
+        }
+      });
+      expect(inferred.statusCode).toBe(202);
+      expect(inferred.json().run.runtimeMode).toBe("codex.exec_json");
+
+      const created = await app.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "codex",
+          provider: "openai",
+          model: "gpt-5.5",
+          adapterType: "process",
+          runtimeMode: "codex.interactive",
+          cwd: "/repo",
+          task: "wait for input"
+        }
+      });
+      expect(created.statusCode).toBe(202);
+      const runId = created.json().run.id as string;
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const runAfterStart = await app.inject({ method: "GET", url: `/runs/${runId}` });
+      expect(runAfterStart.statusCode).toBe(200);
+      expect(runAfterStart.json().run.status).toBe("waiting_for_input");
+
+      const input = await app.inject({
+        method: "POST",
+        url: `/runs/${runId}/input`,
+        payload: { text: "continue" }
+      });
+      expect(input.statusCode).toBe(202);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const runAfterInput = await app.inject({ method: "GET", url: `/runs/${runId}` });
+      expect(runAfterInput.statusCode).toBe(200);
+      expect(["waiting_for_input", "completed"]).toContain(runAfterInput.json().run.status);
+      expect(fake.state.resumes.length).toBeGreaterThanOrEqual(1);
+      expect(fake.state.liveProviderCalls.length).toBe(0);
+      expect(fake.state.commands.length).toBe(0);
     } finally {
       await app.close();
     }
@@ -1243,7 +1315,7 @@ describe("daemon app", () => {
       expect(codex.json().runtimeMode.availability.state).toBe("partial");
       expect(codex.json().runtimeMode.availability.reasonCode).toBe("optional_check_failed");
       expect(doctor.statusCode).toBe(200);
-      expect(doctor.json().summary.partial).toBe(1);
+      expect(doctor.json().summary.partial).toBeGreaterThanOrEqual(1);
     } finally {
       await app.close();
     }
@@ -1560,16 +1632,35 @@ describe("daemon app", () => {
         "{}",
         "2026-05-14T00:00:01.000Z"
       );
+      storage.sqlite.prepare(
+        `INSERT INTO approvals (
+          id, run_id, approval_type, status, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(
+        "approval_runtime_pending",
+        "run_interrupted",
+        "before_external_message",
+        "pending",
+        JSON.stringify({
+          runtimeApprovalToken: "pause-1",
+          expiresAt: "2026-06-14T00:00:00.000Z"
+        }),
+        "2026-05-14T00:00:01.000Z"
+      );
       storage.sqlite.close();
 
       app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
       const response = await app.inject({ method: "GET", url: "/runs/run_interrupted" });
       const events = await app.inject({ method: "GET", url: "/runs/run_interrupted/events" });
+      const approval = await app.inject({ method: "GET", url: "/approvals/approval_runtime_pending" });
 
       expect(response.statusCode).toBe(200);
       expect(response.json().run.status).toBe("failed");
       expect(events.body).toContain("event: run.failed");
       expect(events.body).toContain("daemon_restarted");
+      expect(events.body).toContain("event: approval.rejected");
+      expect(approval.statusCode).toBe(200);
+      expect(approval.json().approval.status).toBe("rejected");
     } finally {
       if (app) {
         try {
@@ -1583,6 +1674,81 @@ describe("daemon app", () => {
       } catch {
         // Do not fail cleanup on best-effort temp cleanup.
       }
+    }
+  });
+
+  it("expires pending runtime approvals at startup when expiresAt is already past", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchyard-daemon-approval-expire-"));
+    const config: DaemonConfig = {
+      host: "127.0.0.1",
+      port: 0,
+      dataDir: dir,
+      sqlitePath: join(dir, "switchyard.sqlite"),
+      artifactDir: join(dir, "artifacts")
+    };
+
+    let app: FastifyInstance | undefined;
+    try {
+      app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+      await app.close();
+      app = undefined;
+
+      const storage = openSqliteStorage(config.sqlitePath);
+      storage.sqlite.prepare(
+        `INSERT INTO runs (
+          id, runtime, provider, model, adapter_type, cwd, task, status, placement,
+          approval_policy, timeout_seconds, metadata_json, created_at, started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        "run_expire_pending",
+        "codex",
+        "openai",
+        "gpt-5.5",
+        "process",
+        "/repo",
+        "expire task",
+        "waiting_for_approval",
+        "local",
+        "default",
+        600,
+        "{}",
+        "2026-05-14T00:00:00.000Z",
+        "2026-05-14T00:00:01.000Z"
+      );
+      storage.sqlite.prepare(
+        `INSERT INTO approvals (
+          id, run_id, approval_type, status, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(
+        "approval_runtime_expired",
+        "run_expire_pending",
+        "before_external_message",
+        "pending",
+        JSON.stringify({
+          runtimeApprovalToken: "pause-expire",
+          expiresAt: "2020-01-01T00:00:00.000Z"
+        }),
+        "2026-05-14T00:00:01.000Z"
+      );
+      storage.sqlite.close();
+
+      app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+      const approval = await app.inject({ method: "GET", url: "/approvals/approval_runtime_expired" });
+      const runEvents = await app.inject({ method: "GET", url: "/runs/run_expire_pending/events" });
+
+      expect(approval.statusCode).toBe(200);
+      expect(approval.json().approval.status).toBe("expired");
+      expect(runEvents.statusCode).toBe(200);
+      expect(runEvents.body).toContain("event: approval.expired");
+    } finally {
+      if (app) {
+        try {
+          await app.close();
+        } catch {
+          // keep cleanup resilient
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

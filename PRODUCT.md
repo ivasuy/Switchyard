@@ -49,11 +49,11 @@ When a release ships:
 
 Snapshot source: `agent/phase-11-r12-production-hosting-foundation` at commit `2b025ed18450ffe97403bb37422b0ef72df61024`.
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like worker execution for fake deterministic plus operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; and shipped S3/R2-compatible object-store client wiring for hosted artifact content.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and fake tool invocations; shipped local deterministic Debate V1; shipped hosted-like worker execution for fake deterministic plus operator opt-in self-hosted/staging hosted real worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; and shipped S3/R2-compatible object-store client wiring for hosted artifact content.
 
 The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, and the R12 self-hosted staging deployment foundation. It is not yet a managed hosted platform, and production hosted real-runtime execution remains forbidden.
 
-Important runtime wording: `codex.exec_json` exists as a one-shot non-interactive runtime mode. A full interactive Codex runtime is not shipped yet.
+Important runtime wording: `codex.exec_json` remains the default inferred Codex one-shot mode. `codex.interactive` is a separate explicit local-only mode for bounded post-start input and resume/session-state flows.
 
 ## What Exists Today
 
@@ -115,6 +115,7 @@ Shipped runtime modes:
 - `fake.deterministic`: deterministic test runtime mode for local smoke tests and contract coverage.
 - `claude_code.sdk`: local bounded interactive Claude Code runtime mode with post-start input, session-state patches, runtime approval bridging, normalized tool events, and dual transcript artifacts (daemon default path uses structured `claude -p` stream-json IO).
 - `codex.exec_json`: local non-interactive Codex CLI execution through `codex exec --json`.
+- `codex.interactive`: local explicit-only Codex interactive mode with bounded post-start input, `waiting_for_input`/`waiting_for_approval` states, session-state patching (`codexThreadId`), and transcript artifacts capped/redacted under the existing runtime adapter contract.
 - `agentfield.async_rest`: daemon-configured AgentField async REST wrapper runtime with bounded health/discovery checks, async execute/status polling, normalized events, transcript artifacts, and result payload artifacts.
 - `generic_http.async_rest`: daemon-configured async REST wrapper runtime with bounded health/start/status/events/cancel/artifacts, verified-terminal cancellation, and transcript artifact capture.
 - `opencode.acp`: local OpenCode ACP subprocess runtime with bounded doctor check, one-prompt-per-run behavior, verified cancellation, and raw ACP transcript artifacts.
@@ -142,14 +143,21 @@ Codex support includes:
 - JSONL stdout parsing into normalized Switchyard events.
 - Raw stdout/stderr transcript artifact capture.
 - `409` response for post-start input because Codex `exec --json` is one-shot and non-interactive.
+- Explicit `codex.interactive` mode that never auto-infers from omitted `runtimeMode`; omitted Codex mode remains `codex.exec_json`.
+- Bounded local resume flow using persisted `codexThreadId` session state and visible failures for missing/stale resume tokens.
+- Runtime approval bridge contract wiring through existing approval records and approval endpoints, with deterministic fake/no-spend coverage.
+- Runtime approval expiration and terminal cleanup behavior so pending runtime approvals do not survive timeout/cancel/failure/daemon restart.
+- Runtime output logging redaction (`runtime.output` logs omit raw output text while artifacts remain the bounded debug surface).
 
 R4 shared substrate note:
 
 - Codex and Generic HTTP adapters now share extracted runtime substrates for process/session streaming, JSONL parsing, timeout helpers, and transcript recording while preserving existing public Codex behavior.
 
-R8 Codex boundary note:
+R16 Codex boundary note:
 
-- Codex remains one-shot `codex.exec_json`. Interactive mode promotion and resume/runtime-approval bridging are deferred.
+- `codex.exec_json` remains one-shot with unchanged default inference and unsupported post-start input semantics.
+- `codex.interactive` is explicit local-only runtime mode; `POST /runs?wait=1` is rejected (`interactive_wait_unsupported`) for this mode.
+- No hosted interactive Codex run bridge, no hosted post-start input bridge, no hosted approval bridge, no PTY/TUI automation, and no public `/sandbox`/`/exec`/`/pty`/`/terminal` route are shipped.
 
 ### REST API
 
@@ -697,7 +705,7 @@ Release scope:
 - tool-call/tool-result normalization and ask-user-question mapping into approval flow.
 - richer raw and normalized transcript artifacts with strict size limits.
 - runtime docs and no-spend-first smoke/check behavior.
-- explicit Codex one-shot preservation (`codex.exec_json`) with interactive promotion deferred.
+- explicit Codex one-shot preservation (`codex.exec_json`) in that phase, with interactive Codex arriving later in R16 as explicit `codex.interactive`.
 
 Usable after this release:
 

@@ -9,5 +9,6 @@ export * from "./middleware-stores.js";
 export * from "./fake-echo-tool-adapter.js";
 export * from "./fake-claude-code-client.js";
 export * from "./fake-claude-code-cli.js";
+export * from "./fake-codex-interactive-session.js";
 export * from "./hosted-test-harness.js";
 export * from "./fake-hosted-sandbox-executor.js";

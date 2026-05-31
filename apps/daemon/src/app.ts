@@ -5,6 +5,11 @@ import {
   ClaudeCodeAdapter,
   createClaudeCodeCliClient,
   type ClaudeCodeCliProcessFactory,
+  CodexAdapterRouter,
+  CodexInteractiveAdapter,
+  type CodexInteractiveSessionFactory,
+  CODEX_INTERACTIVE_RUNTIME_MODE_SLUG,
+  CodexExecResumeJsonSessionFactory,
   CodexExecJsonAdapter,
   GenericHttpAsyncRestAdapter,
   OpenCodeAcpAdapter,
@@ -138,6 +143,8 @@ interface CreateDaemonAppOptions {
   claudeVersionProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["probeVersion"];
   claudeAuthProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["probeAuth"];
   claudeLiveProbe?: NonNullable<ConstructorParameters<typeof ClaudeCodeAdapter>[0]["doctor"]>["runLiveProbe"];
+  codexInteractiveSessionFactory?: CodexInteractiveSessionFactory;
+  codexInteractiveApprovalBridge?: boolean;
 }
 
 interface StartupRecoveryStats {
@@ -145,6 +152,11 @@ interface StartupRecoveryStats {
   failedSessions: number;
   alreadyTerminal: number;
   duplicateStarts: number;
+}
+
+interface StartupRecoveryResult {
+  stats: StartupRecoveryStats;
+  reconciledRunIds: string[];
 }
 
 interface DaemonMetricsState {
@@ -235,7 +247,8 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     message: null
   };
   const metrics = createDaemonMetricsState();
-  metrics.startupRecovery = reconcileInterruptedRuns(stores, options.logger);
+  const startupRecovery = reconcileInterruptedRuns(stores, options.logger);
+  metrics.startupRecovery = startupRecovery.stats;
   const codexOptions: ConstructorParameters<typeof CodexExecJsonAdapter>[0] = {
     modelCatalog: codexProbe.models
   };
@@ -245,6 +258,27 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   if (options.logger) {
     codexOptions.logger = options.logger;
   }
+  const codexExecAdapter = new CodexExecJsonAdapter(codexOptions);
+  const codexInteractiveFactory = options.codexInteractiveSessionFactory ?? new CodexExecResumeJsonSessionFactory({
+    command: "codex",
+    approvalBridgeSupported: options.codexInteractiveApprovalBridge ?? false
+  });
+  const codexInteractiveAdapter = new CodexInteractiveAdapter({
+    sessionFactory: codexInteractiveFactory,
+    command: "codex",
+    approvalBridgeSupported: options.codexInteractiveApprovalBridge ?? false,
+    ...(options.logger ? { logger: options.logger } : {})
+  });
+  const codexRouter = new CodexAdapterRouter({
+    execAdapter: codexExecAdapter,
+    interactiveAdapter: codexInteractiveAdapter
+  });
+  const codexInteractiveCheck = await codexInteractiveAdapter.check({
+    runtimeMode: CODEX_INTERACTIVE_RUNTIME_MODE_SLUG,
+    timeoutMs: checkTimeoutMs,
+    maxDiagnosticBytes
+  });
+  const codexInteractiveAvailability = availabilityFromInteractiveCheck(codexInteractiveCheck, now);
   const genericHttpAdapterOptions: ConstructorParameters<typeof GenericHttpAsyncRestAdapter>[0] = {
     ...(genericHttpConfig.baseUrl ? { baseUrl: genericHttpConfig.baseUrl } : {}),
     ...(genericHttpConfig.authToken ? { authToken: genericHttpConfig.authToken } : {}),
@@ -302,7 +336,7 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
   const adapters = new Map<string, RuntimeAdapter>([
     ["fake", new FakeRuntimeAdapter()],
     ["claude_code", claudeAdapter],
-    ["codex", new CodexExecJsonAdapter(codexOptions)],
+    ["codex", codexRouter],
     ["agentfield", agentfieldAdapter],
     ["generic_http", genericHttpAdapter],
     ["opencode", opencodeAdapter]
@@ -324,6 +358,14 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
           approvalType: input.approvalType,
           payload: input.payload
         });
+      },
+      terminalizePendingForRun: async (runId, input) => {
+        if (!approvalServiceRef) {
+          throw new AdapterProtocolError("Runtime approval bridge is not configured.", {
+            reasonCode: "runtime_approval_bridge_unconfigured"
+          });
+        }
+        return await approvalServiceRef.terminalizePendingRuntimeApprovalsForRun(runId, input);
       }
     },
     ...stores
@@ -361,7 +403,8 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
       [
         adapters.get("fake")!.manifest,
         adapters.get("claude_code")!.manifest,
-        adapters.get("codex")!.manifest,
+        codexExecAdapter.manifest,
+        codexInteractiveAdapter.manifest,
         adapters.get("agentfield")!.manifest,
         adapters.get("generic_http")!.manifest,
         adapters.get("opencode")!.manifest
@@ -370,6 +413,7 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
         "fake.deterministic": fakeAvailability,
         "claude_code.sdk": claudeAvailability,
         "codex.exec_json": codexAvailability,
+        [CODEX_INTERACTIVE_RUNTIME_MODE_SLUG]: codexInteractiveAvailability,
         "agentfield.async_rest": agentfieldAvailability,
         "generic_http.async_rest": genericHttpAvailability,
         "opencode.acp": opencodeAvailability
@@ -389,6 +433,11 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
       runtimeMode: "codex.exec_json",
       adapterId: "codex",
       state: codexAvailability.state
+    });
+    options.logger?.info("runtime_mode.seeded", {
+      runtimeMode: CODEX_INTERACTIVE_RUNTIME_MODE_SLUG,
+      adapterId: "codex",
+      state: codexInteractiveAvailability.state
     });
     options.logger?.info("runtime_mode.seeded", {
       runtimeMode: "agentfield.async_rest",
@@ -500,6 +549,14 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     }
   });
   approvalServiceRef = approvalService;
+  await approvalService.expirePendingRuntimeApprovals();
+  for (const runId of startupRecovery.reconciledRunIds) {
+    await approvalService.terminalizePendingRuntimeApprovalsForRun(runId, {
+      terminalEvent: "daemon_restarted",
+      approvalStatus: "rejected",
+      message: "daemon restarted"
+    });
+  }
   registerMiddlewareRoutes(app, {
     messageRouter,
     memoryService: new MemoryService({ memory: stores.memory }),
@@ -691,15 +748,16 @@ async function seedClaudeRegistry(
 function reconcileInterruptedRuns(
   stores: DaemonStoreResult,
   logger?: RuntimeLogger
-): StartupRecoveryStats {
+): StartupRecoveryResult {
   const stats: StartupRecoveryStats = {
     recoveredRuns: 0,
     failedSessions: 0,
     alreadyTerminal: 0,
     duplicateStarts: 0
   };
+  const reconciledRunIds: string[] = [];
   if (!stores.sqlite) {
-    return stats;
+    return { stats, reconciledRunIds };
   }
 
   const staleRuns = stores.sqlite
@@ -733,6 +791,7 @@ function reconcileInterruptedRuns(
       }
 
       stats.recoveredRuns += 1;
+      reconciledRunIds.push(runId);
       const sessionUpdate = stores.sqlite
         .prepare("UPDATE runtime_sessions SET status = 'failed', updated_at = ? WHERE run_id = ? AND status = 'active'")
         .run(endedAt, runId) as { changes: number };
@@ -762,7 +821,7 @@ function reconcileInterruptedRuns(
     failedSessions: stats.failedSessions,
     duplicateStarts: stats.duplicateStarts
   });
-  return stats;
+  return { stats, reconciledRunIds };
 }
 
 function createDaemonMetricsState(): DaemonMetricsState {
@@ -1162,6 +1221,50 @@ function availabilityFromProbe(
     reasonCode: null,
     message: null
   };
+}
+
+function availabilityFromInteractiveCheck(
+  check: Awaited<ReturnType<CodexInteractiveAdapter["check"]>>,
+  checkedAt: string
+): DaemonRuntimeAvailability {
+  const raw = check.details?.["availability"];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {
+      state: "unknown",
+      canRun: false,
+      installed: false,
+      auth: "unknown",
+      version: null,
+      checkedAt,
+      reasonCode: "codex_interactive_driver_unsupported",
+      message: check.message ?? "codex interactive check did not return availability details"
+    };
+  }
+  const record = raw as Record<string, unknown>;
+  return {
+    state: asAvailabilityState(record["state"]),
+    canRun: record["canRun"] === true,
+    installed: record["installed"] === true,
+    auth: asAvailabilityAuth(record["auth"]),
+    version: typeof record["version"] === "string" ? record["version"] : null,
+    checkedAt: typeof record["checkedAt"] === "string" ? record["checkedAt"] : checkedAt,
+    reasonCode: typeof record["reasonCode"] === "string" ? record["reasonCode"] : null,
+    message: typeof record["message"] === "string" ? record["message"] : null
+  };
+}
+
+function asAvailabilityState(value: unknown): DaemonRuntimeAvailability["state"] {
+  if (value === "available" || value === "partial" || value === "unavailable" || value === "installed" || value === "unsupported" || value === "unknown") {
+    return value;
+  }
+  return "unknown";
+}
+
+function asAvailabilityAuth(value: unknown): DaemonRuntimeAvailability["auth"] {
+  if (value === "configured" || value === "missing" || value === "not_required" || value === "unknown") {
+    return value;
+  }
+  return "unknown";
 }
 
 class ProbeTimeoutError extends Error {}

@@ -538,6 +538,153 @@ describe("run routes", () => {
     expect(response.json().run.runtimeMode).toBe("fake.deterministic");
   });
 
+  it("rejects wait=1 for explicit codex.interactive before create side effects", async () => {
+    const harness = createRouteHarness({ withLauncher: false });
+    const createSpy = vi.spyOn(harness.runService, "createRun");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: {
+        runtime: "codex",
+        provider: "openai",
+        model: "gpt-5.5",
+        adapterType: "process",
+        runtimeMode: "codex.interactive",
+        cwd: "/repo",
+        task: "interactive wait"
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.details).toEqual([{ path: "wait", issue: "interactive_wait_unsupported" }]);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("maps in-flight input conflicts to 409 adapter_protocol_failed", async () => {
+    const harness = createRouteHarness();
+    const created = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      payload: fakeRunPayload("Input race run")
+    });
+    const runId = created.json().run.id as string;
+    vi.spyOn(harness.runService, "sendInput").mockRejectedValueOnce(new AdapterProtocolError("input race", {
+      reasonCode: "runtime_input_in_flight"
+    }));
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: `/runs/${runId}/input`,
+      payload: { text: "continue" }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.details).toEqual([{ path: "reasonCode", issue: "runtime_input_in_flight" }]);
+  });
+
+  it("rejects hosted create for codex.interactive local-only mode", async () => {
+    const harness = createRouteHarness({ withLauncher: false });
+    const createSpy = vi.spyOn(harness.runService, "createRun");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs",
+      payload: {
+        runtime: "codex",
+        provider: "openai",
+        model: "gpt-5.5",
+        adapterType: "process",
+        runtimeMode: "codex.interactive",
+        placement: "hosted",
+        cwd: "/repo",
+        task: "hosted interactive"
+      }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("placement_denied");
+    expect(response.json().error.details).toEqual([{ path: "placement", issue: "hosted_runtime_not_allowed" }]);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("cancels local codex.interactive runs across active and waiting states", async () => {
+    const harness = createRouteHarness();
+    const cancelSpy = vi.spyOn(harness.runService, "cancelRun");
+    const statuses = ["running", "waiting_for_input", "waiting_for_approval"] as const;
+
+    for (const status of statuses) {
+      const runId = `run_codex_interactive_cancel_${status}`;
+      await harness.runs.create({
+        id: runId,
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        cwd: "/repo",
+        task: `cancel ${status}`,
+        status,
+        placement: "local",
+        approvalPolicy: "default",
+        timeoutSeconds: 60,
+        metadata: {},
+        runtimeMode: "codex.interactive",
+        createdAt: "2026-05-30T00:00:00.000Z"
+      });
+      await harness.sessions.create({
+        id: `session_codex_interactive_cancel_${status}`,
+        runId,
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        protocol: "process",
+        status: "active",
+        runtimeMode: "codex.interactive",
+        state: {},
+        createdAt: "2026-05-30T00:00:00.000Z"
+      });
+
+      const response = await harness.app.inject({
+        method: "POST",
+        url: `/runs/${runId}/cancel`
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().run.status).toBe("cancelled");
+    }
+
+    expect(cancelSpy).toHaveBeenCalledTimes(statuses.length);
+  });
+
+  it("returns terminal local codex.interactive run unchanged on cancel", async () => {
+    const harness = createRouteHarness();
+    const runId = "run_codex_interactive_terminal_cancel";
+    await harness.runs.create({
+      id: runId,
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "terminal cancel",
+      status: "completed",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "codex.interactive",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      endedAt: "2026-05-30T00:01:00.000Z"
+    });
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: `/runs/${runId}/cancel`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().run.status).toBe("completed");
+  });
+
   it("infers generic http/agentfield runtime modes and validates explicit generic runtime mode", async () => {
     const harness = createRouteHarness();
     const inferred = await harness.app.inject({
@@ -837,6 +984,36 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
     },
     createdAt: "2026-05-29T00:00:00.000Z",
     updatedAt: "2026-05-29T00:00:00.000Z"
+  });
+  seedRuntimeMode(registry, {
+    id: "runtime_mode_codex_interactive",
+    slug: "codex.interactive",
+    name: "Codex interactive",
+    providerId: "provider_openai",
+    runtimeId: "runtime_codex",
+    adapterId: "codex",
+    adapterType: "process",
+    kind: "interactive_process",
+    status: "partial",
+    capabilities: ["run.start", "run.input", "run.cancel", "session.state", "session.resume", "event.streaming", "artifact.transcript", "auth.local"],
+    limitations: [{ code: "local_only", message: "codex.interactive is local-only in R16." }],
+    placement: {
+      local: { support: "conditional", reason: "Local Codex command shape required." },
+      hosted: { support: "unsupported", reason: "No hosted interactive bridge." },
+      connectedLocalNode: { support: "future", reason: "Future." }
+    },
+    availability: {
+      state: "partial",
+      canRun: true,
+      installed: true,
+      auth: "configured",
+      version: "codex 0.134.0",
+      checkedAt: "2026-05-30T00:00:00.000Z",
+      reasonCode: "codex_approval_bridge_unsupported",
+      message: "approval bridge unsupported"
+    },
+    createdAt: "2026-05-30T00:00:00.000Z",
+    updatedAt: "2026-05-30T00:00:00.000Z"
   });
   const registryService = new RegistryService({ registry });
   registerRunRoutes(app, {

@@ -1,7 +1,8 @@
 import { type RuntimeAdapter } from "@switchyard/core";
-import { FakeRuntimeAdapter, runRuntimeAdapterContract } from "@switchyard/testkit";
+import { FakeRuntimeAdapter, createFakeCodexInteractiveSessionFactory, runRuntimeAdapterContract } from "@switchyard/testkit";
 import { ClaudeCodeAdapter, createClaudeCodeCliClient } from "./claude-code/index.js";
 import { CodexExecJsonAdapter } from "./codex/codex-exec-json-adapter.js";
+import { CodexInteractiveAdapter } from "./codex/codex-interactive-adapter.js";
 import { AgentFieldAsyncRestAdapter } from "./agentfield/agentfield-async-rest-adapter.js";
 import { GenericHttpAsyncRestAdapter } from "./generic-http/generic-http-adapter.js";
 import { OpenCodeAcpAdapter } from "./opencode/opencode-acp-adapter.js";
@@ -168,6 +169,27 @@ function buildMatrixSeeds(): MatrixSeed[] {
       })
     },
     {
+      adapter: new CodexInteractiveAdapter({
+        sessionFactory: createFakeCodexInteractiveSessionFactory().factory,
+        approvalBridgeSupported: true
+      }),
+      noSpendHarness: {
+        type: "fake_codex_interactive_session_factory",
+        mode: "deterministic_no_spend"
+      },
+      coveredScenarios: [
+        "start_waiting_for_input",
+        "post_start_input",
+        "session_resume",
+        "approval_resolution_fake",
+        "transcript_bounds",
+        "malformed_stream",
+        "cancel_states",
+        "input_in_flight"
+      ],
+      evaluate: async (adapter) => evaluateInteractiveCodexAdapter(adapter)
+    },
+    {
       adapter: new ClaudeCodeAdapter({
         client: createClaudeCodeCliClient({
           command: "claude",
@@ -234,6 +256,41 @@ async function evaluateCheckOnlyAdapter(adapter: RuntimeAdapter): Promise<{ ciSt
     return {
       ciStatus: "skip",
       reason: reasonCode ?? check.message ?? "adapter unavailable in no-spend mode"
+    };
+  } catch (error) {
+    return {
+      ciStatus: "fail",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function evaluateInteractiveCodexAdapter(adapter: RuntimeAdapter): Promise<{ ciStatus: CompatibilityStatus; reason: string }> {
+  try {
+    const check = await adapter.check({ runtimeMode: "codex.interactive", timeoutMs: 1000, maxDiagnosticBytes: 4096 });
+    if (!check.ok) {
+      const reasonCode = extractReasonCode(check.details);
+      return {
+        ciStatus: "fail",
+        reason: reasonCode ?? check.message ?? "interactive codex check failed"
+      };
+    }
+    const session = await adapter.start({
+      runId: "run_matrix_codex_interactive",
+      runtime: "codex",
+      runtimeMode: "codex.interactive",
+      provider: "openai",
+      model: "gpt-5",
+      cwd: "/repo",
+      task: "matrix smoke",
+      metadata: {}
+    });
+    const iterator = adapter.events({ ...session, runId: "run_matrix_codex_interactive", runtimeMode: "codex.interactive" })[Symbol.asyncIterator]();
+    await iterator.next();
+    await adapter.cancel({ ...session, runId: "run_matrix_codex_interactive", runtimeMode: "codex.interactive" });
+    return {
+      ciStatus: "pass",
+      reason: "fake codex interactive session factory passed"
     };
   } catch (error) {
     return {

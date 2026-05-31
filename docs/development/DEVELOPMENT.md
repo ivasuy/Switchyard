@@ -76,10 +76,12 @@ curl -s "$BASE/runtime-modes" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/fake.deterministic" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/claude_code.sdk" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/codex.exec_json" | python3 -m json.tool
+curl -s "$BASE/runtime-modes/codex.interactive" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/agentfield.async_rest" | python3 -m json.tool
 curl -s "$BASE/runtime-modes/opencode.acp" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/claude_code.sdk/check" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/codex.exec_json/check" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/codex.interactive/check" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/agentfield.async_rest/check" | python3 -m json.tool
 curl -s -X POST "$BASE/runtime-modes/opencode.acp/check" | python3 -m json.tool
 curl -s "$BASE/doctor" | python3 -m json.tool
@@ -91,6 +93,8 @@ Notes:
 - `claude_code.sdk` is seeded in R8 and defaults to no-spend checks (`reasonCode: live_probe_disabled`) unless `SWITCHYARD_CLAUDE_CODE_LIVE_PROBE=1`.
 - Claude live probe, when enabled, remains bounded by `SWITCHYARD_CLAUDE_CODE_MAX_BUDGET_USD` and `SWITCHYARD_CLAUDE_CODE_REQUEST_TIMEOUT_MS`.
 - `codex.exec_json` is `available` only when both `codex --version` and `codex debug models` succeed with at least one model.
+- `codex.interactive` check is no-spend by default; it validates command-shape support (`codex exec --help` + `codex exec resume --help`) and reports `resumeCommandShapeAvailable` separately from `liveResumeVerified`.
+- Default no-spend doctor/check output must not be interpreted as live resume success. `liveResumeVerified` remains `false` unless a separate optional manual/live probe is explicitly run.
 - missing/slow/oversized Codex checks are bounded and reported as sanitized `unavailable`/`unknown`; daemon startup remains up.
 - `opencode.acp` check runs `opencode --version`, ACP `initialize`, and ACP `session/new` only.
 - Doctor/check does not send ACP `session/prompt`; prompt execution can spend model budget.
@@ -205,6 +209,32 @@ R8 Claude boundaries:
 - Supports post-start text input and runtime approval bridging.
 - Uses bounded transcript persistence (1 MiB raw, 1 MiB normalized, 64 KiB normalized record).
 - PTY/TUI automation is not implemented.
+
+## Codex Interactive No-Spend Smoke
+
+Use deterministic fake-backed smoke first:
+
+```bash
+pnpm --filter @switchyard/daemon test -- smoke
+pnpm --filter @switchyard/adapters test -- codex-interactive-adapter
+pnpm --filter @switchyard/testkit test -- fake-codex-interactive-session
+```
+
+Live daemon capability smoke (no prompt execution by default):
+
+```bash
+BASE=http://127.0.0.1:4545
+curl -s "$BASE/runtime-modes/codex.interactive" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/codex.interactive/check" | python3 -m json.tool
+curl -s "$BASE/doctor" | python3 -m json.tool
+```
+
+R16 Codex interactive boundaries:
+
+- `codex.interactive` is explicit-only; omitted Codex mode remains `codex.exec_json`.
+- `POST /runs?wait=1` with `runtimeMode: "codex.interactive"` is rejected (`interactive_wait_unsupported`).
+- Hosted interactive create/input/approval bridges are not shipped.
+- No PTY/TUI/terminal automation is shipped.
 
 ## OpenCode ACP Local Smoke
 
@@ -580,7 +610,7 @@ R15 non-goals reminder:
 - No hosted arbitrary subprocess/PTY execution beyond the closed catalog modes above.
 - No hosted browser/search/repo/GitHub/fetch tooling.
 - No public `/sandbox`, `/exec`, `/pty`, or `/terminal` execution API.
-- No interactive Codex session resume/approval bridge/post-start hosted input bridge.
+- No hosted interactive Codex session bridge, hosted post-start input bridge, or hosted approval bridge.
 - No hosted debate participant execution or model judging.
 
 R13 object-store smoke posture:

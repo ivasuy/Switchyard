@@ -12,6 +12,7 @@ describe("adapter compatibility matrix", () => {
 
     expect(bySlug.get("fake.deterministic")?.ciStatus).toBe("pass");
     expect(bySlug.get("codex.exec_json")?.ciStatus).toBe("skip");
+    expect(bySlug.get("codex.interactive")?.ciStatus).toBe("pass");
     expect(bySlug.get("claude_code.sdk")?.ciStatus).toBe("skip");
     expect(bySlug.get("generic_http.async_rest")?.ciStatus).toBe("skip");
     expect(bySlug.get("agentfield.async_rest")?.ciStatus).toBe("skip");
@@ -31,7 +32,7 @@ describe("adapter compatibility matrix", () => {
     expect(fakeRow?.noSpendHarness.type).toBe("runtime-adapter-contract-harness");
     expect(fakeRow?.coveredScenarios).toContain("event_streaming");
 
-    expect(matrix.summary.pass).toBe(1);
+    expect(matrix.summary.pass).toBe(2);
     expect(matrix.summary.fail).toBe(0);
     expect(matrix.summary.skip).toBe(5);
     expect(matrix.generatedAt).toBe("1970-01-01T00:00:00.000Z");

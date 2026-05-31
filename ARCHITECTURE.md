@@ -601,7 +601,7 @@ Adapter details are time-sensitive. Switchyard should treat every real adapter a
 |---|---|---|---|---|---|
 | OpenCode | ACP via `opencode acp` | CLI/process | local or hosted worker with installed binary | High | OpenCode documents ACP support through JSON-RPC over stdio. This should be the first real ACP adapter. |
 | Claude Code | TypeScript Agent SDK or `claude -p --output-format stream-json` | PTY/process | local first, hosted only with explicit credentials/sandbox | High | Claude Code exposes a current Agent SDK and programmatic CLI path with streaming JSON. Treat SDK as preferred over terminal scraping. |
-| Codex CLI | `codex exec --json` process adapter | PTY/process for future interactive mode | local first | Medium-High | First real provider slice is implemented for non-interactive runs. The adapter reads the local model catalog with `codex debug models`, normalizes JSONL events, logs process lifecycle details, enforces run timeouts, and preserves raw transcript artifacts. |
+| Codex CLI | `codex exec --json` one-shot + explicit `codex.interactive` process mode | PTY/process fallback remains future | local first | Medium-High | One-shot mode remains default (`codex.exec_json`), and explicit local `codex.interactive` ships bounded post-start input/session-state/resume flow without adding public PTY/terminal APIs. |
 | Cursor | `cursor-agent -p --output-format stream-json` | PTY/process | local first | Medium | Cursor documents headless CLI and streaming JSON. Treat as experimental until command behavior is tested locally. |
 | OpenClaw | HTTP/gateway adapter | process only for local dev | hosted or local depending on deployment | Medium | OpenClaw is itself a gateway with sessions, workspace, streaming, queue behavior, skills, and tool policy. Switchyard should integrate at its gateway boundary, not by controlling its internals. |
 | AgentField | REST API adapter, async execution preferred | HTTP sync for fast tasks | hosted or local | High | AgentField exposes REST execution APIs with async execution for long-running LLM workflows. Switchyard should treat it as a wrapper runtime. |
@@ -807,7 +807,7 @@ switchyard/
 
 ### Runtime and Integration Packages
 
-- `packages/adapters`: runtime and tool integrations. The currently implemented adapters are `codex` for non-interactive local `codex exec --json` runs (`runtimeMode: codex.exec_json`) and `generic_http` for daemon-configured async REST wrapper runs (`runtimeMode: generic_http.async_rest`), alongside the fake deterministic runtime mode (`fake.deterministic`). Planned adapter folders include `opencode`, `claude-code`, `cursor`, `openclaw`, `paperclip`, `agentfield`, `browser-search`, `process`, and `pty`.
+- `packages/adapters`: runtime and tool integrations. Current shipped runtime-mode adapters include `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `generic_http.async_rest`, `agentfield.async_rest`, and `opencode.acp`. Codex uses one adapter id with mode routing (`codex.exec_json` default one-shot and explicit local `codex.interactive`). Planned adapter folders still include `cursor`, `openclaw`, `paperclip`, `browser-search`, broad `process`, and broad `pty` work.
 - `packages/storage`: persistence implementations for in-memory tests, SQLite local mode, Postgres hosted mode, filesystem artifacts, and filesystem-backed object-compatible artifact content.
 - `packages/queue`: local in-process queue and hosted Redis/BullMQ queue implementations.
 - `packages/sdk`: typed client for frontend, backend, CLI, automation, and third-party consumers.
@@ -967,6 +967,9 @@ R10 now includes the previously planned hosted/hybrid surfaces in a safety-first
 Current safety posture:
 
 - Hosted worker execution defaults to `fake.deterministic`; R15 adds operator opt-in self-hosted/staging hosted worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` through a closed runtime catalog and allowlist gate.
+- R16 adds explicit local-only `codex.interactive` under existing `/runs` + `/runs/:id/input` + `/runs/:id/cancel` + approvals APIs; it does not add any public `/terminal`, `/pty`, `/exec`, or `/sandbox` route.
+- R16 keeps `codex.exec_json` as the default inferred Codex mode and requires explicit `runtimeMode: "codex.interactive"` for interactive behavior.
+- R16 doctor/registry checks distinguish `resumeCommandShapeAvailable` from `liveResumeVerified` so default no-spend checks do not overclaim live local resume success.
 - R14 adds an internal hosted sandbox substrate (`HostedSandboxService` + deny-by-default fake command policy + `FakeHostedSandboxExecutor`) for process/PTY safety contracts; R15 does not add arbitrary hosted process/PTY execution or public sandbox execution routes.
 - The R14 substrate is fake/no-spend only: no `child_process`, no `node-pty`, no shell/browser/fetch/GitHub/repo execution, no public `/sandbox`/`/exec`/`/pty`/`/terminal` route, and no kernel/container isolation claims.
 - Hosted server remains fake-runner-only; real provider adapters are worker-owned and opt-in only for self-hosted/staging. Production hosted real-runtime execution is fail-closed in R15.

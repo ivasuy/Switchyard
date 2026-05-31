@@ -22,6 +22,10 @@ All notable changes to Switchyard will be documented in this file.
 - Added R15 hosted real-runtime execution catalog and policy gates for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` with explicit operator opt-in (`SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=enabled`) and production fail-closed posture.
 - Added worker hosted adapter construction for allowlisted `CodexExecJsonAdapter`, `ClaudeCodeAdapter`, and `OpenCodeAcpAdapter` with no-spend fake-factory seams and hosted-safe logger redaction.
 - Added no-spend hosted real-runtime smoke command (`pnpm hosted-real-runtime:smoke`) and OpenAPI guard assertions that keep `/sandbox`, `/exec`, `/pty`, and `/terminal` absent from the public contract.
+- Added explicit local-only `codex.interactive` runtime mode behind the existing runtime adapter contract, including bounded post-start text input, session-state patch persistence (`codexThreadId`), session resume flow, and capped/redacted raw+normalized transcript artifacts.
+- Added `CodexAdapterRouter` so omitted Codex mode still dispatches to `codex.exec_json` while explicit `runtimeMode: "codex.interactive"` dispatches to interactive behavior.
+- Added deterministic no-spend fake Codex interactive session factory coverage, daemon smoke for interactive input/approval paths, and compatibility matrix coverage for `codex.interactive`.
+- Added runtime approval expiration/startup reconciliation and terminalization hooks (`timeout`, `cancel`, `run.failed`, `daemon_restarted`) so runtime approvals cannot remain pending after terminal outcomes.
 
 ### Changed
 
@@ -37,6 +41,9 @@ All notable changes to Switchyard will be documented in this file.
 - Updated hosted run placement and worker claim revalidation to require closed runtime catalog matches, explicit hosted placement for real modes, hosted wait denial (`hosted_wait_unsupported`), durable-row revalidation, and Codex read-only sandbox metadata enforcement.
 - Updated hosted server/worker config parsing with closed allowlist validation and `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION` gate validation including production-forbidden error codes.
 - Updated run input/cancel route guards for hosted real runs so unsupported bridges fail visibly (`hosted_input_unsupported`, `hosted_cancel_unsupported`) without silently dropping interaction requests.
+- Updated `RuntimeRunnerService` to preserve adapter `reasonCode` on `run.failed`, pass `runtimeMode` into adapter sessions for send/cancel/events/artifacts dispatch, reject same-session concurrent input with `runtime_input_in_flight`, and omit raw `runtime.output` text from logs.
+- Updated run create route boundaries for interactive Codex: `POST /runs?wait=1` + `runtimeMode: "codex.interactive"` now fails fast with `interactive_wait_unsupported`, and hosted placement for local-only interactive modes fails with `hosted_runtime_not_allowed`.
+- Updated OpenAPI contract guard tests to reject additional arbitrary-execution tokens (`/shell`, `/process`, `/command`) while keeping shipped middleware tool routes intact.
 
 ## 2026-05-30 - Roadmap Release Train R13 S3/R2 Object-Store Client Wiring
 

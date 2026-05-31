@@ -56,9 +56,9 @@ http://127.0.0.1:4545
 Current implementation status:
 
 - Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
-- Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex (`codex.exec_json`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
+- Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex one-shot (`codex.exec_json`), local Codex interactive (`codex.interactive`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
-- Not implemented yet: trace endpoint, dashboards, TUI, authentication, rate limiting, PTY, interactive Codex runtime mode promotion, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, and model-based debate judging.
+- Not implemented yet: trace endpoint, dashboards, TUI, authentication, rate limiting, public PTY/terminal APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, webhooks, per-run HTTP base URL overrides, remote artifact URL fetching, real debate participant runtimes, and model-based debate judging.
 
 ## Error Contract
 
@@ -270,6 +270,12 @@ curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
 
 `POST /runs?wait=1` returns `{run, response}` where `response.text` is the last normalized `runtime.output`. Async create returns `{run}` and the daemon launches the run in the background.
 
+R16 interactive Codex guardrail:
+
+- `POST /runs?wait=1` with `runtimeMode: "codex.interactive"` is rejected before durable side effects.
+- Error envelope: `400 invalid_input` with `details: [{ "path": "wait", "issue": "interactive_wait_unsupported" }]`.
+- Hosted placement for `codex.interactive` is rejected before create with `409 placement_denied` and `details: [{ "path": "placement", "issue": "hosted_runtime_not_allowed" }]`.
+
 `POST /runs` also accepts optional `context` (`sections`, `memoryIds`, `evidenceIds`, `messageIds`). When present, the daemon builds a deterministic context packet (`target: "run"`), persists the rendered task in `run.task`, stores `metadata.originalTask`, and stores `metadata.contextPacket`. When `context` is absent, run behavior is unchanged from R6. Callers cannot provide `metadata.originalTask` or `metadata.contextPacket` when `context` is supplied.
 
 `runtimeMode` is optional. If omitted, the daemon infers shipped runtime modes:
@@ -283,6 +289,25 @@ curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
 
 When provided, `runtimeMode` must be a runtime-mode slug (for example `codex.exec_json`), not an internal id like `runtime_mode_codex_exec_json`.
 For OpenCode specifically, `runtime_mode_opencode_acp` is rejected with `400 invalid_input`; use slug `opencode.acp` or omit `runtimeMode` and let inference apply.
+
+`codex.interactive` is explicit-only. It is never inferred from omitted `runtimeMode`; omitted Codex mode remains `codex.exec_json`.
+
+Explicit `codex.interactive` create payload example (async only):
+
+```bash
+curl -s -X POST "http://127.0.0.1:4545/runs" \
+  -H 'content-type: application/json' \
+  -d '{
+    "runtime": "codex",
+    "provider": "openai",
+    "model": "gpt-5.5",
+    "adapterType": "process",
+    "runtimeMode": "codex.interactive",
+    "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
+    "task": "Inspect the repo and propose a minimal patch.",
+    "timeoutSeconds": 120
+  }'
+```
 
 Generic HTTP create payload example:
 
@@ -645,6 +670,12 @@ Example `POST /runtime-modes/codex.exec_json/check` response:
 }
 ```
 
+`codex.interactive` doctor/check truth note:
+
+- Default no-spend checks may report command-shape capability (`resumeCommandShapeAvailable: true`) while still reporting `liveResumeVerified: false`.
+- Treat command-shape support and live resume verification as separate signals.
+- Do not treat default no-spend output as proof that live local resume has already succeeded.
+
 Example `GET /doctor` response:
 
 ```json
@@ -719,9 +750,19 @@ Success returns `{"accepted":true}`.
 Mode behavior:
 
 - `claude_code.sdk`: supports post-start input while run/session are active.
+- `codex.interactive`: supports post-start text input while the run/session are active, with `runtime_input_in_flight` conflict protection per runtime session.
 - `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`: return `409 adapter_protocol_failed` for post-start input.
 
-Core protocol safeguards (when REST validation is bypassed) include `runtime_input_not_active`, `runtime_session_missing`, `runtime_input_empty`, and `runtime_input_too_large`.
+Core protocol safeguards (when REST validation is bypassed) include `runtime_input_not_active`, `runtime_session_missing`, `runtime_input_empty`, `runtime_input_too_large`, and `runtime_input_in_flight`.
+
+Codex interactive input/stream/approval reason codes exposed through `409 adapter_protocol_failed` details include:
+
+- `codex_resume_token_missing`
+- `codex_resume_session_stale`
+- `codex_stream_malformed`
+- `codex_approval_bridge_unsupported`
+- `runtime_input_in_flight`
+- `hosted_input_unsupported` (hosted real-run boundary; no hosted post-start input bridge)
 
 For OpenCode input failures, response details include `reasonCode: opencode_input_unsupported`.
 
@@ -752,6 +793,8 @@ Notes:
 - `answers` is optional and forwarded for runtime-linked approvals.
 - If runtime callback delivery fails with an adapter protocol reason, REST returns `409 adapter_protocol_failed` with `reasonCode` details.
 - Approval records remain one-shot: resolving an already-resolved approval returns `409 approval_not_pending`.
+- Expired runtime approvals resolve to terminal `expired` status and later approve/reject attempts return `409 approval_not_pending`.
+- Runtime approval request events with malformed `expiresAt` fail the run with `runtime_approval_expires_at_invalid`.
 
 ## Cancel Run
 
@@ -763,12 +806,14 @@ curl -s -X POST "http://127.0.0.1:4545/runs/$RUN_ID/cancel"
 Cancellation semantics:
 
 - Cancel is idempotent for terminal runs.
+- `codex.interactive` cancel is supported for active `running`, `waiting_for_input`, and `waiting_for_approval` local runs through the existing run cancel route.
 - For `generic_http.async_rest`, an upstream 2xx cancel acknowledgement alone is not terminal.
 - For `opencode.acp`, cancellation is only accepted after ACP verifies `stopReason:"cancelled"`.
 - Switchyard reports `cancelled` only after the adapter verifies terminal `cancelled` state.
 - Unverified or failed cancellation returns `409 adapter_protocol_failed` and keeps the previous run state.
 - `agentfield.async_rest` active cancel returns `409 adapter_protocol_failed` with reason `agentfield_cancel_unsupported`; timeout handling remains Switchyard-owned.
 - OpenCode unverified cancel uses `reasonCode: acp_cancel_unverified`.
+- Hosted real runs remain worker-owned start-to-terminal jobs; hosted cancel/input/approval bridges are not shipped (`hosted_cancel_unsupported`, `hosted_input_unsupported`).
 
 Runtime transcript/result artifacts are exposed through the existing artifact APIs. This includes AgentField transcript/result artifacts, Generic HTTP transcripts, and OpenCode ACP transcripts:
 

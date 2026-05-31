@@ -72,7 +72,7 @@ describe("openapi generation", () => {
 
   it("keeps public arbitrary execution routes out of OpenAPI", () => {
     const document = generateOpenApiDocument();
-    const forbiddenPathTokens = ["/sandbox", "/exec", "/pty", "/terminal"];
+    const forbiddenPathTokens = ["/sandbox", "/exec", "/pty", "/terminal", "/shell", "/process", "/command"];
     const paths = Object.keys(document.paths);
     for (const path of paths) {
       const lower = path.toLowerCase();
@@ -82,7 +82,18 @@ describe("openapi generation", () => {
 
   it("keeps arbitrary execution operation ids out of OpenAPI", () => {
     const document = generateOpenApiDocument();
-    const forbiddenOperationTokens = ["sandbox", "terminal", "exec", "pty", "genericProcess", "arbitrary"];
+    const forbiddenOperationTokens = [
+      "sandbox",
+      "terminal",
+      "exec",
+      "pty",
+      "shell",
+      "process",
+      "command",
+      "genericProcess",
+      "arbitrary",
+      "arbitraryProcess"
+    ];
     const operationIds = Object.values(document.paths).flatMap((methods) =>
       Object.values(methods).map((operation) => String((operation as Record<string, unknown>)["operationId"] ?? ""))
     );

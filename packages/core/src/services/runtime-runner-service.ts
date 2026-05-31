@@ -18,6 +18,11 @@ const SESSION_STATE_SECRET_KEY_PATTERN = /(token|apiKey|authorization|password|s
 
 interface RuntimeApprovalBridge {
   create(input: { runId: string; approvalType: ApprovalType; payload: Record<string, unknown> }): Promise<void>;
+  terminalizePendingForRun?(runId: string, input: {
+    terminalEvent: "run.cancelled" | "run.failed" | "run.timeout" | "daemon_restarted";
+    approvalStatus: "rejected" | "expired";
+    message: string;
+  }): Promise<{ expired: number; rejected: number }>;
 }
 
 export interface RuntimeRunnerDependencies {
@@ -36,6 +41,7 @@ export interface RuntimeRunnerDependencies {
 
 export class RuntimeRunnerService {
   private readonly persistedArtifactKeys = new Set<string>();
+  private readonly runtimeInputInFlight = new Set<string>();
 
   constructor(private readonly deps: RuntimeRunnerDependencies) {}
 
@@ -268,7 +274,24 @@ export class RuntimeRunnerService {
       }
     }
 
-    await adapter.send(this.adapterSession(session), input);
+    const inFlightKey = `${session.runId}:${session.id}`;
+    if (this.runtimeInputInFlight.has(inFlightKey)) {
+      this.log("warn", "runtime.input_in_flight", {
+        runId,
+        sessionId: session.id,
+        reasonCode: "runtime_input_in_flight"
+      });
+      throw new AdapterProtocolError("Runtime input is already in flight for this session.", {
+        reasonCode: "runtime_input_in_flight"
+      });
+    }
+
+    this.runtimeInputInFlight.add(inFlightKey);
+    try {
+      await adapter.send(this.adapterSession(session), input);
+    } finally {
+      this.runtimeInputInFlight.delete(inFlightKey);
+    }
   }
 
   async cancel(runId: string): Promise<Run> {
@@ -299,6 +322,11 @@ export class RuntimeRunnerService {
     };
     await this.deps.runs.update(cancelledRun);
     await this.deps.sessions.update(cancelledSession);
+    await this.terminalizeRuntimeApprovalsForRun(runId, {
+      terminalEvent: "run.cancelled",
+      approvalStatus: "rejected",
+      message: "cancelled by Switchyard"
+    });
     let sequence = (await this.deps.events.listByRun(runId)).length;
     await this.appendAndPublish(this.eventForRun(
       cancelledRun,
@@ -357,13 +385,21 @@ export class RuntimeRunnerService {
       });
     }
 
+    await this.terminalizeRuntimeApprovalsForRun(templateRun.id, {
+      terminalEvent: "run.failed",
+      approvalStatus: "rejected",
+      message: "run failed"
+    });
+
+    const reasonCode = error instanceof AdapterProtocolError ? error.reasonCode : undefined;
     await this.appendAndPublish(this.eventForRun(
       failed,
       "run.failed",
       sequence,
       {
         status: "failed",
-        error: this.errorPayload(error)
+        error: this.errorPayload(error),
+        ...(reasonCode ? { reasonCode } : {})
       }
     ));
     this.log("error", "run.failed", {
@@ -408,6 +444,11 @@ export class RuntimeRunnerService {
 
     await this.deps.runs.update(timedOut);
     await this.deps.sessions.update(timedOutSession);
+    await this.terminalizeRuntimeApprovalsForRun(templateRun.id, {
+      terminalEvent: "run.timeout",
+      approvalStatus: "expired",
+      message: "expired by Switchyard"
+    });
     await this.appendAndPublish(this.eventForRun(
       timedOut,
       "run.failed",
@@ -766,12 +807,26 @@ export class RuntimeRunnerService {
         return { reasonCode: "runtime_approval_type_invalid" };
       }
     }
+    const rawExpiresAt = event.payload["expiresAt"];
+    if (rawExpiresAt !== undefined && rawExpiresAt !== null) {
+      if (typeof rawExpiresAt !== "string") {
+        return { reasonCode: "runtime_approval_expires_at_invalid" };
+      }
+      const parsed = Date.parse(rawExpiresAt);
+      if (!Number.isFinite(parsed)) {
+        return { reasonCode: "runtime_approval_expires_at_invalid" };
+      }
+    }
 
     await this.deps.runtimeApprovals.create({
       runId,
       approvalType,
       payload: redactSecrets({
-        ...event.payload
+        ...event.payload,
+        runtimeMode: session.runtimeMode,
+        runtimeSessionId: session.id,
+        externalSessionKey: session.externalSessionKey,
+        ...(event.payload["expiresAt"] === undefined ? {} : { expiresAt: event.payload["expiresAt"] })
       })
     });
     this.log("info", "runtime.approval.requested", { runId, approvalType });
@@ -784,7 +839,9 @@ export class RuntimeRunnerService {
       this.log("info", "runtime.output", {
         runId: event.runId,
         sequence: event.sequence,
-        text: text ? this.truncate(text, 120) : undefined
+        textBytes: text ? Buffer.byteLength(text, "utf8") : 0,
+        redacted: true,
+        eventType: event.payload["codexType"]
       });
       return;
     }
@@ -886,11 +943,34 @@ export class RuntimeRunnerService {
       runtime: session.runtime,
       provider: session.provider,
       model: session.model,
+      runtimeMode: session.runtimeMode,
       protocol: session.protocol,
       externalSessionKey: session.externalSessionKey,
       processId: session.processId,
       state: session.state
     };
+  }
+
+  private async terminalizeRuntimeApprovalsForRun(
+    runId: string,
+    input: {
+      terminalEvent: "run.cancelled" | "run.failed" | "run.timeout" | "daemon_restarted";
+      approvalStatus: "rejected" | "expired";
+      message: string;
+    }
+  ): Promise<void> {
+    if (!this.deps.runtimeApprovals?.terminalizePendingForRun) {
+      return;
+    }
+    try {
+      await this.deps.runtimeApprovals.terminalizePendingForRun(runId, input);
+    } catch (error) {
+      this.log("warn", "runtime.approval_terminalization_failed", {
+        runId,
+        terminalEvent: input.terminalEvent,
+        reason: this.errorPayload(error)
+      });
+    }
   }
 }
 

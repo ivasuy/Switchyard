@@ -52,6 +52,11 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
         ? await buildRunContext(body, deps.contextBuilder)
         : undefined;
       const runtimeMode = await inferRuntimeMode(body, deps.registryService);
+      if (wait && runtimeMode === "codex.interactive") {
+        return sendHttpError(reply, "invalid_input", "wait=1 is not supported for codex.interactive", [
+          { path: "wait", issue: "interactive_wait_unsupported" }
+        ]);
+      }
       const metadata = body.metadata ?? {};
       const createInput: Parameters<RunService["createRun"]>[0] = {
         runtime: body.runtime,
@@ -78,6 +83,11 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       if (runtimeMode && deps.registry) {
         const mode = await deps.registry.getRuntimeMode(runtimeMode);
         placementFacts = mode?.placement;
+      }
+      if (createInput.placement === "hosted" && placementFacts?.hosted.support === "unsupported") {
+        return sendHttpError(reply, "placement_denied", "hosted_runtime_not_allowed", [
+          { path: "placement", issue: "hosted_runtime_not_allowed" }
+        ]);
       }
 
       const runResult = deps.hostedRuns && placementFacts
