@@ -162,6 +162,81 @@ describe("production worker readiness", () => {
     }
   });
 
+  it("includes redacted sandbox diagnostics in successful readiness", async () => {
+    const worker = createHostedWorker(baseConfig(), {
+      queue: new MemoryRunQueue(),
+      runs: new InMemoryRunStore(),
+      events: new InMemoryEventStore(),
+      postgres: fakePostgresHandle(),
+      ensurePostgresSchema: async () => {},
+      probePostgres: async () => {},
+      checkSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 })
+    });
+
+    try {
+      const readiness = await worker.ready();
+      expect(readiness.ok).toBe(true);
+      expect(readiness.checks?.sandbox).toMatchObject({
+        ok: true,
+        diagnostics: {
+          mode: "disabled",
+          policyCount: 0,
+          ptyDriverConfigured: false
+        }
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it("does not claim jobs when sandbox readiness fails with missing policy", async () => {
+    const queue = new MemoryRunQueue();
+    let claimCalls = 0;
+    const originalClaim = queue.claim.bind(queue);
+    queue.claim = async (options) => {
+      claimCalls += 1;
+      return originalClaim(options);
+    };
+
+    const worker = createHostedWorker({
+      ...baseConfig(),
+      sandbox: resolveHostedSandboxConfig({
+        deploymentMode: "test",
+        env: {
+          SWITCHYARD_SANDBOX_REAL_EXECUTION: "enabled"
+        }
+      })
+    }, {
+      queue,
+      runs: new InMemoryRunStore(),
+      events: new InMemoryEventStore(),
+      postgres: fakePostgresHandle(),
+      ensurePostgresSchema: async () => {},
+      probePostgres: async () => {},
+      checkSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 })
+    });
+
+    try {
+      const claimReadiness = await worker.ready({ mode: "claim" });
+      expect(claimReadiness).toMatchObject({
+        ok: false,
+        reason: "sandbox_policy_missing",
+        checks: {
+          sandbox: {
+            ok: false,
+            code: "sandbox_policy_missing"
+          }
+        }
+      });
+
+      const worked = await worker.tick();
+      expect(worked).toBe(false);
+      expect(claimCalls).toBe(0);
+    } finally {
+      await worker.stop();
+    }
+  });
+
   it("returns structured failure from worker readiness command", async () => {
     const result = await runWorkerReadinessCommand({
       SWITCHYARD_DEPLOYMENT_MODE: "production"

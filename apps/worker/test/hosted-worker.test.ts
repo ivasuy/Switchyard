@@ -9,8 +9,10 @@ import { resolveHostedSandboxConfig } from "@switchyard/core";
 import { MemoryRunQueue } from "@switchyard/queue";
 import { resolveObjectStoreConfig } from "@switchyard/storage";
 import { createFakeAcpProcessFactory, createFakeClaudeCodeClient, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
+import type { SandboxProcessFactory } from "@switchyard/adapters";
 import { loadWorkerConfig } from "../src/config.js";
 import { buildHostedWorkerAdapters, createHostedSafeLogger } from "../src/hosted-runtime-adapters.js";
+import { createWorkerHostedSandboxService } from "../src/sandbox.js";
 import { createHostedWorker } from "../src/worker.js";
 
 const defaultSandbox = () => resolveHostedSandboxConfig({ deploymentMode: "test", env: {} });
@@ -68,6 +70,62 @@ describe("hosted worker app", () => {
     expect(worked).toBe(true);
     expect((await runs.get("run_worker_1"))?.status).toBe("completed");
     await worker.stop();
+  });
+
+  it("builds production sandbox service with injected process factory", async () => {
+    let spawnCalls = 0;
+    const processFactory: SandboxProcessFactory = {
+      spawn: () => {
+        spawnCalls += 1;
+        return new FakeSandboxProcess("sandbox-from-production-factory") as never;
+      }
+    };
+    const config = {
+      ...baseConfig(),
+      sandbox: resolveHostedSandboxConfig({
+        deploymentMode: "test",
+        env: {
+          SWITCHYARD_SANDBOX_REAL_EXECUTION: "enabled",
+          SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON: JSON.stringify([
+            {
+              commandId: "deploy.safe.echo",
+              adapterType: "process",
+              executablePath: "/usr/bin/printf",
+              fixedArgs: ["policy-arg"],
+              allowUserArgs: true,
+              cwdPrefixes: ["/repo"],
+              envAllowlist: ["SAFE_ENV"],
+              allowStdin: false,
+              allowPtyInput: false,
+              isolation: { driver: "none", required: false },
+              networkPolicy: "disabled"
+            }
+          ])
+        }
+      })
+    };
+
+    const sandbox = createWorkerHostedSandboxService(config, { processFactory });
+    const result = await sandbox.execute({
+      jobId: "job_sandbox_prod_1",
+      runId: "run_sandbox_prod_1",
+      runtimeMode: "fake.deterministic",
+      adapterType: "process",
+      commandId: "deploy.safe.echo",
+      argv: ["hello"],
+      cwd: "/repo/workspace",
+      env: { SAFE_ENV: "1" },
+      stdin: "",
+      resourceLimits: baseSandboxLimits(),
+      artifactPolicy: {
+        captureTranscript: false,
+        captureDeniedDecision: false
+      },
+      createdAt: "2026-05-31T00:00:00.000Z"
+    });
+
+    expect(spawnCalls).toBe(1);
+    expect(result.status).toBe("completed");
   });
 
   it("builds allowlisted real adapters when gate is enabled", () => {
@@ -400,6 +458,25 @@ function createCodexHappyProcessFactory() {
   };
 }
 
+function baseSandboxLimits() {
+  return {
+    wallTimeMs: 5_000,
+    stdoutBytes: 8_192,
+    stderrBytes: 8_192,
+    combinedOutputBytes: 16_384,
+    artifactBytes: 65_536,
+    stdinBytes: 8_192,
+    argvCount: 16,
+    argvEntryBytes: 256,
+    envKeys: 16,
+    envValueBytes: 1_024,
+    ptyCols: 120,
+    ptyRows: 40,
+    cpuMs: 1_000,
+    memoryMiB: 256
+  };
+}
+
 class FakeCodexProcess extends EventEmitter {
   readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
@@ -412,6 +489,28 @@ class FakeCodexProcess extends EventEmitter {
 
   kill(_signal?: NodeJS.Signals): boolean {
     this.emit("exit", 0, null);
+    return true;
+  }
+}
+
+class FakeSandboxProcess extends EventEmitter {
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly pid = 5678;
+
+  constructor(output: string) {
+    super();
+    queueMicrotask(() => {
+      this.stdout.write(output);
+      this.stdout.end();
+      this.stderr.end();
+      this.emit("close", 0, null);
+    });
+  }
+
+  kill(_signal?: NodeJS.Signals): boolean {
+    this.emit("close", 0, null);
     return true;
   }
 }

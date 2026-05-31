@@ -1,6 +1,5 @@
 import {
   HostedWorkerService,
-  HostedSandboxService,
   checkHostedSandboxReadiness,
   redactSecrets,
   RunService,
@@ -28,9 +27,11 @@ import {
   PostgresSessionStore,
   probePostgresDatabase
 } from "@switchyard/storage";
-import { FakeHostedSandboxExecutor, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
+import type { SandboxProcessFactory, SandboxPtyFactory } from "@switchyard/adapters";
+import { InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
 import type { WorkerConfig } from "./config.js";
 import { buildHostedWorkerAdapters, checkConfiguredHostedAdapters, type HostedWorkerAdapterFactoryDeps } from "./hosted-runtime-adapters.js";
+import { createWorkerHostedSandboxService } from "./sandbox.js";
 
 export interface WorkerReadinessReport {
   ok: boolean;
@@ -65,6 +66,8 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     config: WorkerConfig,
     adapterDeps: HostedWorkerAdapterFactoryDeps | undefined
   ) => Promise<{ ok: boolean; modes: Record<string, { ok: boolean; code?: string }> }>;
+  processFactory?: SandboxProcessFactory;
+  ptyFactory?: SandboxPtyFactory;
   artifactContent?: ArtifactContentStore & { probe: () => Promise<{ ok: true }> };
   now?: () => number;
   readinessTtlMs?: number;
@@ -92,9 +95,9 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     deps?.artifactContent ?? createArtifactContentStoreFromObjectConfig(config.objectStore);
 
   const adapters = buildHostedWorkerAdapters(config, deps?.adapters);
-  const _hostedSandbox = new HostedSandboxService({
-    config: config.sandbox,
-    executor: new FakeHostedSandboxExecutor()
+  const _hostedSandbox = createWorkerHostedSandboxService(config, {
+    ...(deps?.processFactory ? { processFactory: deps.processFactory } : {}),
+    ...(deps?.ptyFactory ? { ptyFactory: deps.ptyFactory } : {})
   });
   const runner = new RuntimeRunnerService({
     runs,
@@ -284,13 +287,11 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         checks.sandbox = {
           ok: false,
           code,
-          diagnostics: {
-            summary: config.sandbox.redactedSummary
-          }
+          diagnostics: sandboxReadinessDiagnostics(config)
         };
         return markFailure(code);
       }
-      checks.sandbox = { ok: true };
+      checks.sandbox = { ok: true, diagnostics: sandboxReadinessDiagnostics(config) };
 
       return { ok: true, checks };
     } catch (error) {
@@ -301,6 +302,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       };
     }
   }
+}
+
+function sandboxReadinessDiagnostics(config: WorkerConfig): Record<string, unknown> {
+  return {
+    mode: config.sandbox.realExecution.mode,
+    policyCount: config.sandbox.realExecution.commandPolicy.length,
+    ptyDriverConfigured: config.sandbox.realExecution.ptyDriverConfigured
+  };
 }
 
 function firstAdapterFailureCode(modes: Record<string, { ok: boolean; code?: string }>): string {

@@ -136,6 +136,17 @@ describe("production worker config", () => {
     );
   });
 
+  it("surfaces sandbox policy missing when real execution is enabled without policy", () => {
+    const error = expectConfigError(() =>
+      loadWorkerConfig(
+        createProductionEnv({
+          SWITCHYARD_SANDBOX_REAL_EXECUTION: "enabled"
+        })
+      )
+    );
+    expect(error.code).toBe("sandbox_policy_missing");
+  });
+
   it("keeps local defaults backwards-compatible", () => {
     const config = loadWorkerConfig({});
     expect(config.deploymentMode).toBe("local");

@@ -149,7 +149,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   }
 
   if (!config.sandbox.valid) {
-    throw new ConfigError("sandbox_config_invalid", "SWITCHYARD_SANDBOX_*", buildSummary(config));
+    throw new ConfigError(firstSandboxConfigError(config.sandbox.errors), "SWITCHYARD_SANDBOX_*", buildSummary(config));
   }
   config.redactedSummary = buildSummary(config);
   return config;
@@ -233,6 +233,15 @@ function requireVar(value: string | undefined, variable: string, config: WorkerC
 function optional(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function firstSandboxConfigError(errors: string[]): string {
+  for (const code of errors) {
+    if (code.startsWith("sandbox_")) {
+      return code;
+    }
+  }
+  return "sandbox_config_invalid";
 }
 
 function buildSummary(config: WorkerConfig): Record<string, unknown> {
