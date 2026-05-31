@@ -125,8 +125,15 @@ class InMemoryToolInvocationStore implements ToolInvocationStore {
     return value;
   }
 
-  async list(_filter: ListToolInvocationsFilter): Promise<ListToolInvocationsResult> {
-    return { invocations: [...this.items.values()], nextCursor: null };
+  async list(filter: ListToolInvocationsFilter): Promise<ListToolInvocationsResult> {
+    const filtered = [...this.items.values()].filter((item) => {
+      if (filter.runId && item.runId !== filter.runId) return false;
+      if (filter.type && item.type !== filter.type) return false;
+      if (filter.status && item.status !== filter.status) return false;
+      if (filter.approvalId && item.approvalId !== filter.approvalId) return false;
+      return true;
+    });
+    return { invocations: filtered, nextCursor: null };
   }
 
   async listByApproval(approvalId: string): Promise<ToolInvocation[]> {
@@ -226,6 +233,21 @@ function enabledConfig(): ResolvedRealToolPolicyConfig {
   };
 }
 
+function enabledAllowConfig(): ResolvedRealToolPolicyConfig {
+  const config = enabledConfig();
+  return {
+    ...config,
+    global: {
+      ...config.global,
+      approvalDefault: "allow"
+    },
+    fetch: {
+      ...config.fetch,
+      allowWithoutApproval: true
+    }
+  };
+}
+
 class CountingAdapter implements ToolAdapter {
   invocationCount = 0;
   readonly id: string;
@@ -255,6 +277,57 @@ class CountingAdapter implements ToolAdapter {
   }
 
   async cancel() {
+    return;
+  }
+
+  async artifacts(): Promise<Artifact[]> {
+    return [];
+  }
+}
+
+class BlockingAdapter implements ToolAdapter {
+  readonly id: string;
+  invocationCount = 0;
+  private readonly releaseQueue: Array<() => void> = [];
+  private readonly startQueue: Array<(value: void) => void> = [];
+
+  constructor(id: string) {
+    this.id = id;
+  }
+
+  waitForStart(): Promise<void> {
+    return new Promise((resolve) => {
+      this.startQueue.push(resolve);
+    });
+  }
+
+  releaseOne(): void {
+    const next = this.releaseQueue.shift();
+    if (next) {
+      next();
+    }
+  }
+
+  async check() {
+    return { ok: true };
+  }
+
+  async invoke(): Promise<Record<string, unknown>> {
+    this.invocationCount += 1;
+    const start = this.startQueue.shift();
+    if (start) {
+      start();
+    }
+    await new Promise<void>((resolve) => {
+      this.releaseQueue.push(resolve);
+    });
+    return {
+      summary: { adapter: this.id },
+      inlineOutput: { released: true }
+    };
+  }
+
+  async cancel(): Promise<void> {
     return;
   }
 
@@ -373,6 +446,146 @@ describe("real tool router", () => {
     const terminal = await router.get(queued.invocation.id);
     expect(terminal?.output?.artifactIds).toBeDefined();
     expect(artifactContent.writes.length).toBeGreaterThan(0);
+  });
+
+  it("denies oversized real-tool input before approval persistence and adapter dispatch", async () => {
+    const runs = new InMemoryRunStore();
+    const run = makeRun("run_input_cap");
+    await runs.create(run);
+    const events = new InMemoryEventStore();
+    const approvals = new InMemoryApprovalStore();
+    const invocations = new InMemoryToolInvocationStore();
+    const fetchAdapter = new CountingAdapter("fetch");
+    const config = enabledConfig();
+    config.global.maxInputBytes = 64;
+    const router = new ToolRouter({
+      runs,
+      events,
+      approvals,
+      invocations,
+      adapters: new Map([
+        ["fake_echo", new FakeEchoToolAdapter()],
+        ["fetch", fetchAdapter]
+      ]),
+      policy: new LocalPolicyGate(config)
+    });
+
+    await expect(router.invoke({
+      runId: run.id,
+      type: "fetch",
+      input: {
+        url: "https://example.com/path",
+        method: "GET",
+        captureContent: true,
+        headers: {
+          "x-oversized": "a".repeat(256)
+        }
+      }
+    })).rejects.toMatchObject({ code: "tool_policy_denied" });
+
+    const listed = await invocations.list({ runId: run.id, limit: 20 });
+    expect(listed.invocations).toHaveLength(1);
+    expect(listed.invocations[0]?.status).toBe("denied");
+    expect(listed.invocations[0]?.error?.code).toBe("tool_input_limit_exceeded");
+    expect(approvals.items.size).toBe(0);
+    expect(fetchAdapter.invocationCount).toBe(0);
+  });
+
+  it("enforces maxConcurrentRealTools for direct real-tool starts", async () => {
+    const runs = new InMemoryRunStore();
+    const run = makeRun("run_concurrency_direct");
+    await runs.create(run);
+    const events = new InMemoryEventStore();
+    const approvals = new InMemoryApprovalStore();
+    const invocations = new InMemoryToolInvocationStore();
+    const fetchAdapter = new BlockingAdapter("fetch");
+    const config = enabledAllowConfig();
+    config.global.maxConcurrentRealTools = 1;
+    const router = new ToolRouter({
+      runs,
+      events,
+      approvals,
+      invocations,
+      adapters: new Map([
+        ["fake_echo", new FakeEchoToolAdapter()],
+        ["fetch", fetchAdapter]
+      ]),
+      policy: new LocalPolicyGate(config)
+    });
+
+    const first = router.invoke({
+      runId: run.id,
+      type: "fetch",
+      input: { url: "https://example.com/one", method: "GET" }
+    });
+    await fetchAdapter.waitForStart();
+
+    await expect(router.invoke({
+      runId: run.id,
+      type: "fetch",
+      input: { url: "https://example.com/two", method: "GET" }
+    })).rejects.toMatchObject({ code: "tool_policy_denied" });
+
+    fetchAdapter.releaseOne();
+    await first;
+
+    const listed = await invocations.list({ runId: run.id, limit: 20 });
+    const denied = listed.invocations.find((item) => item.status === "denied");
+    expect(denied?.error?.code).toBe("tool_concurrency_limit_exceeded");
+    expect(fetchAdapter.invocationCount).toBe(1);
+  });
+
+  it("enforces maxConcurrentRealTools when resuming approved real tools", async () => {
+    const runs = new InMemoryRunStore();
+    const run = makeRun("run_concurrency_approval");
+    await runs.create(run);
+    const events = new InMemoryEventStore();
+    const approvals = new InMemoryApprovalStore();
+    const invocations = new InMemoryToolInvocationStore();
+    const shellAdapter = new BlockingAdapter("shell");
+    const config = enabledConfig();
+    config.global.maxConcurrentRealTools = 1;
+    const router = new ToolRouter({
+      runs,
+      events,
+      approvals,
+      invocations,
+      adapters: new Map([
+        ["fake_echo", new FakeEchoToolAdapter()],
+        ["shell", shellAdapter]
+      ]),
+      policy: new LocalPolicyGate(config)
+    });
+    const approvalService = new ApprovalService({ approvals, runs, events, toolRouter: router });
+
+    const firstQueued = await router.invoke({
+      runId: run.id,
+      type: "shell",
+      input: { commandId: "local.date.utc", cwd: "/repo" }
+    });
+    const secondQueued = await router.invoke({
+      runId: run.id,
+      type: "shell",
+      input: { commandId: "local.date.utc", cwd: "/repo" }
+    });
+    const firstApprovalId = firstQueued.approval?.id;
+    const secondApprovalId = secondQueued.approval?.id;
+    if (!firstApprovalId || !secondApprovalId) {
+      throw new Error("approval id missing");
+    }
+
+    const firstApprove = approvalService.approve(firstApprovalId, { actor: "actor-1" });
+    await shellAdapter.waitForStart();
+    const secondApprove = approvalService.approve(secondApprovalId, { actor: "actor-2" });
+
+    const secondResolved = await secondApprove;
+    expect(secondResolved.invocation?.status).toBe("denied");
+    expect(secondResolved.invocation?.error?.code).toBe("tool_concurrency_limit_exceeded");
+
+    shellAdapter.releaseOne();
+    const firstResolved = await firstApprove;
+    expect(firstResolved.invocation?.status).toBe("completed");
+    expect(shellAdapter.invocationCount).toBe(1);
   });
 
   it("marks queued invocations denied on reject and expired", async () => {

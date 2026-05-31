@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { type FastifyInstance } from "fastify";
@@ -128,6 +128,29 @@ describe("daemon app", () => {
       pollIntervalMs: 3333,
       maxResponseBytes: 4444
     });
+  });
+
+  it("rejects shell catalog commands with relative executable paths", () => {
+    const dir = mkdtempSync(join(tmpdir(), "switchyard-shell-catalog-relative-"));
+    const catalogPath = join(dir, "shell-catalog.json");
+    writeFileSync(catalogPath, JSON.stringify({
+      commands: [
+        {
+          commandId: "local.relative",
+          executablePath: "bin/date",
+          argv: ["-u"],
+          allowedCwdPrefixes: ["/repo"],
+          env: {},
+          maxArgs: 2
+        }
+      ]
+    }));
+
+    expect(() => loadDaemonConfig({
+      SWITCHYARD_SHELL_COMMAND_CATALOG_PATH: catalogPath
+    })).toThrow("config_invalid:SWITCHYARD_SHELL_COMMAND_CATALOG_PATH");
+
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("creates a fake run through the local REST API", async () => {

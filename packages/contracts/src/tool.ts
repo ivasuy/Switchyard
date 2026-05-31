@@ -6,11 +6,14 @@ export const toolInvocationStatusSchema = z.enum(["queued", "running", "complete
 
 const nonEmptyTrimmedString = z.string().trim().min(1);
 const absolutePathLikeSchema = z.string().trim().min(1).regex(/^([A-Za-z]:[\\/]|\/)/, "must be an absolute path");
+const disallowControlCharacters = (value: string): boolean => !/[\u0000-\u001F\u007F]/.test(value);
+const safeToolStringSchema = z.string().trim().min(1).max(1024).refine(disallowControlCharacters, "must not contain control characters");
 const boundedPathspecSchema = z.string()
   .trim()
   .min(1)
   .max(512)
-  .refine((value) => !value.startsWith("/") && !value.includes(".."), "must be a relative non-traversal path");
+  .refine((value) => !value.startsWith("/") && !value.includes(".."), "must be a relative non-traversal path")
+  .refine(disallowControlCharacters, "must not contain control characters");
 
 export const fetchToolInputSchema = z.object({
   url: nonEmptyTrimmedString.url().max(4096),
@@ -68,7 +71,7 @@ export const repoToolInputSchema = z.object({
 
 export const shellToolInputSchema = z.object({
   commandId: nonEmptyTrimmedString.max(128),
-  args: z.array(nonEmptyTrimmedString.max(1024)).max(32).optional(),
+  args: z.array(safeToolStringSchema).max(32).optional(),
   cwd: absolutePathLikeSchema
 }).strict();
 

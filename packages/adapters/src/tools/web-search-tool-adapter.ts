@@ -57,6 +57,7 @@ export class WebSearchToolAdapter implements ToolAdapter {
           reasonCode: "tool_output_limit_exceeded"
         });
       }
+      const { inlineOutput, truncated } = capWebSearchInlineOutput(mapped, plan.maxInlineOutputBytes);
       return {
         summary: {
           provider: plan.providerId,
@@ -64,10 +65,8 @@ export class WebSearchToolAdapter implements ToolAdapter {
           resultsCount: mapped.length,
           durationMs: this.now().getTime() - startedAt
         },
-        inlineOutput: {
-          results: mapped
-        },
-        truncated: payloadBytes > plan.maxInlineOutputBytes
+        inlineOutput,
+        truncated
       };
     } catch (error) {
       if (error instanceof AdapterProtocolError) {
@@ -179,4 +178,32 @@ function extractSearchArray(value: unknown): Array<Record<string, unknown>> {
     });
   }
   return raw.filter((entry) => entry && typeof entry === "object") as Array<Record<string, unknown>>;
+}
+
+function capWebSearchInlineOutput(
+  results: Array<Record<string, unknown>>,
+  maxBytes: number
+): { inlineOutput: Record<string, unknown>; truncated: boolean } {
+  const full = { results };
+  if (Buffer.byteLength(JSON.stringify(full), "utf8") <= maxBytes) {
+    return { inlineOutput: full, truncated: false };
+  }
+
+  for (let count = results.length - 1; count >= 0; count -= 1) {
+    const payload = {
+      results: results.slice(0, count),
+      omittedResults: results.length - count
+    };
+    if (Buffer.byteLength(JSON.stringify(payload), "utf8") <= maxBytes) {
+      return {
+        inlineOutput: payload,
+        truncated: true
+      };
+    }
+  }
+
+  return {
+    inlineOutput: { results: [], omittedResults: results.length },
+    truncated: true
+  };
 }

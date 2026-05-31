@@ -191,6 +191,35 @@ describe("real tool policy", () => {
     expect(shell.reasonCode).toBe("shell_command_not_configured");
   });
 
+  it("denies repo pathspec and shell args with control characters", async () => {
+    const gate = new LocalPolicyGate(enabledConfig());
+    const repoNewline = await gate.decideTool({
+      type: "repo",
+      input: { operation: "diff", cwd: "/repo", pathspec: ["safe\nunsafe.ts"] }
+    });
+    const repoNul = await gate.decideTool({
+      type: "repo",
+      input: { operation: "diff", cwd: "/repo", pathspec: ["safe\u0000unsafe.ts"] }
+    });
+    const shellNewline = await gate.decideTool({
+      type: "shell",
+      input: { commandId: "local.date.utc", cwd: "/repo", args: ["line1\nline2"] }
+    });
+    const shellControl = await gate.decideTool({
+      type: "shell",
+      input: { commandId: "local.date.utc", cwd: "/repo", args: ["bad\u0007arg"] }
+    });
+
+    expect(repoNewline.decision).toBe("deny");
+    expect(repoNewline.reasonCode).toBe("repo_operation_denied");
+    expect(repoNul.decision).toBe("deny");
+    expect(repoNul.reasonCode).toBe("repo_operation_denied");
+    expect(shellNewline.decision).toBe("deny");
+    expect(shellNewline.reasonCode).toBe("shell_command_not_configured");
+    expect(shellControl.decision).toBe("deny");
+    expect(shellControl.reasonCode).toBe("shell_command_not_configured");
+  });
+
   it("preserves fake_echo safe and risky behavior", async () => {
     const gate = new LocalPolicyGate(enabledConfig());
     const safe = await gate.decideTool({ type: "fake_echo", input: { text: "ok" } });

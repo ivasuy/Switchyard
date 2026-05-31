@@ -214,6 +214,9 @@ function loadShellCatalog(path: string | undefined): Record<string, ShellCatalog
     if (executablePath.length === 0) {
       continue;
     }
+    if (!isAbsolutePathLike(executablePath)) {
+      throw new Error("config_invalid:SWITCHYARD_SHELL_COMMAND_CATALOG_PATH");
+    }
     out[commandId] = {
       commandId,
       executablePath,
@@ -229,6 +232,10 @@ function loadShellCatalog(path: string | undefined): Record<string, ShellCatalog
     };
   }
   return out;
+}
+
+function isAbsolutePathLike(path: string): boolean {
+  return /^([A-Za-z]:[\\/]|\/)/.test(path);
 }
 
 function validateRealToolConfig(config: ResolvedRealToolPolicyConfig, deploymentMode: "local" | "test" | "staging" | "production"): void {

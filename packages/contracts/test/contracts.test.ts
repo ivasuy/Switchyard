@@ -895,6 +895,34 @@ describe("Switchyard contracts", () => {
         input: { command: "rm -rf /", cwd: "/repo" }
       })
     ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "repo",
+        input: { operation: "diff", cwd: "/repo", pathspec: ["safe\nunsafe.ts"] }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "repo",
+        input: { operation: "diff", cwd: "/repo", pathspec: ["safe\u0000unsafe.ts"] }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "shell",
+        input: { commandId: "local.date.utc", cwd: "/repo", args: ["line1\nline2"] }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "shell",
+        input: { commandId: "local.date.utc", cwd: "/repo", args: ["bad\u0007arg"] }
+      })
+    ).toThrow();
   });
 
   it("parses artifacts, approvals, memory, evidence, tools, registry, placement, nodes, users, budgets, context, and errors", () => {

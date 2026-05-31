@@ -14,6 +14,7 @@ import type { RuntimeLogger } from "../ports/runtime-logger.js";
 import { redactSecrets } from "./local-policy-gate.js";
 
 const KNOWN_TOOL_TYPES = new Set(["web_search", "fetch", "browser", "repo", "shell", "github", "fake_echo"]);
+const REAL_TOOL_TYPES = new Set(["web_search", "fetch", "browser", "repo", "shell", "github"]);
 
 class ServiceError extends Error {
   readonly code: string;
@@ -60,6 +61,7 @@ export interface ToolRouterDependencies {
 
 export class ToolRouter {
   private readonly approvalResolutionTails = new Map<string, Promise<void>>();
+  private realToolStartTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: ToolRouterDependencies) {}
 
@@ -70,6 +72,29 @@ export class ToolRouter {
     const normalizedInput = redactSecrets(input.input ?? {});
     const run = input.runId ? await this.requireRun(input.runId) : undefined;
     const approvalPolicy = input.approvalPolicy ?? run?.approvalPolicy;
+    const inputBytes = this.computeInputBytes(normalizedInput);
+    const realToolLimits = this.getRealToolLimits();
+    if (this.isRealToolType(input.type) && realToolLimits && inputBytes > realToolLimits.maxInputBytes) {
+      const denied = await this.persistDeniedInvocation(
+        input.runId,
+        input.type as ToolInvocation["type"],
+        normalizedInput,
+        [redactSecrets({
+          rule: "input_bytes_exceeded",
+          toolType: input.type,
+          inputBytes,
+          maxInputBytes: realToolLimits.maxInputBytes
+        })],
+        "tool_input_limit_exceeded"
+      );
+      this.deps.metrics?.inc("tool.policy.denied", {
+        toolType: input.type,
+        reason: "tool_input_limit_exceeded"
+      });
+      throw new ServiceError("tool_policy_denied", "Tool invocation denied by policy", [
+        { path: "toolInvocationId", issue: denied.id }
+      ]);
+    }
 
     const decision = await this.deps.policy.decideTool({
       runApprovalPolicy: approvalPolicy,
@@ -157,25 +182,47 @@ export class ToolRouter {
     }
 
     const executionPlan = decision.executionPlan;
-    const startedAt = this.nowIso();
-    const invocation: ToolInvocation = {
-      id: `tool_${crypto.randomUUID()}`,
-      runId: input.runId,
-      type: input.type as ToolInvocation["type"],
-      status: "running",
-      input: redactSecrets({
-        request: normalizedInput,
-        reasonCode: decision.reasonCode,
-        policyTrace: decision.policyTrace,
-        executionPlan,
-        executionPlanHash: hashExecutionPlan(executionPlan)
-      }),
-      createdAt: startedAt
-    };
-    if (!invocation.runId) {
-      delete invocation.runId;
-    }
-    await this.deps.invocations.create(invocation);
+    const invocation = await this.withRealToolStartLock(async () => {
+      if (this.isRealToolType(input.type) && await this.isRealToolConcurrencyExceeded()) {
+        const denied = await this.persistDeniedInvocation(
+          input.runId,
+          input.type as ToolInvocation["type"],
+          normalizedInput,
+          [...decision.policyTrace, redactSecrets({
+            rule: "concurrency_limit_exceeded",
+            toolType: input.type
+          })],
+          "tool_concurrency_limit_exceeded"
+        );
+        this.deps.metrics?.inc("tool.policy.denied", {
+          toolType: input.type,
+          reason: "tool_concurrency_limit_exceeded"
+        });
+        throw new ServiceError("tool_policy_denied", "Tool invocation denied by policy", [
+          { path: "toolInvocationId", issue: denied.id }
+        ]);
+      }
+      const startedAt = this.nowIso();
+      const runningInvocation: ToolInvocation = {
+        id: `tool_${crypto.randomUUID()}`,
+        runId: input.runId,
+        type: input.type as ToolInvocation["type"],
+        status: "running",
+        input: redactSecrets({
+          request: normalizedInput,
+          reasonCode: decision.reasonCode,
+          policyTrace: decision.policyTrace,
+          executionPlan,
+          executionPlanHash: hashExecutionPlan(executionPlan)
+        }),
+        createdAt: startedAt
+      };
+      if (!runningInvocation.runId) {
+        delete runningInvocation.runId;
+      }
+      await this.deps.invocations.create(runningInvocation);
+      return runningInvocation;
+    });
 
     await this.appendAndPublish(await this.eventForRun(input.runId, "tool.call", {
       toolInvocationId: invocation.id,
@@ -208,10 +255,28 @@ export class ToolRouter {
       }
 
       if (approval.status === "approved") {
-        const runningAttempt: ToolInvocation = { ...queued, status: "running" };
-        const running = await this.deps.invocations.updateIfStatus(queued.id, "queued", runningAttempt);
+        const running = await this.withRealToolStartLock(async () => {
+          if (this.isRealToolType(queued.type) && await this.isRealToolConcurrencyExceeded()) {
+            return this.transitionInvocation(queued, {
+              status: "denied",
+              error: {
+                code: "tool_concurrency_limit_exceeded",
+                message: "Tool invocation denied because real-tool concurrency limit was reached"
+              }
+            });
+          }
+          const runningAttempt: ToolInvocation = { ...queued, status: "running" };
+          return this.deps.invocations.updateIfStatus(queued.id, "queued", runningAttempt);
+        });
         if (!running) {
           return null;
+        }
+        if (running.status === "denied") {
+          this.deps.metrics?.inc("tool.policy.denied", {
+            toolType: running.type,
+            reason: "tool_concurrency_limit_exceeded"
+          });
+          return running;
         }
 
         const request = extractRequest(running.input);
@@ -536,6 +601,69 @@ export class ToolRouter {
     }
     const run = await this.deps.runs.get(runId);
     return run?.approvalPolicy;
+  }
+
+  private async withRealToolStartLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.realToolStartTail;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.realToolStartTail = previous.then(() => gate);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private isRealToolType(type: string): boolean {
+    return REAL_TOOL_TYPES.has(type);
+  }
+
+  private getRealToolLimits(): { maxConcurrentRealTools: number; maxInputBytes: number } | undefined {
+    if (!this.deps.policy.getRealToolLimits) {
+      return undefined;
+    }
+    return this.deps.policy.getRealToolLimits();
+  }
+
+  private computeInputBytes(input: Record<string, unknown>): number {
+    return Buffer.byteLength(canonicalJson(input), "utf8");
+  }
+
+  private async isRealToolConcurrencyExceeded(): Promise<boolean> {
+    const limits = this.getRealToolLimits();
+    if (!limits) {
+      return false;
+    }
+    const maxConcurrent = Math.max(1, limits.maxConcurrentRealTools);
+    let before: { createdAt: string; id: string } | undefined;
+    let runningRealTools = 0;
+    while (runningRealTools < maxConcurrent) {
+      const page = await this.deps.invocations.list({
+        status: "running",
+        limit: Math.max(50, maxConcurrent * 2),
+        ...(before ? { before } : {})
+      });
+      if (page.invocations.length === 0) {
+        break;
+      }
+      for (const invocation of page.invocations) {
+        if (this.isRealToolType(invocation.type)) {
+          runningRealTools += 1;
+          if (runningRealTools >= maxConcurrent) {
+            return true;
+          }
+        }
+      }
+      if (!page.nextCursor) {
+        break;
+      }
+      before = page.nextCursor;
+    }
+    return false;
   }
 }
 

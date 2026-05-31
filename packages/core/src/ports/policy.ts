@@ -107,6 +107,7 @@ export interface ToolPolicyInput {
 
 export interface ToolPolicyPort {
   decideTool(input: ToolPolicyInput): Promise<ToolPolicyDecision>;
+  getRealToolLimits?(): { maxConcurrentRealTools: number; maxInputBytes: number };
 }
 
 export interface PolicyPort {

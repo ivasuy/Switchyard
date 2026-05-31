@@ -336,6 +336,11 @@ function validateConfig(config: ResolvedRealToolPolicyConfig): void {
   if (config.global.allowedPlacements.length !== 1 || config.global.allowedPlacements[0] !== "local") {
     throw new Error("tool_policy_config_invalid:global.allowedPlacements");
   }
+  for (const entry of Object.values(config.shell.catalog)) {
+    if (!/^([A-Za-z]:[\\/]|\/)/.test(entry.executablePath)) {
+      throw new Error("tool_policy_config_invalid:shell.catalog.executablePath");
+    }
+  }
 }
 
 export class LocalPolicyGate implements ToolPolicyPort {
@@ -344,6 +349,13 @@ export class LocalPolicyGate implements ToolPolicyPort {
   constructor(config: ResolvedRealToolPolicyConfig = createDisabledRealToolPolicyConfig()) {
     validateConfig(config);
     this.config = config;
+  }
+
+  getRealToolLimits(): { maxConcurrentRealTools: number; maxInputBytes: number } {
+    return {
+      maxConcurrentRealTools: this.config.global.maxConcurrentRealTools,
+      maxInputBytes: this.config.global.maxInputBytes
+    };
   }
 
   async decideTool(input: ToolPolicyInput): Promise<ToolPolicyDecision> {

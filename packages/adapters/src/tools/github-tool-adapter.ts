@@ -48,6 +48,8 @@ export class GithubToolAdapter implements ToolAdapter {
           reasonCode: "tool_output_limit_exceeded"
         });
       }
+      const redactedPayload = redactSecrets(payload as Record<string, unknown>);
+      const { inlineOutput, truncated } = capGithubInlineOutput(redactedPayload, plan.maxInlineOutputBytes);
       return {
         summary: {
           operation: plan.operation,
@@ -55,8 +57,8 @@ export class GithubToolAdapter implements ToolAdapter {
           repo: plan.repo,
           durationMs: this.now().getTime() - startedAt
         },
-        inlineOutput: redactSecrets(payload as Record<string, unknown>),
-        truncated: Buffer.byteLength(json, "utf8") > plan.maxInlineOutputBytes
+        inlineOutput,
+        truncated
       };
     } catch (error) {
       if (error instanceof AdapterProtocolError) {
@@ -192,4 +194,47 @@ function mapGithubError(error: unknown, plan: GithubToolExecutionPlan): AdapterP
       repo: plan.repo
     }
   });
+}
+
+function capGithubInlineOutput(
+  payload: Record<string, unknown>,
+  maxBytes: number
+): { inlineOutput: Record<string, unknown>; truncated: boolean } {
+  const fullBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+  if (fullBytes <= maxBytes) {
+    return { inlineOutput: payload, truncated: false };
+  }
+
+  const json = JSON.stringify(payload);
+  let excerptBudget = Math.max(0, maxBytes - 96);
+  while (excerptBudget >= 0) {
+    const inlineOutput: Record<string, unknown> = {
+      excerpt: truncateUtf8(json, excerptBudget),
+      format: "json",
+      omittedBytes: Math.max(0, fullBytes - excerptBudget)
+    };
+    if (Buffer.byteLength(JSON.stringify(inlineOutput), "utf8") <= maxBytes) {
+      return { inlineOutput, truncated: true };
+    }
+    excerptBudget -= 16;
+  }
+
+  return {
+    inlineOutput: { format: "json", omittedBytes: fullBytes },
+    truncated: true
+  };
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) {
+    return "";
+  }
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) {
+    return value;
+  }
+  const buf = Buffer.from(value, "utf8");
+  if (buf.byteLength <= maxBytes) {
+    return value;
+  }
+  return buf.subarray(0, maxBytes).toString("utf8").replace(/\uFFFD+$/g, "");
 }

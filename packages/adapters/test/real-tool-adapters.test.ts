@@ -115,6 +115,36 @@ describe("real tool adapters", () => {
     expect(results[1]?.provider).toBe("fake-search");
   });
 
+  it("web search truncates inline output to maxInlineOutputBytes", async () => {
+    const client: SearchClient = {
+      async search() {
+        return Array.from({ length: 5 }, (_, index) => ({
+          title: `Result ${index}`,
+          url: `https://example.com/${index}`,
+          snippet: "s".repeat(256)
+        }));
+      }
+    };
+    const adapter = new WebSearchToolAdapter({ client });
+    const output = await adapter.invoke({
+      executionPlan: {
+        type: "web_search",
+        providerId: "fake-search",
+        baseUrl: "https://search.example/api",
+        query: "switchyard",
+        maxResults: 5,
+        timeoutMs: 1000,
+        maxResponseBytes: 32_768,
+        maxInlineOutputBytes: 256,
+        maxArtifactBytes: 4096
+      }
+    });
+
+    const bytes = Buffer.byteLength(JSON.stringify(output.inlineOutput), "utf8");
+    expect(output.truncated).toBe(true);
+    expect(bytes).toBeLessThanOrEqual(256);
+  });
+
   it("github maps 429 to github_rate_limited", async () => {
     const client: GithubClient = {
       async call() {
@@ -136,6 +166,38 @@ describe("real tool adapters", () => {
         maxArtifactBytes: 2048
       }
     })).rejects.toMatchObject({ reasonCode: "github_rate_limited" });
+  });
+
+  it("github truncates inline output to maxInlineOutputBytes", async () => {
+    const client: GithubClient = {
+      async call() {
+        return {
+          title: "Large payload",
+          body: "x".repeat(4096),
+          nested: {
+            values: Array.from({ length: 32 }, (_, index) => ({ id: index, text: "y".repeat(128) }))
+          }
+        };
+      }
+    };
+    const adapter = new GithubToolAdapter({ token: "ghp_secret", client });
+    const output = await adapter.invoke({
+      executionPlan: {
+        type: "github",
+        operation: "get_issue",
+        owner: "openai",
+        repo: "codex",
+        number: 1,
+        timeoutMs: 1000,
+        maxResponseBytes: 16_384,
+        maxInlineOutputBytes: 512,
+        maxArtifactBytes: 2048
+      }
+    });
+
+    const bytes = Buffer.byteLength(JSON.stringify(output.inlineOutput), "utf8");
+    expect(output.truncated).toBe(true);
+    expect(bytes).toBeLessThanOrEqual(512);
   });
 
   it("repo and shell execute via local process executor without shell interpolation", async () => {
