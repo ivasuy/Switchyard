@@ -117,6 +117,27 @@ function createBootstrapInput(overrides?: {
   } as unknown as ControlPlaneBootstrapInput;
 }
 
+function createApiKeyRecord(input: {
+  id: string;
+  userId: string;
+  secretHash: string;
+  keyPrefix?: string;
+}): Record<string, unknown> {
+  return {
+    id: input.id,
+    accountId: "account_1",
+    tenantId: "tenant_1",
+    projectId: "project_1",
+    userId: input.userId,
+    name: input.id,
+    keyPrefix: input.keyPrefix ?? "sk_sw",
+    secretHash: input.secretHash,
+    scopes: ["runs:write", "runs:read", "audit:read", "artifacts:read", "nodes:write"],
+    status: "active",
+    createdAt: NOW
+  };
+}
+
 describe("PostgresControlPlaneStore (in-memory fallback)", () => {
   it("bootstraps active records and resolves api key bundle by prefix/hash", async () => {
     const store = new PostgresControlPlaneStore();
@@ -139,6 +160,46 @@ describe("PostgresControlPlaneStore (in-memory fallback)", () => {
     expect(bundle?.apiKey.secretHash).toBe(hashApiKey(RAW_KEY, PEPPER));
     expect(bundle?.apiKey.secretHash).not.toBe(RAW_KEY);
     expect(JSON.stringify(bundle)).not.toContain(RAW_KEY);
+  });
+
+  it("returns null for wrong hash and only hash-matching candidates for same-prefix collisions", async () => {
+    const store = new PostgresControlPlaneStore();
+    const firstRaw = "sk_sw_test_alpha";
+    const secondRaw = "sk_sw_test_beta";
+    const firstHash = hashApiKey(firstRaw, PEPPER);
+    const secondHash = hashApiKey(secondRaw, PEPPER);
+
+    const bootstrap = createBootstrapInput();
+    (bootstrap as unknown as { users: Array<Record<string, unknown>> }).users.push({
+      id: "user_2",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      displayName: "Owner 2",
+      email: "owner2@example.com",
+      status: "active",
+      createdAt: NOW
+    });
+    (bootstrap as unknown as { apiKeys: Array<Record<string, unknown>> }).apiKeys = [
+      createApiKeyRecord({ id: "api_key_1", userId: "user_1", secretHash: firstHash }),
+      createApiKeyRecord({ id: "api_key_2", userId: "user_2", secretHash: secondHash })
+    ];
+    await store.bootstrap(bootstrap);
+
+    const wrongHash = await store.loadApiKeyBundleByHash({
+      keyPrefix: "sk_sw",
+      secretHash: hashApiKey("sk_sw_test_wrong", PEPPER),
+      now: NOW
+    });
+    expect(wrongHash).toBeNull();
+
+    const matched = await store.loadApiKeyBundleByHash({
+      keyPrefix: "sk_sw",
+      secretHash: firstHash,
+      now: NOW
+    });
+    expect(matched?.apiKey.id).toBe("api_key_1");
+    expect(matched?.apiKey.secretHash).toBe(firstHash);
+    expect(matched?.candidateBundles?.every((entry) => entry.apiKey.secretHash === firstHash)).toBe(true);
   });
 
   it("rejects empty bootstrap", async () => {
@@ -325,6 +386,38 @@ describe("PostgresControlPlaneStore (in-memory fallback)", () => {
         now: NOW
       })
     ).rejects.toMatchObject({ code: "invalid_quota_transition" });
+  });
+
+  it("allows replacing consumed connected_nodes reservation within the same hour when no active nodes exist", async () => {
+    const store = new PostgresControlPlaneStore();
+    const reserveInput = {
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "connected_nodes" as const,
+      amount: 1,
+      maxAllowed: 1,
+      windowMs: 60 * 60 * 1_000,
+      reservationTtlMs: 5 * 60 * 1_000,
+      reasonCode: "node_register",
+      now: NOW
+    };
+
+    const first = await store.reserveQuota(reserveInput);
+    await store.transitionQuotaReservation({
+      reservationId: first.id,
+      accountId: first.accountId,
+      tenantId: first.tenantId,
+      projectId: first.projectId,
+      nextState: "consumed",
+      now: NOW
+    });
+
+    const second = await store.reserveQuota({
+      ...reserveInput,
+      now: new Date(Date.parse(NOW) + 30_000).toISOString()
+    });
+    expect(second.state).toBe("reserved");
   });
 
   it("expires stale reservations", async () => {

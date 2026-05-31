@@ -134,7 +134,9 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
       return this.loadApiKeyBundleByHashPostgres(input);
     }
 
-    const matching = [...this.apiKeys.values()].filter((entry) => entry.keyPrefix === input.keyPrefix);
+    const matching = [...this.apiKeys.values()].filter(
+      (entry) => entry.keyPrefix === input.keyPrefix && entry.secretHash === input.secretHash
+    );
     if (matching.length === 0) {
       return null;
     }
@@ -259,7 +261,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
       finalizedAt: input.finalizedAt ?? now
     });
     this.reservations.set(next.id, next);
-    if (input.nextState === "consumed") {
+    if (input.nextState === "consumed" && next.quotaKind !== "connected_nodes") {
       const usageKey = quotaScopeKey(next.accountId, next.tenantId, next.projectId, next.quotaKind);
       const usage = this.usage.get(usageKey);
       if (usage) {
@@ -708,8 +710,9 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
        JOIN projects p ON p.id = k.project_id
        JOIN enterprise_users u ON u.id = k.user_id
        JOIN billing_plans b ON b.id = a.billing_plan_id
-       WHERE k.key_prefix = $1`,
-      [input.keyPrefix]
+       WHERE k.key_prefix = $1
+         AND k.secret_hash = $2`,
+      [input.keyPrefix, input.secretHash]
     );
 
     const bundles = result.rows
@@ -822,7 +825,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
          WHERE id = $1`,
         [next.id, next.state, next.reasonCode, next.finalizedAt ?? null, now]
       );
-      if (next.state === "consumed") {
+      if (next.state === "consumed" && next.quotaKind !== "connected_nodes") {
         const usage = await this.lockOrCreateQuotaUsage(
           client,
           {
