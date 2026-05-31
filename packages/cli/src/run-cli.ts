@@ -272,8 +272,13 @@ function emitCommandError(error: unknown, deps: CliIO): void {
   }
 
   const message = error instanceof Error ? error.message : String(error);
-  const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : undefined;
+  const errorRecord = isRecord(error) ? error : undefined;
+  const code = typeof errorRecord?.code === "string" ? errorRecord.code : undefined;
   deps.stderr(JSON.stringify({ errorClass: "Error", message, ...(code ? { code } : {}) }, null, 2) + "\n");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function readOption(argv: string[], option: string): string | undefined {

@@ -21,7 +21,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "pnpm --filter @switchyard/cli... build && vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "pnpm --filter @switchyard/daemon build && pnpm --filter @switchyard/sdk build && tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "release:smoke-local": "tsx src/release-smoke-local.ts"
   },
