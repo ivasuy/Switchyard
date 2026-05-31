@@ -47,6 +47,9 @@ import type { PostgresDatabaseHandle } from "./database.js";
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled", "timeout"]);
 const ACTIVE_NODE_STATUSES = new Set(["online", "degraded"]);
 const MAX_AUDIT_PAGE_LIMIT = 200;
+const SYSTEM_USER_ID = "user_system";
+const SYSTEM_API_KEY_ID = "api_key_system";
+const SYSTEM_PROJECT_ID = "project_system";
 
 type QuotaState = QuotaReservation["state"];
 type QuotaUsageRow = {
@@ -238,6 +241,17 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
       expiresAt: new Date(now.getTime() + input.reservationTtlMs).toISOString()
     });
     this.reservations.set(reservation.id, reservation);
+    const ownerIds = resolveOwnershipActorIds(input.userId, input.apiKeyId);
+    await this.attachOwnership({
+      resourceType: "quota",
+      resourceId: reservation.id,
+      accountId: reservation.accountId,
+      tenantId: reservation.tenantId,
+      projectId: reservation.projectId,
+      userId: ownerIds.userId,
+      apiKeyId: ownerIds.apiKeyId,
+      createdAt: reservation.createdAt
+    });
     return reservation;
   }
 
@@ -490,34 +504,60 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
     });
 
     if (this.handle) {
-      await this.handle.pool.query(
-        `INSERT INTO audit_log_events (
-          id, account_id, tenant_id, project_id, actor_type, actor_user_id, api_key_id, event_type,
-          resource_type, resource_id, decision, reason_code, ip_hash, user_agent, request_id, payload, created_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-        [
-          event.id,
-          event.accountId,
-          event.tenantId,
-          event.projectId ?? null,
-          event.actorType,
-          event.actorUserId ?? null,
-          event.apiKeyId ?? null,
-          event.eventType,
-          event.resourceType ?? null,
-          event.resourceId ?? null,
-          event.decision,
-          event.reasonCode ?? null,
-          event.ipHash ?? null,
-          event.userAgent ?? null,
-          event.requestId ?? null,
-          event.payload,
-          event.createdAt
-        ]
-      );
+      await this.withTransaction(async (client) => {
+        await client.query(
+          `INSERT INTO audit_log_events (
+            id, account_id, tenant_id, project_id, actor_type, actor_user_id, api_key_id, event_type,
+            resource_type, resource_id, decision, reason_code, ip_hash, user_agent, request_id, payload, created_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+          [
+            event.id,
+            event.accountId,
+            event.tenantId,
+            event.projectId ?? null,
+            event.actorType,
+            event.actorUserId ?? null,
+            event.apiKeyId ?? null,
+            event.eventType,
+            event.resourceType ?? null,
+            event.resourceId ?? null,
+            event.decision,
+            event.reasonCode ?? null,
+            event.ipHash ?? null,
+            event.userAgent ?? null,
+            event.requestId ?? null,
+            event.payload,
+            event.createdAt
+          ]
+        );
+        const ownerIds = resolveOwnershipActorIds(event.actorUserId, event.apiKeyId);
+        const ownershipInput = {
+          resourceType: "audit_log_event",
+          resourceId: event.id,
+          accountId: event.accountId,
+          tenantId: event.tenantId,
+          projectId: event.projectId ?? SYSTEM_PROJECT_ID,
+          userId: ownerIds.userId,
+          apiKeyId: ownerIds.apiKeyId,
+          createdAt: event.createdAt,
+          client
+        } as AttachOwnershipInput & { client: Queryable };
+        await this.attachOwnershipPostgres(ownershipInput);
+      });
       return event;
     }
     this.auditEvents.push(event);
+    const ownerIds = resolveOwnershipActorIds(event.actorUserId, event.apiKeyId);
+    await this.attachOwnership({
+      resourceType: "audit_log_event",
+      resourceId: event.id,
+      accountId: event.accountId,
+      tenantId: event.tenantId,
+      projectId: event.projectId ?? SYSTEM_PROJECT_ID,
+      userId: ownerIds.userId,
+      apiKeyId: ownerIds.apiKeyId,
+      createdAt: event.createdAt
+    });
     return event;
   }
 
@@ -795,6 +835,19 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
           reservation.finalizedAt ?? null
         ]
       );
+      const ownerIds = resolveOwnershipActorIds(input.userId, input.apiKeyId);
+      const ownershipInput = {
+        resourceType: "quota",
+        resourceId: reservation.id,
+        accountId: reservation.accountId,
+        tenantId: reservation.tenantId,
+        projectId: reservation.projectId,
+        userId: ownerIds.userId,
+        apiKeyId: ownerIds.apiKeyId,
+        createdAt: reservation.createdAt,
+        client
+      } as AttachOwnershipInput & { client: Queryable };
+      await this.attachOwnershipPostgres(ownershipInput);
       return reservation;
     });
   }
@@ -1433,6 +1486,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function ownershipKey(resourceType: ResourceType, resourceId: string): string {
   return `${resourceType}:${resourceId}`;
+}
+
+function resolveOwnershipActorIds(
+  userId: string | undefined,
+  apiKeyId: string | undefined
+): { userId: string; apiKeyId: string } {
+  return {
+    userId: userId && userId.trim().length > 0 ? userId : SYSTEM_USER_ID,
+    apiKeyId: apiKeyId && apiKeyId.trim().length > 0 ? apiKeyId : SYSTEM_API_KEY_ID
+  };
 }
 
 function quotaScopeKey(accountId: string, tenantId: string, projectId: string, quotaKind: QuotaReservation["quotaKind"]): string {

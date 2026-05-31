@@ -201,6 +201,9 @@ class InMemoryControlPlaneStore implements ControlPlaneStore {
   withDelayMs = 0;
 
   private criticalChains = new Map<string, Promise<void>>();
+  private static readonly SYSTEM_USER_ID = "user_system";
+  private static readonly SYSTEM_API_KEY_ID = "api_key_system";
+  private static readonly SYSTEM_PROJECT_ID = "project_system";
 
   async loadApiKeyBundleByHash(_input: LoadApiKeyBundleInput): Promise<AuthBundle | null> {
     this.loadCalls += 1;
@@ -274,6 +277,16 @@ class InMemoryControlPlaneStore implements ControlPlaneStore {
       expiresAt: new Date(nowMs + input.reservationTtlMs).toISOString()
     };
     this.reservations.set(reservation.id, reservation);
+    this.ownership.set(`quota:${reservation.id}`, {
+      resourceType: "quota",
+      resourceId: reservation.id,
+      accountId: reservation.accountId,
+      tenantId: reservation.tenantId,
+      projectId: reservation.projectId,
+      userId: input.userId ?? InMemoryControlPlaneStore.SYSTEM_USER_ID,
+      apiKeyId: input.apiKeyId ?? InMemoryControlPlaneStore.SYSTEM_API_KEY_ID,
+      createdAt: reservation.createdAt
+    });
     return reservation;
   }
 
@@ -434,6 +447,16 @@ class InMemoryControlPlaneStore implements ControlPlaneStore {
       createdAt: input.createdAt ?? NOW
     };
     this.auditEvents.push(event);
+    this.ownership.set(`audit_log_event:${event.id}`, {
+      resourceType: "audit_log_event",
+      resourceId: event.id,
+      accountId: event.accountId,
+      tenantId: event.tenantId,
+      projectId: event.projectId ?? InMemoryControlPlaneStore.SYSTEM_PROJECT_ID,
+      userId: input.actorUserId ?? InMemoryControlPlaneStore.SYSTEM_USER_ID,
+      apiKeyId: input.apiKeyId ?? InMemoryControlPlaneStore.SYSTEM_API_KEY_ID,
+      createdAt: event.createdAt
+    });
     return event;
   }
 
@@ -974,6 +997,49 @@ describe("ControlPlaneService ownership and audit", () => {
       })
     ).resolves.toMatchObject({
       ok: true
+    });
+  });
+
+  it("attaches ownership for quota reservations and audit events", async () => {
+    const { service, rawKey, store } = createServiceFixture();
+    const auth = await service.authenticateRequest({ headers: { "x-switchyard-api-key": rawKey } });
+
+    const reservation = await service.preflightRunCreate({
+      auth,
+      placement: "hosted",
+      runtimeMode: "fake.deterministic",
+      timeoutSeconds: 60,
+      now: NOW
+    });
+    const quotaOwnership = await store.getOwnership({ resourceType: "quota", resourceId: reservation.id });
+    expect(quotaOwnership).toMatchObject({
+      accountId: auth.account.id,
+      tenantId: auth.tenant.id,
+      projectId: auth.project.id,
+      userId: auth.user.id,
+      apiKeyId: auth.apiKey.id
+    });
+
+    const audited = await service.recordAudit({
+      auth,
+      eventType: "run.create_allowed",
+      decision: "allow",
+      payload: { routeId: "runs.create" }
+    });
+    expect(audited.ok).toBe(true);
+    if (!audited.ok) {
+      throw new Error("audit append failed");
+    }
+    const auditOwnership = await store.getOwnership({
+      resourceType: "audit_log_event",
+      resourceId: audited.event.id
+    });
+    expect(auditOwnership).toMatchObject({
+      accountId: auth.account.id,
+      tenantId: auth.tenant.id,
+      projectId: auth.project.id,
+      userId: auth.user.id,
+      apiKeyId: auth.apiKey.id
     });
   });
 });

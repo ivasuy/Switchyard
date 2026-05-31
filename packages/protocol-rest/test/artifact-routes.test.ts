@@ -197,6 +197,55 @@ describe("artifact routes", () => {
     expect(response.json().error.code).toBe("quota_exceeded");
     expect(readCalls).toBe(0);
   });
+
+  it("authorizes ownership before exposing missing stored-content state", async () => {
+    const artifacts = new InMemoryArtifactStore();
+    await artifacts.create({ ...baseArtifact, metadata: { contentStored: false } });
+    let readCalls = 0;
+    let preflightCalls = 0;
+
+    const app = Fastify();
+    registerErrorEnvelope(app);
+    registerHostedAuthHooks(app, {
+      controlPlane: {
+        authenticateRequest: async () => testAuth(),
+        requireScope: () => {},
+        recordAudit: async () => ({ ok: true })
+      } as never
+    });
+    registerArtifactRoutes(app, {
+      artifacts,
+      controlPlane: {
+        authorizeResource: async () => ({
+          ok: false,
+          decision: "not_found",
+          code: "artifact_not_found",
+          reasonCode: "resource_not_owned"
+        }),
+        preflightArtifactContentRead: async () => {
+          preflightCalls += 1;
+          throw new Error("should not be called");
+        },
+        recordAudit: async () => ({ ok: true })
+      } as never,
+      artifactContent: {
+        async read() {
+          readCalls += 1;
+          return { body: "nope", contentType: "text/plain" };
+        }
+      }
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/artifacts/artifact_test/content",
+      headers: { authorization: "Bearer sk_sw_test_1" }
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.code).toBe("artifact_not_found");
+    expect(readCalls).toBe(0);
+    expect(preflightCalls).toBe(0);
+  });
 });
 
 function testAuth() {

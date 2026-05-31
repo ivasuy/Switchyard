@@ -206,7 +206,14 @@ export async function probeServerReadiness(input: {
 
   const unowned = controlPlane.unownedResources;
   const unownedVisibleTotal = unowned
-    ? unowned.runs + unowned.runEvents + unowned.artifacts + unowned.placements + unowned.nodes + unowned.assignments
+    ? unowned.runs +
+      unowned.runEvents +
+      unowned.artifacts +
+      unowned.placements +
+      unowned.nodes +
+      unowned.assignments +
+      unowned.auditEvents +
+      unowned.quotaReservations
     : 0;
   checks.unownedResources = strictControlPlane
     ? readinessCheck(
@@ -220,7 +227,9 @@ export async function probeServerReadiness(input: {
               artifacts: unowned?.artifacts ?? 0,
               placements: unowned?.placements ?? 0,
               nodes: unowned?.nodes ?? 0,
-              assignments: unowned?.assignments ?? 0
+              assignments: unowned?.assignments ?? 0,
+              auditEvents: unowned?.auditEvents ?? 0,
+              quotaReservations: unowned?.quotaReservations ?? 0
             })
       )
     : readinessCheck(true);

@@ -335,6 +335,49 @@ describe("PostgresControlPlaneStore (in-memory fallback)", () => {
     ).toEqual(["run_1"]);
   });
 
+  it("attaches ownership for created quota reservations and audit events", async () => {
+    const store = new PostgresControlPlaneStore();
+    const reservation = await store.reserveQuota({
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      maxAllowed: 5,
+      windowMs: 60_000,
+      reservationTtlMs: 60_000,
+      reasonCode: "run_create",
+      now: NOW
+    });
+    const reservationOwnership = await store.getOwnership({ resourceType: "quota", resourceId: reservation.id });
+    expect(reservationOwnership).toMatchObject({
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1"
+    });
+
+    const event = await store.appendAuditEvent({
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      actorType: "api_key",
+      actorUserId: "user_1",
+      apiKeyId: "api_key_1",
+      eventType: "api_key.auth_succeeded",
+      decision: "allow",
+      payload: { ok: true },
+      createdAt: NOW
+    });
+    const auditOwnership = await store.getOwnership({ resourceType: "audit_log_event", resourceId: event.id });
+    expect(auditOwnership).toMatchObject({
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      apiKeyId: "api_key_1"
+    });
+  });
+
   it("serializes quota reservations under max=1 and validates transitions", async () => {
     const store = new PostgresControlPlaneStore();
     const scope = {

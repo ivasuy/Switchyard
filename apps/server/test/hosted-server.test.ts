@@ -674,6 +674,116 @@ describe("hosted server", () => {
     expect(report.checks.unownedResources.code).toBe("unowned_resources_present");
   });
 
+  it("marks readiness unowned_resources_present when unowned audit events exist", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(createAuthEnabledTestEnv()),
+      postgres: undefined,
+      queue: {
+        enqueue: async () => "job",
+        claim: async () => null,
+        ack: async () => {},
+        fail: async () => {},
+        retry: async () => {},
+        discard: async () => {},
+        getJob: async () => null,
+        recoverStaleClaims: async () => 0,
+        stats: async () => ({ queued: 0, claimed: 0 })
+      },
+      artifactContent: {
+        writeText: async () => ({ location: "x" }),
+        writeBytes: async () => ({ location: "x" }),
+        read: async () => ({ body: Buffer.from(""), contentType: "application/octet-stream" }),
+        probe: async () => {}
+      },
+      controlPlane: {
+        mode: "enabled",
+        hasApiKeyPepper: true,
+        hasBootstrap: true,
+        bootstrapActiveCounts: {
+          accounts: 1,
+          tenants: 1,
+          projects: 1,
+          users: 1,
+          apiKeys: 1,
+          billingPlans: 1
+        },
+        storeReady: true,
+        unownedResources: {
+          runs: 0,
+          runEvents: 0,
+          artifacts: 0,
+          placements: 0,
+          nodes: 0,
+          assignments: 0,
+          auditEvents: 1,
+          quotaReservations: 0
+        },
+        hasQuotaStore: true,
+        hasAuditStore: true,
+        nodeTokenBound: true
+      }
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.unownedResources.ok).toBe(false);
+    expect(report.checks.unownedResources.code).toBe("unowned_resources_present");
+  });
+
+  it("marks readiness unowned_resources_present when unowned quota reservations exist", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(createAuthEnabledTestEnv()),
+      postgres: undefined,
+      queue: {
+        enqueue: async () => "job",
+        claim: async () => null,
+        ack: async () => {},
+        fail: async () => {},
+        retry: async () => {},
+        discard: async () => {},
+        getJob: async () => null,
+        recoverStaleClaims: async () => 0,
+        stats: async () => ({ queued: 0, claimed: 0 })
+      },
+      artifactContent: {
+        writeText: async () => ({ location: "x" }),
+        writeBytes: async () => ({ location: "x" }),
+        read: async () => ({ body: Buffer.from(""), contentType: "application/octet-stream" }),
+        probe: async () => {}
+      },
+      controlPlane: {
+        mode: "enabled",
+        hasApiKeyPepper: true,
+        hasBootstrap: true,
+        bootstrapActiveCounts: {
+          accounts: 1,
+          tenants: 1,
+          projects: 1,
+          users: 1,
+          apiKeys: 1,
+          billingPlans: 1
+        },
+        storeReady: true,
+        unownedResources: {
+          runs: 0,
+          runEvents: 0,
+          artifacts: 0,
+          placements: 0,
+          nodes: 0,
+          assignments: 0,
+          auditEvents: 0,
+          quotaReservations: 1
+        },
+        hasQuotaStore: true,
+        hasAuditStore: true,
+        nodeTokenBound: true
+      }
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.unownedResources.ok).toBe(false);
+    expect(report.checks.unownedResources.code).toBe("unowned_resources_present");
+  });
+
   it("fails closed in staging when hosted allowlist is missing", () => {
     expect(() =>
       loadServerConfig({

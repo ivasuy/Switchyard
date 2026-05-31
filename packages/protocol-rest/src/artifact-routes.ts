@@ -76,6 +76,27 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ArtifactRoute
     if (deps.controlPlane && !auth) {
       return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
     }
+    if (deps.controlPlane && auth) {
+      const allowed = await deps.controlPlane.authorizeResource({
+        auth,
+        resourceType: "artifact",
+        resourceId: id,
+        notFoundCode: "artifact_not_found"
+      });
+      if (!allowed.ok) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "artifact.read_denied",
+          decision: "deny",
+          reasonCode: allowed.reasonCode,
+          resourceType: "artifact",
+          resourceId: id,
+          requestId: request.id,
+          payload: { routeId: "artifacts.content", reasonCode: allowed.reasonCode }
+        });
+        return sendHttpError(reply, allowed.code, allowed.reasonCode, [{ path: "reasonCode", issue: allowed.reasonCode }]);
+      }
+    }
 
     const artifact = await deps.artifacts.get(id);
     if (!artifact) {

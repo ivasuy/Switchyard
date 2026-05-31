@@ -56,6 +56,8 @@ export interface ReserveQuotaInput {
   accountId: string;
   tenantId: string;
   projectId: string;
+  userId?: string;
+  apiKeyId?: string;
   quotaKind: QuotaReservation["quotaKind"];
   amount: number;
   maxAllowed: number;
