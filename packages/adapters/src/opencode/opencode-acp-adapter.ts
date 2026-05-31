@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import type { Artifact, SwitchyardEvent } from "@switchyard/contracts";
+import type { Artifact, ProviderResolvedCommand, SwitchyardEvent } from "@switchyard/contracts";
 import {
   AdapterProtocolError,
   type RuntimeAdapter,
@@ -77,6 +77,7 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
   private readonly checkTimeoutMs: number;
   private readonly checkCwd: string;
   private readonly probeVersion;
+  private readonly hostedProviderCommand: ProviderResolvedCommand | undefined;
   private readonly sessions = new Map<string, OpenCodeAcpSessionState>();
 
   constructor(options: OpenCodeAcpAdapterOptions = {}) {
@@ -89,6 +90,7 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
     this.checkTimeoutMs = options.checkTimeoutMs ?? 5000;
     this.checkCwd = options.checkCwd ?? process.cwd();
     this.probeVersion = options.probeVersion;
+    this.hostedProviderCommand = options.hostedProviderCommand;
   }
 
   async check(): Promise<RuntimeAdapterCheck> {
@@ -118,11 +120,21 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
         reasonCode: "opencode_task_required"
       });
     }
+    const metadata = readRecord(request["metadata"]) ?? {};
+    if (this.hostedProviderCommand && !isValidHostedCommand(this.hostedProviderCommand, cwd, metadata)) {
+      throw new AdapterProtocolError("Hosted OpenCode command handoff denied.", {
+        reasonCode: "provider_command_denied"
+      });
+    }
+    const command = this.hostedProviderCommand?.executablePath ?? this.command;
+    const env = this.hostedProviderCommand ? filterHostedEnv(this.hostedProviderCommand) : process.env;
+    const args = this.hostedProviderCommand ? [...this.hostedProviderCommand.argv] : ["acp"];
 
     const client = new AcpStdioClient({
-      command: this.command,
-      args: ["acp"],
+      command,
+      args,
       cwd,
+      env,
       requestTimeoutMs: this.requestTimeoutMs,
       maxMessageBytes: this.maxMessageBytes,
       ...(this.processFactory ? { processFactory: this.processFactory } : {})
@@ -191,6 +203,11 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
   }
 
   async send(_session: Record<string, unknown>, _input: Record<string, unknown>): Promise<void> {
+    if (this.hostedProviderCommand) {
+      throw new AdapterProtocolError("Hosted OpenCode input bridge is unsupported.", {
+        reasonCode: "hosted_input_bridge_unsupported"
+      });
+    }
     throw new AdapterProtocolError("OpenCode ACP does not support POST /runs/:id/input in R5.", {
       reasonCode: "opencode_input_unsupported"
     });
@@ -274,7 +291,11 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
       }
 
       if (event.type === "permission_request") {
-        const terminal = eventForFailure(runId, sequence++, "acp_permission_request_unsupported");
+        const terminal = eventForFailure(
+          runId,
+          sequence++,
+          this.hostedProviderCommand ? "hosted_approval_bridge_unsupported" : "acp_permission_request_unsupported"
+        );
         stored.terminal = terminal;
         stored.promptActive = false;
         this.resolveWaiters(stored, terminal);
@@ -450,4 +471,66 @@ function mapPromptStopReason(runId: string, sequence: number, stopReason: string
     return eventForFailure(runId, sequence, "acp_refusal");
   }
   return eventForFailure(runId, sequence, "acp_unknown_stop_reason");
+}
+
+function isValidHostedCommand(
+  command: ProviderResolvedCommand,
+  cwd: string,
+  metadata: Record<string, unknown>
+): boolean {
+  if (command.runtimeMode !== "opencode.acp") {
+    return false;
+  }
+  if (command.cwd !== cwd) {
+    return false;
+  }
+  if (command.allowUserArgs) {
+    return false;
+  }
+  if (command.argv.length !== 1 || command.argv[0] !== "acp") {
+    return false;
+  }
+  return !hasDeniedMetadataKey(metadata);
+}
+
+function filterHostedEnv(command: ProviderResolvedCommand): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of command.envKeys) {
+    const value = command.env[key];
+    if (typeof value === "string") {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function hasDeniedMetadataKey(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasDeniedMetadataKey(entry));
+  }
+  const record = value as Record<string, unknown>;
+  for (const [key, entry] of Object.entries(record)) {
+    const normalized = key.toLowerCase();
+    if (
+      normalized === "command" ||
+      normalized === "binary" ||
+      normalized === "processfactory" ||
+      normalized === "env" ||
+      normalized === "cwd" ||
+      normalized === "argv" ||
+      normalized === "args" ||
+      normalized === "shell" ||
+      normalized.includes("pty") ||
+      normalized.includes("terminal")
+    ) {
+      return true;
+    }
+    if (hasDeniedMetadataKey(entry)) {
+      return true;
+    }
+  }
+  return false;
 }

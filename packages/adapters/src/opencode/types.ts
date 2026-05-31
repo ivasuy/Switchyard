@@ -1,6 +1,6 @@
 import type { RuntimeAdapterCheck, RuntimeLogger } from "@switchyard/core";
 import type { AcpProcessFactory, AcpStdioClient } from "@switchyard/protocol-acpx";
-import type { SwitchyardEvent } from "@switchyard/contracts";
+import type { ProviderResolvedCommand, SwitchyardEvent } from "@switchyard/contracts";
 
 export interface OpenCodeAcpAdapterOptions {
   command?: string;
@@ -18,8 +18,9 @@ export interface OpenCodeAcpAdapterOptions {
     status: "ok" | "missing" | "timeout" | "error";
     version?: string;
     stderr?: string;
-    message?: string;
+      message?: string;
   }>;
+  hostedProviderCommand?: ProviderResolvedCommand;
 }
 
 export interface OpenCodeAcpSessionState {

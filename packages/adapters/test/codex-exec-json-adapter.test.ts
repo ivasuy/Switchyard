@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
+import type { ProviderResolvedCommand } from "@switchyard/contracts";
 import { CodexExecJsonAdapter, CodexInputUnsupportedError } from "../src/index.js";
 
 describe("CodexExecJsonAdapter", () => {
@@ -255,6 +256,220 @@ describe("CodexExecJsonAdapter", () => {
 
     expect(fake.args).not.toContain("--ignore-user-config");
     expect(fake.args).toContain("--ignore-rules");
+  });
+
+  it("uses hosted provider command handoff and enforces read-only command posture", async () => {
+    const fake = new FakeCodexProcess();
+    const spawned: {
+      command?: string;
+      args?: string[];
+      cwd?: string;
+      env?: NodeJS.ProcessEnv;
+    } = {};
+    const command: ProviderResolvedCommand = {
+      runtimeMode: "codex.exec_json",
+      executablePath: "/opt/provider/bin/codex",
+      argv: ["exec", "--json"],
+      cwd: "/repo",
+      env: {
+        OPENAI_API_KEY: "sk-secret",
+        PATH: "/usr/bin"
+      },
+      envKeys: ["OPENAI_API_KEY", "PATH"],
+      allowUserArgs: false,
+      redactedSummary: { runtimeMode: "codex.exec_json" }
+    };
+
+    const adapter = new CodexExecJsonAdapter({
+      command: "codex-unsafe-default",
+      hostedProviderCommand: command,
+      processFactory: (spawnCommand, args, options) => {
+        spawned.command = spawnCommand;
+        spawned.args = args;
+        spawned.cwd = options.cwd;
+        spawned.env = options.env;
+        queueMicrotask(() => {
+          fake.stdout.write("{\"type\":\"turn.completed\"}\n");
+          fake.stdout.end();
+          fake.stderr.end();
+          fake.emit("exit", 0, null);
+        });
+        return fake as never;
+      }
+    });
+
+    const session = await adapter.start({
+      runId: "run_hosted_codex",
+      model: "gpt-5.5",
+      cwd: "/repo",
+      task: "hosted run",
+      metadata: {
+        ignoreUserConfig: false,
+        OPENAI_API_KEY: "should-not-pass"
+      }
+    });
+
+    const events = [];
+    for await (const event of adapter.events({ ...session, runId: "run_hosted_codex" })) {
+      events.push(event);
+    }
+
+    expect(spawned.command).toBe("/opt/provider/bin/codex");
+    expect(spawned.cwd).toBe("/repo");
+    expect(spawned.args).toEqual([
+      "exec",
+      "--json",
+      "--model",
+      "gpt-5.5",
+      "--cd",
+      "/repo",
+      "--sandbox",
+      "read-only",
+      "--ignore-user-config",
+      "hosted run"
+    ]);
+    expect(spawned.env).toEqual({
+      OPENAI_API_KEY: "sk-secret",
+      PATH: "/usr/bin"
+    });
+    expect(events.at(-1)?.type).toBe("run.completed");
+  });
+
+  it("rejects hosted metadata injection attempts before spawn", async () => {
+    const command: ProviderResolvedCommand = {
+      runtimeMode: "codex.exec_json",
+      executablePath: "/opt/provider/bin/codex",
+      argv: ["exec", "--json"],
+      cwd: "/repo",
+      env: {
+        OPENAI_API_KEY: "sk-secret"
+      },
+      envKeys: ["OPENAI_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: { runtimeMode: "codex.exec_json" }
+    };
+    let spawned = false;
+    const adapter = new CodexExecJsonAdapter({
+      hostedProviderCommand: command,
+      processFactory: () => {
+        spawned = true;
+        return new FakeCodexProcess() as never;
+      }
+    });
+
+    await expect(adapter.start({
+      runId: "run_hosted_codex_denied",
+      model: "gpt-5.5",
+      cwd: "/repo",
+      task: "blocked",
+      metadata: {
+        provider: {
+          command: "/tmp/evil",
+          env: { OPENAI_API_KEY: "sk-evil" },
+          pty: { enabled: true }
+        }
+      }
+    })).rejects.toMatchObject({
+      reasonCode: "provider_command_denied"
+    });
+    expect(spawned).toBe(false);
+  });
+
+  it("maps hosted process spawn failures to provider_binary_unavailable with redacted errors", async () => {
+    const command: ProviderResolvedCommand = {
+      runtimeMode: "codex.exec_json",
+      executablePath: "/Users/example/bin/codex",
+      argv: ["exec", "--json"],
+      cwd: "/repo",
+      env: {
+        OPENAI_API_KEY: "sk-secret"
+      },
+      envKeys: ["OPENAI_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: { runtimeMode: "codex.exec_json" }
+    };
+
+    const adapter = new CodexExecJsonAdapter({
+      hostedProviderCommand: command,
+      processFactory: () => {
+        throw new Error("ENOENT /Users/example/bin/codex OPENAI_API_KEY=sk-secret");
+      }
+    });
+
+    await expect(adapter.start({
+      runId: "run_hosted_spawn_fail",
+      model: "gpt-5.5",
+      cwd: "/repo",
+      task: "spawn fail",
+      metadata: {}
+    })).rejects.toMatchObject({
+      reasonCode: "provider_binary_unavailable"
+    });
+  });
+
+  it("redacts hosted failure logs and nested provider error content", async () => {
+    const fake = new FakeCodexProcess();
+    const logs: Array<{ level: "info" | "warn" | "error"; event: string; details?: Record<string, unknown> }> = [];
+    const command: ProviderResolvedCommand = {
+      runtimeMode: "codex.exec_json",
+      executablePath: "/Users/example/bin/codex",
+      argv: ["exec", "--json"],
+      cwd: "/repo",
+      env: {
+        OPENAI_API_KEY: "sk-secret"
+      },
+      envKeys: ["OPENAI_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: { runtimeMode: "codex.exec_json", key: "abc123" }
+    };
+
+    const adapter = new CodexExecJsonAdapter({
+      hostedProviderCommand: command,
+      processFactory: () => {
+        queueMicrotask(() => {
+          fake.stdout.write("not-json sk-secret /Users/example/project\n");
+          fake.stderr.write("token=abc123 OPENAI_API_KEY=sk-secret\n");
+          fake.stdout.end();
+          fake.stderr.end();
+          fake.emit("exit", 1, null);
+        });
+        return fake as never;
+      },
+      logger: {
+        info(event, details) {
+          logs.push({ level: "info", event, details });
+        },
+        warn(event, details) {
+          logs.push({ level: "warn", event, details });
+        },
+        error(event, details) {
+          logs.push({ level: "error", event, details });
+        }
+      }
+    });
+
+    const session = await adapter.start({
+      runId: "run_hosted_redact",
+      model: "gpt-5.5",
+      cwd: "/repo",
+      task: "prompt includes sk-secret and /Users/example",
+      metadata: {}
+    });
+
+    const events = [];
+    for await (const event of adapter.events({ ...session, runId: "run_hosted_redact" })) {
+      events.push(event);
+    }
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("run.failed");
+    expect(JSON.stringify(events[0])).not.toContain("sk-secret");
+    expect(JSON.stringify(events[0])).not.toContain("/Users/example");
+
+    const serializedLogs = JSON.stringify(logs);
+    expect(serializedLogs).not.toContain("sk-secret");
+    expect(serializedLogs).not.toContain("/Users/example/bin/codex");
+    expect(serializedLogs).not.toContain("/Users/example/project");
   });
 
   it("rejects send because exec-json is not interactive", async () => {

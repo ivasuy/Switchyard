@@ -11,9 +11,9 @@ import {
 } from "@switchyard/core";
 import {
   CLAUDE_CODE_RUNTIME_MODE_SLUG,
+  type ClaudeCodeAdapterOptions,
   type ClaudeCodeClient,
   type ClaudeCodeClientSession,
-  type ClaudeCodeDoctorOptions,
   type ClaudePermissionMode
 } from "./types.js";
 import { mapClaudeCodeEventToSwitchyardEvent } from "./claude-code-event-mapper.js";
@@ -32,18 +32,7 @@ interface StoredClaudeSession {
   unknownEventCount: number;
   unknownSuppressed: boolean;
   pendingRuntimeApprovalTokens: Set<string>;
-}
-
-export interface ClaudeCodeAdapterOptions {
-  client: ClaudeCodeClient;
-  logger?: RuntimeLogger;
-  command?: string;
-  liveProbe?: boolean;
-  maxBudgetUsd?: number;
-  requestTimeoutMs?: number;
-  permissionMode?: ClaudePermissionMode;
-  disabledTools?: string[];
-  doctor?: Omit<ClaudeCodeDoctorOptions, "command" | "liveProbe" | "maxBudgetUsd" | "requestTimeoutMs" | "permissionMode" | "disabledTools">;
+  hostedProviderMode: boolean;
 }
 
 export class ClaudeCodeAdapter implements RuntimeAdapter {
@@ -165,7 +154,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       terminalSeen: false,
       unknownEventCount: 0,
       unknownSuppressed: false,
-      pendingRuntimeApprovalTokens: new Set<string>()
+      pendingRuntimeApprovalTokens: new Set<string>(),
+      hostedProviderMode: Boolean(this.options.hostedProviderCommand)
     });
 
     return {
@@ -176,6 +166,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   async send(session: Record<string, unknown>, input: Record<string, unknown>): Promise<void> {
     const stored = this.requireSession(session);
+    if (stored.hostedProviderMode) {
+      throw new AdapterProtocolError("Hosted Claude input bridge is unsupported.", {
+        reasonCode: "hosted_input_bridge_unsupported"
+      });
+    }
     if (stored.terminalSeen) {
       throw new AdapterProtocolError("Claude session is not active.", {
         reasonCode: "runtime_input_not_active"
@@ -268,6 +263,22 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
       for (const event of mapped.events) {
         sequence += 1;
+        if (stored.hostedProviderMode && event.type === "approval.requested") {
+          stored.terminalSeen = true;
+          yield {
+            id: `event_${crypto.randomUUID()}`,
+            type: "run.failed",
+            runId,
+            sequence: event.sequence,
+            payload: {
+              status: "failed",
+              reasonCode: "hosted_approval_bridge_unsupported",
+              error: "Hosted approval bridge is unsupported."
+            },
+            createdAt
+          };
+          return;
+        }
         if (event.type === "approval.requested") {
           const token = event.payload["runtimeApprovalToken"];
           if (typeof token === "string" && token.length > 0) {

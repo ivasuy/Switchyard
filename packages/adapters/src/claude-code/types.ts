@@ -1,4 +1,5 @@
-import type { RuntimeAdapterCheck } from "@switchyard/core";
+import type { RuntimeAdapterCheck, RuntimeLogger } from "@switchyard/core";
+import type { ProviderResolvedCommand } from "@switchyard/contracts";
 
 export const CLAUDE_CODE_RUNTIME_MODE_SLUG = "claude_code.sdk";
 
@@ -30,6 +31,39 @@ export interface ClaudeCodeClient {
     task: string;
     metadata: Record<string, unknown>;
   }): Promise<ClaudeCodeClientSession>;
+}
+
+export interface ClaudeCodeCliClientOptions {
+  command?: string;
+  processFactory?: (
+    command: string,
+    args: string[],
+    options: { cwd: string; env: NodeJS.ProcessEnv }
+  ) => {
+    readonly pid?: number | undefined;
+    readonly stdin: NodeJS.WritableStream;
+    readonly stdout: NodeJS.ReadableStream;
+    readonly stderr: NodeJS.ReadableStream;
+    once(event: "exit", listener: (code: number | null) => void): unknown;
+    once(event: "error", listener: (error: unknown) => void): unknown;
+    kill(signal: NodeJS.Signals): boolean;
+  };
+  permissionMode?: ClaudePermissionMode;
+  disabledTools?: string[];
+  hostedProviderCommand?: ProviderResolvedCommand;
+}
+
+export interface ClaudeCodeAdapterOptions {
+  client: ClaudeCodeClient;
+  logger?: RuntimeLogger;
+  command?: string;
+  liveProbe?: boolean;
+  maxBudgetUsd?: number;
+  requestTimeoutMs?: number;
+  permissionMode?: ClaudePermissionMode;
+  disabledTools?: string[];
+  hostedProviderCommand?: ProviderResolvedCommand;
+  doctor?: Omit<ClaudeCodeDoctorOptions, "command" | "liveProbe" | "maxBudgetUsd" | "requestTimeoutMs" | "permissionMode" | "disabledTools">;
 }
 
 export interface ClaudeCodeVersionProbeResult {

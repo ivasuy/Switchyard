@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ProviderResolvedCommand } from "@switchyard/contracts";
 import type { SwitchyardEvent } from "@switchyard/contracts";
 import { ClaudeCodeAdapter } from "../src/claude-code/claude-code-adapter.js";
 import { createFakeClaudeCodeClient, createFakeClaudeLiveProbe } from "@switchyard/testkit";
@@ -167,5 +168,61 @@ describe("ClaudeCodeAdapter", () => {
     await expect(adapter.start(makeStartRequest({ metadata: { "dangerously-skip-permissions": true } }))).rejects.toMatchObject({
       reasonCode: "claude_permission_bypass_denied"
     });
+  });
+
+  it("fails hosted approval-required states with hosted_approval_bridge_unsupported", async () => {
+    const fake = createFakeClaudeCodeClient({ approvalToken: "pause-1" });
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "claude_code.sdk",
+      executablePath: "/opt/provider/bin/claude",
+      argv: [],
+      cwd: "/repo",
+      env: { ANTHROPIC_API_KEY: "api-secret" },
+      envKeys: ["ANTHROPIC_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new ClaudeCodeAdapter({ client: fake.client, hostedProviderCommand });
+    const session = await adapter.start(makeStartRequest());
+
+    const events = [];
+    for await (const event of adapter.events({ ...session, runId: "run_claude" })) {
+      events.push(event);
+    }
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "run.failed",
+      payload: {
+        status: "failed",
+        reasonCode: "hosted_approval_bridge_unsupported"
+      }
+    });
+  });
+
+  it("rejects hosted post-start input with hosted_input_bridge_unsupported while preserving timeout/cancellation mapping", async () => {
+    const fake = createFakeClaudeCodeClient({ waitForInputText: true });
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "claude_code.sdk",
+      executablePath: "/opt/provider/bin/claude",
+      argv: [],
+      cwd: "/repo",
+      env: { ANTHROPIC_API_KEY: "api-secret" },
+      envKeys: ["ANTHROPIC_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new ClaudeCodeAdapter({ client: fake.client, hostedProviderCommand });
+    const session = await adapter.start(makeStartRequest());
+
+    await expect(adapter.send({ ...session, runId: "run_claude" }, { text: "continue" })).rejects.toMatchObject({
+      reasonCode: "hosted_input_bridge_unsupported"
+    });
+
+    await adapter.cancel({ ...session, runId: "run_claude" });
+    const events = [];
+    for await (const event of adapter.events({ ...session, runId: "run_claude" })) {
+      events.push(event);
+    }
+    expect(events.some((event) => event.type === "run.cancelled")).toBe(true);
   });
 });

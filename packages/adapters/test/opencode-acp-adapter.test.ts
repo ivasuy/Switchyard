@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { runtimeModeSchema } from "@switchyard/contracts";
+import { runtimeModeSchema, type ProviderResolvedCommand } from "@switchyard/contracts";
 import { AdapterProtocolError } from "@switchyard/core";
 import {
   OPENCODE_ACP_RUNTIME_MODE_SLUG,
   OpenCodeAcpAdapter
 } from "../src/index.js";
-import { createFakeAcpProcessFactory, type FakeAcpRuntimeStats } from "@switchyard/testkit";
+import { createFakeAcpProcessFactory, startFakeAcpRuntimeProcess, type FakeAcpRuntimeStats } from "@switchyard/testkit";
 
 describe("OpenCodeAcpAdapter", () => {
   it("exposes manifest compatible with opencode.acp runtime mode", () => {
@@ -245,5 +245,96 @@ describe("OpenCodeAcpAdapter", () => {
     const artifacts = await adapter.artifacts({ ...session, runId: "run_artifacts" });
     expect(artifacts[0]?.path).toBe("runs/run_artifacts/opencode-acp-transcript.jsonl");
     expect(String(artifacts[0]?.metadata.content)).toContain("\"method\":\"initialize\"");
+  });
+
+  it("passes filtered env in hosted mode and keeps one prompt per run", async () => {
+    const captured: { env?: NodeJS.ProcessEnv; prompts: number } = { prompts: 0 };
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "opencode.acp",
+      executablePath: "/opt/provider/bin/opencode",
+      argv: ["acp"],
+      cwd: "/repo",
+      env: {
+        OPENCODE_TOKEN: "token-secret"
+      },
+      envKeys: ["OPENCODE_TOKEN"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new OpenCodeAcpAdapter({
+      hostedProviderCommand,
+      processFactory: (_args, options) => {
+        captured.env = options.env;
+        const handle = startFakeAcpRuntimeProcess({ scenario: "happy" });
+        const originalWrite = handle.process.stdin.write.bind(handle.process.stdin);
+        handle.process.stdin.write = ((data: string) => {
+          if (data.includes("\"method\":\"session/prompt\"")) {
+            captured.prompts += 1;
+          }
+          return originalWrite(data);
+        }) as typeof handle.process.stdin.write;
+        return handle.process;
+      }
+    });
+
+    const session = await adapter.start({
+      runId: "run_env",
+      runtime: "opencode",
+      runtimeMode: "opencode.acp",
+      provider: "opencode",
+      model: "opencode-default",
+      cwd: "/repo",
+      task: "env check",
+      metadata: {}
+    });
+    const events = [];
+    for await (const event of adapter.events({ ...session, runId: "run_env" })) {
+      events.push(event);
+    }
+
+    expect(captured.env).toEqual({ OPENCODE_TOKEN: "token-secret" });
+    expect(captured.prompts).toBe(1);
+    expect(events.at(-1)?.type).toBe("run.completed");
+  });
+
+  it("maps hosted permission and input bridge failures to hosted reason codes", async () => {
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "opencode.acp",
+      executablePath: "/opt/provider/bin/opencode",
+      argv: ["acp"],
+      cwd: "/repo",
+      env: {},
+      envKeys: [],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const permission = new OpenCodeAcpAdapter({
+      hostedProviderCommand,
+      processFactory: createFakeAcpProcessFactory({ scenario: "permission_request" }),
+      probeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    const permissionSession = await permission.start({
+      runId: "run_perm_hosted",
+      runtime: "opencode",
+      runtimeMode: "opencode.acp",
+      provider: "opencode",
+      model: "opencode-default",
+      cwd: "/repo",
+      task: "permission path",
+      metadata: {}
+    });
+    const permissionEvents = [];
+    for await (const event of permission.events({ ...permissionSession, runId: "run_perm_hosted" })) {
+      permissionEvents.push(event);
+    }
+    expect(permissionEvents.at(-1)?.payload.reasonCode ?? permissionEvents.at(-1)?.payload.error).toBe(
+      "hosted_approval_bridge_unsupported"
+    );
+
+    await expect(
+      permission.send({ ...permissionSession, runId: "run_perm_hosted" }, { text: "continue" })
+    ).rejects.toMatchObject({
+      reasonCode: "hosted_input_bridge_unsupported"
+    } satisfies Partial<AdapterProtocolError>);
   });
 });

@@ -1,9 +1,17 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import type { ClaudeCodeClient, ClaudeCodeClientSession, ClaudeCodeProviderEvent, ClaudePermissionMode } from "./types.js";
+import { AdapterProtocolError } from "@switchyard/core";
+import type { ProviderResolvedCommand } from "@switchyard/contracts";
+import type {
+  ClaudeCodeCliClientOptions,
+  ClaudeCodeClient,
+  ClaudeCodeClientSession,
+  ClaudeCodeProviderEvent,
+  ClaudePermissionMode
+} from "./types.js";
 
 export interface ClaudeCodeCliProcess {
-  readonly pid?: number;
+  readonly pid?: number | undefined;
   readonly stdin: NodeJS.WritableStream;
   readonly stdout: NodeJS.ReadableStream;
   readonly stderr: NodeJS.ReadableStream;
@@ -18,28 +26,41 @@ export type ClaudeCodeCliProcessFactory = (
   options: { cwd: string; env: NodeJS.ProcessEnv }
 ) => ClaudeCodeCliProcess;
 
-export interface ClaudeCodeCliClientOptions {
-  command?: string;
-  processFactory?: ClaudeCodeCliProcessFactory;
-  permissionMode?: ClaudePermissionMode;
-  disabledTools?: string[];
-}
-
 export function createClaudeCodeCliClient(options: ClaudeCodeCliClientOptions = {}): ClaudeCodeClient {
   const command = options.command ?? "claude";
-  const permissionMode = options.permissionMode ?? "read_only";
-  const disabledTools = options.disabledTools ?? ["Bash", "WebFetch", "WebSearch"];
+  const permissionMode = options.hostedProviderCommand ? "read_only" : options.permissionMode ?? "read_only";
+  const disabledTools = options.hostedProviderCommand
+    ? ["Bash", "WebFetch", "WebSearch"]
+    : options.disabledTools ?? ["Bash", "WebFetch", "WebSearch"];
   const processFactory = options.processFactory ??
     ((cliCommand, args, processOptions) => spawn(cliCommand, args, { ...processOptions, shell: false }));
+  const hostedProviderCommand = options.hostedProviderCommand;
 
   return {
     async start(input): Promise<ClaudeCodeClientSession> {
+      if (hostedProviderCommand && !isValidHostedCommand(hostedProviderCommand, input.cwd, input.metadata)) {
+        throw new AdapterProtocolError("Hosted Claude command handoff denied.", {
+          reasonCode: "provider_command_denied"
+        });
+      }
       const args = buildClaudeCliArgs({
         task: input.task,
         permissionMode,
         disabledTools
       });
-      const child = processFactory(command, args, { cwd: input.cwd, env: process.env });
+      const spawnCommand = hostedProviderCommand?.executablePath ?? command;
+      const env = hostedProviderCommand ? filterHostedEnv(hostedProviderCommand) : process.env;
+      let child: ClaudeCodeCliProcess;
+      try {
+        child = processFactory(spawnCommand, args, { cwd: input.cwd, env });
+      } catch {
+        if (hostedProviderCommand) {
+          throw new AdapterProtocolError("Hosted Claude binary is unavailable.", {
+            reasonCode: "provider_binary_unavailable"
+          });
+        }
+        throw new Error("Claude CLI process spawn failed");
+      }
       const queue = createProviderQueue();
       let terminalSeen = false;
       let stderrBuffer = "";
@@ -56,7 +77,9 @@ export function createClaudeCodeCliClient(options: ClaudeCodeCliClientOptions = 
             reasonCode: "claude_process_exit_nonzero",
             error: {
               exitCode,
-              stderr: stderrBuffer.trim().length > 0 ? stderrBuffer : undefined
+              stderr: stderrBuffer.trim().length > 0
+                ? hostedProviderCommand ? "[REDACTED]" : stderrBuffer
+                : undefined
             }
           });
         }
@@ -121,8 +144,8 @@ export function createClaudeCodeCliClient(options: ClaudeCodeCliClientOptions = 
         if (!terminalSeen) {
           queue.push({
             type: "failed",
-            reasonCode: "claude_process_spawn_failed",
-            error: { message: error instanceof Error ? error.message : String(error) }
+            reasonCode: hostedProviderCommand ? "provider_binary_unavailable" : "claude_process_spawn_failed",
+            error: { message: hostedProviderCommand ? "[REDACTED]" : error instanceof Error ? error.message : String(error) }
           });
         }
         queue.close();
@@ -153,6 +176,67 @@ export function createClaudeCodeCliClient(options: ClaudeCodeCliClientOptions = 
       return session;
     }
   };
+}
+
+function isValidHostedCommand(
+  command: ProviderResolvedCommand,
+  cwd: string,
+  metadata: Record<string, unknown>
+): boolean {
+  if (command.runtimeMode !== "claude_code.sdk") {
+    return false;
+  }
+  if (command.cwd !== cwd) {
+    return false;
+  }
+  if (command.allowUserArgs || command.argv.length !== 0) {
+    return false;
+  }
+  return !hasDeniedMetadataKey(metadata);
+}
+
+function filterHostedEnv(command: ProviderResolvedCommand): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of command.envKeys) {
+    const value = command.env[key];
+    if (typeof value === "string") {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function hasDeniedMetadataKey(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasDeniedMetadataKey(entry));
+  }
+  const record = value as Record<string, unknown>;
+  for (const [key, entry] of Object.entries(record)) {
+    const normalized = key.toLowerCase();
+    if (
+      normalized === "command" ||
+      normalized === "binary" ||
+      normalized === "processfactory" ||
+      normalized.includes("pty") ||
+      normalized.includes("terminal") ||
+      normalized === "cwd" ||
+      normalized === "argv" ||
+      normalized === "args" ||
+      normalized === "env" ||
+      normalized === "shell" ||
+      normalized === "approval" ||
+      normalized === "input"
+    ) {
+      return true;
+    }
+    if (hasDeniedMetadataKey(entry)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function buildClaudeCliArgs(input: {
