@@ -283,3 +283,22 @@ The shipped boundary remains explicit: R20 does not ship dashboard, TUI, public 
 
 ### Deferred Concerns
 - None.
+
+## Phase 20: R21 Production Hosted Provider Runtime Activation (Spec Authored)
+**Date:** 2026-05-31
+**Spec:** docs/superpowers/specs/2026-05-31-phase-20-r21-production-hosted-provider-runtime.md
+**Plan:** pending - CTO to author next
+**Audit:** pending - implementation not yet started
+**Branch:** agent/phase-20-r21-production-hosted-provider-runtime (active planned; not merged)
+**PR:** not created - spec authoring only; native TUI/subagents workflow requested
+
+### What changed
+R21 is now spec-linked as the active planned phase. The spec defines production hosted provider runtime activation for known self-hosted provider modes only: `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`. It keeps production fake-only by default and requires explicit env opt-in, closed runtime allowlist, provider-specific policy, R20-style resolved command handoff where applicable, credential redaction, provider spend controls, preflight/readiness proof, smoke/canary coverage, and rollback behavior before production real-runtime execution can be considered shipped.
+
+The planned boundary remains explicit: R21 must not add dashboard/TUI, public arbitrary execution APIs, generic process/PTY adapters, Cursor/OpenClaw/Paperclip, hosted browser/search/GitHub/fetch/repo/shell tools, Generic HTTP/AgentField production activation, `codex.interactive` hosted production activation, hosted approval/input/terminal bridges, or hosted debate with real participant runtimes/model judging.
+
+### Deferred Concerns
+- **phase-20-implementation** - R21 is specified but not implemented or audited yet.
+  - Severity if not addressed: high
+  - Suggested follow-up: CTO plan and implementation for Phase 20 / R21
+  - Workaround: Keep the R20 production boundary in force: fake-only hosted execution by default, production hosted provider execution disabled.
