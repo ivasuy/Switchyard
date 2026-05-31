@@ -78,6 +78,7 @@ After R20, `PRODUCT.md` must say:
 - `pnpm --filter @switchyard/worker test -- production-config`
 - `pnpm --filter @switchyard/worker test -- production-worker-readiness`
 - `pnpm --filter @switchyard/worker test -- hosted-worker`
+- `pnpm production:sandbox-smoke`
 - `pnpm exec vitest run scripts/production-sandbox-smoke.test.ts`
 - `pnpm --filter @switchyard/contracts openapi:check`
 - `pnpm --filter @switchyard/contracts openapi:check:hosted`

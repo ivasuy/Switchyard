@@ -21,8 +21,10 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
 - `pnpm --filter @switchyard/worker test -- hosted-worker.test.ts production-worker-readiness.test.ts production-config.test.ts`
 - `pnpm --filter @switchyard/server test -- hosted-server.test.ts production-config.test.ts production-readiness.test.ts`
 - `pnpm exec vitest run scripts/production-preflight.test.ts deploy/production/production-manifest.test.ts`
+- `pnpm exec vitest run scripts/production-sandbox-smoke.test.ts`
+- `pnpm --filter @switchyard/contracts openapi:check`
 - `pnpm --filter @switchyard/contracts openapi:check:hosted`
-- `pnpm sandbox:smoke`
+- `pnpm production:sandbox-smoke`
 - `pnpm typecheck`
 
 ## Task Graph
@@ -46,11 +48,12 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
     "packages/core/src/services/hosted-sandbox-service.ts",
     "scripts/hosted-sandbox-smoke.ts"
   ],
-  "instructions": "Extend the existing sandbox contract in place. Add schemas/types for real sandbox execution mode, isolation driver, disabled-only network policy, command policy entries, and policy-resolved commands. A policy entry must include commandId, adapterType process|pty, absolute normalized executablePath, fixedArgs default [], allowUserArgs default false, cwdPrefixes as non-empty absolute normalized paths, envAllowlist default [], allowStdin default false, allowPtyInput default false, isolation { driver: none|container|microvm|external, required: boolean }, and networkPolicy limited to disabled for R20. Add named errors: sandbox_real_execution_disabled, sandbox_executable_denied, sandbox_cwd_denied, sandbox_env_denied, sandbox_pty_unavailable, sandbox_spawn_failed, sandbox_isolation_unavailable. Preserve existing fake command ids and request/result behavior.",
+  "instructions": "Extend the existing sandbox contract in place. Add schemas/types for real sandbox execution mode, isolation driver, disabled-only network policy, command policy entries, and policy-resolved commands. A policy entry must include commandId, adapterType process|pty, absolute normalized executablePath, fixedArgs default [], allowUserArgs default false, cwdPrefixes as non-empty absolute normalized paths, envAllowlist default [], allowStdin default false, allowPtyInput default false, isolation { driver: none|container|microvm|external, required: boolean }, and networkPolicy limited to disabled for R20. Reject blank executable paths, placeholder paths/segments, relative paths, traversal paths, shell/tool basenames, and absolute denylisted executables such as /bin/bash, /usr/bin/sh, /usr/bin/python, /usr/bin/codex, /usr/bin/claude, and /usr/bin/opencode. Add named errors: sandbox_real_execution_disabled, sandbox_executable_denied, sandbox_cwd_denied, sandbox_env_denied, sandbox_pty_unavailable, sandbox_spawn_failed, sandbox_isolation_unavailable. Preserve existing fake command ids and request/result behavior.",
   "acceptance": [
     "Existing fake process and fake PTY request tests still pass unchanged.",
     "Valid production process and PTY command policy entries parse only with absolute normalized executablePath and non-empty absolute cwdPrefixes.",
-    "Relative executable paths, traversing cwd prefixes, unsupported network policy values, and malformed env allowlist entries are rejected.",
+    "Blank, placeholder, shell/tool basename, absolute denylisted, relative, and traversing executable paths are rejected.",
+    "Relative cwd prefixes, traversing cwd prefixes, unsupported network policy values, and malformed env allowlist entries are rejected.",
     "New named sandbox errors parse and unknown errors remain rejected.",
     "No public route, OpenAPI path, runtime adapter, or worker behavior is introduced."
   ],
@@ -65,6 +68,13 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       "exception": "ZodError",
       "rescue": "Reject policy before config/readiness can mark sandbox ready.",
       "user_sees": "sandbox_policy_invalid; no job executes."
+    },
+    {
+      "codepath": "sandboxCommandPolicyEntrySchema.parse",
+      "failure": "blank, placeholder, shell/tool basename, or absolute denylisted executable path",
+      "exception": "ZodError",
+      "rescue": "Reject the policy entry before config/readiness can mark sandbox ready.",
+      "user_sees": "sandbox_executable_denied or sandbox_policy_invalid; no job executes."
     },
     {
       "codepath": "sandboxCommandPolicyEntrySchema.parse",
@@ -110,6 +120,12 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       "lens": "error_path",
       "given": "relative executable, traversing cwd prefix, or networkPolicy enabled",
       "expect": "ZodError."
+    },
+    {
+      "name": "rejects denylisted and placeholder executable config",
+      "lens": "error_path",
+      "given": "executablePath /bin/bash, /usr/bin/python, codex, /usr/bin/opencode, /srv/switchyard/example-command, or a blank path",
+      "expect": "ZodError or sandbox policy validation failure before worker startup."
     },
     {
       "name": "parses new named errors",
@@ -176,13 +192,15 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
     "packages/testkit/src/fake-hosted-sandbox-executor.ts",
     "scripts/hosted-sandbox-smoke.ts"
   ],
-  "instructions": "Extend HostedSandboxService and HostedSandboxPolicy in place. Keep core free of child_process, node-pty, @switchyard/adapters, browser, fetch, github, repo, and shell imports. Extend ResolvedHostedSandboxConfig with realExecution: { mode, commandPolicy, ptyDriverConfigured, redactedSummary }. resolveHostedSandboxConfig defaults real execution to disabled and parses SWITCHYARD_SANDBOX_REAL_EXECUTION plus SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON. If real execution is enabled without valid non-empty policy, config.valid must be false with sandbox_policy_missing or sandbox_policy_invalid. Change HostedSandboxPolicy.decide to inspect full SandboxJobRequest. Fake commands retain existing behavior. Non-fake commands are denied unless real execution is enabled and commandId exactly matches policy whose adapterType, cwd prefix, env keys, stdin, argv, and PTY input settings allow the request. Pass resolvedCommand to executor options. Extend HostedSandboxExecutorOutput with optional reasonCode so executor-specific named failures survive normalization.",
+  "instructions": "Extend HostedSandboxService and HostedSandboxPolicy in place. Keep core free of child_process, node-pty, @switchyard/adapters, browser, fetch, github, repo, and shell imports. Extend ResolvedHostedSandboxConfig with realExecution: { mode, commandPolicy, ptyDriverConfigured, redactedSummary }. resolveHostedSandboxConfig defaults real execution to disabled and parses SWITCHYARD_SANDBOX_REAL_EXECUTION plus SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON. Treat JSON-in-env as a small operator catalog: enforce maximum JSON bytes, maximum entry count, duplicate commandId rejection, and redacted parse diagnostics that expose only code/path/counts. If real execution is enabled without valid non-empty policy, config.valid must be false with sandbox_policy_missing or sandbox_policy_invalid. Reject policy entries with placeholder executable paths, shell/tool basenames, absolute denylisted executables, or isolation.required=true unless the selected isolation driver is actually implemented/configured; use sandbox_executable_denied or sandbox_isolation_unavailable before worker startup. Change HostedSandboxPolicy.decide to inspect full SandboxJobRequest. Fake commands retain existing behavior. Non-fake commands are denied unless real execution is enabled and commandId exactly matches policy whose adapterType, cwd prefix, env keys, stdin, argv, and PTY input settings allow the request. Pass resolvedCommand to executor options. Extend HostedSandboxExecutorOutput with optional reasonCode so executor-specific named failures survive normalization.",
   "acceptance": [
     "Fake sandbox behavior remains backwards compatible.",
     "Real execution disabled denies non-fake commandIds with sandbox_real_execution_disabled before executor invocation.",
     "Real execution enabled with matching policy passes resolvedCommand to executor.",
     "Policy denies cwd outside prefixes with sandbox_cwd_denied and env keys outside envAllowlist with sandbox_env_denied.",
     "Policy denies stdin or PTY input when disabled by policy.",
+    "Oversized policy JSON, duplicate commandId entries, placeholder paths, shell/tool basenames, absolute denylisted executables, and unsupported required isolation all fail config/readiness before executor invocation.",
+    "Malformed policy diagnostics are redacted and never echo executablePath, cwd, argv, env, stdin, or raw JSON.",
     "Policy exceptions become sandbox_policy_failed.",
     "Executor output reasonCode values such as sandbox_pty_unavailable and sandbox_spawn_failed are preserved.",
     "Core source still contains no real execution imports."
@@ -205,6 +223,27 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       "exception": "SyntaxError or ZodError",
       "rescue": "Set sandbox_policy_missing or sandbox_policy_invalid with redacted diagnostics.",
       "user_sees": "readiness/preflight reports named sandbox code."
+    },
+    {
+      "codepath": "resolveHostedSandboxConfig",
+      "failure": "policy JSON is oversized, has too many entries, or contains duplicate commandId values",
+      "exception": "explicit validation branch",
+      "rescue": "Set sandbox_policy_invalid with counts-only redacted diagnostics.",
+      "user_sees": "readiness/preflight reports sandbox_policy_invalid without raw policy contents."
+    },
+    {
+      "codepath": "resolveHostedSandboxConfig",
+      "failure": "policy executable is a shell/tool basename, an absolute denylisted executable, or a placeholder path",
+      "exception": "explicit validation branch",
+      "rescue": "Set sandbox_executable_denied or sandbox_policy_invalid before readiness can pass.",
+      "user_sees": "worker startup/readiness fails before any process starts."
+    },
+    {
+      "codepath": "resolveHostedSandboxConfig",
+      "failure": "policy requires unsupported isolation driver",
+      "exception": "explicit validation branch",
+      "rescue": "Set sandbox_isolation_unavailable and keep sandbox readiness fail-closed.",
+      "user_sees": "readiness/preflight reports sandbox_isolation_unavailable."
     },
     {
       "codepath": "HostedSandboxPolicy.decide",
@@ -255,6 +294,24 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       "lens": "error_path",
       "given": "SWITCHYARD_SANDBOX_REAL_EXECUTION=enabled without policy",
       "expect": "config invalid and readiness sandbox_policy_missing."
+    },
+    {
+      "name": "policy JSON is bounded and deterministic",
+      "lens": "error_path",
+      "given": "oversized JSON, duplicate commandId entries, malformed JSON, or too many command policy entries",
+      "expect": "config invalid with sandbox_policy_invalid and diagnostics contain only counts/paths/codes."
+    },
+    {
+      "name": "denylisted executable config fails before startup",
+      "lens": "error_path",
+      "given": "policy executablePath /bin/bash, /usr/bin/sh, /usr/bin/python, /usr/bin/codex, /usr/bin/claude, or /usr/bin/opencode",
+      "expect": "config invalid with sandbox_executable_denied or sandbox_policy_invalid and executor not called."
+    },
+    {
+      "name": "unsupported isolation requirement fails closed",
+      "lens": "error_path",
+      "given": "policy isolation { driver: 'microvm', required: true } without a configured supported driver",
+      "expect": "readiness fails with sandbox_isolation_unavailable before worker claim."
     },
     {
       "name": "real policy passes resolved command",
@@ -353,7 +410,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
     "packages/adapters/test/real-tool-adapters.test.ts",
     "packages/adapters/src/index.ts"
   ],
-  "instructions": "Create a new adapter substrate, not a runtime adapter. Export ProductionHostedSandboxExecutor plus process and PTY factory interfaces from packages/adapters/src/index.ts. The executor implements HostedSandboxExecutorPort and requires options.resolvedCommand for real execution. Process execution uses node:child_process.spawn through an injectable factory, shell:false, stdio pipes, exact argv/cwd/env from resolvedCommand, bounded output collection, stdin write only when policy allowed, and AbortSignal kill handling. PTY execution uses an injectable ptyFactory; when absent, return status failed with sandbox_pty_unavailable. Do not register runtime adapters, add public APIs, invoke provider CLIs, or import testkit from production source.",
+  "instructions": "Create a new adapter substrate, not a runtime adapter. Export ProductionHostedSandboxExecutor plus process and PTY factory interfaces from packages/adapters/src/index.ts. The executor implements HostedSandboxExecutorPort and requires options.resolvedCommand for real execution. Process execution uses node:child_process.spawn through an injectable factory, shell:false, stdio pipes, exact argv/cwd/env from resolvedCommand, bounded output collection, stdin write only when policy allowed, and AbortSignal kill handling. PTY execution uses an injectable ptyFactory; when absent, return status failed with sandbox_pty_unavailable. PTY driver spawn errors, close failures, stream/data errors, write failures, resize failures, and abort cleanup must return named low-cardinality sandbox reason codes and must never fall back to process execution. Stdin write failures in the process path must also map to named sandbox failure and clean up the child. Do not register runtime adapters, add public APIs, invoke provider CLIs, or import testkit from production source.",
   "acceptance": [
     "Process execution calls spawn with shell:false and policy-resolved executablePath, argv, cwd, env.",
     "Injection-like argv entries remain literal argv entries.",
@@ -363,6 +420,8 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
     "AbortSignal cancellation kills child and settles cleanly.",
     "Output collection is bounded.",
     "PTY without ptyFactory returns sandbox_pty_unavailable.",
+    "PTY spawn, close, stream/data, write, resize, and abort cleanup failures return named sandbox failures and never fall back to process execution.",
+    "Process stdin write failure kills/cleans up the child and returns a named sandbox failure.",
     "PTY fake driver receives input and resize frames in order.",
     "Executor is exported for worker construction but no runtime adapter map changes are made."
   ],
@@ -405,6 +464,27 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       "exception": "no throw",
       "rescue": "Return sandbox_pty_unavailable.",
       "user_sees": "sandbox_pty_unavailable; no PTY starts."
+    },
+    {
+      "codepath": "runPty",
+      "failure": "ptyFactory.spawn throws/emits error, PTY stream errors, or PTY closes with failure",
+      "exception": "Error event or thrown Error",
+      "rescue": "Return sandbox_process_failed or sandbox_pty_unavailable with redacted metadata and never retry as process.",
+      "user_sees": "failed SandboxJobResult with named reason."
+    },
+    {
+      "codepath": "runPty",
+      "failure": "PTY write or resize fails after spawn",
+      "exception": "Error from write/resize",
+      "rescue": "Kill/close PTY, cleanup listeners, return sandbox_process_failed with redacted metadata.",
+      "user_sees": "failed SandboxJobResult with named reason; no fallback execution."
+    },
+    {
+      "codepath": "runProcess",
+      "failure": "stdin write fails or stream errors",
+      "exception": "Error event or rejected write",
+      "rescue": "Kill child, cleanup listeners, return sandbox_process_failed with redacted metadata.",
+      "user_sees": "failed SandboxJobResult with named reason."
     }
   ],
   "observability": {
@@ -453,6 +533,18 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       "lens": "happy",
       "given": "pty without factory, then pty with fake factory and frames",
       "expect": "sandbox_pty_unavailable first; fake factory receives dimensions/write/resize second."
+    },
+    {
+      "name": "pty driver failures are fail-closed",
+      "lens": "error_path",
+      "given": "ptyFactory spawn throws, data stream errors, close failure, write failure, resize failure, and abort",
+      "expect": "named sandbox failure, listeners cleaned up, and no process fallback."
+    },
+    {
+      "name": "stdin write failure is named",
+      "lens": "error_path",
+      "given": "process stdin emits error while writing allowed stdin",
+      "expect": "child is killed/cleaned up and result reasonCode is sandbox_process_failed."
     }
   ],
   "integration_contracts": {
@@ -477,7 +569,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       {
         "from_task": "P19-T2-core-sandbox-policy-gate",
         "name": "HostedSandboxExecutorPort",
-        "signature": "execute(request, options?: { signal?: AbortSignal; resolvedCommand?: SandboxResolvedCommand }) => Promise<HostedSandboxExecutorOutput>"
+        "signature": "execute(request: SandboxJobRequest & { resourceLimits: SandboxResourceLimits }, options?: { signal?: AbortSignal; resolvedCommand?: SandboxResolvedCommand }) => Promise<HostedSandboxExecutorOutput>"
       },
       {
         "from_task": "P19-T1-sandbox-contract-policy",
@@ -666,7 +758,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
     "scripts/production-preflight.ts",
     "scripts/production-preflight.test.ts",
     "deploy/production/manifest.json",
-    ".env.example"
+    "deploy/production/.env.example"
   ],
   "dependencies": [
     "P19-T1-sandbox-contract-policy",
@@ -682,7 +774,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
     "scripts/production-manifest.ts",
     "scripts/production-preflight.ts",
     "deploy/production/manifest.json",
-    ".env.example"
+    "deploy/production/.env.example"
   ],
   "instructions": "Extend R19 production posture without adding execution surface. Server config/readiness may parse/report sandbox config posture but must not execute sandbox work. Production manifest validation must include sandboxExecution policy posture and keep public arbitrary execution surfaces forbidden. Add SWITCHYARD_SANDBOX_REAL_EXECUTION=disabled to examples as safe default. If env enables real sandbox execution, preflight requires valid command policy and disabled network policy before dependency checks. Add route guards for /shell, /process, and /command in addition to /sandbox, /exec, /pty, /terminal. Hosted OpenAPI remains free of these paths.",
   "acceptance": [
@@ -698,6 +790,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
   "checks": [
     "pnpm --filter @switchyard/server test -- hosted-server.test.ts production-config.test.ts production-readiness.test.ts",
     "pnpm exec vitest run scripts/production-preflight.test.ts deploy/production/production-manifest.test.ts",
+    "pnpm --filter @switchyard/contracts openapi:check",
     "pnpm --filter @switchyard/contracts openapi:check:hosted"
   ],
   "error_rescue_map": [
@@ -817,6 +910,8 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
   "title": "Update no-spend smoke and product truth",
   "files": [
     "scripts/hosted-sandbox-smoke.ts",
+    "scripts/production-sandbox-smoke.test.ts",
+    "package.json",
     "PRODUCT.md",
     "CHANGELOG.md",
     "ARCHITECTURE.md",
@@ -841,32 +936,34 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
     "scripts/hosted-sandbox-smoke.ts",
     "deploy/production/README.md"
   ],
-  "instructions": "Keep this task docs and no-spend verification only. Extend hosted-sandbox-smoke to cover existing fake behavior plus default real-execution disabled posture, enabled-without-policy readiness failure, denied non-fake command while disabled, and fake PTY echo. Update PRODUCT.md and CHANGELOG.md to state R20 shipped an internal production sandbox foundation and ops gates, not public routes or hosted provider execution. Update ARCHITECTURE.md for worker-only sandbox construction, policy-first resolved command handoff, and PTY driver fail-closed boundary. Update API docs to explicitly say no /exec, /shell, /process, /command, /pty, /terminal, or /sandbox API exists. Update development and production docs with smoke/preflight commands and safe default env posture.",
+  "instructions": "Keep this task docs and no-spend verification only. Add a root package.json `production:sandbox-smoke` script and deterministic `scripts/production-sandbox-smoke.test.ts`. Extend hosted-sandbox-smoke or create a production smoke wrapper to cover existing fake behavior plus process, PTY, denied, timeout, cancel, output-limit, artifact, transcript redaction, readiness, local OpenAPI boundary, hosted OpenAPI boundary, default real-execution disabled posture, enabled-without-policy readiness failure, denied non-fake command while disabled, and fake PTY echo. Update PRODUCT.md and CHANGELOG.md to state R20 shipped an internal production sandbox foundation and ops gates, not public routes or hosted provider execution. Update ARCHITECTURE.md for worker-only sandbox construction, policy-first resolved command handoff, and PTY driver fail-closed boundary. Update API docs to explicitly say no /exec, /shell, /process, /command, /pty, /terminal, or /sandbox API exists. Update development and production docs with production:sandbox-smoke, preflight commands, and safe default env posture.",
   "acceptance": [
-    "pnpm sandbox:smoke still prints sandbox:smoke OK.",
-    "Smoke covers disabled real execution and enabled-without-policy failure without spawning a real process.",
+    "pnpm production:sandbox-smoke prints sandbox:smoke OK or production:sandbox-smoke OK.",
+    "scripts/production-sandbox-smoke.test.ts covers process, PTY, denied, timeout, cancel, output-limit, artifact, transcript redaction, readiness, local OpenAPI boundary, hosted OpenAPI boundary, disabled real execution, and enabled-without-policy failure without live provider spend.",
     "PRODUCT.md snapshot and R20 section distinguish shipped internal foundation from unshipped public routes/adapters.",
     "CHANGELOG.md includes R20 summary and non-goals.",
     "ARCHITECTURE.md states worker-only sandbox construction and PTY driver fail-closed behavior.",
     "API docs state no public arbitrary subprocess/PTY routes exist.",
-    "Development and production docs document sandbox:smoke, preflight, safe default env posture.",
+    "Development and production docs document production:sandbox-smoke, preflight, safe default env posture.",
     "Docs do not claim hosted Codex/Claude/OpenCode, Cursor/OpenClaw/Paperclip, browser, real tools, public arbitrary execution APIs, dashboard/TUI, or hosted debate shipped."
   ],
   "checks": [
-    "pnpm sandbox:smoke",
+    "pnpm production:sandbox-smoke",
+    "pnpm exec vitest run scripts/production-sandbox-smoke.test.ts",
+    "pnpm --filter @switchyard/contracts openapi:check",
     "pnpm --filter @switchyard/contracts openapi:check:hosted",
     "pnpm typecheck"
   ],
   "error_rescue_map": [
     {
-      "codepath": "hosted-sandbox-smoke",
+      "codepath": "production-sandbox-smoke",
       "failure": "default sandbox readiness not ok or real disabled denial regresses",
       "exception": "assertion Error",
       "rescue": "Exit non-zero with sandbox_smoke_failed.",
       "user_sees": "operator sees failing smoke assertion."
     },
     {
-      "codepath": "hosted-sandbox-smoke enabled-without-policy",
+      "codepath": "production-sandbox-smoke enabled-without-policy",
       "failure": "readiness passes without policy",
       "exception": "assertion Error",
       "rescue": "Fail smoke because policy gate regressed.",
@@ -882,7 +979,7 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
   ],
   "observability": {
     "logs": [
-      "sandbox:smoke OK on success",
+      "production:sandbox-smoke OK or sandbox:smoke OK on success",
       "sandbox_smoke_failed:<reason> on failure"
     ],
     "success_metric": "no-spend smoke validates fake execution plus fail-closed real sandbox posture.",
@@ -890,10 +987,10 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
   },
   "test_cases": [
     {
-      "name": "existing smoke still completes",
+      "name": "production smoke still completes",
       "lens": "happy",
       "given": "default fake echo/artifact/timeout/cancel",
-      "expect": "sandbox:smoke OK."
+      "expect": "production:sandbox-smoke exits 0 and prints an OK marker."
     },
     {
       "name": "real execution disabled is explicit",
@@ -924,6 +1021,12 @@ PTY is driver-injected and fail-closed in R20. Node has no PTY builtin, so absen
       "lens": "edge_boundary",
       "given": "PRODUCT.md and API docs",
       "expect": "public arbitrary execution routes and provider execution remain non-goals."
+    },
+    {
+      "name": "production smoke guards both OpenAPI surfaces",
+      "lens": "edge_boundary",
+      "given": "generated local and hosted OpenAPI documents",
+      "expect": "no /exec, /shell, /process, /command, /pty, /terminal, or /sandbox paths exist."
     }
   ],
   "integration_contracts": {
