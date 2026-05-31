@@ -12,7 +12,7 @@ Ship production-operability for the existing safe hosted boundary: provider-neut
 
 1. Existing code already partially solves this through `apps/server/src/config.ts`, `apps/server/src/readiness.ts`, `apps/server/src/app.ts`, `apps/worker/src/config.ts`, `apps/worker/src/worker.ts`, `apps/node/src/config.ts`, `packages/storage/src/postgres/database.ts`, `packages/storage/src/object-store-config.ts`, hosted metrics, R18 control-plane bootstrap/readiness, hosted OpenAPI generation, and `deploy/self-hosted/`. Extend those paths; do not create a parallel config system, second readiness schema, new web server, new queue abstraction, or provider-specific deploy stack.
 2. Minimum useful change: production manifests outside `deploy/self-hosted/`, stricter production env validation, explicit schema compatibility and migration command, readiness/schema checks, worker claim gates, node production policy gates, preflight/canary scripts, and docs. Dashboard, TUI, payments, OAuth/SSO/SCIM, public tenant self-service, production hosted real runtimes, public exec/sandbox/terminal routes, hosted/connected-node real tools, browser automation, Cursor/OpenClaw/Paperclip, runtime-specific approval bridges, hosted debate/model judging, and provider-specific Terraform/Helm/Fly/Render/AWS modules stay out.
-3. Complexity smell: this phase necessarily touches more than 8 files because production operability spans deploy artifacts, server/worker/node config, storage schema gates, readiness, scripts, contracts, and docs. The plan contains 6 task-scoped worktrees with disjoint file ownership and no new runtime services beyond one shared production-config guard helper and one Postgres schema-compatibility helper.
+3. Complexity smell: this phase necessarily touches more than 8 files because production operability spans deploy artifacts, server/worker/node config, storage schema gates, readiness, scripts, contracts, and docs. The plan contains 7 task-scoped worktrees with disjoint file ownership and no new runtime services beyond one shared production-config guard helper, one Postgres schema-compatibility helper, and script-only production ops entrypoints.
 4. Built-in check: use existing Zod contracts/OpenAPI generator, Fastify routes/hooks, Node `URL`, Node `crypto`, Node `fs/promises`, global `fetch`, existing `pg`/Drizzle-shaped Postgres handle, existing BullMQ queue adapter, existing object-store resolver/probe, existing `redactSecrets`, existing Vitest scripts, and JSON for machine-readable production manifest validation. Do not add YAML parsers, cloud SDKs beyond the existing storage S3 client, auth frameworks, logging frameworks, payment SDKs, browser automation, PTY packages, or shell/process execution surfaces.
 5. Distribution check: no new npm package or managed hosted artifact ships. Distribution changes are provider-neutral files under `deploy/production/`, root package scripts for `production:preflight`, `production:migrate`, and `production:canary`, and updated hosted OpenAPI JSON when schema docs change. Local daemon, SDK, CLI, local metrics, local OpenAPI, local real tools, local runtimes, and local debate remain no-auth/backwards compatible by default.
 
@@ -58,7 +58,8 @@ The canary uses only existing hosted HTTP APIs. It does not invoke model provide
 - `apps/server/src/app.ts`, `readiness.ts`, `metrics.ts`, `main.ts` - production schema readiness, redacted startup logs, and preserved protected metrics.
 - `apps/worker/src/worker.ts`, `main.ts`, `ready.ts` - worker readiness before claims and orchestrator-friendly readiness command.
 - `apps/node/src/main.ts` - redacted node startup/failure logs.
-- `scripts/production-preflight.ts`, `production-migrate.ts`, `production-canary.ts` - no-spend operator commands with dependency injection for deterministic tests.
+- `scripts/production-env.ts`, `production-manifest.ts`, `production-preflight.ts`, `production-migrate.ts` - no-spend production env parsing, manifest validation, preflight, and migration commands with deterministic seams.
+- `scripts/production-canary.ts` - no-spend production canary API workflow over existing hosted routes.
 - `packages/contracts/src/openapi.ts`, `openapi.contract.test.ts`, `packages/contracts/openapi.hosted-server.json` - hosted readiness/metrics contract truth if shape changes.
 - `PRODUCT.md`, `README.md`, `docs/development/API.md`, `docs/development/DEVELOPMENT.md` - R19 product/API/development truth.
 
@@ -220,13 +221,14 @@ environment:
 - `packages/core/src/services/hosted-runtime-catalog.ts` - existing hosted runtime allowlist validation and fake-only production rule.
 
 **instructions:**
-1. Add shared core helpers that return structured validation failures rather than throwing app-specific errors: `validateProductionSecret`, `validateProductionUrlCredential`, `validateProductionFakeOnlyAllowlist`, `validateProductionHttpsUrl`, `validateProductionCwdPrefixes`, and `isPlaceholderSecret`. Reuse existing `redactSecrets` for any summary payload.
-2. Placeholder/low-signal strings rejected in production must include empty/whitespace, `replace-me`, `replace-with-*`, `switchyard`, `password`, `secret`, `test`, and `example` case-insensitively. `SWITCHYARD_API_KEY_PEPPER` and `SWITCHYARD_NODE_SHARED_TOKEN` must be at least 32 characters in production.
-3. Server production validation must require Postgres, Redis, object-store backend-specific settings via the existing resolver, node shared token, hosted allowlist exactly `fake.deterministic`, hosted real runtime disabled or absent, API-key auth, API-key pepper, Postgres control-plane store, bootstrap path or JSON, and public metrics absent/false. Reject placeholder credentials in API-key pepper, node token, Postgres URL password, Redis URL password, S3 access key id, and S3 secret access key. Keep staging at least as strict as today but do not break existing local/test no-auth defaults.
-4. Worker production validation must require Postgres, Redis, object store, non-disabled object-store probe via existing resolver, hosted allowlist exactly `fake.deterministic`, hosted real runtime disabled or absent, valid sandbox config, valid idle interval, and fake deterministic adapter-check posture. Reject placeholder URL credentials and S3 credentials.
-5. Node production validation must require `SWITCHYARD_SERVER_URL`, `SWITCHYARD_NODE_SHARED_TOKEN`, `SWITCHYARD_NODE_CAPABILITIES`, `SWITCHYARD_NODE_ALLOW_RUNTIME_MODES`, and `SWITCHYARD_NODE_ALLOW_CWD_PREFIXES`. Production server URL must be `https://`. Runtime allowlist must be exactly `fake.deterministic`. CWD prefixes must be non-empty and must reject `/`, `.`/`..`, blank strings, backslash paths, and drive-root-style values in production.
-6. Ensure all `ConfigError.redactedConfig` payloads expose only booleans, counts, deployment mode, endpoint scheme/host from existing redacted object-store summary, and allowlist names. They must not include raw URLs with credentials, API keys, node tokens, object keys, or raw bootstrap values.
-7. Add focused production config tests for happy, nil, empty, placeholder, malformed, unsafe allowlist, public metrics, bad URL, invalid numeric, and redaction paths. Include explicit local/test compatibility assertions for no-auth local daemon-adjacent behavior: defaults continue to parse without API keys, Postgres, Redis, object store, or node token.
+1. Work in this sequence inside the same worktree to keep the broad task controlled: first add shared guard tests and helpers in `packages/core`, then wire server config, then worker config, then node config, then add cross-app redaction/local-compatibility tests. Do not edit readiness, scripts, manifests, docs, or storage schema in this task.
+2. Add shared core helpers that return structured validation failures rather than throwing app-specific errors: `validateProductionSecret`, `validateProductionUrlCredential`, `validateProductionFakeOnlyAllowlist`, `validateProductionHttpsUrl`, `validateProductionCwdPrefixes`, and `isPlaceholderSecret`. Reuse existing `redactSecrets` for any summary payload.
+3. Placeholder/low-signal strings rejected in production must include empty/whitespace, `replace-me`, `replace-with-*`, `switchyard`, `password`, `secret`, `test`, and `example` case-insensitively. `SWITCHYARD_API_KEY_PEPPER` and `SWITCHYARD_NODE_SHARED_TOKEN` must be at least 32 characters in production.
+4. Server production validation must require Postgres, Redis, object-store backend-specific settings via the existing resolver, node shared token, hosted allowlist exactly `fake.deterministic`, hosted real runtime disabled or absent, API-key auth, API-key pepper, Postgres control-plane store, bootstrap path or JSON, and public metrics absent/false. Reject placeholder credentials in API-key pepper, node token, Postgres URL password, Redis URL password, S3 access key id, and S3 secret access key. Keep staging at least as strict as today but do not break existing local/test no-auth defaults.
+5. Worker production validation must require Postgres, Redis, object store, non-disabled object-store probe via existing resolver, hosted allowlist exactly `fake.deterministic`, hosted real runtime disabled or absent, valid sandbox config, valid idle interval, and fake deterministic adapter-check posture. Reject placeholder URL credentials and S3 credentials.
+6. Node production validation must require `SWITCHYARD_SERVER_URL`, `SWITCHYARD_NODE_SHARED_TOKEN`, `SWITCHYARD_NODE_CAPABILITIES`, `SWITCHYARD_NODE_ALLOW_RUNTIME_MODES`, and `SWITCHYARD_NODE_ALLOW_CWD_PREFIXES`. Production server URL must be `https://`. Runtime allowlist must be exactly `fake.deterministic`. CWD prefixes must be non-empty and must reject `/`, `.`/`..`, blank strings, backslash paths, and drive-root-style values in production.
+7. Ensure all `ConfigError.redactedConfig` payloads expose only booleans, counts, deployment mode, endpoint scheme/host from existing redacted object-store summary, and allowlist names. They must not include raw URLs with credentials, API keys, node tokens, object keys, or raw bootstrap values.
+8. Add focused production config tests for happy, nil, empty, placeholder, malformed, unsafe allowlist, public metrics, bad URL, invalid numeric, and redaction paths. Include explicit local/test compatibility assertions for no-auth local daemon-adjacent behavior: defaults continue to parse without API keys, Postgres, Redis, object store, or node token.
 
 **acceptance:**
 - Production server rejects missing/empty/malformed Postgres, Redis, object store, node token, auth mode, API-key pepper, control-plane store, bootstrap, public metrics, placeholder secrets, unsafe hosted runtime allowlists, and enabled hosted real runtime execution.
@@ -259,6 +261,7 @@ environment:
 - `failure_metric`: `ConfigError code frequency by named config/secret variable in preflight output or startup logs`
 
 **test_cases:**
+- `{ "name": "helper-first sequencing holds", "lens": "integration", "given": "production-config tests import guard helpers and app config tests use the app resolvers", "expect": "shared helper tests pass before app config tests; no script/readiness/storage files are touched by this task" }`
 - `{ "name": "valid production server env parses", "lens": "happy", "given": "production env with Postgres/Redis/local object store, api_key auth, postgres control plane, bootstrap JSON, 32+ char pepper/token, fake.deterministic allowlist", "expect": "loadServerConfig returns deploymentMode production and redacted summary has booleans only" }`
 - `{ "name": "missing production server postgres fails", "lens": "happy_shadow_nil", "given": "delete SWITCHYARD_POSTGRES_URL", "expect": "throws config_required:SWITCHYARD_POSTGRES_URL" }`
 - `{ "name": "empty production server pepper fails", "lens": "happy_shadow_empty", "given": "SWITCHYARD_API_KEY_PEPPER='   '", "expect": "throws config_required:SWITCHYARD_API_KEY_PEPPER or secret_placeholder:SWITCHYARD_API_KEY_PEPPER without leaking value" }`
@@ -278,6 +281,9 @@ environment:
   - `{ "name": "validateProductionFakeOnlyAllowlist", "kind": "function", "signature": "validateProductionFakeOnlyAllowlist(allowlist: readonly string[]) => { ok: true } | { ok: false; code: string; variable: 'SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST' }", "file": "packages/core/src/services/production-config-guards.ts" }`
   - `{ "name": "validateProductionHttpsUrl", "kind": "function", "signature": "validateProductionHttpsUrl(input: { variable: string; value?: string }) => { ok: true } | { ok: false; code: string; variable: string }", "file": "packages/core/src/services/production-config-guards.ts" }`
   - `{ "name": "validateProductionCwdPrefixes", "kind": "function", "signature": "validateProductionCwdPrefixes(prefixes: readonly string[]) => { ok: true } | { ok: false; code: string; variable: 'SWITCHYARD_NODE_ALLOW_CWD_PREFIXES' }", "file": "packages/core/src/services/production-config-guards.ts" }`
+  - `{ "name": "loadServerConfig", "kind": "function", "signature": "loadServerConfig(env?: NodeJS.ProcessEnv) => ServerConfig | throws apps/server ConfigError", "file": "apps/server/src/config.ts" }`
+  - `{ "name": "loadWorkerConfig", "kind": "function", "signature": "loadWorkerConfig(env?: NodeJS.ProcessEnv) => WorkerConfig | throws apps/worker ConfigError", "file": "apps/worker/src/config.ts" }`
+  - `{ "name": "loadNodeConfig", "kind": "function", "signature": "loadNodeConfig(env?: NodeJS.ProcessEnv) => NodeAppConfig | throws apps/node ConfigError", "file": "apps/node/src/config.ts" }`
 - `imports_from_other_tasks`: []
 - `file_paths_consumed_by_other_tasks`: ["apps/server/src/config.ts", "apps/worker/src/config.ts", "apps/node/src/config.ts", "packages/core/src/services/production-config-guards.ts"]
 
@@ -392,12 +398,13 @@ environment:
 1. Add a schema check to `probeServerReadiness`. When production/staging has a Postgres handle, call `checkPostgresSchemaCompatibility`; report `checks.schema = { ok: true, code:'postgres_schema_ready', diagnostics:{ version, expectedVersion } }` on success and `ok:false` with the compatibility code on failure. Local/test without Postgres should remain ready.
 2. Ensure `/health` stays cheap and does not call dependency probes. Add tests proving `/health` returns `{ ok:true }` even when injected readiness dependencies would fail.
 3. Keep `/ready` redacted. Diagnostics may include backend type, endpoint scheme/host, bucket, key prefix, timeout, probe mode, credential-presence booleans, schema expected/actual version, and unowned counts. They must not include raw URLs with credentials, object keys, signed URLs, API keys, node tokens, provider output, task text, cwd, or bootstrap secret hashes.
-4. Preserve production `/metrics` protection. If metrics schema is unchanged, keep counters already present; if adding schema counters, keep them low-cardinality and update P18-T6 contracts. Tests must prove production/staging metrics require API key auth with both `metrics:read` and `admin:read`, and `SWITCHYARD_PUBLIC_METRICS=1` remains forbidden by P18-T2.
-5. In the worker, run readiness before the first claim and before each `service.processNext()` in production/staging. If readiness fails, do not call `queue.claim()` and return `false` or exit on startup according to `main.ts` behavior. The reason must be named (`postgres_unavailable`, `postgres_schema_migration_required`, `postgres_schema_version_unsupported`, `queue_unavailable`, `object_store_unavailable`, `sandbox_config_invalid`, `hosted_real_runtime_production_forbidden`, or adapter check code).
-6. Add `apps/worker/src/ready.ts` as an orchestrator-friendly readiness command that loads worker config, builds the worker, calls `ready()`, prints structured redacted JSON, exits `0` on ready and nonzero on failure, and closes resources. This is the command referenced by P18-T1 manifests.
-7. Harden `apps/worker/src/main.ts` startup: config validation errors and production readiness failures log `worker.start_failed` with code and redacted config/checks before any claim. Local/test behavior remains compatible.
-8. Harden `apps/node/src/main.ts` startup logs: log `node.started` on successful config/start with redacted summary, and `node.start_failed` on config/register errors. Do not add real tool or real runtime capability.
-9. Add deterministic tests with fake queues/stores/probes: server readiness schema ready/migration-required/unsupported/unavailable, redaction, metrics auth, health cheapness, worker no-claim on readiness failure, worker empty queue happy path, and worker invalid payload behavior remains named and no adapter starts.
+4. Preserve production `/metrics` protection. If metrics schema is unchanged, keep counters already present; if adding schema counters, keep them low-cardinality and update P18-T7 contracts. Tests must prove production/staging metrics require API key auth with both `metrics:read` and `admin:read`, and `SWITCHYARD_PUBLIC_METRICS=1` remains forbidden by P18-T2.
+5. In the worker, split readiness into full probes and cheap claim gates. `worker.ready({ mode: "full" })` must probe Postgres/schema, queue stats, object-store probe, sandbox, hosted runtime gate, and configured adapters. `tick()` in production/staging must call a cached claim gate before every `service.processNext()`: it may reuse a successful full readiness result for a short bounded TTL such as 5 seconds, must refresh when the TTL expires, and must never call `queue.claim()` while the cached or refreshed readiness result is failed. The cheap per-tick path must not perform Postgres/queue/object-store probes on every empty queue tick while the ready cache is valid.
+6. If readiness fails, do not call `queue.claim()` and return `false` or exit on startup according to `main.ts` behavior. The reason must be named (`postgres_unavailable`, `postgres_schema_migration_required`, `postgres_schema_version_unsupported`, `queue_unavailable`, `object_store_unavailable`, `sandbox_config_invalid`, `hosted_real_runtime_production_forbidden`, or adapter check code).
+7. Add `apps/worker/src/ready.ts` as an orchestrator-friendly readiness command that loads worker config, builds the worker, calls `ready({ mode: "full" })`, prints structured redacted JSON, exits `0` on ready and nonzero on failure, and closes resources. This is the command referenced by P18-T1 manifests.
+8. Harden `apps/worker/src/main.ts` startup: config validation errors and production readiness failures log `worker.start_failed` with code and redacted config/checks before any claim. Local/test behavior remains compatible.
+9. Harden `apps/node/src/main.ts` startup logs: log `node.started` on successful config/start with redacted summary, and `node.start_failed` on config/register errors. Do not add real tool or real runtime capability.
+10. Add deterministic tests with fake queues/stores/probes: server readiness schema ready/migration-required/unsupported/unavailable, redaction, metrics auth, health cheapness, worker no-claim on readiness failure, worker repeated empty ticks do not repeatedly probe dependencies within the TTL, worker empty queue happy path, and worker invalid payload behavior remains named and no adapter starts.
 
 **acceptance:**
 - `/ready` includes a named schema check and returns 503 for migration required, future schema, malformed schema, or Postgres unavailable in production/staging.
@@ -405,6 +412,7 @@ environment:
 - `/ready` and worker readiness diagnostics are redacted.
 - Production metrics remain API-key protected by `metrics:read` plus `admin:read`.
 - Worker does not claim jobs when DB, queue, object store, schema, sandbox, hosted runtime gate, or adapter readiness fails.
+- Worker repeated empty-queue ticks use cached full readiness for dependency/object-store probes and still run the cheap before-claim gate before each claim attempt.
 - Worker readiness command exists and is usable from production manifests.
 - Node startup/failure logs redact shared tokens and credentialed URLs.
 - No hosted middleware tool routes or public exec/sandbox/PTY/terminal/browser/search routes are added.
@@ -425,6 +433,7 @@ environment:
 - `{ "codepath": "GET /ready diagnostics", "failure": "secret appears in serialized readiness", "exception": "Vitest redaction assertion failure", "rescue": "Run diagnostics through redactSecrets and only include safe summaries", "user_sees": "No secrets leak from readiness" }`
 - `{ "codepath": "GET /metrics auth hook", "failure": "missing or insufficient API key", "exception": "ControlPlaneError auth_required/auth_failed/entitlement_denied", "rescue": "Return existing HTTP error envelope before metrics body", "user_sees": "401/403 error envelope; metrics not exposed" }`
 - `{ "codepath": "worker.tick production readiness gate", "failure": "queue/schema/object-store/sandbox/runtime readiness fails", "exception": "Ready result ok=false", "rescue": "Do not call queue.claim; log named readiness failure; return false or exit at startup", "user_sees": "Worker remains idle/unready and no job is claimed" }`
+- `{ "codepath": "worker.tick cached claim gate", "failure": "expensive readiness probes run on every empty queue tick", "exception": "Vitest probe-count assertion failure", "rescue": "Cache successful full readiness for the bounded TTL while still checking the cached gate before queue.claim", "user_sees": "Worker remains responsive without excessive dependency/object-store probing" }`
 - `{ "codepath": "worker queue payload", "failure": "missing payload or run id", "exception": "existing queue/run validation error", "rescue": "Discard/fail with queue_payload_invalid and never start adapters", "user_sees": "Run/job fails visibly with named reason, not silent drop" }`
 - `{ "codepath": "node main startup", "failure": "register/auth/policy/config failure", "exception": "ConfigError or NodeClientError", "rescue": "Log node.start_failed with code and redacted summary, exit nonzero", "user_sees": "Node does not register or claim assignments under unsafe config" }`
 
@@ -441,6 +450,8 @@ environment:
 - `{ "name": "readiness redacts credentials", "lens": "error_path", "given": "credentialed Postgres/Redis/object-store/node/bootstrap fixture", "expect": "JSON.stringify(/ready body) does not contain fake secrets, URLs with passwords, object keys, or raw hashes" }`
 - `{ "name": "metrics require admin metrics scopes", "lens": "integration", "given": "hosted auth app with no auth, metrics-only key, and admin key", "expect": "no auth denied, metrics-only denied, admin succeeds" }`
 - `{ "name": "worker no-claim on schema failure", "lens": "error_path", "given": "worker ready returns postgres_schema_migration_required and queue claim spy", "expect": "tick returns false and claim spy not called" }`
+- `{ "name": "worker repeated ticks cache expensive probes", "lens": "edge_probe_count", "given": "production worker with ready dependencies passing, empty queue, fake clock inside readiness TTL, and five tick() calls", "expect": "queue.claim is called five times, but Postgres probe, queue.stats, object-store probe, and adapter readiness checks are each called once until TTL expiry" }`
+- `{ "name": "worker cache expiry refreshes readiness", "lens": "edge_probe_count", "given": "production worker with fake clock advanced beyond readiness TTL between ticks", "expect": "next tick refreshes Postgres/schema, queue.stats, object-store, sandbox, runtime gate, and adapter checks before queue.claim" }`
 - `{ "name": "worker empty queue is healthy", "lens": "happy_shadow_empty", "given": "ready dependencies pass and queue.claim returns null", "expect": "tick returns false without error" }`
 - `{ "name": "worker invalid payload does not start adapter", "lens": "error_path", "given": "claimed job missing runId or durable run", "expect": "job failed/discarded with queue_payload_invalid or existing named lifecycle reason and adapter spy not called" }`
 - `{ "name": "node startup logs are redacted", "lens": "error_path", "given": "node config/register failure with token and credentialed URL", "expect": "node.start_failed payload omits token and URL credentials" }`
@@ -448,117 +459,248 @@ environment:
 **integration_contracts:**
 - `exports`:
   - `{ "name": "ReadinessReport", "kind": "type", "signature": "{ ok: boolean; checks: Record<string, { ok: boolean; code?: string; diagnostics?: Record<string, unknown> }> } with checks.schema for production Postgres compatibility", "file": "apps/server/src/readiness.ts" }`
-  - `{ "name": "worker ready command", "kind": "function", "signature": "node apps/worker/dist/ready.js => stdout JSON { ok:boolean, reason?:string, checks?:object } and exit code 0/1", "file": "apps/worker/src/ready.ts" }`
+  - `{ "name": "WorkerReadinessReport", "kind": "type", "signature": "{ ok: boolean; reason?: string; checks?: Record<string, { ok: boolean; code?: string; diagnostics?: Record<string, unknown> }> }", "file": "apps/worker/src/worker.ts" }`
+  - `{ "name": "runWorkerReadinessCommand", "kind": "function", "signature": "runWorkerReadinessCommand(env?: NodeJS.ProcessEnv) => Promise<WorkerReadinessReport>", "file": "apps/worker/src/ready.ts" }`
 - `imports_from_other_tasks`:
-  - `{ "from_task": "P18-T2-production-config-hardening", "name": "production config guard helpers", "signature": "validateProduction* helpers exported from @switchyard/core" }`
+  - `{ "from_task": "P18-T2-production-config-hardening", "name": "loadWorkerConfig", "signature": "loadWorkerConfig(env?: NodeJS.ProcessEnv) => WorkerConfig | throws apps/worker ConfigError" }`
   - `{ "from_task": "P18-T3-postgres-schema-migration-gates", "name": "checkPostgresSchemaCompatibility", "signature": "checkPostgresSchemaCompatibility(handle: PostgresDatabaseHandle) => Promise<PostgresSchemaCompatibility>" }`
 - `file_paths_consumed_by_other_tasks`: ["apps/server/src/readiness.ts", "apps/worker/src/ready.ts", "apps/server/src/metrics.ts"]
 
-### Task P18-T5-preflight-and-canary-commands: Add Production Preflight, Migration, And Canary Commands
+### Task P18-T5-production-preflight-migrate: Add Production Preflight And Migration Commands
 
-**id:** `P18-T5-preflight-and-canary-commands`
-**title:** `Add production preflight, migration, and canary commands`
+**id:** `P18-T5-production-preflight-migrate`
+**title:** `Add production preflight and migration commands`
 
 **files:**
 - Modify: `package.json`
+- Create: `scripts/production-env.ts`
+- Create: `scripts/production-manifest.ts`
 - Create: `scripts/production-preflight.ts`
 - Create: `scripts/production-migrate.ts`
-- Create: `scripts/production-canary.ts`
-- Create: `scripts/production-ops.test.ts`
+- Create: `scripts/production-preflight.test.ts`
+- Create: `scripts/production-migrate.test.ts`
 
 **dependencies:** ["P18-T1-production-manifest-pack", "P18-T2-production-config-hardening", "P18-T3-postgres-schema-migration-gates", "P18-T4-readiness-worker-node-operability"]
 
 **context_files:**
-- `docs/superpowers/specs/2026-05-31-phase-18-r19-production-hosted-deployment.md` - FR3/FR4/FR5 preflight, migration, canary, and no-spend constraints.
-- `package.json` - root script naming pattern for self-hosted and hosted smoke commands.
-- `scripts/self-hosted-smoke.ts` - existing fetch/poll/error style and named failure pattern.
-- `deploy/self-hosted/docker-compose.yml` - existing staging manifest style; the new production manifest contract comes from P18-T1 integration exports.
+- `docs/superpowers/specs/2026-05-31-phase-18-r19-production-hosted-deployment.md` - FR3/FR4 preflight, migration, env parsing, failure-code, and no-spend constraints.
+- `package.json` - root script naming pattern for smoke and production commands.
+- `scripts/self-hosted-smoke.ts` - existing CLI argument, structured result, and named failure style.
 - `apps/server/src/config.ts` - server config resolver from P18-T2.
 - `apps/worker/src/config.ts` - worker config resolver from P18-T2.
 - `apps/node/src/config.ts` - node config resolver from P18-T2.
 - `packages/storage/src/postgres/database.ts` - schema compatibility and migration exports from P18-T3.
 
 **instructions:**
-1. Add root scripts:
-   - `production:preflight`: `tsx scripts/production-preflight.ts`
-   - `production:migrate`: `tsx scripts/production-migrate.ts`
-   - `production:canary`: `tsx scripts/production-canary.ts`
-2. `production-preflight.ts` must accept `--env-file <path>`, `--manifest <path>`, `--include-node`, and `--json` (JSON default is acceptable). It must parse env files without executing shell code, merge with current process env, and validate server/worker/optional node config through the actual resolvers from P18-T2.
-3. Preflight must JSON-parse `deploy/production/manifest.json` and validate required env keys, production commands, no dev commands, health/readiness checks, fake-only runtime posture, object-store probe posture, and forbidden surfaces. Use the JSON manifest as the structured source rather than ad hoc YAML parsing.
-4. Preflight must check Postgres schema compatibility using P18-T3, queue connectivity via the existing queue adapter stats path, object-store probe via the existing object-store factory, and control-plane bootstrap/readiness posture. Production CLI runs use real configured dependencies; tests inject deterministic fakes. Output shape:
-   `{ ok:boolean, checks:[{ name:string, status:'pass'|'fail'|'skip', code:string, diagnostics?:object }], summary:{ deploymentMode:'production', manifest:string, checkedAt:string } }`.
-5. `production-migrate.ts` must accept `--env-file <path>` and run only the idempotent P18-T3 migration against the configured Postgres URL. It must print redacted JSON and exit nonzero with named codes on missing env, unavailable Postgres, or migration failure.
-6. `production-canary.ts` must accept `--base-url`, `--api-key` or `SWITCHYARD_CANARY_API_KEY`, `--timeout-ms`, and `--json`. It must call only `/ready`, `/runs`, `/runs/:id`, `/runs/:id/events`, `/runs/:id/artifacts`, `/artifacts/:id/content`, `/metrics`, `/auth/whoami`, `/entitlements`, and `/audit/events`.
-7. Canary create payload must use `runtime:"fake"`, `provider:"test"`, `model:"test-model"`, `adapterType:"process"`, `runtimeMode:"fake.deterministic"`, `placement:"hosted"`, `cwd:"/repo"`, static task label `r19 production canary`, and metadata including `{ switchyardCanary: "r19-production", canaryId, startedAt }`.
-8. Canary must poll run detail until `completed` or timeout, parse SSE replay from `/runs/:id/events`, fetch artifact metadata/content, verify non-empty content without printing bytes, call protected `/metrics` with the same API key, and verify audit/ownership evidence by finding the canary run id or canary metadata in `/audit/events` output where the R18 route supports it.
-9. Every failure returns a named code: `env_file_missing`, `env_file_empty`, `config_check_failed`, `manifest_missing`, `manifest_invalid`, `postgres_schema_migration_required`, `postgres_schema_version_unsupported`, `postgres_unavailable`, `queue_unavailable`, `object_store_unavailable`, `control_plane_bootstrap_missing`, `auth_required`, `auth_invalid`, `ready_denied`, `run_create_denied`, `worker_timeout`, `artifact_missing`, `artifact_content_empty`, `artifact_digest_mismatch`, `metrics_auth_failed`, `audit_lookup_failed`, `unexpected_terminal_status`, or `malformed_response`.
-10. Tests must instantiate exported runner functions with fake env, fake dependencies, and fake fetch. They must not call live AWS/R2, model providers, payment providers, GitHub, search, browsers, arbitrary commands, PTY, or public network dependencies.
+1. Add root scripts in `package.json`: `production:preflight` as `tsx scripts/production-preflight.ts`, `production:migrate` as `tsx scripts/production-migrate.ts`, and `production:canary` as `tsx scripts/production-canary.ts`. The canary script file is owned by P18-T6; this task only owns the package script entry so docs and operators have one stable command set.
+2. Add `scripts/production-env.ts` with a strict env-file parser that never executes shell code. Behavior is fixed:
+   - Missing file returns `env_file_missing`; a zero-byte or whitespace-only file returns `env_file_empty`.
+   - Blank lines and lines whose first non-whitespace character is `#` are ignored.
+   - Valid assignments are `KEY=value` where `KEY` matches `/^[A-Za-z_][A-Za-z0-9_]*$/`.
+   - Leading/trailing whitespace around keys, `=`, and unquoted values is trimmed.
+   - Single-quoted values preserve literal content until the closing quote. Double-quoted values support `\"` and `\\`; no command substitution, variable expansion, backticks, or shell escapes are executed.
+   - Inline comments are allowed only outside quotes when `#` is preceded by whitespace.
+   - `KEY=`, unquoted whitespace-only values, and quoted whitespace-only values produce an empty string; downstream config resolvers treat them as missing.
+   - Duplicate keys are invalid and return `env_duplicate_key`; invalid lines, unterminated quotes, and malformed keys return `env_file_invalid_line`.
+   - The parser collects every duplicate/invalid-line error with redacted line numbers before preflight decides whether to continue.
+3. Add `scripts/production-manifest.ts` to JSON-parse `deploy/production/manifest.json` from P18-T1 and validate required env keys, production commands, no `dev` or install commands, health/readiness checks, worker readiness gate path, fake-only runtime posture, object-store probe posture, and forbidden surfaces. Use `manifest.json` as the structured source; do not parse compose YAML except as a text sanity check in P18-T1 tests.
+4. Define preflight aggregation semantics explicitly in `runProductionPreflight`:
+   - Input blockers (`env_file_missing`, `env_file_empty`, `env_file_invalid_line`, `env_duplicate_key`, `manifest_missing`, `manifest_invalid`) return all input/manifest parse failures and skip app config and dependency checks.
+   - When input parsing succeeds, run server, worker, optional node config, and manifest rule validation independently and collect all failures instead of stopping at the first config failure.
+   - If any config or manifest rule fails, skip live/injected dependency checks to avoid misleading network probes against known-unsafe config.
+   - If config and manifest validation pass, run schema, queue, object-store, control-plane bootstrap/store/quota/audit/unowned-resource, and hosted runtime gate checks independently with bounded timeouts and collect all failures in one JSON response.
+5. `production-preflight.ts` must accept `--env-file <path>`, `--manifest <path>`, `--include-node`, and `--json` (JSON default is acceptable). It must merge parsed env values over current process env only after env parsing succeeds, then call `loadServerConfig`, `loadWorkerConfig`, and optionally `loadNodeConfig` from P18-T2.
+6. Preflight output shape is `{ ok:boolean, checks:Array<{ name:string; status:'pass'|'fail'|'skip'; code:string; diagnostics?:object }>, summary:{ deploymentMode:'production'; manifest:string; checkedAt:string } }`. Diagnostics must be redacted and low-cardinality.
+7. Preflight must expose named failure codes for at least: `postgres_schema_migration_required`, `postgres_schema_version_unsupported`, `postgres_unavailable`, `queue_unavailable`, `object_store_unavailable`, `control_plane_bootstrap_missing`, `control_plane_bootstrap_account_missing`, `control_plane_bootstrap_tenant_missing`, `control_plane_bootstrap_project_missing`, `control_plane_bootstrap_user_missing`, `control_plane_bootstrap_api_key_missing`, `control_plane_bootstrap_billing_plan_missing`, `control_plane_node_token_unbound`, `quota_store_unavailable`, `audit_store_unavailable`, `unowned_resources_present`, and `hosted_runtime_gate_failed`.
+8. `production-migrate.ts` must accept `--env-file <path>` and run only `migratePostgresSchema` from P18-T3 against the configured Postgres URL. It must print redacted JSON and exit nonzero with named codes on missing/empty/invalid env, unavailable Postgres, or migration failure.
+9. Tests must call exported runner functions with fake env files, fake queue/object/control-plane/schema dependencies, and no live network. Required tests must not call live AWS/R2, model providers, payment providers, GitHub, search, browsers, arbitrary commands, PTY, or public network dependencies.
 
 **acceptance:**
-- Root production preflight, migration, and canary commands exist.
-- Preflight validates app config, manifest, schema compatibility, queue, object store, control plane, auth, quota, audit, unowned resources, and hosted runtime gate with structured redacted output.
+- Root `production:preflight`, `production:migrate`, and `production:canary` package scripts exist with stable command names.
+- Env parser behavior is deterministic for duplicate keys, comments, quotes, whitespace-only values, missing/empty files, and invalid lines.
+- Preflight all-failures-vs-first-failure behavior is explicit and tested.
+- Preflight validates app config, manifest, schema compatibility, queue, object store, control plane bootstrap/account/tenant/project/user/API-key/billing/node-token binding, quota, audit, unowned resources, and hosted runtime gate with structured redacted output.
 - Migration command is idempotent and delegates to P18-T3 migration.
-- Canary verifies authenticated readiness, fake hosted run creation, worker completion, events, artifacts, artifact content, metrics auth, and audit/ownership evidence.
-- Preflight/canary failures have named reason codes and redacted diagnostics.
+- Preflight and migration failures have named reason codes and redacted diagnostics.
 - Required tests are deterministic/no-spend.
 
 **checks:**
-- `pnpm exec vitest run scripts/production-ops.test.ts`
+- `pnpm exec vitest run scripts/production-preflight.test.ts scripts/production-migrate.test.ts`
 - `pnpm production:preflight -- --env-file deploy/production/.env.example --manifest deploy/production/manifest.json --json` must fail with expected placeholder/config codes, not with parse/runtime errors.
+- `pnpm production:migrate -- --env-file /definitely/missing --json` must fail with `env_file_missing` without opening Postgres.
 - `pnpm typecheck`
 - `git diff --check scripts package.json`
 
 **error_rescue_map:**
-- `{ "codepath": "readEnvFile", "failure": "missing env file", "exception": "ENOENT", "rescue": "Return env_file_missing and do not run dependency checks", "user_sees": "Preflight/migrate JSON check envFile status fail code env_file_missing" }`
-- `{ "codepath": "readEnvFile", "failure": "empty env file", "exception": "explicit empty content check", "rescue": "Return env_file_empty", "user_sees": "Preflight/migrate JSON shows env_file_empty" }`
-- `{ "codepath": "config resolver checks", "failure": "server/worker/node config throws ConfigError", "exception": "ConfigError", "rescue": "Convert to failed check with error.code and redactedConfig", "user_sees": "Preflight JSON names config_required/secret_placeholder/config_forbidden without secrets" }`
-- `{ "codepath": "manifest validation", "failure": "manifest missing/malformed/unsafe", "exception": "ENOENT, SyntaxError, explicit validation failure", "rescue": "Return manifest_missing, manifest_invalid, manifest_forbidden_command, or manifest_forbidden_surface", "user_sees": "Preflight blocks deploy before traffic" }`
-- `{ "codepath": "schema check", "failure": "migration required or unsupported", "exception": "PostgresSchemaCompatibility ok=false", "rescue": "Return the compatibility code and do not mark preflight ok", "user_sees": "Operator sees production:migrate or rollback guidance code" }`
+- `{ "codepath": "parseProductionEnvFile", "failure": "missing env file", "exception": "ENOENT", "rescue": "Return env_file_missing and skip config/dependency checks", "user_sees": "Preflight/migrate JSON includes envFile status fail code env_file_missing" }`
+- `{ "codepath": "parseProductionEnvFile", "failure": "empty or whitespace-only env file", "exception": "explicit empty content check", "rescue": "Return env_file_empty", "user_sees": "Preflight/migrate JSON shows env_file_empty" }`
+- `{ "codepath": "parseProductionEnvFile", "failure": "duplicate key", "exception": "explicit duplicate-key check", "rescue": "Return env_duplicate_key for every duplicate line and do not merge env", "user_sees": "Preflight JSON identifies duplicate env keys by name and line without secret values" }`
+- `{ "codepath": "parseProductionEnvFile", "failure": "invalid assignment, malformed key, or unterminated quote", "exception": "explicit line parser failure", "rescue": "Return env_file_invalid_line for every bad line", "user_sees": "Preflight JSON lists invalid line numbers with redacted snippets" }`
+- `{ "codepath": "validateProductionManifest", "failure": "manifest missing/malformed/unsafe", "exception": "ENOENT, SyntaxError, explicit validation failure", "rescue": "Return manifest_missing, manifest_invalid, manifest_forbidden_command, or manifest_forbidden_surface", "user_sees": "Preflight blocks deploy before traffic" }`
+- `{ "codepath": "config resolver checks", "failure": "server/worker/node config throws ConfigError", "exception": "ConfigError", "rescue": "Convert every resolver failure to failed checks with error.code and redactedConfig", "user_sees": "Preflight JSON names config_required/secret_placeholder/config_forbidden without secrets" }`
+- `{ "codepath": "schema check", "failure": "migration required, future unsupported schema, malformed metadata, or unavailable Postgres", "exception": "PostgresSchemaCompatibility ok=false or pg Error", "rescue": "Return postgres_schema_migration_required, postgres_schema_version_unsupported, postgres_schema_malformed, or postgres_unavailable", "user_sees": "Operator sees migration or rollback guidance code" }`
 - `{ "codepath": "queue stats check", "failure": "Redis unavailable or stats timeout", "exception": "BullMQ/ioredis Error", "rescue": "Return queue_unavailable with redacted host diagnostics", "user_sees": "Preflight fails before deploy" }`
-- `{ "codepath": "object-store probe", "failure": "auth/bucket/timeout/read/write/delete failure", "exception": "object store Error message", "rescue": "Return existing object_store_* or artifact_* reason code with redacted summary", "user_sees": "Preflight fails with backend/host/bucket/probe only" }`
-- `{ "codepath": "canary input", "failure": "missing or empty API key/base URL", "exception": "explicit validation failure", "rescue": "Return auth_required or invalid_input without making HTTP calls", "user_sees": "Canary exits nonzero with named input code" }`
-- `{ "codepath": "canary HTTP response parse", "failure": "empty or malformed JSON/SSE response", "exception": "SyntaxError or explicit shape check", "rescue": "Return malformed_response with step name", "user_sees": "Canary JSON identifies bad step without raw body" }`
-- `{ "codepath": "canary worker wait", "failure": "run never completes before timeout", "exception": "timeout loop", "rescue": "Return worker_timeout and include runId only", "user_sees": "Canary exits nonzero; durable run id can be inspected" }`
-- `{ "codepath": "canary artifact content", "failure": "missing, empty, digest mismatch, or object-store error", "exception": "HTTP 404/409/503 or empty body", "rescue": "Return artifact_missing, artifact_content_empty, artifact_digest_mismatch, or object-store code", "user_sees": "Canary identifies artifact failure without printing bytes/object keys" }`
-- `{ "codepath": "canary metrics/audit", "failure": "metrics denied or audit evidence missing", "exception": "HTTP 401/403 or no matching audit record", "rescue": "Return metrics_auth_failed or audit_lookup_failed", "user_sees": "Canary shows auth/evidence failure with no API key leak" }`
+- `{ "codepath": "object-store probe", "failure": "auth, bucket, timeout, read, write, delete, or digest failure", "exception": "object store Error message", "rescue": "Return object_store_unavailable or existing object_store_/artifact_ reason code with redacted summary", "user_sees": "Preflight fails with backend/host/bucket/probe only" }`
+- `{ "codepath": "control-plane bootstrap checks", "failure": "missing active account/tenant/project/user/api key/billing plan or node-token binding", "exception": "explicit bootstrap shape check", "rescue": "Return the matching control_plane_bootstrap_* or control_plane_node_token_unbound code", "user_sees": "Preflight names the missing bootstrap binding before deploy" }`
+- `{ "codepath": "control-plane store checks", "failure": "quota store unavailable, audit store unavailable, or unowned resources exist", "exception": "store probe rejection or explicit count check", "rescue": "Return quota_store_unavailable, audit_store_unavailable, or unowned_resources_present", "user_sees": "Preflight blocks traffic with redacted counts only" }`
+- `{ "codepath": "hosted runtime gate check", "failure": "production runtime gate is unsafe", "exception": "validateHostedRuntimeAllowlist failure", "rescue": "Return hosted_runtime_gate_failed with source code in diagnostics", "user_sees": "Preflight refuses non-fake production runtime posture" }`
+- `{ "codepath": "runProductionMigration", "failure": "Postgres unavailable or migration fails", "exception": "pg Error or migration rejection", "rescue": "Return postgres_unavailable or postgres_schema_migration_failed with redacted diagnostics", "user_sees": "Migration command exits nonzero without leaking DB URL" }`
 
 **observability:**
-- `logs`: ["preflight JSON check results", "migration JSON result", "canary JSON steps with elapsedMs/runId/artifactId/terminalStatus"]
-- `success_metric`: `preflight ok=true, migration version=19, canary ok=true with ready/run/events/artifact/metrics/audit steps pass`
-- `failure_metric`: `named preflight/canary codes listed in failed check/step`
+- `logs`: ["preflight JSON check results", "migration JSON result"]
+- `success_metric`: `preflight ok=true with all configured checks pass; migration ok=true version=19`
+- `failure_metric`: `named preflight/migration codes listed in failed checks`
 
 **test_cases:**
+- `{ "name": "env parser handles comments and quotes", "lens": "happy", "given": "env text with comments, KEY=value, SINGLE='literal # value', DOUBLE=\"escaped \\\" value\", and inline comments outside quotes", "expect": "parseProductionEnvFile returns expected key/value map without executing expansion" }`
+- `{ "name": "env parser missing file", "lens": "happy_shadow_nil", "given": "--env-file /missing", "expect": "ok=false code=env_file_missing and dependency fakes not called" }`
+- `{ "name": "env parser empty file", "lens": "happy_shadow_empty", "given": "empty temp env file or whitespace-only env file", "expect": "ok=false code=env_file_empty" }`
+- `{ "name": "env parser duplicate keys fail closed", "lens": "error_path", "given": "SWITCHYARD_PORT=4646 followed by SWITCHYARD_PORT=9999", "expect": "ok=false code=env_duplicate_key and no last-write-wins merge occurs" }`
+- `{ "name": "env parser whitespace-only values become missing", "lens": "happy_shadow_empty", "given": "SWITCHYARD_API_KEY_PEPPER='   '", "expect": "config check fails with config_required or secret_placeholder and output omits spaces" }`
+- `{ "name": "env parser invalid line fails", "lens": "error_path", "given": "NOT VALID or KEY without equals or unterminated quote", "expect": "ok=false code=env_file_invalid_line with redacted line numbers" }`
 - `{ "name": "preflight valid fake dependencies passes", "lens": "happy", "given": "valid production env plus injected schema-ready queue/object/control-plane fakes", "expect": "ok=true and all checks pass" }`
-- `{ "name": "preflight missing env file", "lens": "happy_shadow_nil", "given": "--env-file /missing", "expect": "ok=false code=env_file_missing and no dependency fakes called" }`
-- `{ "name": "preflight empty env file", "lens": "happy_shadow_empty", "given": "empty temp env file", "expect": "ok=false code=env_file_empty" }`
-- `{ "name": "preflight placeholder secrets redacted", "lens": "error_path", "given": "env with replace-with-pepper and fake DB passwords", "expect": "ok=false, code secret_placeholder, serialized output omits raw values" }`
+- `{ "name": "preflight aggregates config failures", "lens": "error_path", "given": "env missing server pepper, worker Redis, and node token with include-node", "expect": "one result contains all three failed config checks and skips dependency checks" }`
+- `{ "name": "preflight aggregates dependency failures", "lens": "error_path", "given": "valid config with schema future version, queue unavailable, object-store unavailable, audit unavailable, and unowned counts", "expect": "one result includes postgres_schema_version_unsupported, queue_unavailable, object_store_unavailable, audit_store_unavailable, and unowned_resources_present" }`
 - `{ "name": "preflight schema migration required", "lens": "error_path", "given": "schema fake returns postgres_schema_migration_required", "expect": "ok=false and schema check code matches" }`
+- `{ "name": "preflight schema malformed", "lens": "error_path", "given": "schema fake returns postgres_schema_malformed", "expect": "ok=false code=postgres_schema_malformed" }`
+- `{ "name": "preflight postgres unavailable", "lens": "error_path", "given": "schema fake rejects before metadata read", "expect": "ok=false code=postgres_unavailable" }`
+- `{ "name": "preflight queue unavailable", "lens": "error_path", "given": "queue stats fake rejects", "expect": "ok=false code=queue_unavailable" }`
+- `{ "name": "preflight object store unavailable", "lens": "error_path", "given": "object-store probe fake rejects", "expect": "ok=false code=object_store_unavailable or existing object_store_* code" }`
+- `{ "name": "preflight bootstrap missing", "lens": "happy_shadow_nil", "given": "valid production env without bootstrap path or JSON", "expect": "ok=false code=control_plane_bootstrap_missing" }`
+- `{ "name": "preflight bootstrap account missing", "lens": "error_path", "given": "bootstrap has zero active accounts", "expect": "ok=false code=control_plane_bootstrap_account_missing" }`
+- `{ "name": "preflight bootstrap tenant missing", "lens": "error_path", "given": "bootstrap has zero active tenants", "expect": "ok=false code=control_plane_bootstrap_tenant_missing" }`
+- `{ "name": "preflight bootstrap project missing", "lens": "error_path", "given": "bootstrap has zero active projects", "expect": "ok=false code=control_plane_bootstrap_project_missing" }`
+- `{ "name": "preflight bootstrap user missing", "lens": "error_path", "given": "bootstrap has zero active users", "expect": "ok=false code=control_plane_bootstrap_user_missing" }`
+- `{ "name": "preflight bootstrap api key missing", "lens": "error_path", "given": "bootstrap has zero active api keys", "expect": "ok=false code=control_plane_bootstrap_api_key_missing" }`
+- `{ "name": "preflight bootstrap billing missing", "lens": "error_path", "given": "bootstrap has zero active billing plans", "expect": "ok=false code=control_plane_bootstrap_billing_plan_missing" }`
+- `{ "name": "preflight node token unbound", "lens": "error_path", "given": "node token configured but no bootstrap binding", "expect": "ok=false code=control_plane_node_token_unbound" }`
+- `{ "name": "preflight quota store unavailable", "lens": "error_path", "given": "quota store fake rejects", "expect": "ok=false code=quota_store_unavailable" }`
+- `{ "name": "preflight audit store unavailable", "lens": "error_path", "given": "audit store fake rejects", "expect": "ok=false code=audit_store_unavailable" }`
+- `{ "name": "preflight unowned resources present", "lens": "error_path", "given": "unowned resource fake counts runs/artifacts/audit rows", "expect": "ok=false code=unowned_resources_present with counts only" }`
+- `{ "name": "preflight runtime gate failure", "lens": "error_path", "given": "production allowlist includes codex.exec_json", "expect": "ok=false code=hosted_runtime_gate_failed" }`
+- `{ "name": "preflight manifest missing", "lens": "happy_shadow_nil", "given": "--manifest /missing", "expect": "ok=false code=manifest_missing and dependency checks skipped" }`
+- `{ "name": "preflight manifest malformed", "lens": "error_path", "given": "manifest file containing invalid JSON", "expect": "ok=false code=manifest_invalid" }`
 - `{ "name": "preflight manifest dev command rejected", "lens": "error_path", "given": "manifest fake with command containing dev", "expect": "ok=false code=manifest_forbidden_command" }`
+- `{ "name": "preflight manifest forbidden surface rejected", "lens": "error_path", "given": "manifest fake declaring dashboard or public exec surface", "expect": "ok=false code=manifest_forbidden_surface" }`
 - `{ "name": "migration idempotent", "lens": "integration", "given": "fake Postgres migration runner called twice", "expect": "both return ok=true version=19" }`
-- `{ "name": "canary happy path", "lens": "happy", "given": "fake fetch sequence for ready, whoami, entitlements, run create/detail completed, SSE events, artifacts, content, metrics, audit", "expect": "ok=true with runId and artifactId; no raw artifact bytes in output" }`
-- `{ "name": "canary missing api key", "lens": "happy_shadow_nil", "given": "no --api-key and no env key", "expect": "ok=false code=auth_required and fetch not called" }`
-- `{ "name": "canary readiness denied", "lens": "error_path", "given": "GET /ready returns 503", "expect": "ok=false code=ready_denied" }`
-- `{ "name": "canary worker timeout", "lens": "error_path", "given": "run detail stays queued/running until timeout", "expect": "ok=false code=worker_timeout and runId present" }`
-- `{ "name": "canary artifact empty", "lens": "happy_shadow_empty", "given": "artifact content response 200 with zero bytes", "expect": "ok=false code=artifact_content_empty" }`
-- `{ "name": "canary metrics auth failure", "lens": "error_path", "given": "GET /metrics returns 403", "expect": "ok=false code=metrics_auth_failed" }`
-- `{ "name": "canary audit missing", "lens": "error_path", "given": "GET /audit/events returns no matching run/canary evidence", "expect": "ok=false code=audit_lookup_failed" }`
-- `{ "name": "canary output redacts secrets", "lens": "error_path", "given": "fake API key, node token, DB URL, object key, signed URL, raw bytes in fake responses", "expect": "JSON.stringify(result) omits all raw secrets and bytes" }`
+- `{ "name": "migration postgres unavailable", "lens": "error_path", "given": "migration fake cannot open/query Postgres", "expect": "ok=false code=postgres_unavailable and DB URL omitted" }`
+- `{ "name": "migration command failure", "lens": "error_path", "given": "migratePostgresSchema fake rejects after connection", "expect": "ok=false code=postgres_schema_migration_failed" }`
+- `{ "name": "preflight output redacts secrets", "lens": "error_path", "given": "fake API key, node token, DB URL, Redis URL, object key, signed URL, and object-store credentials in fakes", "expect": "JSON.stringify(result) omits all raw secrets and object keys" }`
 
 **integration_contracts:**
 - `exports`:
+  - `{ "name": "parseProductionEnvFile", "kind": "function", "signature": "parseProductionEnvFile(path: string) => Promise<{ ok: true; values: Record<string, string> } | { ok: false; errors: Array<{ code: 'env_file_missing' | 'env_file_empty' | 'env_file_invalid_line' | 'env_duplicate_key'; line?: number; key?: string }> }>", "file": "scripts/production-env.ts" }`
+  - `{ "name": "validateProductionManifest", "kind": "function", "signature": "validateProductionManifest(path: string) => Promise<{ ok: true; manifest: ProductionManifest } | { ok: false; errors: Array<{ code: 'manifest_missing' | 'manifest_invalid' | 'manifest_forbidden_command' | 'manifest_forbidden_surface' | 'manifest_env_missing'; service?: string }> }>", "file": "scripts/production-manifest.ts" }`
   - `{ "name": "runProductionPreflight", "kind": "function", "signature": "runProductionPreflight(options: { envFile?: string; manifestPath?: string; includeNode?: boolean; deps?: PreflightDeps }) => Promise<ProductionPreflightResult>", "file": "scripts/production-preflight.ts" }`
   - `{ "name": "runProductionMigration", "kind": "function", "signature": "runProductionMigration(options: { envFile?: string; deps?: MigrationDeps }) => Promise<ProductionMigrationResult>", "file": "scripts/production-migrate.ts" }`
-  - `{ "name": "runProductionCanary", "kind": "function", "signature": "runProductionCanary(options: { baseUrl: string; apiKey?: string; timeoutMs?: number; fetchImpl?: typeof fetch }) => Promise<ProductionCanaryResult>", "file": "scripts/production-canary.ts" }`
+  - `{ "name": "productionPreflightPackageScript", "kind": "constant", "signature": "package.json scripts.production:preflight = 'tsx scripts/production-preflight.ts'", "file": "package.json" }`
+  - `{ "name": "productionMigrationPackageScript", "kind": "constant", "signature": "package.json scripts.production:migrate = 'tsx scripts/production-migrate.ts'", "file": "package.json" }`
+  - `{ "name": "productionCanaryPackageScript", "kind": "constant", "signature": "package.json scripts.production:canary = 'tsx scripts/production-canary.ts'", "file": "package.json" }`
 - `imports_from_other_tasks`:
-  - `{ "from_task": "P18-T1-production-manifest-pack", "name": "productionManifestJson", "signature": "deploy/production/manifest.json machine-readable manifest" }`
-  - `{ "from_task": "P18-T2-production-config-hardening", "name": "loadServerConfig/loadWorkerConfig/loadNodeConfig production behavior", "signature": "load*Config(env) throws ConfigError with code/redactedConfig or returns config" }`
-  - `{ "from_task": "P18-T3-postgres-schema-migration-gates", "name": "checkPostgresSchemaCompatibility/migratePostgresSchema", "signature": "schema compatibility and migration functions exported from @switchyard/storage" }`
-  - `{ "from_task": "P18-T4-readiness-worker-node-operability", "name": "ReadinessReport and worker ready command", "signature": "ready JSON shapes consumed by preflight/runbook/canary" }`
-- `file_paths_consumed_by_other_tasks`: ["scripts/production-preflight.ts", "scripts/production-migrate.ts", "scripts/production-canary.ts", "package.json"]
+  - `{ "from_task": "P18-T1-production-manifest-pack", "name": "productionManifestJson", "signature": "deploy/production/manifest.json => { services: { server: ServiceManifest; worker: ServiceManifest; node?: ServiceManifest }, requiredEnv: string[], forbiddenSurfaces: string[] }" }`
+  - `{ "from_task": "P18-T2-production-config-hardening", "name": "loadServerConfig", "signature": "loadServerConfig(env?: NodeJS.ProcessEnv) => ServerConfig | throws apps/server ConfigError" }`
+  - `{ "from_task": "P18-T2-production-config-hardening", "name": "loadWorkerConfig", "signature": "loadWorkerConfig(env?: NodeJS.ProcessEnv) => WorkerConfig | throws apps/worker ConfigError" }`
+  - `{ "from_task": "P18-T2-production-config-hardening", "name": "loadNodeConfig", "signature": "loadNodeConfig(env?: NodeJS.ProcessEnv) => NodeAppConfig | throws apps/node ConfigError" }`
+  - `{ "from_task": "P18-T3-postgres-schema-migration-gates", "name": "checkPostgresSchemaCompatibility", "signature": "checkPostgresSchemaCompatibility(handle: PostgresDatabaseHandle) => Promise<PostgresSchemaCompatibility>" }`
+  - `{ "from_task": "P18-T3-postgres-schema-migration-gates", "name": "migratePostgresSchema", "signature": "migratePostgresSchema(handle: PostgresDatabaseHandle) => Promise<{ ok: true; version: number }>" }`
+- `file_paths_consumed_by_other_tasks`: ["package.json", "scripts/production-env.ts", "scripts/production-manifest.ts", "scripts/production-preflight.ts", "scripts/production-migrate.ts"]
 
-### Task P18-T6-contract-docs-product-truth: Update Hosted Contracts And Product Truth
+### Task P18-T6-production-canary-api-workflow: Add Production Canary API Workflow
 
-**id:** `P18-T6-contract-docs-product-truth`
+**id:** `P18-T6-production-canary-api-workflow`
+**title:** `Add production canary API workflow`
+
+**files:**
+- Create: `scripts/production-canary.ts`
+- Create: `scripts/production-canary.test.ts`
+
+**dependencies:** ["P18-T4-readiness-worker-node-operability", "P18-T5-production-preflight-migrate"]
+
+**context_files:**
+- `docs/superpowers/specs/2026-05-31-phase-18-r19-production-hosted-deployment.md` - FR5 canary, failure-code, redaction, and no-spend constraints.
+- `package.json` - `production:canary` script entry owned by P18-T5.
+- `scripts/self-hosted-smoke.ts` - existing CLI argument, fetch, poll, timeout, and structured failure style.
+- `packages/contracts/src/endpoint-inventory.ts` - existing hosted route paths the canary is allowed to call.
+- `packages/contracts/src/openapi.ts` - hosted `/ready`, run, artifact, metrics, and enterprise route contract shapes.
+- `packages/contracts/src/enterprise.ts` - whoami, entitlements, and audit response schemas.
+- `apps/server/src/app.ts` - hosted API wiring and metrics/auth behavior the canary exercises.
+
+**instructions:**
+1. Implement `scripts/production-canary.ts` only over existing HTTP API routes. It must accept `--base-url`, `--api-key` or `SWITCHYARD_CANARY_API_KEY`, `--timeout-ms`, and `--json`. It must not import server internals, open databases, or use canary-only routes.
+2. Validate inputs before HTTP calls. Missing or whitespace API key returns `auth_required`. A base URL that the built-in `URL` constructor rejects, is not `http:`/`https:`, includes credentials, or has an empty hostname returns `invalid_base_url`. Do not log the API key or credentialed URL.
+3. The canary may call only `/ready`, `/runs`, `/runs/:id`, `/runs/:id/events`, `/runs/:id/artifacts`, `/artifacts/:id/content`, `/metrics`, `/auth/whoami`, `/entitlements`, and `/audit/events`.
+4. Canary create payload must use `runtime:"fake"`, `provider:"test"`, `model:"test-model"`, `adapterType:"process"`, `runtimeMode:"fake.deterministic"`, `placement:"hosted"`, `cwd:"/repo"`, static task label `r19 production canary`, and metadata including `{ switchyardCanary: "r19-production", canaryId, startedAt }`.
+5. Poll run detail until `completed`, `failed`, `cancelled`, `timed_out`, or timeout. `completed` is the only successful terminal status. Queued/running beyond timeout returns `worker_timeout`; any other terminal status returns `unexpected_terminal_status`.
+6. Parse `/runs/:id/events` as SSE replay. Empty, malformed, or missing event data returns `malformed_sse`; malformed JSON responses from all other steps return `malformed_response`.
+7. Fetch artifact metadata and content. Missing artifact list/record returns `artifact_missing`. Zero-byte content returns `artifact_content_empty`. If metadata includes digest/size, verify content digest/size with Node `crypto`; mismatch returns `artifact_digest_mismatch`. Never print raw artifact bytes or object keys.
+8. Call protected `/metrics` with the same API key. HTTP 401/403 returns `metrics_auth_failed`; malformed metrics JSON returns `malformed_response`.
+9. Verify audit/ownership evidence by finding the canary run id or canary metadata in `/audit/events`. If the first audit read succeeds but evidence is not visible, poll until a short audit-evidence deadline inside the main timeout; report intermediate step code `delayed_audit_evidence` in successful output when evidence appears after at least one retry, and fail with `audit_lookup_failed` when evidence never appears.
+10. Every failed HTTP step must map to a named code: 401/403 before metrics is `auth_invalid` except missing local input is `auth_required`; `/ready` 503 is `ready_denied`; `/runs` denial is `run_create_denied`; not-found artifact/content is `artifact_missing`; other unexpected status/body shape is `malformed_response` unless a more specific code above applies.
+11. Tests must instantiate `runProductionCanary` with fake `fetchImpl`. They must not call live providers, payment systems, AWS/R2, GitHub, search, browsers, arbitrary commands, PTY, or public network dependencies.
+
+**acceptance:**
+- Root `production:canary` script from P18-T5 points at this script and executes without module-resolution errors.
+- Canary verifies authenticated readiness, fake hosted run creation, worker completion, events/SSE replay, artifacts, artifact content, protected metrics, and audit/ownership evidence.
+- Canary failure codes include `auth_required`, `auth_invalid`, `invalid_base_url`, `ready_denied`, `run_create_denied`, `worker_timeout`, `artifact_missing`, `artifact_content_empty`, `artifact_digest_mismatch`, `metrics_auth_failed`, `audit_lookup_failed`, `unexpected_terminal_status`, `malformed_response`, and `malformed_sse`.
+- Delayed audit evidence is retried and reported distinctly from permanently missing audit evidence.
+- Canary output is structured, redacted, and deterministic under fake fetch tests.
+
+**checks:**
+- `pnpm exec vitest run scripts/production-canary.test.ts`
+- `pnpm production:canary -- --base-url not-a-url --api-key test --json` must fail with `invalid_base_url` before any network call.
+- `pnpm typecheck`
+- `git diff --check scripts/production-canary.ts scripts/production-canary.test.ts`
+
+**error_rescue_map:**
+- `{ "codepath": "canary input", "failure": "missing or empty API key", "exception": "explicit validation failure", "rescue": "Return auth_required without making HTTP calls", "user_sees": "Canary exits nonzero with auth_required" }`
+- `{ "codepath": "canary input", "failure": "invalid base URL, credentialed URL, or unsupported protocol", "exception": "TypeError from URL or explicit validation failure", "rescue": "Return invalid_base_url without making HTTP calls", "user_sees": "Canary exits nonzero with invalid_base_url" }`
+- `{ "codepath": "canary auth", "failure": "API key rejected by hosted route", "exception": "HTTP 401/403", "rescue": "Return auth_invalid before continuing to side-effecting steps", "user_sees": "Canary identifies invalid credentials without leaking key" }`
+- `{ "codepath": "GET /ready", "failure": "readiness denied", "exception": "HTTP 503 or ok=false body", "rescue": "Return ready_denied with redacted readiness codes", "user_sees": "Canary blocks traffic promotion" }`
+- `{ "codepath": "POST /runs", "failure": "run creation denied by auth/quota/runtime/queue gate", "exception": "HTTP 4xx/5xx", "rescue": "Return run_create_denied with request step and status only", "user_sees": "Canary identifies create failure without raw task or API key" }`
+- `{ "codepath": "canary HTTP response parse", "failure": "empty or malformed JSON response", "exception": "SyntaxError or explicit shape check", "rescue": "Return malformed_response with step name", "user_sees": "Canary JSON identifies bad step without raw body" }`
+- `{ "codepath": "canary SSE parser", "failure": "empty, malformed, or non-JSON SSE replay", "exception": "SyntaxError or explicit SSE shape check", "rescue": "Return malformed_sse with runId only", "user_sees": "Canary identifies malformed event replay without raw event body" }`
+- `{ "codepath": "canary worker wait", "failure": "run never completes before timeout", "exception": "timeout loop", "rescue": "Return worker_timeout and include runId only", "user_sees": "Canary exits nonzero; durable run id can be inspected" }`
+- `{ "codepath": "canary terminal status", "failure": "run reaches failed/cancelled/timed_out or unknown terminal status", "exception": "explicit status check", "rescue": "Return unexpected_terminal_status with runId and terminalStatus", "user_sees": "Canary identifies terminal state mismatch" }`
+- `{ "codepath": "canary artifact metadata/content", "failure": "missing artifact, empty bytes, or digest mismatch", "exception": "HTTP 404/409, empty body, or crypto digest comparison", "rescue": "Return artifact_missing, artifact_content_empty, or artifact_digest_mismatch", "user_sees": "Canary identifies artifact failure without printing bytes/object keys" }`
+- `{ "codepath": "canary metrics", "failure": "metrics denied", "exception": "HTTP 401/403", "rescue": "Return metrics_auth_failed", "user_sees": "Canary shows metrics-scope failure with no API key leak" }`
+- `{ "codepath": "canary audit evidence", "failure": "audit evidence initially absent but later appears", "exception": "empty matching audit list before retry deadline", "rescue": "Retry until short audit-evidence deadline and record delayed_audit_evidence when eventually found", "user_sees": "Successful canary notes delayed audit evidence" }`
+- `{ "codepath": "canary audit evidence", "failure": "audit evidence never appears", "exception": "no matching audit record before timeout", "rescue": "Return audit_lookup_failed", "user_sees": "Canary shows audit/evidence failure with no secret leak" }`
+
+**observability:**
+- `logs`: ["canary JSON steps with elapsedMs, runId, artifactId, terminalStatus, metricsAuthorized, auditEvidence, and delayedAuditEvidence"]
+- `success_metric`: `canary ok=true with ready/run/events/artifact/content/metrics/audit steps pass`
+- `failure_metric`: `named canary code listed in failed step`
+
+**test_cases:**
+- `{ "name": "canary happy path", "lens": "happy", "given": "fake fetch sequence for ready, whoami, entitlements, run create/detail completed, SSE events, artifacts, content, metrics, and audit", "expect": "ok=true with runId and artifactId; no raw artifact bytes in output" }`
+- `{ "name": "canary missing api key", "lens": "happy_shadow_nil", "given": "no --api-key and no env key", "expect": "ok=false code=auth_required and fetch not called" }`
+- `{ "name": "canary invalid base URL", "lens": "error_path", "given": "--base-url not-a-url or https://user:pass@example.com", "expect": "ok=false code=invalid_base_url and fetch not called" }`
+- `{ "name": "canary auth invalid", "lens": "error_path", "given": "GET /auth/whoami or /ready returns 401/403", "expect": "ok=false code=auth_invalid and API key omitted from output" }`
+- `{ "name": "canary readiness denied", "lens": "error_path", "given": "GET /ready returns 503", "expect": "ok=false code=ready_denied" }`
+- `{ "name": "canary run create denied", "lens": "error_path", "given": "POST /runs returns 403 quota/runtime denial", "expect": "ok=false code=run_create_denied" }`
+- `{ "name": "canary worker timeout", "lens": "error_path", "given": "run detail stays queued/running until timeout", "expect": "ok=false code=worker_timeout and runId present" }`
+- `{ "name": "canary unexpected terminal status", "lens": "error_path", "given": "run detail returns failed, cancelled, timed_out, or unknown terminal status", "expect": "ok=false code=unexpected_terminal_status with terminalStatus" }`
+- `{ "name": "canary malformed JSON response", "lens": "error_path", "given": "ready or run detail response body is empty/malformed JSON", "expect": "ok=false code=malformed_response and raw body omitted" }`
+- `{ "name": "canary malformed SSE", "lens": "error_path", "given": "events endpoint returns malformed SSE or non-JSON data event", "expect": "ok=false code=malformed_sse" }`
+- `{ "name": "canary artifact missing", "lens": "happy_shadow_nil", "given": "artifact list is empty or content returns 404", "expect": "ok=false code=artifact_missing" }`
+- `{ "name": "canary artifact empty", "lens": "happy_shadow_empty", "given": "artifact content response 200 with zero bytes", "expect": "ok=false code=artifact_content_empty" }`
+- `{ "name": "canary artifact digest mismatch", "lens": "error_path", "given": "artifact metadata digest differs from fetched content digest", "expect": "ok=false code=artifact_digest_mismatch" }`
+- `{ "name": "canary metrics auth failure", "lens": "error_path", "given": "GET /metrics returns 403", "expect": "ok=false code=metrics_auth_failed" }`
+- `{ "name": "canary delayed audit evidence", "lens": "edge_delayed_audit", "given": "first audit response lacks canary run, second response includes it", "expect": "ok=true and result records delayed_audit_evidence without failing" }`
+- `{ "name": "canary audit missing", "lens": "error_path", "given": "GET /audit/events returns no matching run/canary evidence until deadline", "expect": "ok=false code=audit_lookup_failed" }`
+- `{ "name": "canary output redacts secrets", "lens": "error_path", "given": "fake API key, node token, DB URL, object key, signed URL, raw bytes, task text, and cwd in fake responses", "expect": "JSON.stringify(result) omits all raw secrets, bytes, task text, and cwd" }`
+
+**integration_contracts:**
+- `exports`:
+  - `{ "name": "runProductionCanary", "kind": "function", "signature": "runProductionCanary(options: { baseUrl: string; apiKey?: string; timeoutMs?: number; fetchImpl?: typeof fetch; now?: () => number }) => Promise<ProductionCanaryResult>", "file": "scripts/production-canary.ts" }`
+- `imports_from_other_tasks`:
+  - `{ "from_task": "P18-T5-production-preflight-migrate", "name": "productionCanaryPackageScript", "signature": "package.json scripts.production:canary = 'tsx scripts/production-canary.ts'" }`
+  - `{ "from_task": "P18-T4-readiness-worker-node-operability", "name": "ReadinessReport", "signature": "{ ok: boolean; checks: Record<string, { ok: boolean; code?: string; diagnostics?: Record<string, unknown> }> } with checks.schema for production Postgres compatibility" }`
+- `file_paths_consumed_by_other_tasks`: ["scripts/production-canary.ts"]
+
+### Task P18-T7-contract-docs-product-truth: Update Hosted Contracts And Product Truth
+
+**id:** `P18-T7-contract-docs-product-truth`
 **title:** `Update hosted contracts and product truth`
 
 **files:**
@@ -570,7 +712,7 @@ environment:
 - Modify: `docs/development/API.md`
 - Modify: `docs/development/DEVELOPMENT.md`
 
-**dependencies:** ["P18-T1-production-manifest-pack", "P18-T2-production-config-hardening", "P18-T3-postgres-schema-migration-gates", "P18-T4-readiness-worker-node-operability", "P18-T5-preflight-and-canary-commands"]
+**dependencies:** ["P18-T1-production-manifest-pack", "P18-T2-production-config-hardening", "P18-T3-postgres-schema-migration-gates", "P18-T4-readiness-worker-node-operability", "P18-T5-production-preflight-migrate", "P18-T6-production-canary-api-workflow"]
 
 **context_files:**
 - `docs/superpowers/specs/2026-05-31-phase-18-r19-production-hosted-deployment.md` - docs and API truth requirements.
@@ -609,7 +751,7 @@ environment:
 - `{ "codepath": "hosted OpenAPI ReadyResponse", "failure": "schema no longer matches /ready body", "exception": "OpenAPI contract or generated diff failure", "rescue": "Update SCHEMA_BY_REF.ReadyResponse and regenerate hosted OpenAPI", "user_sees": "Hosted API docs match readiness response" }`
 - `{ "codepath": "hosted /metrics security", "failure": "metrics route becomes public or loses scopes", "exception": "OpenAPI contract assertion failure", "rescue": "Restore security scheme and required scopes", "user_sees": "Operators see metrics requires API key with metrics/admin scopes" }`
 - `{ "codepath": "PRODUCT.md truth", "failure": "docs overclaim managed SaaS or production real runtime", "exception": "docs review/audit finding", "rescue": "Replace wording with production-readiness for fake-safe hosted boundary", "user_sees": "Product truth accurately states shipped and unshipped surfaces" }`
-- `{ "codepath": "DEVELOPMENT.md commands", "failure": "copy/paste command references missing script", "exception": "docs command check failure", "rescue": "Align docs with package.json scripts from P18-T5", "user_sees": "Operator commands run as documented" }`
+- `{ "codepath": "DEVELOPMENT.md commands", "failure": "copy/paste command references missing script", "exception": "docs command check failure", "rescue": "Align docs with package.json scripts from P18-T5 and canary script from P18-T6", "user_sees": "Operator commands run as documented" }`
 - `{ "codepath": "docs redaction/examples", "failure": "example includes real-looking secret", "exception": "docs grep/review finding", "rescue": "Use replace-with-* placeholders and no raw credential examples", "user_sees": "Docs do not train unsafe secret handling" }`
 
 **observability:**
@@ -632,19 +774,22 @@ environment:
   - `{ "name": "hosted ReadyResponse OpenAPI schema", "kind": "constant", "signature": "ReadyResponse: { ok:boolean, checks: Record<string,{ok:boolean, code?:string, diagnostics?:object}> }", "file": "packages/contracts/src/openapi.ts" }`
   - `{ "name": "R19 product truth", "kind": "constant", "signature": "PRODUCT.md documents R19 as production hosted deployment readiness for fake-safe hosted boundary", "file": "PRODUCT.md" }`
 - `imports_from_other_tasks`:
-  - `{ "from_task": "P18-T1-production-manifest-pack", "name": "production manifest/runbook paths", "signature": "deploy/production/README.md and manifest paths for docs cross-reference" }`
-  - `{ "from_task": "P18-T3-postgres-schema-migration-gates", "name": "schema compatibility codes", "signature": "postgres_schema_ready|postgres_schema_migration_required|postgres_schema_version_unsupported|postgres_schema_malformed|postgres_unavailable" }`
-  - `{ "from_task": "P18-T5-preflight-and-canary-commands", "name": "production command scripts", "signature": "pnpm production:preflight|production:migrate|production:canary" }`
+  - `{ "from_task": "P18-T1-production-manifest-pack", "name": "productionManifestJson", "signature": "deploy/production/manifest.json => { services: { server: ServiceManifest; worker: ServiceManifest; node?: ServiceManifest }, requiredEnv: string[], forbiddenSurfaces: string[] }" }`
+  - `{ "from_task": "P18-T3-postgres-schema-migration-gates", "name": "checkPostgresSchemaCompatibility", "signature": "checkPostgresSchemaCompatibility(handle: PostgresDatabaseHandle) => Promise<PostgresSchemaCompatibility>" }`
+  - `{ "from_task": "P18-T5-production-preflight-migrate", "name": "productionPreflightPackageScript", "signature": "package.json scripts.production:preflight = 'tsx scripts/production-preflight.ts'" }`
+  - `{ "from_task": "P18-T5-production-preflight-migrate", "name": "productionMigrationPackageScript", "signature": "package.json scripts.production:migrate = 'tsx scripts/production-migrate.ts'" }`
+  - `{ "from_task": "P18-T5-production-preflight-migrate", "name": "productionCanaryPackageScript", "signature": "package.json scripts.production:canary = 'tsx scripts/production-canary.ts'" }`
+  - `{ "from_task": "P18-T6-production-canary-api-workflow", "name": "runProductionCanary", "signature": "runProductionCanary(options: { baseUrl: string; apiKey?: string; timeoutMs?: number; fetchImpl?: typeof fetch; now?: () => number }) => Promise<ProductionCanaryResult>" }`
 - `file_paths_consumed_by_other_tasks`: []
 
 ## Integration Points
 
-- P18-T1 produces the deploy pack and machine-readable manifest that P18-T5 preflight validates and P18-T6 docs reference.
+- P18-T1 produces the deploy pack and machine-readable manifest that P18-T5 preflight validates and P18-T7 docs reference.
 - P18-T2 hardens the app config resolvers in place. P18-T5 must call those same resolvers rather than reimplementing validation.
-- P18-T3 exports schema compatibility/migration helpers. P18-T4 uses compatibility in readiness/worker gates; P18-T5 uses compatibility and migration in operator commands; P18-T6 documents the codes.
+- P18-T3 exports schema compatibility/migration helpers. P18-T4 uses compatibility in readiness/worker gates; P18-T5 uses compatibility and migration in operator commands; P18-T7 documents the codes.
 - P18-T4 keeps `/health`, `/ready`, `/metrics`, worker readiness, and node startup behavior aligned with the production manifest and canary.
-- P18-T5 canary uses only existing hosted APIs and must not require new canary-only server routes.
-- P18-T6 owns public truth after implementation and must update hosted OpenAPI only where response schemas actually changed.
+- P18-T5 owns env parsing, manifest validation, preflight, migration, and package script entries. P18-T6 owns the production canary API workflow and must use only existing hosted APIs with no canary-only server routes.
+- P18-T7 owns public truth after implementation and must update hosted OpenAPI only where response schemas actually changed.
 
 ## Phase-Level Acceptance Criteria
 
@@ -666,7 +811,7 @@ environment:
 
 ## Phase Checks
 
-- `pnpm exec vitest run deploy/production/production-manifest.test.ts scripts/production-ops.test.ts`
+- `pnpm exec vitest run deploy/production/production-manifest.test.ts scripts/production-preflight.test.ts scripts/production-migrate.test.ts scripts/production-canary.test.ts`
 - `pnpm --filter @switchyard/core test -- production-config-guards`
 - `pnpm --filter @switchyard/server test -- production-config`
 - `pnpm --filter @switchyard/server test -- production-readiness`
@@ -695,7 +840,7 @@ environment:
 4. Ownership disjoint: no file appears in more than one task's `files` list.
 5. Context files real: every `context_files` path exists before implementation.
 6. Acceptance testable: every task acceptance item names objective checks or observable outcomes.
-7. Dependency order sane: T4 depends on config/schema; T5 depends on manifests/config/schema/readiness; T6 depends on implementation surfaces.
+7. Dependency order sane: T4 depends on config/schema; T5 depends on manifests/config/schema/readiness; T6 depends on the package script and hosted API shapes; T7 depends on implementation surfaces.
 8. Checks runnable: checks use existing pnpm/vitest/typecheck/openapi scripts or root dev dependencies.
 9. Error/rescue maps present: every runtime/config/script task has named failures and user-visible outcomes.
 10. Observability present: server/worker/node/preflight/canary runtime behavior has logs and metrics/failure codes.
