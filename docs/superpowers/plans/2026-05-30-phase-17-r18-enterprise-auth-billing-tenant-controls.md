@@ -253,7 +253,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
   - `{ "name": "auditEventsResponseSchema", "kind": "constant", "signature": "auditEventsResponseSchema: z.ZodType<AuditEventsResponse>", "file": "packages/contracts/src/enterprise.ts" }`
   - `{ "name": "R18_HTTP_ERROR_CODES", "kind": "constant", "signature": "R18_HTTP_ERROR_CODES: readonly HttpErrorCode[]", "file": "packages/contracts/src/http-error.ts" }`
 - `imports_from_other_tasks`: []
-- `file_paths_consumed_by_other_tasks`: `packages/core/src/ports/control-plane-store.ts`, `packages/core/src/services/control-plane-service.ts`, `packages/storage/src/postgres/control-plane-store.ts`, `packages/protocol-rest/src/hosted-auth.ts`, `packages/protocol-rest/src/enterprise-routes.ts`, `packages/contracts/src/openapi.ts`
+- `file_paths_consumed_by_other_tasks`: `packages/contracts/src/ids.ts`, `packages/contracts/src/enterprise.ts`, `packages/contracts/src/http-error.ts`, `packages/contracts/src/index.ts`, `packages/protocol-rest/src/http-errors.ts`
 
 ### Task P17-T2-core-control-plane-service
 
@@ -354,7 +354,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
   - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "ResourceOwnership", "kind": "type", "signature": "type ResourceOwnership = z.infer<typeof resourceOwnershipSchema>", "file": "packages/contracts/src/enterprise.ts" }`
   - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "AuditLogEvent", "kind": "type", "signature": "type AuditLogEvent = z.infer<typeof auditLogEventSchema>", "file": "packages/contracts/src/enterprise.ts" }`
   - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "R18_HTTP_ERROR_CODES", "kind": "constant", "signature": "R18_HTTP_ERROR_CODES: readonly HttpErrorCode[]", "file": "packages/contracts/src/http-error.ts" }`
-- `file_paths_consumed_by_other_tasks`: `packages/storage/src/postgres/control-plane-store.ts`, `packages/protocol-rest/src/hosted-auth.ts`, `packages/protocol-node/src/node-routes.ts`, `apps/server/src/app.ts`, `apps/server/src/readiness.ts`
+- `file_paths_consumed_by_other_tasks`: `packages/core/src/ports/control-plane-store.ts`, `packages/core/src/services/control-plane-service.ts`, `packages/core/src/index.ts`
 
 ### Task P17-T3-control-plane-storage-ownership
 
@@ -369,6 +369,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 **Dependencies:** `P17-T1-enterprise-contracts-errors`, `P17-T2-core-control-plane-service`
 
 **Context files (must read before coding):**
+- `docs/superpowers/specs/2026-05-30-phase-17-r18-enterprise-auth-billing-tenant-controls.md` - exact R18 storage, ownership, quota, audit, and fail-closed requirements.
 - `packages/storage/src/postgres/schema.ts` - current Drizzle table definitions for hosted resources.
 - `packages/storage/src/postgres/database.ts` - existing additive `CREATE TABLE IF NOT EXISTS` migration style.
 - `packages/storage/src/postgres/run-store.ts` - in-memory fallback pattern to match.
@@ -459,7 +460,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
   - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "resourceOwnershipSchema", "kind": "constant", "signature": "resourceOwnershipSchema: z.ZodType<ResourceOwnership>", "file": "packages/contracts/src/enterprise.ts" }`
   - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "quotaReservationSchema", "kind": "constant", "signature": "quotaReservationSchema: z.ZodType<QuotaReservation>", "file": "packages/contracts/src/enterprise.ts" }`
   - `{ "from_task": "P17-T2-core-control-plane-service", "name": "ControlPlaneStore", "kind": "interface", "signature": "interface ControlPlaneStore { loadApiKeyBundleByHash(input: LoadApiKeyBundleInput): Promise<AuthBundle | null>; bootstrap(input: ControlPlaneBootstrapInput): Promise<ControlPlaneBootstrapSummary>; reserveQuota(input: ReserveQuotaInput): Promise<QuotaReservation>; transitionQuotaReservation(input: TransitionQuotaReservationInput): Promise<QuotaReservation>; withQuotaCriticalSection<T>(scope: QuotaCriticalSectionScope, fn: () => Promise<T>): Promise<T>; attachOwnership(input: AttachOwnershipInput): Promise<ResourceOwnership>; getOwnership(input: GetOwnershipInput): Promise<ResourceOwnership | null>; listOwnedResourceIds(input: ListOwnedResourceIdsInput): Promise<readonly string[]>; countActiveOwnedRuns(input: ActiveRunCountInput): Promise<number>; countActiveOwnedNodes(input: ActiveNodeCountInput): Promise<number>; appendAuditEvent(input: AppendAuditEventInput): Promise<AuditLogEvent>; listAuditEvents(input: ListAuditEventsInput): Promise<AuditEventsPage>; countUnownedResources(): Promise<UnownedResourceCounts>; expireStaleReservations(input: ExpireReservationsInput): Promise<number>; }", "file": "packages/core/src/ports/control-plane-store.ts" }`
-- `file_paths_consumed_by_other_tasks`: `apps/server/src/app.ts`, `apps/server/src/readiness.ts`, `apps/server/test/hosted-server.test.ts`
+- `file_paths_consumed_by_other_tasks`: `packages/storage/src/postgres/control-plane-store.ts`, `packages/storage/src/postgres/database.ts`, `packages/storage/src/index.ts`
 
 ### Task P17-T4-hosted-rest-auth-tenant-quota-audit
 
@@ -476,6 +477,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 **Dependencies:** `P17-T1-enterprise-contracts-errors`, `P17-T2-core-control-plane-service`, `P17-T3-control-plane-storage-ownership`
 
 **Context files (must read before coding):**
+- `docs/superpowers/specs/2026-05-30-phase-17-r18-enterprise-auth-billing-tenant-controls.md` - exact hosted REST auth, tenant isolation, quota, audit, and OpenAPI boundary requirements.
 - `packages/protocol-rest/src/run-routes.ts` - current create/list/get/events/input/cancel flows and side-effect order.
 - `packages/protocol-rest/src/artifact-routes.ts` - current artifact metadata/content error mapping.
 - `packages/protocol-rest/src/registry-routes.ts` - registry route shapes protected by hosted auth hook but not modified here.
@@ -565,7 +567,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
   - `{ "from_task": "P17-T2-core-control-plane-service", "name": "ControlPlaneService", "kind": "class", "signature": "class ControlPlaneService { constructor(input: ControlPlaneServiceInput); authenticateRequest(input: AuthenticateRequestInput): Promise<AuthContext>; requireScope(auth: AuthContext, scope: EnterpriseScope): void; authorizeResource(input: AuthorizeResourceInput): Promise<AuthorizeResourceResult>; ensureOwnedOrAttachFromRun(input: EnsureOwnedOrAttachFromRunInput): Promise<EnsureOwnedResult>; preflightRunCreate(input: PreflightRunCreateInput): Promise<QuotaReservation>; releaseQuotaReservation(input: ReleaseQuotaReservationInput): Promise<QuotaReservation>; preflightArtifactContentRead(input: PreflightArtifactContentReadInput): Promise<QuotaReservation>; preflightNodeRegister(input: PreflightNodeRegisterInput): Promise<QuotaReservation>; whoami(auth: AuthContext): WhoamiResponse; entitlementSnapshot(auth: AuthContext): Promise<EntitlementsResponse>; listAuditEvents(input: ListAuditEventsInput): Promise<AuditEventsResponse>; recordAudit(input: RecordAuditInput): Promise<RecordAuditResult>; }", "file": "packages/core/src/services/control-plane-service.ts" }`
   - `{ "from_task": "P17-T2-core-control-plane-service", "name": "ControlPlaneError", "kind": "class", "signature": "class ControlPlaneError extends Error { code: HttpErrorCode; reasonCode: string; statusCode: number; safeDetails?: Record<string, unknown>; }", "file": "packages/core/src/services/control-plane-service.ts" }`
   - `{ "from_task": "P17-T3-control-plane-storage-ownership", "name": "PostgresControlPlaneStore", "kind": "class", "signature": "class PostgresControlPlaneStore implements ControlPlaneStore { constructor(handle?: PostgresDatabaseHandle); }", "file": "packages/storage/src/postgres/control-plane-store.ts" }`
-- `file_paths_consumed_by_other_tasks`: `apps/server/src/app.ts`, `packages/contracts/src/endpoint-inventory.ts`, `packages/contracts/src/openapi.ts`
+- `file_paths_consumed_by_other_tasks`: `packages/protocol-rest/src/hosted-auth.ts`, `packages/protocol-rest/src/enterprise-routes.ts`, `packages/protocol-rest/src/run-routes.ts`, `packages/protocol-rest/src/artifact-routes.ts`, `packages/protocol-rest/src/index.ts`
 
 ### Task P17-T5-node-tenant-controls
 
@@ -576,6 +578,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 **Dependencies:** `P17-T1-enterprise-contracts-errors`, `P17-T2-core-control-plane-service`, `P17-T3-control-plane-storage-ownership`
 
 **Context files (must read before coding):**
+- `docs/superpowers/specs/2026-05-30-phase-17-r18-enterprise-auth-billing-tenant-controls.md` - exact connected-node tenant/project auth, ownership, quota, audit, and non-goal boundaries.
 - `packages/protocol-node/src/node-routes.ts` - current shared-token auth and node/assignment route side effects.
 - `packages/protocol-node/test/node-routes.test.ts` - existing auth/body-limit route harness.
 - `packages/core/src/services/node-coordinator-service.ts` - registration, heartbeat, claim, reject, complete semantics.
@@ -648,7 +651,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
   - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "R18_HTTP_ERROR_CODES", "kind": "constant", "signature": "R18_HTTP_ERROR_CODES: readonly HttpErrorCode[]", "file": "packages/contracts/src/http-error.ts" }`
   - `{ "from_task": "P17-T2-core-control-plane-service", "name": "ControlPlaneService", "kind": "class", "signature": "class ControlPlaneService { authenticateRequest(input: AuthenticateRequestInput): Promise<AuthContext>; preflightNodeRegister(input: PreflightNodeRegisterInput): Promise<QuotaReservation>; authorizeResource(input: AuthorizeResourceInput): Promise<AuthorizeResourceResult>; recordAudit(input: RecordAuditInput): Promise<RecordAuditResult>; }", "file": "packages/core/src/services/control-plane-service.ts" }`
   - `{ "from_task": "P17-T3-control-plane-storage-ownership", "name": "PostgresControlPlaneStore", "kind": "class", "signature": "class PostgresControlPlaneStore implements ControlPlaneStore { constructor(handle?: PostgresDatabaseHandle); }", "file": "packages/storage/src/postgres/control-plane-store.ts" }`
-- `file_paths_consumed_by_other_tasks`: `apps/server/src/app.ts`, `apps/server/src/readiness.ts`, `packages/contracts/src/endpoint-inventory.ts`
+- `file_paths_consumed_by_other_tasks`: `packages/protocol-node/src/node-routes.ts`
 
 ### Task P17-T6-server-config-readiness-metrics-wiring
 
@@ -663,6 +666,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 **Dependencies:** `P17-T1-enterprise-contracts-errors`, `P17-T2-core-control-plane-service`, `P17-T3-control-plane-storage-ownership`, `P17-T4-hosted-rest-auth-tenant-quota-audit`, `P17-T5-node-tenant-controls`
 
 **Context files (must read before coding):**
+- `docs/superpowers/specs/2026-05-30-phase-17-r18-enterprise-auth-billing-tenant-controls.md` - exact server config, readiness, metrics, bootstrap, and local-compatibility requirements.
 - `apps/server/src/config.ts` - deployment mode parsing and current fail-closed checks.
 - `apps/server/src/app.ts` - current server dependency construction and route registration.
 - `apps/server/src/readiness.ts` - current dependency readiness report shape.
@@ -739,7 +743,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
   - `{ "from_task": "P17-T4-hosted-rest-auth-tenant-quota-audit", "name": "registerHostedAuthHooks", "kind": "function", "signature": "registerHostedAuthHooks(app: FastifyInstance, deps: HostedAuthDependencies) => void", "file": "packages/protocol-rest/src/hosted-auth.ts" }`
   - `{ "from_task": "P17-T4-hosted-rest-auth-tenant-quota-audit", "name": "registerEnterpriseRoutes", "kind": "function", "signature": "registerEnterpriseRoutes(app: FastifyInstance, deps: { controlPlane: ControlPlaneService }) => void", "file": "packages/protocol-rest/src/enterprise-routes.ts" }`
   - `{ "from_task": "P17-T5-node-tenant-controls", "name": "registerNodeRoutes", "kind": "function", "signature": "registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependencies) => void", "file": "packages/protocol-node/src/node-routes.ts" }`
-- `file_paths_consumed_by_other_tasks`: `packages/contracts/src/openapi.ts`, `PRODUCT.md`, `docs/development/API.md`, `docs/development/DEVELOPMENT.md`
+- `file_paths_consumed_by_other_tasks`: `apps/server/src/config.ts`, `apps/server/src/app.ts`, `apps/server/src/readiness.ts`, `apps/server/src/metrics.ts`
 
 ### Task P17-T7-hosted-openapi-contract
 
@@ -756,6 +760,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 **Dependencies:** `P17-T1-enterprise-contracts-errors`, `P17-T4-hosted-rest-auth-tenant-quota-audit`, `P17-T5-node-tenant-controls`, `P17-T6-server-config-readiness-metrics-wiring`
 
 **Context files (must read before coding):**
+- `docs/superpowers/specs/2026-05-30-phase-17-r18-enterprise-auth-billing-tenant-controls.md` - exact hosted OpenAPI security, route, forbidden-surface, and local OpenAPI compatibility requirements.
 - `packages/contracts/src/endpoint-inventory.ts` - current local daemon and hosted-node route inventories.
 - `packages/contracts/src/openapi.ts` - current generator title/server/components shape.
 - `packages/contracts/src/openapi-cli.ts` - current generate/check behavior for local daemon.
@@ -834,7 +839,7 @@ servers: [{ url: "http://127.0.0.1:4545" }],
   - `{ "from_task": "P17-T4-hosted-rest-auth-tenant-quota-audit", "name": "getHostedRouteAuthRequirement", "kind": "function", "signature": "getHostedRouteAuthRequirement(method: string, pathname: string) => HostedRouteAuthRequirement | null", "file": "packages/protocol-rest/src/hosted-auth.ts" }`
   - `{ "from_task": "P17-T5-node-tenant-controls", "name": "registerNodeRoutes", "kind": "function", "signature": "registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependencies) => void", "file": "packages/protocol-node/src/node-routes.ts" }`
   - `{ "from_task": "P17-T6-server-config-readiness-metrics-wiring", "name": "probeServerReadiness", "kind": "function", "signature": "probeServerReadiness(input: ServerReadinessInput) => Promise<ServerReadinessResult>", "file": "apps/server/src/readiness.ts" }`
-- `file_paths_consumed_by_other_tasks`: `PRODUCT.md`, `README.md`, `docs/development/API.md`, `docs/development/DEVELOPMENT.md`
+- `file_paths_consumed_by_other_tasks`: `packages/contracts/src/endpoint-inventory.ts`, `packages/contracts/src/openapi.ts`, `packages/contracts/src/openapi-cli.ts`, `packages/contracts/openapi.local-daemon.json`, `packages/contracts/openapi.hosted-server.json`, `packages/contracts/package.json`
 
 ### Task P17-T8-local-compat-docs-no-spend
 
