@@ -129,6 +129,7 @@ function createCoordinatorStub() {
       lastEventSequence: 0,
       createdAt: NOW
     })),
+    markOffline: vi.fn(async () => ({})),
     expireStale: vi.fn(async () => {})
   };
 }
@@ -349,6 +350,80 @@ describe("node routes", () => {
     expect(coordinator.register).not.toHaveBeenCalled();
   });
 
+  it("allows hosted node registration with bound node token", async () => {
+    const controlPlane = createControlPlaneStub();
+    const boundAuth = createAuthContext();
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging",
+      nodeTokenBindings: [{ token: "bound-token", auth: boundAuth }]
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/register",
+      headers: { "x-switchyard-node-token": "bound-token" },
+      payload: { capabilities: [] }
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(coordinator.register).toHaveBeenCalledTimes(1);
+    expect(controlPlane.authenticateRequest).not.toHaveBeenCalled();
+    expect(controlPlane.preflightNodeRegister).toHaveBeenCalledWith(expect.objectContaining({
+      auth: boundAuth
+    }));
+  });
+
+  it("denies hosted auth when nodes:write scope is missing", async () => {
+    const controlPlane = createControlPlaneStub();
+    controlPlane.requireScope.mockImplementation(() => {
+      throw new ControlPlaneError("tenant_access_denied", "missing_scope");
+    });
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/register",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: { capabilities: [] }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(coordinator.register).not.toHaveBeenCalled();
+    expect(controlPlane.recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "tenant.access_denied",
+      reasonCode: "missing_scope"
+    }));
+  });
+
+  it("denies hosted auth for inactive tenant context", async () => {
+    const controlPlane = createControlPlaneStub();
+    controlPlane.authenticateRequest.mockRejectedValue(new ControlPlaneError("auth_failed", "tenant_inactive"));
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/register",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: { capabilities: [] }
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json().error.code).toBe("auth_failed");
+    expect(coordinator.register).not.toHaveBeenCalled();
+    expect(controlPlane.recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "node.auth_failed",
+      reasonCode: "tenant_inactive"
+    }));
+  });
+
   it("allows api key registration and consumes connected-node reservation", async () => {
     const controlPlane = createControlPlaneStub();
     const { app, coordinator } = await buildNodeApp({
@@ -403,6 +478,34 @@ describe("node routes", () => {
       eventType: "node.register_denied",
       decision: "deny",
       reasonCode: "connected_nodes_exceeded"
+    }));
+  });
+
+  it("rolls back registration on ownership attach failure and marks node offline", async () => {
+    const controlPlane = createControlPlaneStub();
+    controlPlane.ensureOwnedOrAttachFromRun.mockResolvedValue({
+      ok: false,
+      reasonCode: "ownership_attach_failed",
+      code: "ownership_attach_failed"
+    });
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/register",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: { capabilities: [] }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json().error.code).toBe("internal_error");
+    expect(coordinator.markOffline).toHaveBeenCalledWith("node_1");
+    expect(controlPlane.releaseQuotaReservation).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "failed",
+      reasonCode: "ownership_attach_failed"
     }));
   });
 
@@ -470,6 +573,255 @@ describe("node routes", () => {
     expect(coordinator.claim).not.toHaveBeenCalled();
   });
 
+  it("denies auto-claim exposure for out-of-scope claimed assignment and rolls back claim", async () => {
+    const controlPlane = createControlPlaneStub();
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+    coordinator.claim.mockResolvedValueOnce({
+      assignment: {
+        id: "assignment_3",
+        runId: "run_3",
+        nodeId: "node_1",
+        status: "claimed",
+        retryCount: 0,
+        lastEventSequence: 0,
+        createdAt: NOW
+      },
+      run: {
+        id: "run_3",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        cwd: "/repo",
+        task: "x",
+        status: "running",
+        placement: "connected_local_node",
+        approvalPolicy: "default",
+        timeoutSeconds: 60,
+        metadata: {},
+        runtimeMode: "fake.deterministic",
+        createdAt: NOW
+      }
+    });
+    controlPlane.authorizeResource.mockImplementation(async (input: { resourceType: string; resourceId: string }) => {
+      if (input.resourceType === "node") {
+        return { ok: true, ownership: createOwnership({ resourceType: "node", resourceId: "node_1" }) };
+      }
+      if (input.resourceType === "assignment" && input.resourceId === "assignment_3") {
+        return {
+          ok: false,
+          decision: "denied",
+          code: "tenant_access_denied",
+          reasonCode: "tenant_mismatch"
+        };
+      }
+      return { ok: true, ownership: createOwnership({ resourceType: "run", resourceId: "run_3" }) };
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/node_1/assignments/claim",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: {}
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(coordinator.reject).toHaveBeenCalledWith("node_1", "assignment_3", "tenant_access_denied");
+  });
+
+  it("denies heartbeat when node ownership is out-of-scope", async () => {
+    const controlPlane = createControlPlaneStub();
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+    controlPlane.authorizeResource.mockResolvedValue({
+      ok: false,
+      decision: "denied",
+      code: "tenant_access_denied",
+      reasonCode: "tenant_mismatch"
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/node_1/heartbeat",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: { capabilities: [] }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(coordinator.heartbeat).not.toHaveBeenCalled();
+  });
+
+  it("denies GET /nodes/:id when node ownership is out-of-scope", async () => {
+    const controlPlane = createControlPlaneStub();
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+    controlPlane.authorizeResource.mockResolvedValue({
+      ok: false,
+      decision: "denied",
+      code: "tenant_access_denied",
+      reasonCode: "tenant_mismatch"
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/nodes/node_1",
+      headers: { authorization: "Bearer sk_sw_test_alpha" }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(coordinator.get).not.toHaveBeenCalled();
+  });
+
+  it("denies cross-tenant reject before coordinator side effects", async () => {
+    const controlPlane = createControlPlaneStub();
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+    controlPlane.authorizeResource.mockImplementation(async (input: { resourceType: string }) => {
+      if (input.resourceType === "node") return { ok: true, ownership: createOwnership() };
+      return {
+        ok: false,
+        decision: "denied",
+        code: "tenant_access_denied",
+        reasonCode: "tenant_mismatch"
+      };
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/node_1/assignments/assignment_1/reject",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: { reason: "nope" }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(coordinator.reject).not.toHaveBeenCalled();
+  });
+
+  it("denies cross-tenant event sync before service side effects", async () => {
+    const controlPlane = createControlPlaneStub();
+    const { app, eventSync } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+    controlPlane.authorizeResource.mockImplementation(async (input: { resourceType: string }) => {
+      if (input.resourceType === "node") return { ok: true, ownership: createOwnership() };
+      return {
+        ok: false,
+        decision: "denied",
+        code: "tenant_access_denied",
+        reasonCode: "tenant_mismatch"
+      };
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/node_1/assignments/assignment_1/events",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: { events: [] }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(eventSync.appendBatch).not.toHaveBeenCalled();
+  });
+
+  it("denies cross-tenant artifact manifest sync before service side effects", async () => {
+    const controlPlane = createControlPlaneStub();
+    const { app, artifactSync } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+    controlPlane.authorizeResource.mockImplementation(async (input: { resourceType: string }) => {
+      if (input.resourceType === "node") return { ok: true, ownership: createOwnership() };
+      return {
+        ok: false,
+        decision: "denied",
+        code: "tenant_access_denied",
+        reasonCode: "tenant_mismatch"
+      };
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/node_1/assignments/assignment_1/artifacts/manifest",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: { artifacts: [] }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(artifactSync.acceptManifest).not.toHaveBeenCalled();
+  });
+
+  it("denies cross-tenant artifact content sync before service side effects", async () => {
+    const controlPlane = createControlPlaneStub();
+    const { app, artifactSync } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+    controlPlane.authorizeResource.mockImplementation(async (input: { resourceType: string }) => {
+      if (input.resourceType === "node") return { ok: true, ownership: createOwnership() };
+      return {
+        ok: false,
+        decision: "denied",
+        code: "tenant_access_denied",
+        reasonCode: "tenant_mismatch"
+      };
+    });
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/nodes/node_1/assignments/assignment_1/artifacts/artifact_1/content",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: {}
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(artifactSync.acceptContent).not.toHaveBeenCalled();
+  });
+
+  it("denies cross-tenant complete before coordinator side effects", async () => {
+    const controlPlane = createControlPlaneStub();
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+    controlPlane.authorizeResource.mockImplementation(async (input: { resourceType: string }) => {
+      if (input.resourceType === "node") return { ok: true, ownership: createOwnership() };
+      return {
+        ok: false,
+        decision: "denied",
+        code: "tenant_access_denied",
+        reasonCode: "tenant_mismatch"
+      };
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/node_1/assignments/assignment_1/complete",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: { status: "completed" }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(coordinator.complete).not.toHaveBeenCalled();
+  });
+
   it("rejects large unauthenticated artifact content before parsing and sync side effects", async () => {
     const controlPlane = createControlPlaneStub();
     const { app, artifactSync, getPreParsingCalls } = await buildNodeApp({
@@ -490,6 +842,80 @@ describe("node routes", () => {
     expect(response.json().error.code).toBe("auth_required");
     expect(getPreParsingCalls()).toBe(0);
     expect(artifactSync.acceptContent).not.toHaveBeenCalled();
+  });
+
+  it("audits invalid API key failures even without resolved tenant binding", async () => {
+    const controlPlane = createControlPlaneStub();
+    controlPlane.authenticateRequest.mockRejectedValue(new ControlPlaneError("auth_failed", "invalid_api_key"));
+    const { app } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging"
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/register",
+      headers: { authorization: "Bearer sk_sw_raw_secret_key" },
+      payload: { capabilities: [] }
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(controlPlane.recordAudit).toHaveBeenCalled();
+    expect(JSON.stringify(controlPlane.recordAudit.mock.calls)).not.toContain("sk_sw_raw_secret_key");
+  });
+
+  it("audits blank and unbound node tokens in multi-binding setup", async () => {
+    const controlPlane = createControlPlaneStub();
+    const bindings = [
+      { token: "token-1", auth: createAuthContext() },
+      { token: "token-2", auth: createAuthContext({ project: { ...createAuthContext().project, id: "project_2" } }) }
+    ];
+    const { app } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging",
+      nodeTokenBindings: bindings
+    });
+
+    const blank = await app.inject({
+      method: "POST",
+      url: "/nodes/register",
+      headers: { "x-switchyard-node-token": "   " },
+      payload: { capabilities: [] }
+    });
+    expect(blank.statusCode).toBe(401);
+
+    const unbound = await app.inject({
+      method: "POST",
+      url: "/nodes/register",
+      headers: { "x-switchyard-node-token": "secret-node-token" },
+      payload: { capabilities: [] }
+    });
+    expect(unbound.statusCode).toBe(401);
+    expect(controlPlane.recordAudit).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(controlPlane.recordAudit.mock.calls)).not.toContain("secret-node-token");
+  });
+
+  it("audits query-credential denials in hosted mode and tolerates audit append failures", async () => {
+    const controlPlane = createControlPlaneStub();
+    controlPlane.recordAudit.mockRejectedValue(new Error("audit_down"));
+    const { app } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging",
+      nodeTokenBindings: [
+        { token: "token-1", auth: createAuthContext() },
+        { token: "token-2", auth: createAuthContext({ tenant: { ...createAuthContext().tenant, id: "tenant_2" } }) }
+      ]
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/register?token=leaky-token",
+      payload: { capabilities: [] }
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json().error.code).toBe("auth_failed");
+    expect(JSON.stringify(response.json())).not.toContain("leaky-token");
   });
 });
 

@@ -20,6 +20,9 @@ import {
 import { sendHttpError, type HttpErrorCode, type HttpErrorDetail } from "@switchyard/protocol-rest";
 
 const FORBIDDEN_QUERY_CREDENTIAL_KEYS = new Set(["api_key", "token", "authorization"]);
+const SYSTEM_AUDIT_ACCOUNT_ID = "account_system";
+const SYSTEM_AUDIT_TENANT_ID = "tenant_system";
+const SYSTEM_AUDIT_PROJECT_ID = "project_system";
 
 type NodeDeploymentMode = "local" | "test" | "staging" | "production";
 
@@ -335,6 +338,52 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
 
     try {
       const claimed = await deps.coordinator.claim(nodeId, body.assignmentId);
+      if (hosted && controlPlane && auth && claimed?.assignment) {
+        const assignmentScope = await controlPlane.authorizeResource({
+          auth,
+          resourceType: "assignment",
+          resourceId: claimed.assignment.id,
+          notFoundCode: "assignment_not_found"
+        });
+        if (!assignmentScope.ok) {
+          await rollbackClaimAssignment(deps.coordinator, nodeId, claimed.assignment.id);
+          await auditNodeDecision(controlPlane, {
+            auth,
+            eventType: "tenant.access_denied",
+            decision: "deny",
+            reasonCode: assignmentScope.reasonCode,
+            resourceType: "assignment",
+            resourceId: claimed.assignment.id,
+            requestId: request.id,
+            payload: { routeId: "nodes.claim" }
+          });
+          return sendHttpError(reply, assignmentScope.code, assignmentScope.reasonCode, [{ path: "reasonCode", issue: assignmentScope.reasonCode }]);
+        }
+      }
+      if (hosted && controlPlane && auth && claimed?.run) {
+        const runScope = await controlPlane.authorizeResource({
+          auth,
+          resourceType: "run",
+          resourceId: claimed.run.id,
+          notFoundCode: "run_not_found"
+        });
+        if (!runScope.ok) {
+          if (claimed.assignment) {
+            await rollbackClaimAssignment(deps.coordinator, nodeId, claimed.assignment.id);
+          }
+          await auditNodeDecision(controlPlane, {
+            auth,
+            eventType: "tenant.access_denied",
+            decision: "deny",
+            reasonCode: runScope.reasonCode,
+            resourceType: "run",
+            resourceId: claimed.run.id,
+            requestId: request.id,
+            payload: { routeId: "nodes.claim" }
+          });
+          return sendHttpError(reply, runScope.code, runScope.reasonCode, [{ path: "reasonCode", issue: runScope.reasonCode }]);
+        }
+      }
       if (hosted && controlPlane && auth) {
         await auditNodeDecision(controlPlane, {
           auth,
@@ -937,6 +986,14 @@ async function bestEffortMarkNodeOffline(coordinator: NodeCoordinatorService, no
   }
 }
 
+async function rollbackClaimAssignment(coordinator: NodeCoordinatorService, nodeId: string, assignmentId: string): Promise<void> {
+  try {
+    await coordinator.reject(nodeId, assignmentId, "tenant_access_denied");
+  } catch {
+    // Best effort only.
+  }
+}
+
 async function auditNodeAuthFailure(
   request: FastifyRequest,
   deps: NodeRouteDependencies,
@@ -948,48 +1005,40 @@ async function auditNodeAuthFailure(
   }
 
   const fallback = resolveFallbackAuditAuth(request, deps);
+  const eventType = error.code === "tenant_access_denied" ? "tenant.access_denied" : "node.auth_failed";
+  const payload = {
+    routeId: "nodes.auth",
+    method: request.method,
+    pathname: routePathname(request)
+  };
+
   if (fallback) {
     await auditNodeDecision(controlPlane, {
       auth: fallback,
-      eventType: error.code === "tenant_access_denied" ? "tenant.access_denied" : "node.auth_failed",
+      eventType,
       decision: "deny",
       reasonCode: error.reasonCode,
       resourceType: "auth",
       resourceId: "nodes.route",
       requestId: request.id,
-      payload: {
-        routeId: "nodes.auth",
-        method: request.method,
-        pathname: routePathname(request)
-      }
+      payload
     });
-    return;
-  }
-
-  const singleBinding = deps.nodeTokenBindings && deps.nodeTokenBindings.length === 1
-    ? deps.nodeTokenBindings[0]
-    : undefined;
-  if (!singleBinding) {
     return;
   }
 
   try {
     await controlPlane.recordAudit({
-      accountId: singleBinding.auth.account.id,
-      tenantId: singleBinding.auth.tenant.id,
-      projectId: singleBinding.auth.project.id,
+      accountId: SYSTEM_AUDIT_ACCOUNT_ID,
+      tenantId: SYSTEM_AUDIT_TENANT_ID,
+      projectId: SYSTEM_AUDIT_PROJECT_ID,
       actorType: "system",
-      eventType: error.code === "tenant_access_denied" ? "tenant.access_denied" : "node.auth_failed",
+      eventType,
       decision: "deny",
       reasonCode: error.reasonCode,
       resourceType: "auth",
       resourceId: "nodes.route",
       requestId: request.id,
-      payload: {
-        routeId: "nodes.auth",
-        method: request.method,
-        pathname: routePathname(request)
-      }
+      payload
     });
   } catch {
     // Best effort only.
