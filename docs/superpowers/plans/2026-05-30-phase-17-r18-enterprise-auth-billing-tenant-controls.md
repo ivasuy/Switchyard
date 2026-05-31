@@ -8,6 +8,17 @@
 
 Ship an API-first enterprise control-plane foundation for hosted/server APIs: API-key identity, tenant/project ownership, plan entitlements, quota enforcement, audit events, redacted fail-closed server config, and preserved local-daemon no-auth defaults.
 
+## Architect Iteration 1 Revisions
+
+- Accepted: replace future-output `context_files` with existing anchors and move cross-task future files into structured integration contracts.
+- Accepted: require `onRequest` auth/query-key rejection for protected hosted/server/node routes before body parsing, with large unauthenticated body spy tests.
+- Accepted: rewrite integration contracts with explicit name, kind, signature, and file path; define the hosted route-scope helper exactly.
+- Accepted: add memory/Postgres quota critical sections, reservation state machines, ownership atomicity/rollback rules, and concurrency/ownership-failure tests.
+- Accepted: add the missing malformed-auth, auth-store, bootstrap, audit-cursor, OpenAPI-surface, empty-inventory, downstream-failure, and empty-list tests.
+- Accepted: make observability use low-cardinality event names and deterministic OpenAPI CLI failure messages.
+- Accepted: make `/metrics` hosted global operator/admin-only for R18; tenant-scoped metrics remain unshipped.
+- Accepted: add rollout/rollback notes for additive schema-first deployment and fail-safe readiness.
+
 ## Scope Challenge
 
 1. Existing code already partially solves this through Zod contracts, request-id-aware HTTP errors, Fastify route modules, Postgres-shaped stores with in-memory fallback, hosted config/readiness fail-closed checks, hosted metrics, node token hooks, and the shared `redactSecrets` helper. Extend those paths; do not create a second server framework, second error envelope, second redactor, or parallel local daemon.
@@ -24,19 +35,34 @@ R18 adds a hosted/server control plane around existing API surfaces. The local d
 hosted/server request
   -> Fastify request id
   -> public bypass: GET /health and GET /ready
-  -> API key extraction from Authorization or x-switchyard-api-key
-  -> query-string key rejection and credential conflict checks
+  -> onRequest credential extraction from Authorization or x-switchyard-api-key
+  -> onRequest query-string key rejection and credential conflict checks before body parsing
   -> peppered hash lookup with timing-safe compare
   -> active Account/Tenant/Project/User/ApiKey/BillingPlan bundle
   -> route scope + resource ownership authorization
   -> entitlement/quota preflight and reservation
-  -> existing run/node/artifact/store side effect
+  -> existing run/node/artifact/store side effect inside ownership-safe boundary
   -> resource ownership row + redacted audit event + low-cardinality metric
 ```
 
 Durable ownership is a control-plane concern rather than a public response-shape rewrite. Public run, event, artifact, node, assignment, and placement contracts can remain backward compatible while `resource_ownership` records bind `resourceType + resourceId` to account/tenant/project/user/api key. Server route enforcement must consult this durable ownership source before returning reads, opening SSE streams, registering nodes, claiming assignments, or returning artifact content.
 
 Plans and quotas are operator/bootstrap-managed in R18. No money moves. Quota preflights create short-lived reservations before run creation, node registration, and artifact content reads. Reservations are released on downstream failure and expired during startup/readiness reconciliation.
+
+### Atomicity Model
+
+Quota reservations and ownership attachment must be treated as one safety boundary. The in-memory store must serialize quota and ownership mutations through a per-tenant/project critical section keyed by `accountId:tenantId:projectId:quotaKind`. The Postgres store must run the same mutations inside a transaction and use either `SELECT ... FOR UPDATE` on the relevant `quota_usage` row plus a conditional reservation insert/update, or `pg_advisory_xact_lock(hashtext(scopeKey))` when the row does not exist yet. A successful reservation state transition is:
+
+```text
+reserved -> consumed   when the guarded side effect and ownership attach both commit
+reserved -> released   when no user-visible side effect was created
+reserved -> failed     when a downstream write partially failed and compensating cleanup ran
+reserved -> expired    when startup/readiness reconciliation or the next quota check sees stale age
+```
+
+Run quotas count both consumed hourly run-create reservations and unexpired reserved run-create reservations for race prevention. Active run count is derived from owned runs whose status is not terminal (`completed`, `failed`, `cancelled`, `timeout`) plus unexpired reserved run-create reservations; terminal run transitions remove the run from the active count without a separate decrement row. Artifact byte quotas reserve the expected byte count before content read, consume on successful content response, and release/fail/expire on denied or failed reads. Connected-node count uses owned nodes with active status/heartbeat (`online`, `degraded`, or non-expired `heartbeatExpiresAt`) plus unexpired reserved node-register reservations; `offline`, expired heartbeat, or deleted/unknown ownership releases active pressure.
+
+Ownership attachment must happen atomically with resource creation where the existing store boundary allows it. For Postgres-backed run/node/artifact paths, implementers should write the resource row and `resource_ownership` row in the same transaction. Where an existing service writes outside that transaction, the route/service must attach ownership before queue enqueue, response send, SSE open, artifact content read, or node assignment exposure; if ownership attach fails, it must mark the partially created resource failed/cancelled/deleted where supported, release or fail the quota reservation, audit `ownership.attach_failed`, and return a safe downstream error without enqueueing or exposing the resource.
 
 ## File Structure
 
@@ -195,16 +221,39 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `{ "name": "enterprise ids reject org prefix", "lens": "error_path", "given": "tenantIdSchema.parse('org_123')", "expect": "throws ZodError" }`
 - `{ "name": "legacy user remains valid", "lens": "happy_shadow_nil", "given": "{ id: 'user_1', organizationId: 'org_1', displayName: 'Vasu', createdAt: ISO }", "expect": "userSchema parses without accountId or tenantId" }`
 - `{ "name": "new user fields parse", "lens": "happy", "given": "{ id, accountId, tenantId, email, status, displayName, createdAt, updatedAt }", "expect": "userSchema parses and preserves fields" }`
-- `{ "name": "public api key omits hash", "lens": "error_path", "given": "apiKeyPublicSchema.parse({ ..., secretHash: 'sha256:abc' })", "expect": "parse rejects secretHash or strips through explicit public serializer test" }`
+- `{ "name": "public api key omits hash", "lens": "error_path", "given": "apiKeyPublicSchema.parse({ id: 'api_key_1', accountId: 'account_1', tenantId: 'tenant_1', projectId: 'project_1', userId: 'user_1', name: 'test', keyPrefix: 'sk_sw', scopes: [], status: 'active', createdAt: ISO, secretHash: 'sha256:abc' })", "expect": "parse rejects secretHash or strips through explicit public serializer test" }`
 - `{ "name": "stored api key requires hash", "lens": "happy", "given": "apiKeyStoredSchema fixture with secretHash and keyPrefix", "expect": "schema parses" }`
 - `{ "name": "quota and entitlement fixtures parse", "lens": "happy", "given": "plan with allowed placements/runtime modes and R18 quota set", "expect": "billingPlanSchema and entitlementSnapshotSchema parse" }`
 - `{ "name": "audit event redacted payload parses", "lens": "happy", "given": "audit event with payload { authorization: '[REDACTED]' }", "expect": "auditLogEventSchema parses and raw credential field is absent" }`
 - `{ "name": "R18 http error codes match runtime", "lens": "integration", "given": "contract enum and protocol-rest HttpErrorCode union", "expect": "sorted code arrays are equal and quota_exceeded maps to 429" }`
 
 **integration_contracts:**
-- `exports`: `enterprise schemas/types from packages/contracts/src/enterprise.ts`; `R18 HttpErrorCode union values`; `accountIdSchema`, `tenantIdSchema`, `projectIdSchema`, `apiKeyIdSchema`, `billingPlanIdSchema`, `quotaReservationIdSchema`, `auditLogEventIdSchema`
+- `exports`:
+  - `{ "name": "accountIdSchema", "kind": "constant", "signature": "accountIdSchema: z.ZodString", "file": "packages/contracts/src/ids.ts" }`
+  - `{ "name": "tenantIdSchema", "kind": "constant", "signature": "tenantIdSchema: z.ZodString", "file": "packages/contracts/src/ids.ts" }`
+  - `{ "name": "projectIdSchema", "kind": "constant", "signature": "projectIdSchema: z.ZodString", "file": "packages/contracts/src/ids.ts" }`
+  - `{ "name": "apiKeyIdSchema", "kind": "constant", "signature": "apiKeyIdSchema: z.ZodString", "file": "packages/contracts/src/ids.ts" }`
+  - `{ "name": "billingPlanIdSchema", "kind": "constant", "signature": "billingPlanIdSchema: z.ZodString", "file": "packages/contracts/src/ids.ts" }`
+  - `{ "name": "quotaReservationIdSchema", "kind": "constant", "signature": "quotaReservationIdSchema: z.ZodString", "file": "packages/contracts/src/ids.ts" }`
+  - `{ "name": "auditLogEventIdSchema", "kind": "constant", "signature": "auditLogEventIdSchema: z.ZodString", "file": "packages/contracts/src/ids.ts" }`
+  - `{ "name": "accountSchema", "kind": "constant", "signature": "accountSchema: z.ZodType<Account>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "tenantSchema", "kind": "constant", "signature": "tenantSchema: z.ZodType<Tenant>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "projectSchema", "kind": "constant", "signature": "projectSchema: z.ZodType<Project>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "apiKeyPublicSchema", "kind": "constant", "signature": "apiKeyPublicSchema: z.ZodType<ApiKeyPublic>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "apiKeyStoredSchema", "kind": "constant", "signature": "apiKeyStoredSchema: z.ZodType<ApiKeyStored>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "billingPlanSchema", "kind": "constant", "signature": "billingPlanSchema: z.ZodType<BillingPlan>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "entitlementSnapshotSchema", "kind": "constant", "signature": "entitlementSnapshotSchema: z.ZodType<EntitlementSnapshot>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "quotaUsageSchema", "kind": "constant", "signature": "quotaUsageSchema: z.ZodType<QuotaUsage>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "quotaReservationSchema", "kind": "constant", "signature": "quotaReservationSchema: z.ZodType<QuotaReservation>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "resourceOwnershipSchema", "kind": "constant", "signature": "resourceOwnershipSchema: z.ZodType<ResourceOwnership>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "authContextSchema", "kind": "constant", "signature": "authContextSchema: z.ZodType<AuthContext>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "auditLogEventSchema", "kind": "constant", "signature": "auditLogEventSchema: z.ZodType<AuditLogEvent>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "whoamiResponseSchema", "kind": "constant", "signature": "whoamiResponseSchema: z.ZodType<WhoamiResponse>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "entitlementsResponseSchema", "kind": "constant", "signature": "entitlementsResponseSchema: z.ZodType<EntitlementsResponse>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "auditEventsResponseSchema", "kind": "constant", "signature": "auditEventsResponseSchema: z.ZodType<AuditEventsResponse>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "name": "R18_HTTP_ERROR_CODES", "kind": "constant", "signature": "R18_HTTP_ERROR_CODES: readonly HttpErrorCode[]", "file": "packages/contracts/src/http-error.ts" }`
 - `imports_from_other_tasks`: []
-- `file_paths_consumed_by_other_tasks`: `packages/core/src/ports/control-plane-store.ts`, `packages/storage/src/postgres/control-plane-store.ts`, `packages/protocol-rest/src/hosted-auth.ts`, `packages/protocol-rest/src/enterprise-routes.ts`, `packages/contracts/src/openapi.ts`
+- `file_paths_consumed_by_other_tasks`: `packages/core/src/ports/control-plane-store.ts`, `packages/core/src/services/control-plane-service.ts`, `packages/storage/src/postgres/control-plane-store.ts`, `packages/protocol-rest/src/hosted-auth.ts`, `packages/protocol-rest/src/enterprise-routes.ts`, `packages/contracts/src/openapi.ts`
 
 ### Task P17-T2-core-control-plane-service
 
@@ -218,7 +267,8 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 
 **Context files (must read before coding):**
 - `docs/superpowers/specs/2026-05-30-phase-17-r18-enterprise-auth-billing-tenant-controls.md` - request flow, auth rules, quota behavior, audit rules.
-- `packages/contracts/src/enterprise.ts` - contract schemas/types this service consumes and returns.
+- `packages/contracts/src/ids.ts` - current ID helper pattern and R18 ID schemas exported by T1.
+- `packages/contracts/src/http-error.ts` - existing error-code export pattern and R18 codes exported by T1.
 - `packages/core/src/services/local-policy-gate.ts` - shared `redactSecrets` helper to reuse.
 - `packages/core/src/services/hosted-run-service.ts` - current side-effect order for hosted run creation and queue enqueue.
 - `packages/core/src/ports/run-store.ts` - active run count filter shape and current store style.
@@ -227,20 +277,24 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 **Instructions:**
 1. Define a `ControlPlaneStore` port for accounts, tenants, projects, users, API keys by prefix/hash, billing plans, quota usage/reservations, audit events, resource ownership, bootstrap summary, unowned resource counts, and stale reservation expiry.
 2. Implement one `ControlPlaneService` class. Use pure helper functions inside the same file for API key extraction, peppered hashing, timing-safe hash comparison, scope checks, entitlement decisions, quota reservation lifecycle, ownership authorization, audit payload redaction, and safe reason codes.
-3. Accept credentials from `Authorization: Bearer <api-key>` or `x-switchyard-api-key`. Reject missing, blank, malformed bearer, conflicting differing headers, and query-string key attempts. If both headers are present with the same key, accept once.
+3. Accept credentials from `Authorization: Bearer <api-key>` or `x-switchyard-api-key`. Reject missing, blank, malformed bearer, wrong auth schemes, duplicate bearer segments such as `Bearer Bearer sk_x`, whitespace-only key material, conflicting differing headers, and query-string key attempts. If both headers are present with the same key after exact trimming, accept once.
 4. Hash raw keys with `createHmac("sha256", pepper).update(rawKey).digest("hex")`; compare stored and computed hashes with `timingSafeEqual` after length checks. Never return or log raw keys, pepper, bearer header, or secret hash.
 5. Build an `AuthContext` only when API key, account, tenant, project, user, and plan are active. Deny revoked, expired, suspended, deleted, archived, missing plan, or inactive plan states before side effects.
 6. Provide methods for route code: `authenticateRequest`, `requireScope`, `authorizeResource`, `ensureOwnedOrAttachFromRun`, `preflightRunCreate`, `releaseQuotaReservation`, `preflightArtifactContentRead`, `preflightNodeRegister`, `whoami`, `entitlementSnapshot`, `listAuditEvents`, and `recordAudit`.
-7. Quota preflight must reserve before side effects for run creation, artifact content bytes, and connected-node registration. Downstream failures must release or fail reservations; stale reservations must expire by age.
-8. Audit events must redact payloads with `redactSecrets` and store safe reason codes. Audit failure on allow paths increments/returns a typed result for metrics without leaking; auth/deny paths still return the original denial.
+7. Quota preflight must reserve before side effects for run creation, artifact content bytes, and connected-node registration using the `reserved -> consumed/released/failed/expired` state machine in the Atomicity Model. Downstream failures must release or fail reservations; stale reservations must expire by age.
+8. `preflightRunCreate` must count unexpired reservations plus owned non-terminal runs for active-run pressure; `preflightArtifactContentRead` must reserve expected bytes before content reads; `preflightNodeRegister` must count active owned nodes plus unexpired node reservations.
+9. `ensureOwnedOrAttachFromRun` must attach ownership before queue enqueue/response/stream/content exposure. If attach fails after a resource is written, return a typed `ownership_attach_failed` result so callers can rollback/terminalize and release or fail the quota reservation.
+10. Audit events must redact payloads with `redactSecrets` and store safe reason codes. Audit failure on allow paths increments/returns a typed result for metrics without leaking; auth/deny paths still return the original denial.
 
 **Acceptance criteria:**
 - Valid bearer and valid `x-switchyard-api-key` create the same `AuthContext`; identical duplicate headers are accepted.
-- Missing, blank, malformed bearer, conflicting headers, query-string `api_key`/`token`/`authorization`, revoked key, expired key, suspended account, inactive tenant, archived project, deleted user, and inactive plan all deny with the exact R18 error code/reason.
+- Missing, blank, malformed bearer, wrong scheme, duplicate bearer segment, whitespace-only key material, conflicting headers, query-string `api_key`/`token`/`authorization`, auth store unavailable, revoked key, expired key, suspended account, inactive tenant, archived project, deleted user, and inactive plan all deny with the exact R18 error code/reason.
 - `requireScope` denies with `tenant_access_denied` or `entitlement_denied` only after auth succeeds and never leaks a raw key.
 - Run preflight enforces placement, runtime mode, hosted-real-runtime boolean, max timeout, hourly run quota, active-run quota, and creates a reservation before returning allow.
+- Concurrent run, artifact-byte, and connected-node reservations for the same tenant/project are serialized in memory and transactionally locked in Postgres through the store contract; tests prove only the allowed quota count succeeds under parallel calls.
 - Artifact content preflight enforces scope, entitlement, ownership, and byte quota before content read.
 - Node registration preflight enforces project ownership and max connected-node quota before registration.
+- Ownership attach failure returns a typed failure result before queue enqueue/response and triggers reservation release/fail in route callers.
 - `authorizeResource` returns safe not-found/denied results without unscoped resource data exposure.
 - Audit payloads and returned errors redact API keys, bearer headers, node tokens, secret hashes, provider tokens, object-store credentials, cookies, signed URL secret query params, and peppers.
 
@@ -251,14 +305,17 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 **error_rescue_map:**
 - `{ "codepath": "authenticateRequest", "failure": "credentials missing on protected route", "exception": "ControlPlaneError { code: 'auth_required' }", "rescue": "Return denial before parsing route body or calling side-effect services", "user_sees": "401 auth_required with request id" }`
 - `{ "codepath": "authenticateRequest", "failure": "conflicting bearer and x-switchyard-api-key", "exception": "ControlPlaneError { code: 'auth_conflict' }", "rescue": "Deny and audit a redacted conflict reason", "user_sees": "401 auth_conflict" }`
+- `{ "codepath": "authenticateRequest", "failure": "malformed Authorization value, wrong scheme, duplicate bearer segment, or whitespace-only key material", "exception": "ControlPlaneError { code: 'auth_failed' }", "rescue": "Reject before hashing or store lookup; return safe reason code malformed_authorization or blank_key_material", "user_sees": "401 auth_failed" }`
 - `{ "codepath": "hash/compare API key", "failure": "stored hash length differs or malformed hash", "exception": "explicit malformed_hash condition", "rescue": "Treat as auth_failed without timingSafeEqual throw", "user_sees": "401 auth_failed" }`
 - `{ "codepath": "bundle lookup", "failure": "store unavailable", "exception": "ControlPlaneError { code: 'auth_store_unavailable' }", "rescue": "Fail closed and record low-cardinality failure metric through caller", "user_sees": "503 auth_store_unavailable" }`
 - `{ "codepath": "preflightRunCreate", "failure": "quota exceeded", "exception": "ControlPlaneError { code: 'quota_exceeded', reasonCode }", "rescue": "Do not create reservation or side effects; audit quota.denied", "user_sees": "429 quota_exceeded with safe reason code" }`
+- `{ "codepath": "preflightRunCreate/preflightArtifactContentRead/preflightNodeRegister", "failure": "concurrent reservation race", "exception": "quota critical-section or transaction conflict", "rescue": "Serialize in memory or retry one Postgres transaction once after lock conflict; deny excess attempts with quota_exceeded", "user_sees": "Only allowed requests succeed; excess requests see 429 quota_exceeded" }`
 - `{ "codepath": "preflightRunCreate", "failure": "reservation created but downstream fails", "exception": "caller reports downstream failure", "rescue": "releaseQuotaReservation marks reservation released or failed", "user_sees": "original downstream error without leaking reservation internals" }`
+- `{ "codepath": "ensureOwnedOrAttachFromRun", "failure": "ownership attach fails after resource creation", "exception": "ControlPlaneError { code: 'ownership_attach_failed' } returned to caller", "rescue": "Caller terminalizes or deletes partial resource, releases/fails reservation, and prevents queue enqueue/response", "user_sees": "Safe downstream failure; resource is not exposed as tenant-owned" }`
 - `{ "codepath": "recordAudit", "failure": "audit store append fails", "exception": "ControlPlaneError { code: 'audit_log_unavailable' } or returned failure result", "rescue": "Never leak payload; allow-path callers may continue with audit.failed metric, readiness fails in staging/production", "user_sees": "Deny response still returned; allow response may still succeed depending on caller policy" }`
 
 **observability:**
-- `logs`: `debug/info events are caller-owned; service returns safe reason codes and redacted audit payloads only`
+- `logs`: `caller-owned typed event names only: control_plane.auth_denied, control_plane.auth_allowed, control_plane.quota_reserved, control_plane.quota_consumed, control_plane.quota_released, control_plane.quota_failed, control_plane.ownership_attached, control_plane.ownership_attach_failed, control_plane.audit_append_failed; attach reasonCode, scopeKind, and routeId only`
 - `success_metric`: `auth.succeeded, quota.reserved, quota.released, audit.appended can be incremented by route/server callers from typed service outcomes`
 - `failure_metric`: `auth.required, auth.failed, auth.conflict, tenant.denied, entitlement.denied, quota.denied, audit.failed can be incremented from ControlPlaneError codes`
 
@@ -267,19 +324,36 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `{ "name": "same duplicate key headers authenticate once", "lens": "edge_auth_duplicate", "given": "Bearer and x-switchyard-api-key contain the same raw key", "expect": "auth succeeds and raw key is absent from audit payload" }`
 - `{ "name": "missing key denied", "lens": "happy_shadow_nil", "given": "protected request with no auth header", "expect": "auth_required before side effects" }`
 - `{ "name": "blank key denied", "lens": "happy_shadow_empty", "given": "Authorization: Bearer    ", "expect": "auth_failed" }`
+- `{ "name": "malformed authorization denied", "lens": "error_path", "given": "Authorization: Bearer with no token, Authorization: Basic abc, Authorization: Bearer Bearer sk_sw_test_alpha", "expect": "auth_failed with malformed_authorization and no store lookup for malformed values" }`
+- `{ "name": "whitespace-only key denied", "lens": "happy_shadow_empty", "given": "x-switchyard-api-key contains spaces and tabs only", "expect": "auth_failed with blank_key_material" }`
 - `{ "name": "query key denied", "lens": "error_path", "given": "request query contains api_key=sk_secret", "expect": "auth_failed or auth_required and audit payload does not contain sk_secret" }`
 - `{ "name": "conflicting headers denied", "lens": "error_path", "given": "Bearer key A and x-switchyard-api-key key B", "expect": "auth_conflict" }`
+- `{ "name": "auth store unavailable fails closed", "lens": "error_path", "given": "store throws during API key bundle lookup", "expect": "auth_store_unavailable and raw key absent from error/audit" }`
 - `{ "name": "revoked expired inactive states deny", "lens": "error_path", "given": "revoked API key, expired API key, suspended account, suspended tenant, archived project, deleted user, inactive plan", "expect": "each returns auth_failed or entitlement_denied before side effects with safe reason" }`
 - `{ "name": "scope denied", "lens": "error_path", "given": "AuthContext without artifacts:read calls artifact preflight", "expect": "tenant_access_denied or entitlement_denied with reason missing_scope" }`
 - `{ "name": "run quota reservation", "lens": "happy", "given": "tenant under hourly/active quotas creates hosted fake run", "expect": "preflight returns reservation id and increments quota.reserved outcome" }`
+- `{ "name": "concurrent run reservations serialize", "lens": "integration", "given": "maxRunsPerHour 1 and two simultaneous preflightRunCreate calls", "expect": "one reservation becomes reserved and one request receives quota_exceeded; no double consumption" }`
 - `{ "name": "run quota exceeded", "lens": "error_path", "given": "maxRunsPerHour already consumed", "expect": "quota_exceeded with runs_per_hour_exceeded and no reservation" }`
 - `{ "name": "artifact bytes quota exceeded", "lens": "error_path", "given": "artifact read size would exceed maxArtifactContentReadBytesPerHour", "expect": "quota_exceeded with artifact_read_bytes_exceeded" }`
+- `{ "name": "artifact byte reservation lifecycle", "lens": "happy", "given": "artifact content preflight reserves 1024 bytes then caller reports success", "expect": "reservation moves reserved -> consumed and usage records 1024 bytes" }`
 - `{ "name": "node quota exceeded", "lens": "error_path", "given": "active connected node count equals maxConnectedNodes", "expect": "quota_exceeded with connected_nodes_exceeded" }`
+- `{ "name": "ownership attach failure typed", "lens": "error_path", "given": "ensureOwnedOrAttachFromRun store attach throws after run id is known", "expect": "returns ownership_attach_failed without queue enqueue signal and reservation can be failed" }`
 - `{ "name": "redaction removes secrets", "lens": "edge_redaction", "given": "audit payload with Authorization, apiKey, secretHash, cookie, signed URL sig", "expect": "stored payload contains redacted markers and no raw secret substrings" }`
 
 **integration_contracts:**
-- `exports`: `ControlPlaneStore interface`; `ControlPlaneService class`; `ControlPlaneError class`; `hashApiKey(rawKey: string, pepper: string) => string`; `safeAuthRouteScopes constant or equivalent route-scope helper`
-- `imports_from_other_tasks`: `P17-T1-enterprise-contracts-errors: enterprise schemas/types and R18 HttpErrorCode values`
+- `exports`:
+  - `{ "name": "ControlPlaneStore", "kind": "interface", "signature": "interface ControlPlaneStore { loadApiKeyBundleByHash(input: LoadApiKeyBundleInput): Promise<AuthBundle | null>; bootstrap(input: ControlPlaneBootstrapInput): Promise<ControlPlaneBootstrapSummary>; reserveQuota(input: ReserveQuotaInput): Promise<QuotaReservation>; transitionQuotaReservation(input: TransitionQuotaReservationInput): Promise<QuotaReservation>; withQuotaCriticalSection<T>(scope: QuotaCriticalSectionScope, fn: () => Promise<T>): Promise<T>; attachOwnership(input: AttachOwnershipInput): Promise<ResourceOwnership>; getOwnership(input: GetOwnershipInput): Promise<ResourceOwnership | null>; listOwnedResourceIds(input: ListOwnedResourceIdsInput): Promise<readonly string[]>; countActiveOwnedRuns(input: ActiveRunCountInput): Promise<number>; countActiveOwnedNodes(input: ActiveNodeCountInput): Promise<number>; appendAuditEvent(input: AppendAuditEventInput): Promise<AuditLogEvent>; listAuditEvents(input: ListAuditEventsInput): Promise<AuditEventsPage>; countUnownedResources(): Promise<UnownedResourceCounts>; expireStaleReservations(input: ExpireReservationsInput): Promise<number>; }", "file": "packages/core/src/ports/control-plane-store.ts" }`
+  - `{ "name": "ControlPlaneService", "kind": "class", "signature": "class ControlPlaneService { constructor(input: ControlPlaneServiceInput); authenticateRequest(input: AuthenticateRequestInput): Promise<AuthContext>; requireScope(auth: AuthContext, scope: EnterpriseScope): void; authorizeResource(input: AuthorizeResourceInput): Promise<AuthorizeResourceResult>; ensureOwnedOrAttachFromRun(input: EnsureOwnedOrAttachFromRunInput): Promise<EnsureOwnedResult>; preflightRunCreate(input: PreflightRunCreateInput): Promise<QuotaReservation>; releaseQuotaReservation(input: ReleaseQuotaReservationInput): Promise<QuotaReservation>; preflightArtifactContentRead(input: PreflightArtifactContentReadInput): Promise<QuotaReservation>; preflightNodeRegister(input: PreflightNodeRegisterInput): Promise<QuotaReservation>; whoami(auth: AuthContext): WhoamiResponse; entitlementSnapshot(auth: AuthContext): Promise<EntitlementsResponse>; listAuditEvents(input: ListAuditEventsInput): Promise<AuditEventsResponse>; recordAudit(input: RecordAuditInput): Promise<RecordAuditResult>; }", "file": "packages/core/src/services/control-plane-service.ts" }`
+  - `{ "name": "ControlPlaneError", "kind": "class", "signature": "class ControlPlaneError extends Error { code: HttpErrorCode; reasonCode: string; statusCode: number; safeDetails?: Record<string, unknown>; }", "file": "packages/core/src/services/control-plane-service.ts" }`
+  - `{ "name": "hashApiKey", "kind": "function", "signature": "hashApiKey(rawKey: string, pepper: string) => string", "file": "packages/core/src/services/control-plane-service.ts" }`
+  - `{ "name": "TERMINAL_RUN_STATUSES", "kind": "constant", "signature": "TERMINAL_RUN_STATUSES: readonly ['completed', 'failed', 'cancelled', 'timeout']", "file": "packages/core/src/services/control-plane-service.ts" }`
+- `imports_from_other_tasks`:
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "AuthContext", "kind": "type", "signature": "type AuthContext = z.infer<typeof authContextSchema>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "ApiKeyStored", "kind": "type", "signature": "type ApiKeyStored = z.infer<typeof apiKeyStoredSchema>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "QuotaReservation", "kind": "type", "signature": "type QuotaReservation = z.infer<typeof quotaReservationSchema>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "ResourceOwnership", "kind": "type", "signature": "type ResourceOwnership = z.infer<typeof resourceOwnershipSchema>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "AuditLogEvent", "kind": "type", "signature": "type AuditLogEvent = z.infer<typeof auditLogEventSchema>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "R18_HTTP_ERROR_CODES", "kind": "constant", "signature": "R18_HTTP_ERROR_CODES: readonly HttpErrorCode[]", "file": "packages/contracts/src/http-error.ts" }`
 - `file_paths_consumed_by_other_tasks`: `packages/storage/src/postgres/control-plane-store.ts`, `packages/protocol-rest/src/hosted-auth.ts`, `packages/protocol-node/src/node-routes.ts`, `apps/server/src/app.ts`, `apps/server/src/readiness.ts`
 
 ### Task P17-T3-control-plane-storage-ownership
@@ -299,8 +373,8 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `packages/storage/src/postgres/database.ts` - existing additive `CREATE TABLE IF NOT EXISTS` migration style.
 - `packages/storage/src/postgres/run-store.ts` - in-memory fallback pattern to match.
 - `packages/storage/test/postgres-storage.test.ts` - deterministic in-memory Postgres-shaped test style.
-- `packages/core/src/ports/control-plane-store.ts` - required store method contract.
-- `packages/contracts/src/enterprise.ts` - persisted and public enterprise shapes.
+- `packages/core/src/ports/run-store.ts` - current list/count filter style for active run derivation.
+- `packages/contracts/src/ids.ts` - existing prefixed ID helper pattern consumed by T1 enterprise schemas.
 
 **Instructions:**
 1. Add additive Postgres tables and indexes for `accounts`, `tenants`, `projects`, `enterprise_users`, `api_keys`, `billing_plans`, `quota_reservations`, `quota_usage`, `audit_log_events`, and `resource_ownership`.
@@ -309,8 +383,11 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 4. Persist only API key `secretHash`, `keyPrefix`, metadata, status, scopes, and timestamps. Never persist raw key material from bootstrap input.
 5. Add bootstrap import/upsert helpers that validate account/tenant/project/user/key/plan relationships and report active counts. Duplicate ids, missing relationships, empty bootstrap, inactive plan for active key, or raw-secret persistence attempt must fail with safe errors.
 6. Implement resource ownership operations for `run`, `run_event`, `artifact`, `placement_decision`, `node`, `assignment`, `quota_reservation`, and `audit_log_event`.
-7. Implement tenant-scoped audit pagination, quota reservation release/fail/expire, active count helpers, artifact-read byte usage, connected-node count, and `countUnownedResources` across existing hosted resource tables.
-8. Real Postgres tests remain optional behind `SWITCHYARD_TEST_POSTGRES_URL`; deterministic default tests use in-memory fallback and must be no-spend.
+7. Implement quota reservation transitions exactly as `reserved -> consumed`, `reserved -> released`, `reserved -> failed`, and `reserved -> expired`; reject invalid transitions such as `consumed -> released` or `expired -> consumed` with a safe store error.
+8. Implement `withQuotaCriticalSection` as a per-scope promise chain in memory. In Postgres mode, wrap reservation creation/transition and active count checks in a transaction using `SELECT ... FOR UPDATE` on `quota_usage` when present, and `pg_advisory_xact_lock(hashtext(scopeKey))` before inserting the first row for a scope.
+9. Implement tenant-scoped audit pagination, quota reservation release/fail/expire, active count helpers, artifact-read byte usage, connected-node count, and `countUnownedResources` across existing hosted resource tables. Active runs are owned runs whose status is not `completed`, `failed`, `cancelled`, or `timeout`; active nodes are owned nodes whose status is `online` or `degraded` and whose `heartbeatExpiresAt` is absent or later than `now`.
+10. `attachOwnership` must be idempotent for the same resource/account/tenant/project tuple and must reject conflicting ownership atomically. For Postgres-backed callers that pass an open transaction/client, the resource row and ownership row must commit or rollback together; otherwise callers must use the compensating rollback path before queue enqueue/response.
+11. Real Postgres tests remain optional behind `SWITCHYARD_TEST_POSTGRES_URL`; deterministic default tests use in-memory fallback and must be no-spend.
 
 **Acceptance criteria:**
 - Fresh `ensurePostgresSchema` creates all control-plane tables/indexes without dropping or rewriting existing tables.
@@ -318,6 +395,8 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `PostgresControlPlaneStore(handle)` works when `SWITCHYARD_TEST_POSTGRES_URL` is set and skips safely when it is not.
 - Bootstrap never stores raw key fields and rejects malformed/empty/duplicate/inactive relationship data with redacted errors.
 - Ownership list/read methods return only resource ids for the caller tenant/project and do not require fetching unscoped resource rows first.
+- Quota reservations serialize concurrent in-memory attempts and use Postgres transaction locks/conditional updates so parallel calls cannot exceed run, artifact-byte, or connected-node quotas.
+- Ownership attach is idempotent for the same owner, rejects conflicting owner tuples, and can be performed in the same Postgres transaction as resource creation.
 - Unowned resource count flags resource rows without matching ownership in staging/production readiness paths.
 
 **Checks (must pass before GREEN):**
@@ -328,13 +407,16 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 **error_rescue_map:**
 - `{ "codepath": "ensurePostgresSchema", "failure": "table/index already exists from prior phase", "exception": "Postgres duplicate object error if not guarded", "rescue": "Use CREATE TABLE IF NOT EXISTS and CREATE INDEX IF NOT EXISTS only", "user_sees": "Server starts against pre-R18 databases without destructive migration" }`
 - `{ "codepath": "bootstrap import", "failure": "empty bootstrap file or zero active records", "exception": "ControlPlaneStoreError { code: 'control_plane_bootstrap_empty' }", "rescue": "Reject bootstrap and return redacted summary", "user_sees": "Startup/readiness fails closed with control_plane_bootstrap_empty" }`
+- `{ "codepath": "bootstrap import", "failure": "malformed JSON, missing required relation, duplicate id, zero active tenant/project/key/plan, or active key with inactive plan", "exception": "ControlPlaneStoreError { code: 'control_plane_bootstrap_malformed' | 'control_plane_bootstrap_duplicate' | 'control_plane_bootstrap_zero_active' | 'control_plane_bootstrap_inactive_plan' }", "rescue": "Reject the full bootstrap before partial insert/upsert and return counts/reason only", "user_sees": "Startup/readiness fails closed with a safe bootstrap reason code" }`
 - `{ "codepath": "bootstrap import", "failure": "raw API key accidentally remains in stored record", "exception": "explicit raw-secret guard", "rescue": "Hash immediately and persist only secretHash/keyPrefix", "user_sees": "No raw key appears in database, logs, or readiness" }`
 - `{ "codepath": "quota reservation", "failure": "stale reservation left by crashed process", "exception": "none; stale age condition", "rescue": "expireStaleReservations marks it expired before next quota check", "user_sees": "Quota recovers without manual cleanup after reservation timeout" }`
+- `{ "codepath": "quota reservation", "failure": "parallel reservations exceed max quota", "exception": "critical-section contention or Postgres transaction retry/conditional update miss", "rescue": "Serialize/retry once, then return quota_exceeded for excess request without a reservation row", "user_sees": "At most the configured quota succeeds" }`
+- `{ "codepath": "ownership attach", "failure": "resource already owned by another tenant/project or ownership insert fails", "exception": "ControlPlaneStoreError { code: 'ownership_conflict' | 'ownership_attach_failed' }", "rescue": "Rollback same transaction or return typed failure so caller can terminalize/delete resource before queue/response", "user_sees": "Safe 403/404/downstream failure; cross-tenant owner is not exposed" }`
 - `{ "codepath": "audit list", "failure": "cursor malformed or tenant has no events", "exception": "store cursor parse condition", "rescue": "Return invalid_query from caller for malformed cursor or empty list with nextCursor null", "user_sees": "Safe paginated audit response scoped to caller tenant" }`
 - `{ "codepath": "countUnownedResources", "failure": "existing rows have no ownership", "exception": "none; count > 0", "rescue": "Return counts grouped by low-cardinality resource type", "user_sees": "/ready returns unowned_resources_present in staging/production" }`
 
 **observability:**
-- `logs`: []
+- `logs`: `storage/control-plane callers may log control_plane.bootstrap_loaded, control_plane.bootstrap_failed, control_plane.quota_transitioned, control_plane.quota_transition_failed, control_plane.ownership_attached, control_plane.ownership_conflict, control_plane.audit_list_failed with reasonCode and resourceType only`
 - `success_metric`: `controlPlane.ready can be incremented when bootstrap counts, stores, quotas, audit, and ownership checks pass`
 - `failure_metric`: `controlPlane.notReady can be incremented when bootstrap, audit store, quota store, or unowned-resource checks fail`
 
@@ -342,17 +424,41 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `{ "name": "in-memory bootstrap loads active bundle", "lens": "happy", "given": "valid deterministic account/tenant/project/user/api key/plan fixture", "expect": "active counts are all > 0 and API key lookup returns bundle" }`
 - `{ "name": "bootstrap raw key is not persisted", "lens": "edge_redaction", "given": "bootstrap input includes rawKey sk_sw_test_alpha", "expect": "stored api key has keyPrefix and secretHash; JSON/stringified store has no sk_sw_test_alpha" }`
 - `{ "name": "empty bootstrap rejected", "lens": "happy_shadow_empty", "given": "bootstrap with empty arrays", "expect": "control_plane_bootstrap_empty or zero_active_* error" }`
+- `{ "name": "missing bootstrap rejected by caller contract", "lens": "happy_shadow_nil", "given": "bootstrap path/env absent in staging caller", "expect": "store bootstrap is not invoked; server task maps to control_plane_bootstrap_missing" }`
+- `{ "name": "malformed bootstrap rejected", "lens": "error_path", "given": "bootstrap object missing tenant.accountId relation or containing invalid JSON from loader", "expect": "control_plane_bootstrap_malformed before partial insert" }`
 - `{ "name": "duplicate ids rejected", "lens": "error_path", "given": "two tenants with same id", "expect": "bootstrap validation rejects before partial insert" }`
+- `{ "name": "zero active bootstrap rejected", "lens": "error_path", "given": "only suspended tenants/projects or no active API keys", "expect": "control_plane_bootstrap_zero_active with redacted counts" }`
+- `{ "name": "inactive plan for active key rejected", "lens": "error_path", "given": "active API key references archived billing plan", "expect": "control_plane_bootstrap_inactive_plan before insert" }`
 - `{ "name": "ownership attach and scoped lookup", "lens": "happy", "given": "run_1 owned by tenant A and run_2 owned by tenant B", "expect": "tenant A list returns only run_1 and get run_2 denies/not-found" }`
+- `{ "name": "ownership attach conflict", "lens": "error_path", "given": "run_1 already owned by tenant A and tenant B tries attachOwnership", "expect": "ownership_conflict and existing owner remains unchanged" }`
 - `{ "name": "quota reservation lifecycle", "lens": "happy", "given": "reserve then release run creation quota", "expect": "reservation status moves reserved -> released and usage is not double-counted" }`
+- `{ "name": "quota reservation consumed lifecycle", "lens": "happy", "given": "reserve run creation then report committed downstream side effect", "expect": "reservation status moves reserved -> consumed and hourly usage increments once" }`
 - `{ "name": "stale reservation expires", "lens": "error_path", "given": "reservation older than configured expiry", "expect": "expireStaleReservations marks expired and next quota check ignores it" }`
+- `{ "name": "invalid reservation transition rejected", "lens": "error_path", "given": "consumed reservation transitioned to released", "expect": "store rejects with invalid_quota_transition" }`
+- `{ "name": "concurrent in-memory reservations respect quota", "lens": "integration", "given": "maxConnectedNodes 1 and two parallel reserveQuota calls for node_register", "expect": "one reserved row and one quota_exceeded result" }`
 - `{ "name": "audit pagination scoped", "lens": "integration", "given": "audit events for tenant A and tenant B", "expect": "tenant A list returns only tenant A events with deterministic cursor" }`
+- `{ "name": "malformed audit cursor rejected", "lens": "error_path", "given": "listAuditEvents cursor is not valid base64/json cursor", "expect": "invalid_query mapping from caller and no tenant-external rows" }`
 - `{ "name": "unowned resources counted", "lens": "error_path", "given": "run row without resource_ownership row", "expect": "countUnownedResources returns runs > 0" }`
 - `{ "name": "real postgres optional smoke", "lens": "integration", "given": "SWITCHYARD_TEST_POSTGRES_URL unset", "expect": "test reports skipped sentinel without network call" }`
 
 **integration_contracts:**
-- `exports`: `PostgresControlPlaneStore implements ControlPlaneStore`; `ensurePostgresSchema` creates R18 tables; `control-plane table names and resource ownership type literals`
-- `imports_from_other_tasks`: `P17-T1-enterprise-contracts-errors: enterprise schemas/types`; `P17-T2-core-control-plane-service: ControlPlaneStore interface`
+- `exports`:
+  - `{ "name": "PostgresControlPlaneStore", "kind": "class", "signature": "class PostgresControlPlaneStore implements ControlPlaneStore { constructor(handle?: PostgresDatabaseHandle); }", "file": "packages/storage/src/postgres/control-plane-store.ts" }`
+  - `{ "name": "accounts", "kind": "constant", "signature": "accounts = pgTable('accounts', { id, name, status, billingPlanId, createdAt, updatedAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "tenants", "kind": "constant", "signature": "tenants = pgTable('tenants', { id, accountId, slug, displayName, status, createdAt, updatedAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "projects", "kind": "constant", "signature": "projects = pgTable('projects', { id, accountId, tenantId, slug, displayName, status, createdAt, updatedAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "enterpriseUsers", "kind": "constant", "signature": "enterpriseUsers = pgTable('enterprise_users', { id, accountId, tenantId, displayName, email, status, createdAt, updatedAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "apiKeys", "kind": "constant", "signature": "apiKeys = pgTable('api_keys', { id, accountId, tenantId, projectId, userId, name, keyPrefix, secretHash, scopes, status, expiresAt, lastUsedAt, createdAt, revokedAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "billingPlans", "kind": "constant", "signature": "billingPlans = pgTable('billing_plans', { id, slug, displayName, status, entitlements, quotas, createdAt, updatedAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "quotaReservations", "kind": "constant", "signature": "quotaReservations = pgTable('quota_reservations', { id, accountId, tenantId, projectId, quotaKind, amount, status, resourceType, resourceId, createdAt, updatedAt, expiresAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "quotaUsage", "kind": "constant", "signature": "quotaUsage = pgTable('quota_usage', { id, accountId, tenantId, projectId, quotaKind, windowStart, windowEnd, used, updatedAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "auditLogEvents", "kind": "constant", "signature": "auditLogEvents = pgTable('audit_log_events', { id, accountId, tenantId, projectId, actorType, actorUserId, apiKeyId, eventType, resourceType, resourceId, decision, reasonCode, ipHash, userAgent, requestId, payload, createdAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "resourceOwnership", "kind": "constant", "signature": "resourceOwnership = pgTable('resource_ownership', { resourceType, resourceId, accountId, tenantId, projectId, createdByUserId, apiKeyId, actorType, createdAt })", "file": "packages/storage/src/postgres/schema.ts" }`
+  - `{ "name": "ensurePostgresSchema", "kind": "function", "signature": "ensurePostgresSchema(handle: PostgresDatabaseHandle) => Promise<void>", "file": "packages/storage/src/postgres/database.ts" }`
+- `imports_from_other_tasks`:
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "resourceOwnershipSchema", "kind": "constant", "signature": "resourceOwnershipSchema: z.ZodType<ResourceOwnership>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "quotaReservationSchema", "kind": "constant", "signature": "quotaReservationSchema: z.ZodType<QuotaReservation>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T2-core-control-plane-service", "name": "ControlPlaneStore", "kind": "interface", "signature": "interface ControlPlaneStore { loadApiKeyBundleByHash(input: LoadApiKeyBundleInput): Promise<AuthBundle | null>; bootstrap(input: ControlPlaneBootstrapInput): Promise<ControlPlaneBootstrapSummary>; reserveQuota(input: ReserveQuotaInput): Promise<QuotaReservation>; transitionQuotaReservation(input: TransitionQuotaReservationInput): Promise<QuotaReservation>; withQuotaCriticalSection<T>(scope: QuotaCriticalSectionScope, fn: () => Promise<T>): Promise<T>; attachOwnership(input: AttachOwnershipInput): Promise<ResourceOwnership>; getOwnership(input: GetOwnershipInput): Promise<ResourceOwnership | null>; listOwnedResourceIds(input: ListOwnedResourceIdsInput): Promise<readonly string[]>; countActiveOwnedRuns(input: ActiveRunCountInput): Promise<number>; countActiveOwnedNodes(input: ActiveNodeCountInput): Promise<number>; appendAuditEvent(input: AppendAuditEventInput): Promise<AuditLogEvent>; listAuditEvents(input: ListAuditEventsInput): Promise<AuditEventsPage>; countUnownedResources(): Promise<UnownedResourceCounts>; expireStaleReservations(input: ExpireReservationsInput): Promise<number>; }", "file": "packages/core/src/ports/control-plane-store.ts" }`
 - `file_paths_consumed_by_other_tasks`: `apps/server/src/app.ts`, `apps/server/src/readiness.ts`, `apps/server/test/hosted-server.test.ts`
 
 ### Task P17-T4-hosted-rest-auth-tenant-quota-audit
@@ -374,24 +480,28 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `packages/protocol-rest/src/artifact-routes.ts` - current artifact metadata/content error mapping.
 - `packages/protocol-rest/src/registry-routes.ts` - registry route shapes protected by hosted auth hook but not modified here.
 - `packages/protocol-rest/src/http-errors.ts` - send error helper and R18 codes added by task T1.
-- `packages/core/src/services/control-plane-service.ts` - auth, scope, quota, ownership, and audit APIs.
+- `packages/core/src/services/hosted-run-service.ts` - hosted create/queue side-effect boundary that run routes call.
 - `packages/protocol-rest/test/run-routes.test.ts` - existing Fastify route harness style to extend without breaking local behavior.
 
 **Instructions:**
 1. Add `hosted-auth.ts` with a `registerHostedAuthHooks(app, deps)` helper. It must be inert when no control plane is supplied, so local daemon and existing protocol-rest tests remain no-auth by default.
-2. Protected hosted routes must require auth and scopes: `runs:write` for create/input/cancel, `runs:read` for run reads/list/events/run artifacts, `artifacts:read` for artifact metadata/content, `registry:read` for providers/runtimes/models/runtime modes/doctor, `metrics:read` handled in server task, `audit:read` for audit reads, `entitlements:read` for entitlements, and `admin:read` for admin-only whoami fields.
-3. Keep `GET /health` and `GET /ready` public. Reject query-string key attempts before route handlers run.
-4. Add `enterprise-routes.ts` registering `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events`. All outputs must use public enterprise schemas and never include raw API keys, `secretHash`, peppers, bearer headers, node tokens, provider secrets, or object-store credentials.
-5. Update run routes so a supplied control plane enforces auth context, rejects or ignores client-supplied ownership overrides (`accountId`, `tenantId`, `projectId`, `createdByUserId`, `apiKeyId`) in body or metadata, preflights run entitlements/quotas before `runService.createRun`, attaches ownership to run/events/placement/assignment resources created by the existing hosted path, releases quota reservation on queue or service failure, and records redacted audit events.
-6. Update list/read/SSE/input/cancel/run-artifact flows to authorize by durable ownership before returning data or opening SSE. Cross-tenant id reads should return `404 run_not_found` where possible; explicit cross-tenant list/filter attempts should return `403 tenant_access_denied`.
-7. Update artifact routes so metadata/content reads require ownership plus `artifacts:read`, artifact-read entitlement, and byte quota before content read. Existing object-store and missing-content error mappings must remain.
-8. Add no-spend route tests with in-memory control-plane fixtures and fake runtime only.
+2. Install hosted credential extraction and query-key rejection in Fastify `onRequest`, not `preHandler`, for every protected hosted/server REST route. The hook must derive a route requirement from method + pathname, reject missing/invalid credentials before body parsing, and leave `GET /health` and `GET /ready` public.
+3. Use `preValidation` or route handler checks only for decisions that require parsed params/body, such as owner override validation or resource-id ownership checks. Missing/invalid auth, wrong schemes, duplicate bearer segments, query keys, and auth-store unavailable must be denied before the JSON body parser or run/artifact/registry service spies can run.
+4. Protected hosted routes must require auth and scopes: `runs:write` for create/input/cancel, `runs:read` for run reads/list/events/run artifacts, `artifacts:read` for artifact metadata/content, `registry:read` for providers/runtimes/models/runtime modes/doctor, `audit:read` for audit reads, `entitlements:read` for entitlements, and `admin:read` for admin-only whoami fields. `/metrics` is handled in server task and requires operator/admin scope there.
+5. Add `enterprise-routes.ts` registering `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events`. All outputs must use public enterprise schemas and never include raw API keys, `secretHash`, peppers, bearer headers, node tokens, provider secrets, or object-store credentials.
+6. Update run routes so a supplied control plane enforces auth context, rejects or ignores client-supplied ownership overrides (`accountId`, `tenantId`, `projectId`, `createdByUserId`, `apiKeyId`) in body or metadata, preflights run entitlements/quotas before `runService.createRun`, attaches ownership to run/events/placement/assignment resources created by the existing hosted path, releases quota reservation on queue/run/placement/ownership failure, and records redacted audit events.
+7. Attach run ownership before queue enqueue or response. If ownership attach fails after run creation, route code must mark the run `failed` or use the existing safe terminalization path where available, release/fail the reservation, audit `ownership.attach_failed`, and return before enqueue/response.
+8. Update list/read/SSE/input/cancel/run-artifact flows to authorize by durable ownership before returning data or opening SSE. Cross-tenant id reads should return `404 run_not_found` where possible; explicit cross-tenant list/filter attempts should return `403 tenant_access_denied`.
+9. Update artifact routes so metadata/content reads require ownership plus `artifacts:read`, artifact-read entitlement, and byte quota before content read. Existing object-store and missing-content error mappings must remain.
+10. Add no-spend route tests with in-memory control-plane fixtures and fake runtime only, including large unauthenticated bodies that prove the parser and downstream service spies are not invoked.
 
 **Acceptance criteria:**
 - Without a control-plane dependency, existing run and artifact route tests still pass unauthenticated.
-- With control-plane auth enabled, missing/blank/malformed/conflicting/query-string credentials are denied before run/artifact/registry side effects.
-- `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events` return tenant-scoped safe data and require appropriate scopes.
+- With control-plane auth enabled, missing/blank/malformed/wrong-scheme/duplicate-bearer/conflicting/query-string credentials and auth-store unavailable are denied in `onRequest` before JSON body parsing and before run/artifact/registry side effects.
+- `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events` return tenant-scoped safe data and require the named scopes from the route-scope map.
 - `POST /runs` uses ownership from `AuthContext`, rejects owner override attempts, enforces placement/runtime/hosted-real/max-timeout/hourly-run/active-run checks before creating a run, and releases reservations on downstream failure.
+- Large unauthenticated `POST /runs` requests are denied without invoking body parser hooks, `runService.createRun`, placement, queue, ownership, or audit allow-path spies.
+- Queue, run-service, placement, ownership-attach, and audit downstream failures have explicit tests and leave no queued unowned run visible to callers.
 - Tenant A cannot read/list/stream/input/cancel Tenant B runs or run artifacts.
 - Artifact content reads enforce tenant/project ownership, `artifacts:read`, entitlement, and byte quota before `artifactContent.read`.
 - Audit events are appended for auth failures, run create allow/deny, tenant access denied, entitlement denied, quota denied, artifact read allow/deny, and audit read allow/deny.
@@ -403,34 +513,58 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `pnpm --filter @switchyard/protocol-rest typecheck`
 
 **error_rescue_map:**
-- `{ "codepath": "registerHostedAuthHooks.preHandler", "failure": "missing or invalid API key", "exception": "ControlPlaneError auth_required/auth_failed/auth_conflict", "rescue": "sendHttpError before route body side effects and append redacted audit if possible", "user_sees": "401 auth_required, auth_failed, or auth_conflict" }`
+- `{ "codepath": "registerHostedAuthHooks.onRequest", "failure": "missing or invalid API key", "exception": "ControlPlaneError auth_required/auth_failed/auth_conflict/auth_store_unavailable", "rescue": "sendHttpError before body parsing, route validation, or side-effect services and append redacted audit if possible", "user_sees": "401 auth_required, auth_failed, auth_conflict, or 503 auth_store_unavailable" }`
+- `{ "codepath": "registerHostedAuthHooks.onRequest", "failure": "large unauthenticated POST body", "exception": "ControlPlaneError auth_required/auth_failed before parser", "rescue": "Return auth error from onRequest without consuming body parser or invoking run/artifact services", "user_sees": "401/503 auth error instead of body-size or validation error" }`
 - `{ "codepath": "POST /runs preflight", "failure": "entitlement or quota denial", "exception": "ControlPlaneError entitlement_denied/quota_exceeded", "rescue": "return denial before runService, placement store, queue, or assignment calls", "user_sees": "403 entitlement_denied or 429 quota_exceeded with safe reason" }`
 - `{ "codepath": "POST /runs downstream", "failure": "queue enqueue or run service fails after reservation", "exception": "HostedRunServiceError or generic error", "rescue": "release or fail reservation, audit error with redacted payload, preserve existing safe HTTP mapping", "user_sees": "existing queue_unavailable/placement_denied/internal error without quota leak" }`
+- `{ "codepath": "POST /runs downstream", "failure": "ownership attach fails after run creation", "exception": "ControlPlaneError ownership_attach_failed or store error", "rescue": "terminalize/delete partial run where supported, release/fail reservation, skip queue enqueue, audit ownership.attach_failed", "user_sees": "safe 500/503 or existing downstream error without exposed unowned run" }`
 - `{ "codepath": "GET /runs/:id/events", "failure": "cross-tenant run id", "exception": "authorization denial result", "rescue": "send denial before setting SSE headers or hijacking reply", "user_sees": "404 run_not_found or 403 tenant_access_denied, not an opened stream" }`
 - `{ "codepath": "GET /artifacts/:id/content", "failure": "byte quota exceeded", "exception": "ControlPlaneError quota_exceeded", "rescue": "return before artifactContent.read and audit artifact.read_denied", "user_sees": "429 quota_exceeded with artifact_read_bytes_exceeded" }`
+- `{ "codepath": "GET /artifacts/:id/content", "failure": "artifact content store fails after byte reservation", "exception": "artifact content store error", "rescue": "release/fail byte reservation and preserve existing content error mapping", "user_sees": "existing missing_artifact_content or storage error without quota leak" }`
 - `{ "codepath": "GET /audit/events", "failure": "caller lacks audit:read or malformed cursor", "exception": "ControlPlaneError entitlement_denied or HttpProblem invalid_query", "rescue": "return safe error and never include tenant-external audit rows", "user_sees": "403 entitlement_denied or 400 invalid_query" }`
 
 **observability:**
-- `logs`: `route code should log only event names and safe reason codes if app logger is used; no raw credential payloads`
+- `logs`: `hosted_auth.denied, hosted_auth.allowed, hosted_run.create_allowed, hosted_run.create_denied, hosted_run.ownership_attach_failed, hosted_artifact.read_allowed, hosted_artifact.read_denied, hosted_audit.list_denied with routeId and reasonCode only; no raw credential payloads`
 - `success_metric`: `auth.succeeded, quota.reserved, quota.released, audit.appended, artifact.read_allowed, run.create_allowed outcomes available to server metrics`
 - `failure_metric`: `auth.required, auth.failed, auth.conflict, tenant.denied, entitlement.denied, quota.denied, audit.failed, artifact.read_denied outcomes available to server metrics`
 
 **test_cases:**
 - `{ "name": "local route harness remains no-auth", "lens": "happy", "given": "registerRunRoutes without controlPlane", "expect": "POST /runs?wait=1 succeeds without auth" }`
 - `{ "name": "hosted missing auth denied before create", "lens": "happy_shadow_nil", "given": "POST /runs with controlPlane but no headers", "expect": "401 auth_required and runService.createRun not called" }`
+- `{ "name": "large unauthenticated run body skips parser and service", "lens": "error_path", "given": "POST /runs with 5MB JSON body and no Authorization", "expect": "401 auth_required from onRequest; body parser spy, validation spy, runService.createRun, placement, ownership, and queue spies are not called" }`
+- `{ "name": "malformed authorization denied before body parse", "lens": "error_path", "given": "POST /runs with Authorization: Basic abc and valid large JSON body", "expect": "401 auth_failed; body parser and runService spies are not called" }`
+- `{ "name": "auth store unavailable before body parse", "lens": "error_path", "given": "POST /runs with bearer key and store throwing during auth lookup", "expect": "503 auth_store_unavailable; body parser and runService spies are not called" }`
 - `{ "name": "query api key denied", "lens": "error_path", "given": "POST /runs?api_key=sk_secret", "expect": "401 and response/audit excludes sk_secret" }`
 - `{ "name": "owner override rejected", "lens": "error_path", "given": "POST /runs body has tenantId/projectId or metadata.tenantId", "expect": "400 invalid_input before run creation" }`
 - `{ "name": "authenticated run create writes ownership", "lens": "happy", "given": "valid runs:write key creates hosted fake run", "expect": "202/201 response has run and ownership rows for run plus queued event/placement when present" }`
 - `{ "name": "run quota denied before side effects", "lens": "error_path", "given": "maxRunsPerHour exhausted", "expect": "429 quota_exceeded and no run/event/placement/queue job" }`
+- `{ "name": "run service failure releases reservation", "lens": "error_path", "given": "preflight succeeds then runService.createRun throws", "expect": "reservation released or failed and no queue enqueue" }`
+- `{ "name": "placement failure releases reservation", "lens": "error_path", "given": "run created but placement decision write throws before queue", "expect": "run terminalized/failed where supported, reservation failed, no queue enqueue, safe error returned" }`
+- `{ "name": "queue failure releases reservation", "lens": "error_path", "given": "run and ownership attach succeed but queue enqueue throws", "expect": "reservation released/failed, audit error redacted, safe queue error returned" }`
+- `{ "name": "ownership attach failure prevents queue", "lens": "error_path", "given": "runService.createRun returns run but controlPlane.ensureOwnedOrAttachFromRun fails", "expect": "reservation failed/released, queue spy not called, run not visible as owned" }`
+- `{ "name": "audit append failure is low-cardinality", "lens": "error_path", "given": "run create allow succeeds but audit store append throws", "expect": "route behavior follows allow-path policy, audit.failed metric/reason emitted, no secret payload in logs" }`
 - `{ "name": "cross-tenant get hidden", "lens": "error_path", "given": "Tenant B requests Tenant A run id", "expect": "404 run_not_found or 403 tenant_access_denied and audit tenant.access_denied" }`
 - `{ "name": "cross-tenant SSE denied before hijack", "lens": "error_path", "given": "Tenant B requests /runs/:id/events?live=1 for Tenant A run", "expect": "denial response is not text/event-stream" }`
 - `{ "name": "artifact content byte quota", "lens": "error_path", "given": "artifact size exceeds tenant hourly byte quota", "expect": "429 quota_exceeded and artifactContent.read spy not called" }`
+- `{ "name": "artifact content downstream failure releases bytes", "lens": "error_path", "given": "byte reservation succeeds then artifactContent.read throws", "expect": "reservation released/failed and existing safe content error returned" }`
+- `{ "name": "malformed audit cursor denied", "lens": "error_path", "given": "GET /audit/events?cursor=not-a-valid-cursor", "expect": "400 invalid_query and no tenant-external audit rows" }`
 - `{ "name": "whoami redacts secrets", "lens": "edge_redaction", "given": "GET /auth/whoami with valid key", "expect": "response includes account/tenant/project/scopes/plan summary and no secretHash or raw key" }`
 - `{ "name": "audit list scoped", "lens": "integration", "given": "audit events for two tenants", "expect": "GET /audit/events returns only caller tenant events with cursor" }`
 
 **integration_contracts:**
-- `exports`: `registerHostedAuthHooks(app, deps) => void`; `registerEnterpriseRoutes(app, deps) => void`; optional route dependency fields `controlPlane`, `authRequired`, `auditRouteDecisions`
-- `imports_from_other_tasks`: `P17-T1-enterprise-contracts-errors: R18 error codes and enterprise response schemas`; `P17-T2-core-control-plane-service: ControlPlaneService and ControlPlaneError`; `P17-T3-control-plane-storage-ownership: ownership/quota/audit store behavior through service`
+- `exports`:
+  - `{ "name": "HostedAuthDependencies", "kind": "interface", "signature": "interface HostedAuthDependencies { controlPlane?: ControlPlaneService; authRequired?: boolean; auditRouteDecisions?: boolean; }", "file": "packages/protocol-rest/src/hosted-auth.ts" }`
+  - `{ "name": "HostedRouteAuthRequirement", "kind": "interface", "signature": "interface HostedRouteAuthRequirement { routeId: string; scopes: readonly EnterpriseScope[]; public: boolean; }", "file": "packages/protocol-rest/src/hosted-auth.ts" }`
+  - `{ "name": "getHostedRouteAuthRequirement", "kind": "function", "signature": "getHostedRouteAuthRequirement(method: string, pathname: string) => HostedRouteAuthRequirement | null", "file": "packages/protocol-rest/src/hosted-auth.ts" }`
+  - `{ "name": "registerHostedAuthHooks", "kind": "function", "signature": "registerHostedAuthHooks(app: FastifyInstance, deps: HostedAuthDependencies) => void", "file": "packages/protocol-rest/src/hosted-auth.ts" }`
+  - `{ "name": "registerEnterpriseRoutes", "kind": "function", "signature": "registerEnterpriseRoutes(app: FastifyInstance, deps: { controlPlane: ControlPlaneService }) => void", "file": "packages/protocol-rest/src/enterprise-routes.ts" }`
+- `imports_from_other_tasks`:
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "whoamiResponseSchema", "kind": "constant", "signature": "whoamiResponseSchema: z.ZodType<WhoamiResponse>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "entitlementsResponseSchema", "kind": "constant", "signature": "entitlementsResponseSchema: z.ZodType<EntitlementsResponse>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "auditEventsResponseSchema", "kind": "constant", "signature": "auditEventsResponseSchema: z.ZodType<AuditEventsResponse>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T2-core-control-plane-service", "name": "ControlPlaneService", "kind": "class", "signature": "class ControlPlaneService { constructor(input: ControlPlaneServiceInput); authenticateRequest(input: AuthenticateRequestInput): Promise<AuthContext>; requireScope(auth: AuthContext, scope: EnterpriseScope): void; authorizeResource(input: AuthorizeResourceInput): Promise<AuthorizeResourceResult>; ensureOwnedOrAttachFromRun(input: EnsureOwnedOrAttachFromRunInput): Promise<EnsureOwnedResult>; preflightRunCreate(input: PreflightRunCreateInput): Promise<QuotaReservation>; releaseQuotaReservation(input: ReleaseQuotaReservationInput): Promise<QuotaReservation>; preflightArtifactContentRead(input: PreflightArtifactContentReadInput): Promise<QuotaReservation>; preflightNodeRegister(input: PreflightNodeRegisterInput): Promise<QuotaReservation>; whoami(auth: AuthContext): WhoamiResponse; entitlementSnapshot(auth: AuthContext): Promise<EntitlementsResponse>; listAuditEvents(input: ListAuditEventsInput): Promise<AuditEventsResponse>; recordAudit(input: RecordAuditInput): Promise<RecordAuditResult>; }", "file": "packages/core/src/services/control-plane-service.ts" }`
+  - `{ "from_task": "P17-T2-core-control-plane-service", "name": "ControlPlaneError", "kind": "class", "signature": "class ControlPlaneError extends Error { code: HttpErrorCode; reasonCode: string; statusCode: number; safeDetails?: Record<string, unknown>; }", "file": "packages/core/src/services/control-plane-service.ts" }`
+  - `{ "from_task": "P17-T3-control-plane-storage-ownership", "name": "PostgresControlPlaneStore", "kind": "class", "signature": "class PostgresControlPlaneStore implements ControlPlaneStore { constructor(handle?: PostgresDatabaseHandle); }", "file": "packages/storage/src/postgres/control-plane-store.ts" }`
 - `file_paths_consumed_by_other_tasks`: `apps/server/src/app.ts`, `packages/contracts/src/endpoint-inventory.ts`, `packages/contracts/src/openapi.ts`
 
 ### Task P17-T5-node-tenant-controls
@@ -447,23 +581,26 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `packages/core/src/services/node-coordinator-service.ts` - registration, heartbeat, claim, reject, complete semantics.
 - `packages/core/src/services/event-sync-service.ts` - assignment event sync behavior.
 - `packages/core/src/services/artifact-sync-service.ts` - assignment artifact sync behavior.
-- `packages/core/src/services/control-plane-service.ts` - node auth, ownership, and quota APIs.
+- `packages/core/src/ports/node-assignment-store.ts` - current assignment status and lookup contract.
 
 **Instructions:**
 1. Extend `NodeRouteDependencies` with optional `controlPlane`, `deploymentMode`, and node-token binding inputs from server config. Keep current behavior when no control plane is supplied so existing local/test routes can still use shared token or no token according to current tests.
-2. For hosted staging/production mode with a control plane, authenticate node requests using either a valid API key with `nodes:write` or a valid configured `x-switchyard-node-token` that maps through control-plane bootstrap to a single account/tenant/project. A global token without project binding must deny.
-3. Enforce node/project ownership on `GET /nodes`, `GET /nodes/:id`, heartbeat, claim, reject, event sync, artifact manifest/content sync, and complete. Node and assignment ids from other tenants must not leak data.
-4. Run `preflightNodeRegister` before coordinator registration and deny when connected-node entitlement is false or `maxConnectedNodes` is exceeded.
-5. Attach ownership to nodes on register/heartbeat and to assignments/events/artifacts created through node sync by inheriting assignment/run ownership.
-6. Keep existing body-size limits and token timing-safe comparison behavior.
-7. Append redacted audit events for `node.auth_failed`, `node.register_allowed`, `node.register_denied`, and tenant access denials.
+2. For hosted staging/production mode with a control plane, authenticate node requests in Fastify `onRequest` using either a valid API key with `nodes:write` or a valid configured `x-switchyard-node-token` that maps through control-plane bootstrap to a single account/tenant/project. A global token without project binding must deny.
+3. Missing/invalid node auth, blank token, wrong Authorization scheme, duplicate bearer segment, query-string key attempt, and auth-store unavailable must deny before body parsing, body-size work, coordinator calls, event-sync calls, or artifact-sync calls.
+4. Enforce node/project ownership on `GET /nodes`, `GET /nodes/:id`, heartbeat, claim, reject, event sync, artifact manifest/content sync, and complete. Node and assignment ids from other tenants must not leak data.
+5. Run `preflightNodeRegister` before coordinator registration and deny when connected-node entitlement is false or `maxConnectedNodes` is exceeded.
+6. Attach ownership to nodes on register/heartbeat and to assignments/events/artifacts created through node sync by inheriting assignment/run ownership. If ownership attach fails after coordinator registration, mark node offline where supported, release/fail the node reservation, and return before assignment exposure.
+7. Keep existing body-size limits and token timing-safe comparison behavior.
+8. Append redacted audit events for `node.auth_failed`, `node.register_allowed`, `node.register_denied`, and tenant access denials.
 
 **Acceptance criteria:**
 - Existing token auth/body-limit tests still pass when no control plane is configured.
-- Hosted control-plane mode denies missing token/API key, blank token, invalid token, unbound global token, missing `nodes:write`, inactive tenant/project, and node quota exceeded before coordinator side effects.
+- Hosted control-plane mode denies missing token/API key, blank token, invalid token, wrong scheme, duplicate bearer segment, query key, auth store unavailable, unbound global token, missing `nodes:write`, inactive tenant/project, and node quota exceeded before body parsing and coordinator side effects.
 - Valid API key or bound node token registers/heartbeats a node owned by the caller tenant/project.
 - Node list/get returns only owned nodes.
 - Assignment claim/reject/event sync/artifact sync/complete deny cross-tenant node or assignment ids before service side effects.
+- Large unauthenticated node artifact/content sync bodies are denied before body parsing and before artifact-sync service spies run.
+- Node register, heartbeat, claim, event sync, artifact sync, complete, ownership, and audit downstream failures are tested with reservation cleanup or safe denial.
 - Audit events and error envelopes never include raw node tokens or API keys.
 
 **Checks (must pass before GREEN):**
@@ -471,14 +608,17 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `pnpm --filter @switchyard/protocol-node typecheck`
 
 **error_rescue_map:**
-- `{ "codepath": "node preHandler auth", "failure": "required hosted auth missing", "exception": "ControlPlaneError auth_required or node_auth_required", "rescue": "return before body validation or coordinator calls", "user_sees": "401 node_auth_required or auth_required" }`
+- `{ "codepath": "node onRequest auth", "failure": "required hosted auth missing", "exception": "ControlPlaneError auth_required or node_auth_required", "rescue": "return before body parsing, body validation, or coordinator calls", "user_sees": "401 node_auth_required or auth_required" }`
+- `{ "codepath": "node onRequest auth", "failure": "wrong scheme, malformed bearer, duplicate bearer segment, whitespace-only key/token, query-string credential, or auth store unavailable", "exception": "ControlPlaneError auth_failed/auth_store_unavailable", "rescue": "deny before parsing request body or invoking node services", "user_sees": "401 auth_failed or 503 auth_store_unavailable" }`
 - `{ "codepath": "node token binding", "failure": "shared token valid but not mapped to tenant/project", "exception": "ControlPlaneError auth_failed", "rescue": "deny and audit node.auth_failed with redacted token metadata", "user_sees": "401 node_auth_failed or auth_failed" }`
 - `{ "codepath": "POST /nodes/register", "failure": "connected nodes entitlement or quota denied", "exception": "ControlPlaneError entitlement_denied/quota_exceeded", "rescue": "return before coordinator.register and ownership attach", "user_sees": "403 entitlement_denied or 429 quota_exceeded" }`
+- `{ "codepath": "POST /nodes/register downstream", "failure": "coordinator register succeeds but ownership attach fails", "exception": "ControlPlaneError ownership_attach_failed or store error", "rescue": "mark node offline where supported, release/fail reservation, audit node.register_denied, return before assignment exposure", "user_sees": "safe 500/503 without visible unowned node" }`
 - `{ "codepath": "assignment routes", "failure": "assignment belongs to another tenant", "exception": "authorization denial result", "rescue": "return assignment_not_found or tenant_access_denied before sync/complete side effects", "user_sees": "404 assignment_not_found or 403 tenant_access_denied" }`
+- `{ "codepath": "assignment routes downstream", "failure": "claim/reject/event-sync/artifact-sync/complete store fails", "exception": "NodeCoordinatorError | EventSyncError | ArtifactSyncError | store error", "rescue": "preserve existing safe node error mapping, append audit error if possible, do not attach cross-tenant ownership", "user_sees": "existing safe node/assignment error" }`
 - `{ "codepath": "artifact content sync", "failure": "payload exceeds existing size limit", "exception": "explicit content-length/body size check", "rescue": "preserve payload_too_large mapping before reading/accepting content", "user_sees": "413 payload_too_large" }`
 
 **observability:**
-- `logs`: `safe route events may include node route name and reasonCode only; no node id labels in metrics`
+- `logs`: `node_auth.denied, node_auth.allowed, node.register_allowed, node.register_denied, node.ownership_attach_failed, node.assignment_denied, node.sync_failed with routeId and reasonCode only; no node id labels in metrics`
 - `success_metric`: `node.register, node.heartbeat, node.claim, node.sync, node.complete plus audit.appended for allowed node decisions`
 - `failure_metric`: `auth.failed, node.auth_failed, tenant.denied, entitlement.denied, quota.denied, audit.failed`
 
@@ -486,16 +626,28 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `{ "name": "legacy shared-token route still works", "lens": "happy", "given": "registerNodeRoutes with sharedToken and no controlPlane", "expect": "valid x-switchyard-node-token registers node" }`
 - `{ "name": "hosted missing node auth denied", "lens": "happy_shadow_nil", "given": "controlPlane hosted mode POST /nodes/register without key/token", "expect": "401 before coordinator.register" }`
 - `{ "name": "blank node token denied", "lens": "happy_shadow_empty", "given": "x-switchyard-node-token: ''", "expect": "401 node_auth_failed and redacted audit" }`
+- `{ "name": "malformed node authorization denied before parse", "lens": "error_path", "given": "POST /nodes/register with Authorization: Bearer Bearer sk_sw_test_alpha and a valid body", "expect": "401 auth_failed before body parser and coordinator.register spies" }`
+- `{ "name": "node query credential denied", "lens": "error_path", "given": "POST /nodes/register?token=secret-node-token", "expect": "401 and response/audit excludes secret-node-token" }`
+- `{ "name": "node auth store unavailable", "lens": "error_path", "given": "API-key node auth lookup throws", "expect": "503 auth_store_unavailable before coordinator.register" }`
+- `{ "name": "large unauthenticated artifact sync body skips parser", "lens": "error_path", "given": "POST /nodes/:id/assignments/:assignmentId/artifacts/content with large body and no auth", "expect": "401 from onRequest; body parser and artifactSyncService spies are not called" }`
 - `{ "name": "unbound shared token denied", "lens": "error_path", "given": "valid global token but no bootstrap project binding", "expect": "401 node_auth_failed before registration" }`
 - `{ "name": "api key node registration succeeds", "lens": "happy", "given": "Authorization bearer key with nodes:write and connected-node entitlement", "expect": "201 node response and node ownership row" }`
 - `{ "name": "connected-node quota denied", "lens": "error_path", "given": "active node count equals maxConnectedNodes", "expect": "429 connected_nodes_exceeded and coordinator.register not called" }`
+- `{ "name": "concurrent node register reservations serialize", "lens": "integration", "given": "maxConnectedNodes 1 and two simultaneous register requests", "expect": "one coordinator.register call succeeds and one request receives quota_exceeded" }`
+- `{ "name": "node ownership attach failure rolls back", "lens": "error_path", "given": "coordinator.register succeeds and controlPlane ownership attach fails", "expect": "reservation failed/released, node marked offline where supported, no assignment exposure" }`
 - `{ "name": "cross-tenant node list scoped", "lens": "integration", "given": "nodes owned by tenant A and B", "expect": "Tenant A GET /nodes sees only tenant A" }`
 - `{ "name": "cross-tenant assignment claim denied", "lens": "error_path", "given": "Tenant B node claims Tenant A assignment id", "expect": "404 assignment_not_found or 403 tenant_access_denied and no claim side effect" }`
+- `{ "name": "node downstream failures safe", "lens": "error_path", "given": "event sync, artifact sync, or complete service throws after ownership authorization", "expect": "safe existing error mapping, audit failed reason only, no raw payload secrets" }`
 - `{ "name": "node token redaction", "lens": "edge_redaction", "given": "invalid x-switchyard-node-token secret-node-token", "expect": "response and audit payload do not contain secret-node-token" }`
 
 **integration_contracts:**
-- `exports`: `registerNodeRoutes(app, deps)` extended dependency contract with optional control-plane auth while preserving existing call signature behavior`
-- `imports_from_other_tasks`: `P17-T1-enterprise-contracts-errors: R18 error codes`; `P17-T2-core-control-plane-service: ControlPlaneService node auth/preflight APIs`; `P17-T3-control-plane-storage-ownership: resource ownership and node quota backing store`
+- `exports`:
+  - `{ "name": "NodeRouteDependencies", "kind": "interface", "signature": "interface NodeRouteDependencies { coordinator: NodeCoordinatorService; eventSync?: EventSyncService; artifactSync?: ArtifactSyncService; sharedToken?: string; requireAuth?: boolean; controlPlane?: ControlPlaneService; deploymentMode?: 'local' | 'test' | 'staging' | 'production'; nodeTokenBindings?: readonly NodeTokenBinding[]; }", "file": "packages/protocol-node/src/node-routes.ts" }`
+  - `{ "name": "registerNodeRoutes", "kind": "function", "signature": "registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependencies) => void", "file": "packages/protocol-node/src/node-routes.ts" }`
+- `imports_from_other_tasks`:
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "R18_HTTP_ERROR_CODES", "kind": "constant", "signature": "R18_HTTP_ERROR_CODES: readonly HttpErrorCode[]", "file": "packages/contracts/src/http-error.ts" }`
+  - `{ "from_task": "P17-T2-core-control-plane-service", "name": "ControlPlaneService", "kind": "class", "signature": "class ControlPlaneService { authenticateRequest(input: AuthenticateRequestInput): Promise<AuthContext>; preflightNodeRegister(input: PreflightNodeRegisterInput): Promise<QuotaReservation>; authorizeResource(input: AuthorizeResourceInput): Promise<AuthorizeResourceResult>; recordAudit(input: RecordAuditInput): Promise<RecordAuditResult>; }", "file": "packages/core/src/services/control-plane-service.ts" }`
+  - `{ "from_task": "P17-T3-control-plane-storage-ownership", "name": "PostgresControlPlaneStore", "kind": "class", "signature": "class PostgresControlPlaneStore implements ControlPlaneStore { constructor(handle?: PostgresDatabaseHandle); }", "file": "packages/storage/src/postgres/control-plane-store.ts" }`
 - `file_paths_consumed_by_other_tasks`: `apps/server/src/app.ts`, `apps/server/src/readiness.ts`, `packages/contracts/src/endpoint-inventory.ts`
 
 ### Task P17-T6-server-config-readiness-metrics-wiring
@@ -524,18 +676,18 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 3. Local/test defaults may use disabled auth and memory control-plane store. No bootstrap file is required unless auth mode is explicitly `api_key`.
 4. Parse bootstrap records, hash raw API keys immediately with the pepper, discard raw keys, and pass only stored records to `PostgresControlPlaneStore`.
 5. Wire `ControlPlaneService` and `PostgresControlPlaneStore` into REST and node routes only for hosted/server auth mode. Keep existing local/test server behavior available for tests.
-6. Protect `/metrics` with `metrics:read` when auth is enabled or deployment mode is staging/production. `GET /health` and `GET /ready` stay public, but readiness diagnostics must be redacted and low-cardinality.
+6. Protect `/metrics` as an operator-only global metrics endpoint in R18. When auth is enabled or deployment mode is staging/production, require both `metrics:read` and `admin:read` in an `onRequest`/early hook before queue capture or metrics serialization; a tenant-scoped metrics endpoint is not shipped in R18. `GET /health` and `GET /ready` stay public, but readiness diagnostics must be redacted and low-cardinality.
 7. Extend readiness with `controlPlaneStore`, `apiKeyAuth`, `apiKeyPepper`, `bootstrap`, `billingPlan`, `quotaStore`, `auditStore`, and `unownedResources`.
 8. Extend metrics with `auth.required`, `auth.failed`, `auth.succeeded`, `auth.conflict`, `tenant.denied`, `entitlement.denied`, `quota.denied`, `quota.reserved`, `quota.released`, `audit.appended`, `audit.failed`, `controlPlane.ready`, and `controlPlane.notReady`.
-9. Use `redactSecrets` or equivalent existing helpers for config error summaries, startup logs, readiness bodies, and test-captured logs.
+9. Use the existing `redactSecrets` helper for config error summaries, startup logs, readiness bodies, and test-captured logs.
 
 **Acceptance criteria:**
 - Local/test server can still start with no auth config and fake hosted wait tests remain no-spend.
-- Staging/production config fails before binding when auth mode is disabled, pepper missing, bootstrap missing/empty, control-plane store is memory, active records are absent, node token is unbound, or public metrics are requested in production.
+- Staging/production config fails before binding when auth mode is disabled, pepper missing, bootstrap missing/empty/malformed/duplicate/zero-active/inactive-plan, control-plane store is memory, active records are absent, node token is unbound, or public metrics are requested in production.
 - Bootstrap raw keys never appear in `config.redactedSummary`, startup logs, readiness, metrics, audit payloads, or thrown `ConfigError.redactedConfig`.
-- Authenticated hosted server requests can create fake hosted runs and read metrics only with proper scopes.
+- Authenticated hosted server requests can create fake hosted runs and read `/metrics` only with both `metrics:read` and `admin:read`; a valid non-admin `metrics:read` key is denied for global metrics.
 - `/ready` reports all R18 control-plane checks and `unowned_resources_present` when existing hosted resource rows lack ownership.
-- `/metrics` is public only in local/test or explicit non-production public mode; staging/production require `metrics:read`.
+- `/metrics` is public only in local/test or explicit non-production public mode; staging/production require operator/admin auth and never return tenant-filtered metrics in R18.
 
 **Checks (must pass before GREEN):**
 - `pnpm --filter @switchyard/server test -- hosted-server`
@@ -543,14 +695,14 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 
 **error_rescue_map:**
 - `{ "codepath": "loadServerConfig", "failure": "staging/production auth disabled", "exception": "ConfigError config_required:SWITCHYARD_SERVER_AUTH_MODE or config_forbidden:SWITCHYARD_SERVER_AUTH_MODE", "rescue": "Throw before app creation with redacted summary", "user_sees": "Startup failure naming the missing/forbidden variable only" }`
-- `{ "codepath": "bootstrap loading", "failure": "file missing, malformed JSON, empty records, duplicate ids", "exception": "ConfigError control_plane_bootstrap_*", "rescue": "Fail closed and include only booleans/counts in redactedConfig", "user_sees": "Startup/readiness failure with safe bootstrap code" }`
+- `{ "codepath": "bootstrap loading", "failure": "file missing, env missing, malformed JSON, empty records, duplicate ids, zero active records, inactive plan for active key", "exception": "ConfigError control_plane_bootstrap_*", "rescue": "Fail closed before binding and include only booleans/counts in redactedConfig", "user_sees": "Startup/readiness failure with safe bootstrap code" }`
 - `{ "codepath": "bootstrap hashing", "failure": "raw key appears after hash", "exception": "test-caught raw-secret guard", "rescue": "Discard rawKey after creating stored key and redact config summary", "user_sees": "No raw key in logs/errors/readiness/metrics" }`
 - `{ "codepath": "createServerApp control-plane wiring", "failure": "postgres/control-plane store unavailable", "exception": "Postgres or store error", "rescue": "Readiness returns controlPlaneStore false; staging/production fail closed", "user_sees": "503 /ready with controlPlaneStore code" }`
-- `{ "codepath": "GET /metrics", "failure": "missing metrics:read in protected mode", "exception": "ControlPlaneError entitlement_denied or tenant_access_denied", "rescue": "Return safe HTTP error before capturing/returning metrics", "user_sees": "403 without metrics body" }`
+- `{ "codepath": "GET /metrics onRequest", "failure": "missing metrics:read or admin:read in protected mode", "exception": "ControlPlaneError entitlement_denied or tenant_access_denied", "rescue": "Return safe HTTP error before queue capture or returning global metrics", "user_sees": "403 without metrics body" }`
 - `{ "codepath": "probeServerReadiness", "failure": "unowned resources present", "exception": "none; count > 0", "rescue": "Return unownedResources check false with resource type counts only", "user_sees": "503 /ready with unowned_resources_present" }`
 
 **observability:**
-- `logs`: `server.listening with redactedSummary only`; `server.start_failed with ConfigError code and redactedConfig only`; optional safe audit/config fail-closed event names
+- `logs`: `server.listening with redactedSummary only`; `server.start_failed with ConfigError code and redactedConfig only`; `config.fail_closed`, `metrics.denied`, `metrics.allowed`, `readiness.control_plane_not_ready` with reasonCode/checkName only
 - `success_metric`: `controlPlane.ready, auth.succeeded, quota.reserved, quota.released, audit.appended, dependencies.ready`
 - `failure_metric`: `controlPlane.notReady, auth.required, auth.failed, auth.conflict, entitlement.denied, quota.denied, audit.failed, dependencies.notReady, config.failures`
 
@@ -559,15 +711,34 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `{ "name": "staging rejects disabled auth", "lens": "error_path", "given": "SWITCHYARD_DEPLOYMENT_MODE=staging and SWITCHYARD_SERVER_AUTH_MODE=disabled", "expect": "loadServerConfig throws config_forbidden:SWITCHYARD_SERVER_AUTH_MODE" }`
 - `{ "name": "staging rejects missing pepper", "lens": "happy_shadow_nil", "given": "api_key auth but no SWITCHYARD_API_KEY_PEPPER", "expect": "ConfigError config_required:SWITCHYARD_API_KEY_PEPPER" }`
 - `{ "name": "staging rejects memory control plane", "lens": "error_path", "given": "SWITCHYARD_CONTROL_PLANE_STORE=memory in staging", "expect": "ConfigError config_forbidden:SWITCHYARD_CONTROL_PLANE_STORE" }`
+- `{ "name": "staging rejects missing bootstrap", "lens": "happy_shadow_nil", "given": "api_key auth with no SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH and no bootstrap JSON env", "expect": "ConfigError control_plane_bootstrap_missing before binding" }`
+- `{ "name": "staging rejects empty bootstrap", "lens": "happy_shadow_empty", "given": "bootstrap file with empty account/tenant/project/key/plan arrays", "expect": "ConfigError control_plane_bootstrap_empty or control_plane_bootstrap_zero_active" }`
+- `{ "name": "staging rejects malformed bootstrap", "lens": "error_path", "given": "bootstrap path points to malformed JSON", "expect": "ConfigError control_plane_bootstrap_malformed with no raw file contents in error" }`
+- `{ "name": "staging rejects duplicate bootstrap ids", "lens": "error_path", "given": "bootstrap has duplicate api_key id", "expect": "ConfigError control_plane_bootstrap_duplicate" }`
+- `{ "name": "staging rejects zero active bootstrap", "lens": "error_path", "given": "bootstrap has only suspended tenants/projects or revoked keys", "expect": "ConfigError control_plane_bootstrap_zero_active" }`
+- `{ "name": "staging rejects inactive plan", "lens": "error_path", "given": "active key/account references archived plan", "expect": "ConfigError control_plane_bootstrap_inactive_plan" }`
 - `{ "name": "bootstrap raw key redacted", "lens": "edge_redaction", "given": "bootstrap file containing sk_sw_test_alpha and pepper secret", "expect": "redactedSummary, thrown errors, readiness, metrics, and captured logs contain neither value" }`
 - `{ "name": "metrics protected in staging", "lens": "error_path", "given": "GET /metrics without key in staging auth mode", "expect": "401/403 and body has no queue/dependency metrics" }`
-- `{ "name": "metrics read allowed", "lens": "happy", "given": "GET /metrics with metrics:read key in staging-like test config", "expect": "200 metrics snapshot with auth/controlPlane counters" }`
+- `{ "name": "metrics read without admin denied", "lens": "error_path", "given": "GET /metrics with valid metrics:read key lacking admin:read", "expect": "403 and body has no global metrics snapshot" }`
+- `{ "name": "metrics denial skips queue capture", "lens": "error_path", "given": "GET /metrics without admin auth and queue capture spy installed", "expect": "401/403 from early hook and queue capture spy is not called" }`
+- `{ "name": "admin metrics read allowed", "lens": "happy", "given": "GET /metrics with metrics:read and admin:read key in staging-like test config", "expect": "200 global metrics snapshot with auth/controlPlane counters" }`
+- `{ "name": "tenant scoped metrics absent", "lens": "edge_boundary", "given": "GET /metrics?tenantId=tenant_a or /tenants/tenant_a/metrics", "expect": "query is ignored or rejected safely and no tenant-scoped metrics route exists" }`
 - `{ "name": "readiness includes R18 checks", "lens": "happy", "given": "valid auth/bootstrap/store config", "expect": "/ready checks include controlPlaneStore, apiKeyAuth, apiKeyPepper, bootstrap, billingPlan, quotaStore, auditStore, unownedResources" }`
 - `{ "name": "unowned readiness fail", "lens": "error_path", "given": "existing run row without ownership in staging", "expect": "503 /ready and unownedResources.code is unowned_resources_present" }`
 
 **integration_contracts:**
-- `exports`: `ServerConfig` extended with control-plane/auth fields`; `HostedMetricsSnapshot` extended with auth/quota/audit/controlPlane counters`; `probeServerReadiness(input)` extended with optional controlPlane inputs`
-- `imports_from_other_tasks`: `P17-T2-core-control-plane-service: ControlPlaneService`; `P17-T3-control-plane-storage-ownership: PostgresControlPlaneStore`; `P17-T4-hosted-rest-auth-tenant-quota-audit: hosted REST hooks/routes`; `P17-T5-node-tenant-controls: extended node route deps`
+- `exports`:
+  - `{ "name": "ServerConfig", "kind": "interface", "signature": "interface ServerConfig { deploymentMode: DeploymentMode; serverAuthMode: 'disabled' | 'api_key'; apiKeyPepper?: string; controlPlaneBootstrapPath?: string; controlPlaneBootstrapJson?: string; controlPlaneStore: 'memory' | 'postgres'; auditIpHashPepper?: string; publicMetrics: boolean; }", "file": "apps/server/src/config.ts" }`
+  - `{ "name": "loadServerConfig", "kind": "function", "signature": "loadServerConfig(env?: NodeJS.ProcessEnv) => ServerConfig", "file": "apps/server/src/config.ts" }`
+  - `{ "name": "HostedMetricsSnapshot", "kind": "interface", "signature": "interface HostedMetricsSnapshot { counters: Record<string, number>; components: Record<string, 'ok' | 'unavailable'>; }", "file": "apps/server/src/metrics.ts" }`
+  - `{ "name": "probeServerReadiness", "kind": "function", "signature": "probeServerReadiness(input: ServerReadinessInput) => Promise<ServerReadinessResult>", "file": "apps/server/src/readiness.ts" }`
+  - `{ "name": "createServerApp", "kind": "function", "signature": "createServerApp(input?: CreateServerAppInput) => Promise<FastifyInstance>", "file": "apps/server/src/app.ts" }`
+- `imports_from_other_tasks`:
+  - `{ "from_task": "P17-T2-core-control-plane-service", "name": "ControlPlaneService", "kind": "class", "signature": "class ControlPlaneService { authenticateRequest(input: AuthenticateRequestInput): Promise<AuthContext>; preflightRunCreate(input: PreflightRunCreateInput): Promise<QuotaReservation>; recordAudit(input: RecordAuditInput): Promise<RecordAuditResult>; }", "file": "packages/core/src/services/control-plane-service.ts" }`
+  - `{ "from_task": "P17-T3-control-plane-storage-ownership", "name": "PostgresControlPlaneStore", "kind": "class", "signature": "class PostgresControlPlaneStore implements ControlPlaneStore { constructor(handle?: PostgresDatabaseHandle); }", "file": "packages/storage/src/postgres/control-plane-store.ts" }`
+  - `{ "from_task": "P17-T4-hosted-rest-auth-tenant-quota-audit", "name": "registerHostedAuthHooks", "kind": "function", "signature": "registerHostedAuthHooks(app: FastifyInstance, deps: HostedAuthDependencies) => void", "file": "packages/protocol-rest/src/hosted-auth.ts" }`
+  - `{ "from_task": "P17-T4-hosted-rest-auth-tenant-quota-audit", "name": "registerEnterpriseRoutes", "kind": "function", "signature": "registerEnterpriseRoutes(app: FastifyInstance, deps: { controlPlane: ControlPlaneService }) => void", "file": "packages/protocol-rest/src/enterprise-routes.ts" }`
+  - `{ "from_task": "P17-T5-node-tenant-controls", "name": "registerNodeRoutes", "kind": "function", "signature": "registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependencies) => void", "file": "packages/protocol-node/src/node-routes.ts" }`
 - `file_paths_consumed_by_other_tasks`: `packages/contracts/src/openapi.ts`, `PRODUCT.md`, `docs/development/API.md`, `docs/development/DEVELOPMENT.md`
 
 ### Task P17-T7-hosted-openapi-contract
@@ -597,14 +768,20 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 2. Add schema refs for enterprise response/query schemas from `enterprise.ts`: Whoami response, Entitlements response, AuditEvents query/response, and safe audit/plan/quota objects.
 3. Extend `generateOpenApiDocument` with a `surface` option while preserving the current default local daemon title, server URL, paths, and no global security requirement.
 4. Hosted output must use title `Switchyard Hosted Server API`, server URL placeholder `https://api.switchyard.local`, and `components.securitySchemes.SwitchyardApiKey` as HTTP bearer with bearer format `Switchyard API key`.
-5. Protected hosted operations must include `security: [{ SwitchyardApiKey: [] }]`. `GET /health` and `GET /ready` must remain public. Production metrics should still be documented as protected by default.
+5. Protected hosted operations must include `security: [{ SwitchyardApiKey: [] }]`. `GET /health` and `GET /ready` must remain public. `GET /metrics` must be documented as operator-only global metrics requiring API key auth plus `metrics:read` and `admin:read`; tenant-scoped metrics are not documented because they do not ship in R18.
 6. Add CLI support for local and hosted generate/check without breaking existing `openapi:generate` and `openapi:check`. Add package scripts for hosted generation/check and include `openapi.hosted-server.json` in package files.
-7. Regenerate both checked-in OpenAPI artifacts.
-8. Strengthen tests proving local daemon OpenAPI remains unauthenticated and hosted OpenAPI includes R18 security/routes while forbidden public routes remain absent.
+7. OpenAPI CLI failures must be deterministic:
+   - Unknown surface: `Unknown OpenAPI surface "<surface>". Expected one of: local_daemon, hosted_server.`
+   - Empty inventory: `OpenAPI route inventory is empty for surface "<surface>".`
+   - Drift: `OpenAPI artifact drift for <artifact>; run <script> to regenerate.`
+8. Regenerate both checked-in OpenAPI artifacts.
+9. Strengthen tests proving local daemon OpenAPI remains unauthenticated and hosted OpenAPI includes R18 security/routes while forbidden public routes remain absent.
 
 **Acceptance criteria:**
 - Default `generateOpenApiDocument()` still returns title `Switchyard Local Daemon API`, local server URL, no `SwitchyardApiKey` security scheme, and no hosted-only enterprise routes.
 - Hosted `generateOpenApiDocument({ surface: "hosted_server" })` includes `SwitchyardApiKey`, `/auth/whoami`, `/entitlements`, `/audit/events`, protected run/artifact/registry/node/metrics operations, and public health/ready.
+- Unknown OpenAPI surfaces and empty inventories fail with the deterministic messages above and do not write partial artifacts.
+- Hosted `/metrics` is documented as protected global operator/admin metrics; no tenant-scoped metrics route or query contract appears.
 - Local route drift test remains tied only to `createDaemonApp`; it must not require hosted server route printing.
 - OpenAPI forbidden routes remain absent: `/tenant/signup`, `/billing/checkout`, `/billing/webhook`, `/payments/*`, `/dashboard/*`, `/tui/*`, `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`.
 - `openapi:check` verifies local artifact and hosted check verifies hosted artifact.
@@ -617,14 +794,15 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `pnpm --filter @switchyard/contracts typecheck`
 
 **error_rescue_map:**
-- `{ "codepath": "generateOpenApiDocument", "failure": "unknown or empty surface inventory", "exception": "Error('Empty route inventory is not allowed.') or surface validation error", "rescue": "Reject generation before emitting partial docs", "user_sees": "CLI exits with a clear OpenAPI generation error" }`
+- `{ "codepath": "generateOpenApiDocument", "failure": "unknown surface", "exception": "Error('Unknown OpenAPI surface \"<surface>\". Expected one of: local_daemon, hosted_server.')", "rescue": "Reject generation before emitting partial docs", "user_sees": "CLI exits with the deterministic unknown-surface message" }`
+- `{ "codepath": "generateOpenApiDocument", "failure": "empty surface inventory", "exception": "Error('OpenAPI route inventory is empty for surface \"<surface>\".')", "rescue": "Reject generation before emitting partial docs", "user_sees": "CLI exits with the deterministic empty-inventory message" }`
 - `{ "codepath": "hosted security assignment", "failure": "protected route missing security", "exception": "OpenAPI contract assertion failure", "rescue": "Add route to protected set or mark explicit public bypass if health/ready", "user_sees": "Generated hosted API docs accurately require API key auth" }`
 - `{ "codepath": "local OpenAPI compatibility", "failure": "local output accidentally gains hosted security/routes", "exception": "OpenAPI contract assertion failure or openapi:check drift", "rescue": "Use surface-specific inventory and components", "user_sees": "Local SDK/CLI docs remain no-auth by default" }`
-- `{ "codepath": "openapi-cli", "failure": "existing generate/check command breaks", "exception": "script usage or drift failure", "rescue": "Keep old positional behavior and add explicit hosted flag/script", "user_sees": "Existing local OpenAPI workflow still works" }`
+- `{ "codepath": "openapi-cli", "failure": "existing generate/check command breaks or artifact drift detected", "exception": "script usage or drift failure", "rescue": "Keep old positional behavior and add explicit hosted flag/script; print OpenAPI artifact drift for <artifact>; run <script> to regenerate.", "user_sees": "Existing local OpenAPI workflow still works and drift message is deterministic" }`
 - `{ "codepath": "forbidden route boundary", "failure": "non-goal public route appears", "exception": "Vitest assertion failure", "rescue": "Remove from inventory or move to future phase docs only", "user_sees": "No dashboard, billing checkout, public tenant signup, shell, PTY, or sandbox route in docs" }`
 
 **observability:**
-- `logs`: []
+- `logs`: `openapi.generate_failed and openapi.check_failed may be emitted by CLI wrappers with surface/artifact only; no route payloads or secrets`
 - `success_metric`: `local and hosted OpenAPI generation/check commands produce deterministic bytes`
 - `failure_metric`: `OpenAPI contract failures for security, route drift, or forbidden public surfaces`
 
@@ -635,13 +813,27 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `{ "name": "health ready public", "lens": "edge_security", "given": "hosted OpenAPI /health and /ready operations", "expect": "security is absent or empty" }`
 - `{ "name": "runs protected", "lens": "edge_security", "given": "hosted OpenAPI POST /runs, GET /runs/{id}/events", "expect": "security includes SwitchyardApiKey" }`
 - `{ "name": "metrics protected", "lens": "edge_security", "given": "hosted OpenAPI GET /metrics", "expect": "security includes SwitchyardApiKey" }`
+- `{ "name": "metrics documented admin-only", "lens": "edge_security", "given": "hosted OpenAPI GET /metrics operation description and extensions", "expect": "operation states global operator/admin metrics and requires metrics:read plus admin:read; no tenant metrics path exists" }`
+- `{ "name": "unknown openapi surface fails", "lens": "error_path", "given": "generateOpenApiDocument({ surface: 'unknown' as never }) or CLI --surface unknown", "expect": "throws/prints Unknown OpenAPI surface \"unknown\". Expected one of: local_daemon, hosted_server." }`
+- `{ "name": "empty inventory fails", "lens": "happy_shadow_empty", "given": "generateOpenApiDocument({ surface: 'hosted_server', inventory: [] })", "expect": "throws OpenAPI route inventory is empty for surface \"hosted_server\"." }`
 - `{ "name": "local drift remains daemon-only", "lens": "integration", "given": "endpoint-inventory.drift test", "expect": "compares only LOCAL_DAEMON_ROUTE_INVENTORY to createDaemonApp routes" }`
 - `{ "name": "forbidden public routes absent", "lens": "edge_boundary", "given": "hosted and local OpenAPI paths", "expect": "all forbidden route prefixes absent" }`
 - `{ "name": "hosted artifact deterministic", "lens": "integration", "given": "openapi:check:hosted", "expect": "checked-in openapi.hosted-server.json matches generated bytes" }`
 
 **integration_contracts:**
-- `exports`: `generateOpenApiDocument(options?: { surface?: 'local_daemon' | 'hosted_server'; inventory?: readonly RouteInventoryEntry[] })`; `HOSTED_SERVER_ROUTE_INVENTORY`; `SwitchyardApiKey` security scheme in hosted OpenAPI`
-- `imports_from_other_tasks`: `P17-T1-enterprise-contracts-errors: enterprise schemas and R18 errors`; `P17-T4-hosted-rest-auth-tenant-quota-audit: enterprise route paths and protected REST semantics`; `P17-T5-node-tenant-controls: hosted-node route semantics`; `P17-T6-server-config-readiness-metrics-wiring: metrics/readiness surface`
+- `exports`:
+  - `{ "name": "OpenApiSurface", "kind": "type", "signature": "type OpenApiSurface = 'local_daemon' | 'hosted_server'", "file": "packages/contracts/src/openapi.ts" }`
+  - `{ "name": "HOSTED_SERVER_ROUTE_INVENTORY", "kind": "constant", "signature": "HOSTED_SERVER_ROUTE_INVENTORY: readonly RouteInventoryEntry[]", "file": "packages/contracts/src/endpoint-inventory.ts" }`
+  - `{ "name": "generateOpenApiDocument", "kind": "function", "signature": "generateOpenApiDocument(options?: { surface?: OpenApiSurface; inventory?: readonly RouteInventoryEntry[] }) => OpenApiDocument", "file": "packages/contracts/src/openapi.ts" }`
+  - `{ "name": "runOpenApiCli", "kind": "function", "signature": "runOpenApiCli(argv: readonly string[], io?: OpenApiCliIO) => Promise<number>", "file": "packages/contracts/src/openapi-cli.ts" }`
+  - `{ "name": "SwitchyardApiKey", "kind": "constant", "signature": "components.securitySchemes.SwitchyardApiKey = { type: 'http', scheme: 'bearer', bearerFormat: 'Switchyard API key' }", "file": "packages/contracts/src/openapi.ts" }`
+- `imports_from_other_tasks`:
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "whoamiResponseSchema", "kind": "constant", "signature": "whoamiResponseSchema: z.ZodType<WhoamiResponse>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "entitlementsResponseSchema", "kind": "constant", "signature": "entitlementsResponseSchema: z.ZodType<EntitlementsResponse>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T1-enterprise-contracts-errors", "name": "auditEventsResponseSchema", "kind": "constant", "signature": "auditEventsResponseSchema: z.ZodType<AuditEventsResponse>", "file": "packages/contracts/src/enterprise.ts" }`
+  - `{ "from_task": "P17-T4-hosted-rest-auth-tenant-quota-audit", "name": "getHostedRouteAuthRequirement", "kind": "function", "signature": "getHostedRouteAuthRequirement(method: string, pathname: string) => HostedRouteAuthRequirement | null", "file": "packages/protocol-rest/src/hosted-auth.ts" }`
+  - `{ "from_task": "P17-T5-node-tenant-controls", "name": "registerNodeRoutes", "kind": "function", "signature": "registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependencies) => void", "file": "packages/protocol-node/src/node-routes.ts" }`
+  - `{ "from_task": "P17-T6-server-config-readiness-metrics-wiring", "name": "probeServerReadiness", "kind": "function", "signature": "probeServerReadiness(input: ServerReadinessInput) => Promise<ServerReadinessResult>", "file": "apps/server/src/readiness.ts" }`
 - `file_paths_consumed_by_other_tasks`: `PRODUCT.md`, `README.md`, `docs/development/API.md`, `docs/development/DEVELOPMENT.md`
 
 ### Task P17-T8-local-compat-docs-no-spend
@@ -663,7 +855,8 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `packages/sdk/src/client.test.ts` - existing SDK local run, event, artifact, registry, and error tests.
 - `packages/cli/src/run-cli.test.ts` - existing CLI local command harness.
 - `PRODUCT.md` - owner-facing current truth and R17 unshipped enterprise controls statements.
-- `docs/development/API.md` and `docs/development/DEVELOPMENT.md` - developer API and smoke command docs.
+- `docs/development/API.md` - developer API docs and local/hosted OpenAPI guidance.
+- `docs/development/DEVELOPMENT.md` - smoke command docs, rollout notes, and no-spend verification guidance.
 - `README.md` - top-level current product summary and local usage guidance.
 
 **Instructions:**
@@ -671,15 +864,16 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 2. Add SDK tests proving local client fake run/event/artifact/registry flows do not require an API key by default.
 3. Add CLI tests proving existing local fake run and contract export commands work without auth env vars.
 4. Add no-spend guard assertions where these tests construct fake/runtime-only harnesses. They must not call payment providers, model providers, AWS/R2, live GitHub, external search, hosted browser, or arbitrary process/PTY.
-5. Update docs to describe R18 precisely: API-first enterprise control-plane foundation for hosted/server APIs, API key auth, tenant/project ownership, plan/entitlement/quota contracts, audit events, redacted fail-closed staging/production config, hosted OpenAPI, and local daemon no-auth default.
+5. Update docs to describe R18 precisely: API-first enterprise control-plane foundation for hosted/server APIs, API key auth, tenant/project ownership, plan/entitlement/quota contracts, audit events, redacted fail-closed staging/production config, hosted OpenAPI, operator-only global `/metrics` requiring admin scope in hosted auth mode, and local daemon no-auth default.
 6. Explicitly state non-goals remain unshipped: dashboard, TUI, payment provider integration, invoices, checkout, webhooks, managed production hosting, public tenant self-service, OAuth/OIDC/SAML/SSO/SCIM, hosted or connected-node real tools, browser automation, arbitrary process/PTY, Cursor/OpenClaw/Paperclip, and runtime-specific approval bridge expansion.
-7. Document copy-paste no-spend verification commands for R18 and the new hosted OpenAPI generation/check command.
+7. Document rollout/rollback: deploy additive Postgres schema first, then auth/control-plane code; rollback leaves new tables inert; staging/production readiness fails safely if schema/bootstrap/control-plane checks are incomplete; no silent tenant adoption of existing unowned resources.
+8. Document copy-paste no-spend verification commands for R18 and the new hosted OpenAPI generation/check command.
 
 **Acceptance criteria:**
 - Default local daemon tests pass without any auth headers or enterprise bootstrap file.
 - SDK and CLI local flows continue to work without credentials.
 - Docs no longer say enterprise auth/billing/tenant controls are unshipped once R18 lands, but they do not claim payment collection, managed SaaS, public self-service, OAuth/SSO, dashboard, TUI, hosted tools, browser automation, or arbitrary process/PTY.
-- Docs include staging/production fail-closed auth variables and no-spend verification commands.
+- Docs include staging/production fail-closed auth variables, admin-only metrics boundary, additive rollout/rollback notes, and no-spend verification commands.
 - No new test in this task contacts live external providers or starts arbitrary process/PTY execution.
 
 **Checks (must pass before GREEN):**
@@ -710,21 +904,42 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - `{ "name": "CLI fake run no auth env", "lens": "happy", "given": "run CLI fake command with no SWITCHYARD_API_KEY", "expect": "command succeeds against local harness" }`
 - `{ "name": "contract export local remains local", "lens": "integration", "given": "CLI contract export default", "expect": "outputs local daemon OpenAPI rather than hosted server OpenAPI" }`
 - `{ "name": "docs mention R18 boundary", "lens": "edge_docs", "given": "PRODUCT.md and development docs", "expect": "enterprise control-plane foundation is described and payment/dashboard/TUI/OAuth/hosted tools remain explicitly unshipped" }`
+- `{ "name": "docs mention admin metrics boundary", "lens": "edge_docs", "given": "PRODUCT.md and docs/development/API.md", "expect": "/metrics described as hosted global operator/admin only; tenant-scoped metrics explicitly not shipped in R18" }`
+- `{ "name": "docs mention rollout rollback", "lens": "edge_docs", "given": "docs/development/DEVELOPMENT.md", "expect": "additive schema first, code second, rollback leaves tables inert, readiness fails safely when schema/bootstrap incomplete" }`
 - `{ "name": "no-spend guard", "lens": "edge_no_spend", "given": "new daemon/sdk/cli tests", "expect": "fake/in-memory harnesses only and no live provider/network/browser/process calls" }`
 
 **integration_contracts:**
-- `exports`: `updated product/development truth and local compatibility tests`
-- `imports_from_other_tasks`: `P17-T6-server-config-readiness-metrics-wiring: hosted config variables and metrics/readiness behavior`; `P17-T7-hosted-openapi-contract: local and hosted OpenAPI command names/artifacts`
+- `exports`:
+  - `{ "name": "R18 PRODUCT.md truth", "kind": "documentation", "signature": "PRODUCT.md describes R18 enterprise control-plane foundation, local no-auth default, admin-only hosted metrics, and explicit non-goals", "file": "PRODUCT.md" }`
+  - `{ "name": "R18 README.md truth", "kind": "documentation", "signature": "README.md describes local defaults and hosted enterprise control-plane boundary without payment/dashboard/TUI overclaims", "file": "README.md" }`
+  - `{ "name": "R18 API development truth", "kind": "documentation", "signature": "docs/development/API.md documents hosted auth variables, hosted OpenAPI commands, admin-only metrics, and no tenant metrics surface", "file": "docs/development/API.md" }`
+  - `{ "name": "R18 DEVELOPMENT rollout truth", "kind": "documentation", "signature": "docs/development/DEVELOPMENT.md documents additive schema rollout, inert rollback, readiness fail-safe behavior, and no-spend checks", "file": "docs/development/DEVELOPMENT.md" }`
+- `imports_from_other_tasks`:
+  - `{ "from_task": "P17-T6-server-config-readiness-metrics-wiring", "name": "ServerConfig", "kind": "interface", "signature": "interface ServerConfig { deploymentMode: DeploymentMode; serverAuthMode: 'disabled' | 'api_key'; apiKeyPepper?: string; controlPlaneBootstrapPath?: string; controlPlaneBootstrapJson?: string; controlPlaneStore: 'memory' | 'postgres'; auditIpHashPepper?: string; publicMetrics: boolean; }", "file": "apps/server/src/config.ts" }`
+  - `{ "from_task": "P17-T6-server-config-readiness-metrics-wiring", "name": "probeServerReadiness", "kind": "function", "signature": "probeServerReadiness(input: ServerReadinessInput) => Promise<ServerReadinessResult>", "file": "apps/server/src/readiness.ts" }`
+  - `{ "from_task": "P17-T7-hosted-openapi-contract", "name": "generateOpenApiDocument", "kind": "function", "signature": "generateOpenApiDocument(options?: { surface?: OpenApiSurface; inventory?: readonly RouteInventoryEntry[] }) => OpenApiDocument", "file": "packages/contracts/src/openapi.ts" }`
+  - `{ "from_task": "P17-T7-hosted-openapi-contract", "name": "runOpenApiCli", "kind": "function", "signature": "runOpenApiCli(argv: readonly string[], io?: OpenApiCliIO) => Promise<number>", "file": "packages/contracts/src/openapi-cli.ts" }`
 - `file_paths_consumed_by_other_tasks`: []
 
 ## Risks
 
 - Auth middleware could accidentally affect the local daemon. Mitigation: REST hooks are inert unless a control-plane dependency is supplied, and T8 adds daemon/SDK/CLI no-auth regression tests.
+- Auth middleware could run too late and parse large unauthenticated bodies. Mitigation: T4/T5/T6 require `onRequest` credential extraction/query-key rejection and large-body spy tests that prove parser and downstream services are not invoked.
 - Filtering after unscoped reads could leak resource existence. Mitigation: the control-plane store owns resource ownership lookups/listing, and REST/node tasks must authorize before returning rows or opening streams.
-- Quota reservations could strand capacity after downstream failure. Mitigation: T2 defines release/fail/expire semantics; T3 persists reservation statuses; T4/T6 release on caught downstream errors and readiness/startup expires stale reservations.
+- Quota reservations could strand capacity or race under concurrency. Mitigation: T2 defines `reserved -> consumed/released/failed/expired`; T3 serializes memory reservations and locks Postgres transactions; T4/T5/T6 release or fail reservations on queue/run/placement/ownership/artifact/node failures and readiness/startup expires stale reservations.
+- Ownership attach could fail after a resource write. Mitigation: T2 exposes typed `ownership_attach_failed`; T3 supports transactional attach/idempotency; T4/T5 require compensating terminalization/delete before queue enqueue, response, or assignment exposure.
 - Bootstrap secrets could leak through config errors or audit payloads. Mitigation: raw keys are hashed immediately, summaries are boolean/count-only, and redaction tests seed obvious secret substrings.
 - The word billing could be mistaken for payments. Mitigation: contracts model plans/entitlements/quotas only, and T8 docs explicitly keep payment provider integration out of scope.
 - Connected-node global token could remain cross-tenant. Mitigation: T5 requires a project binding or API key in hosted control-plane mode and T6 readiness fails unbound node-token production/staging config.
+- Global metrics could leak tenant activity. Mitigation: T6 makes `/metrics` operator-only with `metrics:read` plus `admin:read`; T7/T8 document that tenant-scoped metrics are not shipped in R18.
+
+## Rollout And Rollback
+
+- Roll out schema first: deploy the additive Postgres `CREATE TABLE IF NOT EXISTS`/`CREATE INDEX IF NOT EXISTS` changes for accounts, tenants, projects, users, API keys, billing plans, quota reservations/usage, audit events, and resource ownership before enabling hosted auth code.
+- Roll out code second: enable `SWITCHYARD_SERVER_AUTH_MODE=api_key`, `SWITCHYARD_API_KEY_PEPPER`, `SWITCHYARD_CONTROL_PLANE_STORE=postgres`, and bootstrap data only after schema readiness passes. Local/test may continue to use disabled auth and memory stores.
+- Readiness fails safely: staging/production `/ready` must return 503 when schema, bootstrap, active plan/key/tenant/project, quota store, audit store, node-token binding, or unowned-resource checks are incomplete.
+- Rollback is inert: disabling/removing the R18 code path leaves new tables unused and does not rewrite or delete existing hosted resource rows. Existing unowned rows are not silently adopted into a tenant during rollback or re-rollout.
+- Rollback caveat: after auth code has created owned resources, reverting to pre-R18 code may make ownership rows unused but harmless. Re-enabling R18 must run the same readiness checks and stale reservation expiry before accepting protected work.
 
 ## Integration Points
 
@@ -741,14 +956,18 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 
 - [ ] `@switchyard/contracts` exports identity/auth/billing/quota/audit schemas and types with deterministic tests.
 - [ ] Hosted/server API key auth accepts bearer or `x-switchyard-api-key`, rejects missing/empty/malformed/conflicting/query-string credentials, and never logs raw credentials.
+- [ ] Hosted/server REST and node auth runs in `onRequest` for protected routes so missing/invalid credentials deny before body parsing; large unauthenticated `/runs` and node artifact/content POST tests prove parser and service spies are not invoked.
 - [ ] Staging/production server config fails closed when auth mode, pepper, bootstrap/control-plane records, active plan, active key, audit store, quota store, or tenant ownership checks are missing.
 - [ ] Local daemon default behavior remains no-auth and all existing local daemon smoke/API flows continue to work without credentials.
 - [ ] Hosted/server resource creation writes durable tenant/account/project/user ownership for runs, events, artifacts, placement decisions, nodes, assignments, quota records, and audit events.
+- [ ] Ownership attach is atomic with resource creation where possible, or compensating rollback/terminalization happens before queue enqueue, response send, SSE open, artifact content read, or assignment exposure.
 - [ ] Tenant isolation tests prove one tenant cannot read/list/stream/mutate another tenant's runs, events, artifacts, nodes, assignments, metrics, entitlements, or audit logs.
 - [ ] `POST /runs` enforces placement/runtime entitlements, max timeout, active-run quota, and hourly run quota before run/queue/assignment side effects.
+- [ ] Run quota, artifact byte quota, and connected-node quota use the documented reservation state machines and include concurrent reservation tests.
 - [ ] Connected-node routes preserve existing token behavior where allowed, but in staging/production the token/API key maps to tenant/project context and node quota is enforced.
 - [ ] Artifact metadata/content reads enforce tenant/project ownership, `artifacts:read`, artifact-read entitlement, and artifact byte quota.
 - [ ] `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events` exist for hosted/server APIs and are covered in OpenAPI.
+- [ ] Hosted `/metrics` is global operator-only in R18 and requires hosted auth with `metrics:read` plus `admin:read`; tenant-scoped metrics are explicitly not shipped.
 - [ ] Hosted/server OpenAPI documents API key security for protected routes, while local-daemon OpenAPI remains backwards compatible and unauthenticated by default.
 - [ ] Audit events are appended for auth failures, cross-tenant denials, entitlement denials, quota denials, allowed run creation, artifact access decisions, node auth/registration decisions, and fail-closed config decisions.
 - [ ] Redaction tests prove raw API keys, node tokens, secret hashes, peppers, provider tokens, object-store credentials, authorization headers, cookies, and signed URL secret query params do not appear in logs, audit payloads, errors, readiness, metrics, or artifacts touched by R18.
@@ -774,18 +993,18 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 ## Self-Review
 
 1. Spec coverage: every R18 acceptance criterion maps to at least one task above.
-2. Placeholder scan: no unresolved marker tokens, generic edge-case language, or unspecified validation remains.
+2. Placeholder scan: no unresolved marker tokens, generic edge-case language, ambiguous helper contracts, or unspecified validation remains.
 3. Type consistency: T1 enterprise types feed T2 service/store contracts, T3 implementation, T4/T5 routes, T6 wiring, and T7 OpenAPI schemas.
 4. Ownership disjoint: each listed file is owned by exactly one task.
-5. Context files real: all context files listed exist in this worktree.
+5. Context files real: every `context_files` path was rechecked after architect iteration 1; future outputs are only dependency exports/imports, not context anchors.
 6. Acceptance testable: each task acceptance item names observable behavior or exact commands.
 7. Dependency order sane: contracts precede core, core precedes storage/routes, routes precede server wiring, OpenAPI/docs depend on integrated route/server behavior.
 8. Checks runnable: commands use existing package scripts, with new hosted OpenAPI scripts owned by T7.
 9. Error/rescue maps present: every runtime task has explicit failure rows; pure contract/OpenAPI/doc tasks include contract/drift rows.
-10. Observability present: runtime tasks name low-cardinality metrics and redaction constraints.
-11. Test cases enumerate acceptance: every task has happy, nil/empty, error, edge, or integration tests matching its acceptance and rescue paths.
-12. Integration contracts walked: every import from another task resolves to an export in an earlier dependency.
-13. Contract types match: API key, auth context, ownership, quota reservation, and audit signatures are consistent across T1/T2/T3/T4/T5/T6/T7.
+10. Observability present: runtime tasks name low-cardinality event names, metrics, safe reason-code logging, and redaction constraints.
+11. Test cases enumerate acceptance: every task has happy, nil/empty, error, edge, or integration tests matching its acceptance and rescue paths, including malformed auth, bootstrap failures, downstream failures, and concurrency.
+12. Integration contracts walked: every import from another task resolves to an explicit structured export with name, kind, signature, and file.
+13. Contract types match: API key, auth context, ownership, quota reservation state machines, audit signatures, metrics boundary, and OpenAPI surface signatures are consistent across T1/T2/T3/T4/T5/T6/T7.
 
 ## Plan Completeness Self-Test
 
@@ -796,5 +1015,5 @@ servers: [{ url: "http://127.0.0.1:4545" }],
 - [x] Every `integration_contracts.imports_from_other_tasks` resolves to a real export elsewhere.
 - [x] Every `context_files` path exists in the project.
 - [x] No task edits a file owned by another task.
-- [x] No placeholder text remains.
+- [x] No placeholder text remains; ambiguous route/helper contracts were replaced with exact structured signatures.
 - [x] Complexity is L; the phase is split into package-scoped tasks rather than sub-phases because the core objective requires contracts, enforcement, storage, OpenAPI, and local compatibility to land together.
