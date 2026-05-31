@@ -595,6 +595,19 @@ export class RuntimeRunnerService {
 
     await this.deps.runs.update(terminal);
     await this.deps.sessions.update(terminalSession);
+    if (event.type === "run.failed") {
+      await this.terminalizeRuntimeApprovalsForRun(templateRun.id, {
+        terminalEvent: "run.failed",
+        approvalStatus: "rejected",
+        message: "run failed"
+      });
+    } else if (event.type === "run.cancelled") {
+      await this.terminalizeRuntimeApprovalsForRun(templateRun.id, {
+        terminalEvent: "run.cancelled",
+        approvalStatus: "rejected",
+        message: "cancelled by Switchyard"
+      });
+    }
     await this.appendAndPublish(this.eventForRun(
       terminal,
       event.type,

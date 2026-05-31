@@ -555,6 +555,123 @@ describe("runtime approval + session R16", () => {
     expect(handles.size).toBe(0);
   });
 
+  it("late approve and reject for expired runtime approvals return promptly without duplicate side effects", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const approvals = new MemoryApprovalStore();
+    const sent: Array<Record<string, unknown>> = [];
+    const now = new Date("2026-05-31T00:00:00.000Z");
+    const scheduler = {
+      setTimeout: (_fn: () => void, _ms: number) => Symbol("timer") as unknown as ReturnType<typeof setTimeout>,
+      clearTimeout: (_handle: ReturnType<typeof setTimeout>) => undefined
+    };
+    const service = new ApprovalService({
+      approvals,
+      runs,
+      events,
+      runtimeResolutionSender: async (input) => {
+        sent.push(input as unknown as Record<string, unknown>);
+      },
+      clock: () => new Date(now.getTime()),
+      scheduler
+    });
+    const run = makeRun();
+    await runs.create(run);
+
+    const approveTarget = await service.create({
+      runId: run.id,
+      approvalType: "before_external_message",
+      payload: {
+        runtimeApprovalToken: "pause-approve",
+        expiresAt: "2026-05-31T00:01:00.000Z"
+      }
+    });
+    const rejectTarget = await service.create({
+      runId: run.id,
+      approvalType: "before_external_message",
+      payload: {
+        runtimeApprovalToken: "pause-reject",
+        expiresAt: "2026-05-31T00:01:00.000Z"
+      }
+    });
+    now.setTime(Date.parse("2026-05-31T00:01:01.000Z"));
+
+    const approveOutcome = await Promise.race([
+      service.approve(approveTarget.id, { actor: "late-user" })
+        .then(() => ({ kind: "resolved" as const }))
+        .catch((error: unknown) => ({ kind: "rejected" as const, error })),
+      new Promise<{ kind: "timeout" }>((resolve) => setTimeout(() => resolve({ kind: "timeout" }), 100))
+    ]);
+    expect(approveOutcome.kind).toBe("rejected");
+    if (approveOutcome.kind === "rejected") {
+      expect(approveOutcome.error).toMatchObject({ code: "approval_not_pending" });
+    }
+
+    const rejectOutcome = await Promise.race([
+      service.reject(rejectTarget.id, { actor: "late-user" })
+        .then(() => ({ kind: "resolved" as const }))
+        .catch((error: unknown) => ({ kind: "rejected" as const, error })),
+      new Promise<{ kind: "timeout" }>((resolve) => setTimeout(() => resolve({ kind: "timeout" }), 100))
+    ]);
+    expect(rejectOutcome.kind).toBe("rejected");
+    if (rejectOutcome.kind === "rejected") {
+      expect(rejectOutcome.error).toMatchObject({ code: "approval_not_pending" });
+    }
+
+    expect((await approvals.get(approveTarget.id))?.status).toBe("expired");
+    expect((await approvals.get(rejectTarget.id))?.status).toBe("expired");
+    expect(events.items.filter((event) => event.type === "approval.expired" && event.payload["approvalId"] === approveTarget.id)).toHaveLength(1);
+    expect(events.items.filter((event) => event.type === "approval.expired" && event.payload["approvalId"] === rejectTarget.id)).toHaveLength(1);
+    expect(sent.filter((payload) => payload["approvalId"] === approveTarget.id)).toHaveLength(1);
+    expect(sent.filter((payload) => payload["approvalId"] === rejectTarget.id)).toHaveLength(1);
+  });
+
+  it("terminalizes pending runtime approvals when adapter emits run.failed", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const sent: Array<Record<string, unknown>> = [];
+    const adapter = new PlannedAdapter([
+      runtimeEvent("approval.requested", 1, {
+        runtimeApprovalToken: "pause-1",
+        approvalType: "before_external_message"
+      }),
+      runtimeEvent("run.failed", 2, { status: "failed", error: "adapter crashed" })
+    ]);
+    const runtimeApprovals = new ApprovalService({
+      approvals,
+      runs,
+      events,
+      runtimeResolutionSender: async (input) => {
+        sent.push(input as unknown as Record<string, unknown>);
+      }
+    });
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]]),
+      runtimeApprovals: {
+        create: async (input) => {
+          await runtimeApprovals.create(input);
+        },
+        terminalizePendingForRun: async (runId, input) => runtimeApprovals.terminalizePendingRuntimeApprovalsForRun(runId, input)
+      }
+    });
+    const run = makeRun();
+    await runs.create(run);
+    await events.append(runtimeEvent("run.queued", 0, {}));
+
+    const result = await runner.start(run);
+    const approval = [...approvals.items.values()][0];
+
+    expect(result.status).toBe("failed");
+    expect(approval?.status).toBe("rejected");
+    expect(events.items.filter((event) => event.type === "approval.rejected" && event.payload["approvalId"] === approval?.id)).toHaveLength(1);
+    expect(sent.filter((payload) => payload["approvalId"] === approval?.id && payload["decision"] === "rejected")).toHaveLength(1);
+  });
+
   it("terminalizes pending runtime approvals for timeout/cancel/failure and stale sender keeps terminal status", async () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();

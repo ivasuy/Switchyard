@@ -186,7 +186,7 @@ export class ApprovalService {
 
       const expiresAt = parseExpiresAt(approval);
       if (expiresAt && expiresAt <= this.nowDate()) {
-        const expired = await this.transitionPendingRuntimeApproval(id, {
+        const expired = await this.transitionPendingRuntimeApprovalWithinLock(id, {
           status: "expired",
           message: "expired by Switchyard",
           eventType: "approval.expired"
@@ -382,7 +382,7 @@ export class ApprovalService {
     const delayMs = Math.max(0, expiresAt.getTime() - now.getTime());
     const handle = scheduler.setTimeout(() => {
       void this.withResolutionLock(approval.id, async () => {
-        const expired = await this.transitionPendingRuntimeApproval(approval.id, {
+        const expired = await this.transitionPendingRuntimeApprovalWithinLock(approval.id, {
           status: "expired",
           message: "expired by Switchyard",
           eventType: "approval.expired"
@@ -439,39 +439,50 @@ export class ApprovalService {
       eventType: "approval.expired" | "approval.rejected";
     }
   ): Promise<Approval | null> {
-    return await this.withResolutionLock(approvalId, async () => {
-      const approval = await this.deps.approvals.get(approvalId);
-      if (!approval || approval.status !== "pending") {
-        return null;
-      }
-      const nextApproval: Approval = {
-        ...approval,
-        status: input.status,
-        resolvedAt: this.nowIso(),
-        payload: redactSecrets({
-          ...approval.payload,
-          resolution: {
-            actor: "switchyard",
-            reason: input.message
-          }
-        })
-      };
-      const persisted = await this.deps.approvals.updateIfStatus(approvalId, "pending", nextApproval);
-      if (!persisted) {
-        return null;
-      }
-      this.clearExpirationTimer(approvalId);
-      await this.appendAndPublish(await this.eventForRun(persisted.runId, input.eventType, {
-        approvalId: persisted.id,
-        status: persisted.status
-      }));
-      this.deps.logger?.info(input.eventType, {
-        approvalId: persisted.id,
-        runId: persisted.runId,
-        status: persisted.status
-      });
-      return persisted;
+    return this.withResolutionLock(approvalId, async () =>
+      this.transitionPendingRuntimeApprovalWithinLock(approvalId, input)
+    );
+  }
+
+  private async transitionPendingRuntimeApprovalWithinLock(
+    approvalId: string,
+    input: {
+      status: "expired" | "rejected";
+      message: string;
+      eventType: "approval.expired" | "approval.rejected";
+    }
+  ): Promise<Approval | null> {
+    const approval = await this.deps.approvals.get(approvalId);
+    if (!approval || approval.status !== "pending") {
+      return null;
+    }
+    const nextApproval: Approval = {
+      ...approval,
+      status: input.status,
+      resolvedAt: this.nowIso(),
+      payload: redactSecrets({
+        ...approval.payload,
+        resolution: {
+          actor: "switchyard",
+          reason: input.message
+        }
+      })
+    };
+    const persisted = await this.deps.approvals.updateIfStatus(approvalId, "pending", nextApproval);
+    if (!persisted) {
+      return null;
+    }
+    this.clearExpirationTimer(approvalId);
+    await this.appendAndPublish(await this.eventForRun(persisted.runId, input.eventType, {
+      approvalId: persisted.id,
+      status: persisted.status
+    }));
+    this.deps.logger?.info(input.eventType, {
+      approvalId: persisted.id,
+      runId: persisted.runId,
+      status: persisted.status
     });
+    return persisted;
   }
 
   private async sendRuntimeRejectionResolution(
