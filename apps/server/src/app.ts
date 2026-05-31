@@ -92,7 +92,7 @@ export async function createServerApp(config: ServerConfig) {
   });
 
   let controlPlaneStoreInstance: PostgresControlPlaneStore | undefined;
-  let controlPlane: ControlPlaneService | undefined;
+  let controlPlaneRaw: ControlPlaneService | undefined;
   let bootstrapActiveCounts: ControlPlaneBootstrapConfig["active"] | undefined;
   let nodeTokenBindings: readonly NodeTokenBinding[] = [];
   if (serverAuthMode === "api_key") {
@@ -120,7 +120,7 @@ export async function createServerApp(config: ServerConfig) {
       throw new ConfigError(code, "SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH", config.redactedSummary);
     }
 
-    controlPlane = new ControlPlaneService({
+    controlPlaneRaw = new ControlPlaneService({
       store: controlPlaneStoreInstance,
       apiKeyPepper: config.apiKeyPepper
     });
@@ -134,6 +134,9 @@ export async function createServerApp(config: ServerConfig) {
       throw new ConfigError("control_plane_bootstrap_node_token_unbound", "SWITCHYARD_NODE_SHARED_TOKEN", config.redactedSummary);
     }
   }
+  const controlPlane = controlPlaneRaw
+    ? instrumentControlPlane(controlPlaneRaw, metrics)
+    : undefined;
 
   const runs: RunStore = new PostgresRunStore(postgres);
   const events: EventStore = new PostgresEventStore(postgres);
@@ -301,10 +304,8 @@ export async function createServerApp(config: ServerConfig) {
       const auth = await controlPlane.authenticateRequest(authInput);
       controlPlane.requireScope(auth, "metrics:read");
       controlPlane.requireScope(auth, "admin:read");
-      metrics.inc("auth.succeeded");
     } catch (error) {
       if (error instanceof ControlPlaneError) {
-        recordControlPlaneErrorMetric(error, metrics);
         return sendHttpError(reply, error.code, error.reasonCode, [{ path: "reasonCode", issue: error.reasonCode }]);
       }
       throw error;
@@ -688,32 +689,116 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
-function recordControlPlaneErrorMetric(error: ControlPlaneError, metrics: HostedMetrics): void {
-  if (error.code === "auth_required") {
+function instrumentControlPlane(controlPlane: ControlPlaneService, metrics: HostedMetrics): ControlPlaneService {
+  const proxy = new Proxy(controlPlane, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function") {
+        return value;
+      }
+      return (...args: unknown[]) => {
+        const methodName = String(property);
+        try {
+          const result = value.apply(target, args);
+          if (result && typeof (result as Promise<unknown>).then === "function") {
+            return (result as Promise<unknown>)
+              .then((resolved) => {
+                captureControlPlaneSuccessMetric(methodName, resolved, metrics);
+                return resolved;
+              })
+              .catch((error) => {
+                if (error instanceof ControlPlaneError) {
+                  captureControlPlaneCodeMetric(error.code, metrics);
+                  if (methodName === "recordAudit") {
+                    metrics.inc("audit.failed");
+                  }
+                }
+                throw error;
+              });
+          }
+          captureControlPlaneSuccessMetric(methodName, result, metrics);
+          return result;
+        } catch (error) {
+          if (error instanceof ControlPlaneError) {
+            captureControlPlaneCodeMetric(error.code, metrics);
+            if (methodName === "recordAudit") {
+              metrics.inc("audit.failed");
+            }
+          }
+          throw error;
+        }
+      };
+    }
+  });
+  return proxy as unknown as ControlPlaneService;
+}
+
+function captureControlPlaneSuccessMetric(methodName: string, result: unknown, metrics: HostedMetrics): void {
+  if (methodName === "authenticateRequest") {
+    metrics.inc("auth.succeeded");
+  }
+  if (
+    methodName === "preflightRunCreate" ||
+    methodName === "preflightArtifactContentRead" ||
+    methodName === "preflightNodeRegister"
+  ) {
+    metrics.inc("quota.reserved");
+  }
+  if (methodName === "releaseQuotaReservation") {
+    metrics.inc("quota.released");
+  }
+  if (methodName === "recordAudit" && isRecordAuditResult(result)) {
+    metrics.inc(result.ok ? "audit.appended" : "audit.failed");
+  }
+  if (methodName === "authorizeResource" && isAuthorizeResourceResult(result) && !result.ok) {
+    captureControlPlaneCodeMetric(result.code, metrics);
+  }
+}
+
+function captureControlPlaneCodeMetric(code: ControlPlaneError["code"], metrics: HostedMetrics): void {
+  if (code === "auth_required") {
     metrics.inc("auth.required");
     return;
   }
-  if (error.code === "auth_failed") {
+  if (code === "auth_failed" || code === "auth_store_unavailable") {
     metrics.inc("auth.failed");
     return;
   }
-  if (error.code === "auth_conflict") {
+  if (code === "auth_conflict") {
     metrics.inc("auth.conflict");
     return;
   }
-  if (error.code === "tenant_access_denied") {
+  if (code === "tenant_access_denied" || code === "project_access_denied") {
     metrics.inc("tenant.denied");
     return;
   }
-  if (error.code === "entitlement_denied") {
+  if (code === "entitlement_denied") {
     metrics.inc("entitlement.denied");
     return;
   }
-  if (error.code === "quota_exceeded") {
+  if (code === "quota_exceeded") {
     metrics.inc("quota.denied");
     return;
   }
-  metrics.inc("controlPlane.notReady");
+  if (code === "audit_log_unavailable") {
+    metrics.inc("audit.failed");
+  }
+}
+
+function isRecordAuditResult(value: unknown): value is { ok: boolean } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as { ok?: unknown };
+  return typeof candidate.ok === "boolean";
+}
+
+function isAuthorizeResourceResult(value: unknown): value is { ok: boolean; code: ControlPlaneError["code"] } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as { ok?: unknown; code?: unknown };
+  return typeof candidate.ok === "boolean" && typeof candidate.code === "string";
 }
 
 function tokenMatches(got: string, expected: string): boolean {

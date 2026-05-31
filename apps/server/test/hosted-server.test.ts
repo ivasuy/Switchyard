@@ -527,6 +527,58 @@ describe("hosted server", () => {
     }
   });
 
+  it("increments control-plane metrics after authenticated hosted run", async () => {
+    const config = loadServerConfig(createAuthEnabledTestEnv());
+    const app = await createServerApp(config);
+    try {
+      const before = await app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: {
+          authorization: `Bearer ${ADMIN_RAW_KEY}`
+        }
+      });
+      expect(before.statusCode).toBe(200);
+
+      const created = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        headers: {
+          authorization: `Bearer ${ADMIN_RAW_KEY}`
+        },
+        payload: {
+          runtime: "fake",
+          provider: "test",
+          model: "test-model",
+          adapterType: "process",
+          cwd: "/repo",
+          task: "hosted auth metrics",
+          placement: "hosted",
+          runtimeMode: "fake.deterministic"
+        }
+      });
+      expect(created.statusCode).toBe(201);
+
+      const after = await app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: {
+          authorization: `Bearer ${ADMIN_RAW_KEY}`
+        }
+      });
+      expect(after.statusCode).toBe(200);
+
+      const beforeMetrics = before.json();
+      const afterMetrics = after.json();
+      expect(afterMetrics.auth.succeeded).toBeGreaterThan(beforeMetrics.auth.succeeded);
+      expect(afterMetrics.quota.reserved).toBeGreaterThan(beforeMetrics.quota.reserved);
+      expect(afterMetrics.quota.released).toBeGreaterThan(beforeMetrics.quota.released);
+      expect(afterMetrics.audit.appended).toBeGreaterThan(beforeMetrics.audit.appended);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("redacts bootstrap raw key and pepper from summaries and errors", () => {
     const env = createStagingEnv({
       SWITCHYARD_DEPLOYMENT_MODE: "local",
