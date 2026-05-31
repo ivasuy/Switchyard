@@ -251,3 +251,19 @@ The shipped boundary remains explicit: R18 does not ship dashboard, TUI, payment
 
 ### Deferred Concerns
 - None.
+
+## Phase 18: R19 Production Hosted Deployment
+**Date:** 2026-05-31
+**Spec:** docs/superpowers/specs/2026-05-31-phase-18-r19-production-hosted-deployment.md
+**Plan:** docs/superpowers/plans/2026-05-31-phase-18-r19-production-hosted-deployment.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-18-report.md
+**Branch:** agent/phase-18-r19-production-hosted-deployment (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R19 is now shipped on the phase branch. Switchyard adds provider-neutral production hosted deployment readiness for the existing fake-safe hosted boundary: production compose and manifest artifacts, fail-closed production config validation across server/worker/node, Postgres schema compatibility and additive migration gates, hosted `/ready` schema diagnostics, worker/node readiness and startup redaction, production preflight/migrate/canary commands, and hosted OpenAPI/product truth alignment. The phase also made `pnpm typecheck` self-contained for CLI checks and fixed the audit-found `/ready` contract drift so the generated hosted OpenAPI uses the same schema diagnostics shape as the shipped implementation.
+
+The shipped boundary remains explicit: R19 does not ship dashboard, TUI, managed SaaS/public signup, payment provider integration, OAuth/OIDC/SAML/SSO/SCIM, production hosted real-runtime execution, arbitrary process/PTY execution, public `/exec`/`/shell`/`/process`/`/command`/`/pty`/`/terminal`/`/sandbox` routes, hosted or connected-node real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, runtime-specific hosted approval bridge expansion, or hosted debate with real participant runtimes/model judging.
+
+### Deferred Concerns
+- None.

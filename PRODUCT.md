@@ -1181,3 +1181,29 @@ Explicitly not shipped in R18:
 - Cursor, OpenClaw, or Paperclip adapters.
 - Runtime-specific approval bridge expansion for OpenCode, AgentField, Generic HTTP, or hosted Codex.
 - Hosted debate with real participant runtimes or model judging.
+
+## R19 Production Hosted Deployment (Shipped Production-Readiness Slice)
+
+Shipped in this phase:
+
+- Provider-neutral production manifest pack for the existing fake-safe hosted boundary, including production compose, manifest posture metadata, `.env.example`, bootstrap example, and documentation.
+- Fail-closed production config validation shared by server, worker, and node, including placeholder/blank-entry rejection, runtime allowlist enforcement, production auth/object-store requirements, and redacted startup logging.
+- Postgres schema compatibility checks, additive migration policy gates, `production:migrate`, and `/ready` schema diagnostics with named codes.
+- Worker/node operability improvements: cheap health, schema-aware readiness, worker cached/full readiness, CLI readiness output, and sanitized startup failures.
+- Production `preflight`, `migrate`, and deterministic no-spend `canary` commands that validate the hosted API workflow without relying on live provider spend.
+- Hosted OpenAPI, API docs, development docs, and product truth aligned with the shipped R19 production-readiness boundary.
+- CLI typecheck self-containment so full branch verification does not depend on prebuilt local package artifacts.
+
+Explicitly not shipped in R19:
+
+- Dashboard or TUI.
+- Managed SaaS/public signup, tenant self-service UI, billing admin UI, or organization-management UI.
+- Payment provider integration, invoices, checkout, webhooks, tax, subscription lifecycle, customer portal, or automated billing collection.
+- OAuth, OIDC, SAML, SSO, SCIM, passkeys, session cookies, user passwords, email invites, or browser login flow.
+- Production hosted real-runtime execution for Codex/Claude/OpenCode.
+- Production arbitrary subprocess/PTY execution, generic process/PTY adapters, or public `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` execution APIs.
+- Hosted or connected-node real-tool execution.
+- Browser automation.
+- Cursor, OpenClaw, or Paperclip adapters.
+- Runtime-specific hosted approval bridge expansion for Codex/OpenCode/AgentField/Generic HTTP.
+- Hosted debate with real participant runtimes or model judging.
