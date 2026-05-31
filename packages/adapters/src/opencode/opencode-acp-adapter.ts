@@ -340,12 +340,15 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
   async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
     const stored = this.requireSession(session);
     const runId = requiredString(session["runId"], "runId");
+    const transcriptContent = this.hostedProviderCommand
+      ? buildHostedSafeTranscript(stored.client.transcript().content())
+      : stored.client.transcript().content();
     return [{
       id: "artifact_opencode_acp_transcript",
       type: "transcript",
       path: `runs/${runId}/opencode-acp-transcript.jsonl`,
       metadata: {
-        content: stored.client.transcript().content(),
+        content: transcriptContent,
         ...stored.client.transcript().metadata({
           runtime: "opencode",
           mode: "acp",
@@ -533,4 +536,74 @@ function hasDeniedMetadataKey(value: unknown): boolean {
     }
   }
   return false;
+}
+
+function buildHostedSafeTranscript(content: string): string {
+  const lines = content.split("\n");
+  const safeLines: string[] = [];
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      const type = typeof parsed["type"] === "string" ? parsed["type"] : "acp.unknown";
+      if (type === "acp.message") {
+        const safe: Record<string, unknown> = {
+          type: "acp.message",
+          direction: parsed["direction"] === "in" || parsed["direction"] === "out" ? parsed["direction"] : "out",
+          timestamp: typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : new Date().toISOString(),
+          byteLength: typeof parsed["byteLength"] === "number" ? parsed["byteLength"] : 0,
+          redacted: true,
+          raw: "[REDACTED_HOSTED]"
+        };
+        if (typeof parsed["jsonrpc"] === "string") {
+          safe["jsonrpc"] = parsed["jsonrpc"];
+        }
+        if (typeof parsed["id"] === "string" || typeof parsed["id"] === "number") {
+          safe["id"] = parsed["id"];
+        }
+        if (typeof parsed["method"] === "string") {
+          safe["method"] = parsed["method"];
+        }
+        safeLines.push(`${JSON.stringify(safe)}\n`);
+        continue;
+      }
+
+      if (type === "acp.stderr") {
+        safeLines.push(`${JSON.stringify({
+          type: "acp.stderr",
+          timestamp: typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : new Date().toISOString(),
+          byteLength: typeof parsed["byteLength"] === "number" ? parsed["byteLength"] : 0,
+          text: "[REDACTED_HOSTED]",
+          redacted: true
+        })}\n`);
+        continue;
+      }
+
+      if (type === "acp.oversized") {
+        safeLines.push(`${JSON.stringify({
+          type: "acp.oversized",
+          direction: parsed["direction"] === "in" || parsed["direction"] === "out" ? parsed["direction"] : "out",
+          timestamp: typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : new Date().toISOString(),
+          byteLength: typeof parsed["byteLength"] === "number" ? parsed["byteLength"] : 0,
+          reasonCode: "acp_message_too_large"
+        })}\n`);
+        continue;
+      }
+
+      safeLines.push(`${JSON.stringify({
+        type: "acp.unknown",
+        redacted: true
+      })}\n`);
+    } catch {
+      safeLines.push(`${JSON.stringify({
+        type: "acp.unknown",
+        redacted: true
+      })}\n`);
+    }
+  }
+
+  return safeLines.join("");
 }

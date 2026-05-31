@@ -337,4 +337,52 @@ describe("OpenCodeAcpAdapter", () => {
       reasonCode: "hosted_input_bridge_unsupported"
     } satisfies Partial<AdapterProtocolError>);
   });
+
+  it("redacts hosted transcript artifacts while retaining hosted-safe diagnostics", async () => {
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "opencode.acp",
+      executablePath: "/Users/example/bin/opencode",
+      argv: ["acp"],
+      cwd: "/Users/example/workspace/project",
+      env: {
+        OPENCODE_TOKEN: "token-secret-value",
+        HOME: "/Users/example"
+      },
+      envKeys: ["OPENCODE_TOKEN", "HOME"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new OpenCodeAcpAdapter({
+      hostedProviderCommand,
+      processFactory: createFakeAcpProcessFactory({ scenario: "happy" }),
+      probeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+
+    const session = await adapter.start({
+      runId: "run_hosted_transcript",
+      runtime: "opencode",
+      runtimeMode: "opencode.acp",
+      provider: "opencode",
+      model: "opencode-default",
+      cwd: "/Users/example/workspace/project",
+      task: "Prompt secret token-secret-value from /Users/example/workspace/project",
+      metadata: {}
+    });
+    for await (const _event of adapter.events({ ...session, runId: "run_hosted_transcript" })) {
+      // drain
+    }
+
+    const artifacts = await adapter.artifacts({ ...session, runId: "run_hosted_transcript" });
+    const content = String(artifacts[0]?.metadata.content);
+    expect(content).toContain("\"method\":\"initialize\"");
+    expect(content).toContain("\"method\":\"session/prompt\"");
+    expect(content).toContain("[REDACTED_HOSTED]");
+    expect(content).not.toContain("Prompt secret token-secret-value");
+    expect(content).not.toContain("token-secret-value");
+    expect(content).not.toContain("/Users/example/workspace/project");
+    expect(content).not.toContain("/Users/example/bin/opencode");
+    expect(content).not.toContain("\"raw\":\"{");
+    expect(content).not.toContain("\"prompt\"");
+    expect(content).not.toContain("\"cwd\"");
+  });
 });
