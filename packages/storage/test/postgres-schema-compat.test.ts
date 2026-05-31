@@ -114,6 +114,15 @@ describe("postgres schema compatibility", () => {
     });
   });
 
+  it("reports malformed when schema_version is only partially numeric", async () => {
+    const { handle } = makeFakeHandle({ metadataValue: "19abc" });
+
+    await expect(checkPostgresSchemaCompatibility(handle)).resolves.toMatchObject({
+      ok: false,
+      code: "postgres_schema_malformed"
+    });
+  });
+
   it("reports unsupported when schema version is newer than current code", async () => {
     const { handle } = makeFakeHandle({ metadataValue: String(POSTGRES_SCHEMA_VERSION + 1) });
 

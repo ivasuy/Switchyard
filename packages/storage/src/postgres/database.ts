@@ -447,8 +447,7 @@ export async function checkPostgresSchemaCompatibility(
     };
   }
 
-  const actualVersion = Number.parseInt(raw, 10);
-  if (!Number.isInteger(actualVersion)) {
+  if (!/^\d+$/.test(raw)) {
     return {
       ok: false,
       code: "postgres_schema_malformed",
@@ -456,6 +455,7 @@ export async function checkPostgresSchemaCompatibility(
     };
   }
 
+  const actualVersion = Number(raw);
   if (actualVersion > POSTGRES_SCHEMA_VERSION) {
     return {
       ok: false,
