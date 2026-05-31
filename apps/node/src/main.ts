@@ -21,10 +21,14 @@ try {
   }
 } catch (error) {
   console.error("node.start_failed", {
-    code: error instanceof Error ? error.message : String(error),
+    code: sanitizeStartupError(error instanceof Error ? error.message : String(error)),
     config: (error as { redactedConfig?: unknown })?.redactedConfig ?? config?.redactedSummary ?? {}
   });
   process.exitCode = 1;
 } finally {
   await app?.stop();
+}
+
+function sanitizeStartupError(message: string): string {
+  return message.replace(/\b(https?:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, "$1[redacted]@");
 }

@@ -139,9 +139,17 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       return runFullReadiness();
     },
     stop: async () => {
-      await postgresReady;
+      try {
+        await postgresReady;
+      } catch {
+        // Readiness already maps startup probe failures to named reasons; cleanup must not replace that result.
+      }
       await queue.close?.();
-      await postgres?.close();
+      try {
+        await postgres?.close();
+      } catch {
+        // Best-effort cleanup for handles that failed during initial connection.
+      }
     }
   };
 

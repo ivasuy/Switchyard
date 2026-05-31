@@ -35,5 +35,11 @@ try {
   });
   process.exitCode = 1;
 } finally {
-  await worker?.stop();
+  try {
+    await worker?.stop();
+  } catch (error) {
+    if (process.exitCode !== 1) {
+      throw error;
+    }
+  }
 }

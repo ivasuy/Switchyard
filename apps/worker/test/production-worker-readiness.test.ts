@@ -1,3 +1,6 @@
+import { spawn } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { resolveHostedSandboxConfig } from "@switchyard/core";
 import { resolveObjectStoreConfig } from "@switchyard/storage";
@@ -7,6 +10,8 @@ import { createHostedWorker } from "../src/worker.js";
 import { runWorkerReadinessCommand } from "../src/ready.js";
 import type { WorkerConfig } from "../src/config.js";
 import type { PostgresDatabaseHandle } from "@switchyard/storage";
+
+const workerRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function baseConfig(): WorkerConfig {
   return {
@@ -165,4 +170,59 @@ describe("production worker readiness", () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toBeTruthy();
   });
+
+  it("readiness CLI keeps structured JSON when Postgres is unreachable", async () => {
+    const result = await runWorkerReadyCli({
+      SWITCHYARD_DEPLOYMENT_MODE: "production",
+      SWITCHYARD_POSTGRES_URL: "postgres://worker:worker-strong-credential@127.0.0.1:1/switchyard",
+      SWITCHYARD_REDIS_URL: "redis://default:worker-strong-credential@127.0.0.1:1/0",
+      SWITCHYARD_OBJECT_STORE_BACKEND: "local",
+      SWITCHYARD_OBJECT_STORE_DIR: "/tmp/switchyard-worker-ready",
+      SWITCHYARD_OBJECT_STORE_PROBE: "write_read_delete",
+      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic",
+      SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "disabled"
+    });
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).not.toContain("ECONNREFUSED");
+    expect(result.stderr).not.toContain("Error:");
+
+    const payload = JSON.parse(result.stdout.trim()) as { ok: boolean; reason?: string };
+    expect(payload).toMatchObject({ ok: false, reason: "postgres_unavailable" });
+  });
 });
+
+function runWorkerReadyCli(env: Record<string, string>): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolveResult, reject) => {
+    const child = spawn("pnpm", ["exec", "tsx", "src/ready.ts"], {
+      cwd: workerRoot,
+      env: {
+        ...process.env,
+        ...env,
+        FORCE_COLOR: "0"
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("worker_ready_cli_timeout"));
+    }, 7_500);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      resolveResult({ code, stdout, stderr });
+    });
+  });
+}

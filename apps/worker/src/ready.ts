@@ -4,14 +4,15 @@ import { loadWorkerConfig } from "./config.js";
 
 export async function runWorkerReadinessCommand(env: NodeJS.ProcessEnv = process.env): Promise<WorkerReadinessReport> {
   let worker: ReturnType<typeof createHostedWorker> | undefined;
+  let report: WorkerReadinessReport | undefined;
   try {
     const config = loadWorkerConfig(env);
     worker = createHostedWorker(config);
-    const report = await worker.ready({ mode: "full" });
+    report = await worker.ready({ mode: "full" });
     return report;
   } catch (error) {
     const diagnostics = (error as { redactedConfig?: unknown })?.redactedConfig as Record<string, unknown> | undefined;
-    return {
+    report = {
       ok: false,
       reason: error instanceof Error ? error.message : String(error),
       checks: {
@@ -22,9 +23,16 @@ export async function runWorkerReadinessCommand(env: NodeJS.ProcessEnv = process
         }
       }
     };
+    return report;
   } finally {
     if (worker) {
-      await worker.stop();
+      try {
+        await worker.stop();
+      } catch (error) {
+        if (!report || report.ok) {
+          throw error;
+        }
+      }
     }
   }
 }

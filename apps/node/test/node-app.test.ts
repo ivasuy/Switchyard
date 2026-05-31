@@ -1,6 +1,11 @@
+import { spawn } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createNodeApp } from "../src/app.js";
 import { loadNodeConfig } from "../src/config.js";
+
+const nodeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function createFakeClient() {
   const calls: string[] = [];
@@ -178,4 +183,57 @@ describe("node app", () => {
     expect(config.policy.allowRuntimeModes).toEqual(["fake.deterministic"]);
     expect(config.policy.allowCwdPrefixes).toEqual(["/repo"]);
   });
+
+  it("redacts credentialed server URLs from node.start_failed logs", async () => {
+    const result = await runNodeMain({
+      SWITCHYARD_DEPLOYMENT_MODE: "production",
+      SWITCHYARD_SERVER_URL: "https://operator:node-credential-value@127.0.0.1:1",
+      SWITCHYARD_NODE_SHARED_TOKEN: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      SWITCHYARD_NODE_CAPABILITIES: "runtime.fake.deterministic",
+      SWITCHYARD_NODE_ALLOW_RUNTIME_MODES: "fake.deterministic",
+      SWITCHYARD_NODE_ALLOW_CWD_PREFIXES: "/repo"
+    });
+
+    const combined = `${result.stdout}\n${result.stderr}`;
+    expect(result.code).not.toBe(0);
+    expect(combined).toContain("node.start_failed");
+    expect(combined).not.toContain("operator:node-credential-value");
+    expect(combined).not.toContain("https://operator:node-credential-value@");
+    expect(combined).not.toContain("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  });
 });
+
+function runNodeMain(env: Record<string, string>): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolveResult, reject) => {
+    const child = spawn("pnpm", ["exec", "tsx", "src/main.ts"], {
+      cwd: nodeRoot,
+      env: {
+        ...process.env,
+        ...env,
+        FORCE_COLOR: "0"
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("node_main_timeout"));
+    }, 7_500);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      resolveResult({ code, stdout, stderr });
+    });
+  });
+}
