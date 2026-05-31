@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { resolveHostedSandboxConfig } from "../packages/core/src/index.js";
 import { parseProductionEnvFile } from "./production-env.js";
 import { validateProductionManifest } from "./production-manifest.js";
 import { runProductionPreflight } from "./production-preflight.js";
@@ -51,6 +52,7 @@ function makeWorkerConfig(overrides: Record<string, unknown> = {}): any {
     redisUrl: "redis://:pw@redis.example:6379/0",
     queueName: "switchyard-hosted-runs",
     objectStore: { backend: "memory", probe: "write_read_delete", redactedSummary: { backend: "memory" } },
+    sandbox: resolveHostedSandboxConfig({ deploymentMode: "production", env: {} }),
     ...overrides
   };
 }
@@ -101,13 +103,19 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
           "SWITCHYARD_SERVER_AUTH_MODE",
           "SWITCHYARD_CONTROL_PLANE_STORE",
           "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-          "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+          "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+          "SWITCHYARD_SANDBOX_REAL_EXECUTION"
         ],
         healthChecks: ["GET /health", "GET /ready"],
         policy: {
           runtimeAllowlist: ["fake.deterministic"],
           hostedRealRuntimeExecution: "disabled",
-          objectStoreProbe: "write_read_delete"
+          objectStoreProbe: "write_read_delete",
+          sandboxExecution: {
+            realExecution: "disabled",
+            commandPolicy: "required_when_enabled",
+            networkPolicy: "disabled"
+          }
         }
       },
       worker: {
@@ -117,7 +125,8 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
           "SWITCHYARD_DEPLOYMENT_MODE",
           "SWITCHYARD_OBJECT_STORE_PROBE",
           "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-          "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+          "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+          "SWITCHYARD_SANDBOX_REAL_EXECUTION"
         ],
         readinessGate: {
           command: ["node", "apps/worker/dist/ready.js"]
@@ -125,7 +134,12 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
         policy: {
           runtimeAllowlist: ["fake.deterministic"],
           hostedRealRuntimeExecution: "disabled",
-          objectStoreProbe: "write_read_delete"
+          objectStoreProbe: "write_read_delete",
+          sandboxExecution: {
+            realExecution: "disabled",
+            commandPolicy: "required_when_enabled",
+            networkPolicy: "disabled"
+          }
         }
       },
       node: {
@@ -141,6 +155,7 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
         ],
         policy: {
           runtimeAllowlist: ["fake.deterministic"],
+          hostedRealRuntimeExecution: "disabled",
           realTools: "forbidden"
         }
       }
@@ -155,9 +170,10 @@ function validManifest(overrides: Record<string, unknown> = {}): Record<string, 
       "SWITCHYARD_OBJECT_STORE_PROBE",
       "SWITCHYARD_NODE_SHARED_TOKEN",
       "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-      "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+      "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+      "SWITCHYARD_SANDBOX_REAL_EXECUTION"
     ],
-    forbiddenSurfaces: ["dashboard", "tui", "payment", "oauth", "browser", "/sandbox", "/exec", "/pty", "/terminal"],
+    forbiddenSurfaces: ["dashboard", "tui", "payment", "oauth", "browser", "/sandbox", "/exec", "/shell", "/process", "/command", "/pty", "/terminal"],
     ...overrides
   };
 }
@@ -397,6 +413,38 @@ describe("validateProductionManifest", () => {
     });
   });
 
+  test("rejects missing forbidden execution surface posture entries", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      (manifest as any).forbiddenSurfaces = ["dashboard", "tui", "payment", "oauth", "browser", "/sandbox", "/exec", "/pty", "/terminal"];
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors).toContainEqual({ code: "manifest_forbidden_surface", service: "forbiddenSurfaces" });
+    });
+  });
+
+  test("rejects missing sandbox execution policy posture", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      delete (manifest.services as any).worker.policy.sandboxExecution;
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors).toContainEqual({ code: "manifest_forbidden_surface", service: "worker" });
+    });
+  });
+
   test("rejects disabled object-store probe posture", async () => {
     await withTempDir(async (dir) => {
       const manifestPath = join(dir, "manifest.json");
@@ -494,6 +542,44 @@ describe("runProductionPreflight", () => {
     });
   });
 
+  test("emits sandboxGate failure when worker sandbox policy config is invalid", async () => {
+    await withTempDir(async (dir) => {
+      const envPath = join(dir, "ok.env");
+      await writeFile(envPath, "SWITCHYARD_DEPLOYMENT_MODE=production\n", "utf8");
+
+      const result = await runProductionPreflight({
+        envFile: envPath,
+        deps: {
+          validateManifest: async () => ({ ok: true, manifest: {} as never }),
+          loadServerConfig: () => makeServerConfig(),
+          loadWorkerConfig: () => {
+            throw {
+              code: "sandbox_policy_missing",
+              redactedConfig: {
+                sandbox: {
+                  mode: "enabled"
+                }
+              }
+            };
+          }
+        }
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.checks).toContainEqual({
+        name: "sandboxGate",
+        status: "fail",
+        code: "sandbox_policy_missing",
+        diagnostics: {
+          sandbox: {
+            mode: "enabled"
+          }
+        }
+      });
+      expect(result.checks.some((entry) => entry.status === "skip" && entry.code === "skipped_sandbox_gate_failed")).toBe(true);
+    });
+  });
+
   test("aggregates dependency failures when config and manifest checks pass", async () => {
     await withTempDir(async (dir) => {
       const envPath = join(dir, "ok.env");
@@ -527,7 +613,8 @@ describe("runProductionPreflight", () => {
             deploymentMode: "production",
             redisUrl: "redis://:pw@redis.example:6379/0",
             queueName: "switchyard-hosted-runs",
-            objectStore: { backend: "memory", probe: "write_read_delete", redactedSummary: { backend: "memory" } }
+            objectStore: { backend: "memory", probe: "write_read_delete", redactedSummary: { backend: "memory" } },
+            sandbox: resolveHostedSandboxConfig({ deploymentMode: "production", env: {} })
           }),
           openPostgresDatabase: () => ({ close: async () => undefined } as never),
           checkPostgresSchemaCompatibility: async () => ({ ok: false, code: "postgres_schema_version_unsupported", version: 999 }),
@@ -559,7 +646,60 @@ describe("runProductionPreflight", () => {
         "unowned_resources_present",
         "hosted_runtime_gate_failed"
       ]));
+      const sandboxGate = result.checks.find((entry) => entry.name === "sandboxGate");
+      expect(sandboxGate).toMatchObject({ name: "sandboxGate", status: "pass", code: "sandbox_gate_disabled" });
     });
+  });
+
+  test("adds sandboxGate pass for safe disabled posture before dependency checks", async () => {
+    const result = await runDependencyPreflight({});
+    const sandboxGate = result.checks.find((entry) => entry.name === "sandboxGate");
+    expect(sandboxGate).toMatchObject({ name: "sandboxGate", status: "pass", code: "sandbox_gate_disabled" });
+  });
+
+  test("fails sandboxGate with sandbox_policy_missing before dependencies when real execution is enabled without policy", async () => {
+    const result = await runDependencyPreflight({
+      loadWorkerConfig: () => makeWorkerConfig({
+        sandbox: resolveHostedSandboxConfig({
+          deploymentMode: "production",
+          env: {
+            SWITCHYARD_SANDBOX_REAL_EXECUTION: "enabled"
+          }
+        })
+      })
+    });
+
+    expect(result.ok).toBe(false);
+    const sandboxGate = result.checks.find((entry) => entry.name === "sandboxGate");
+    expect(sandboxGate).toMatchObject({
+      name: "sandboxGate",
+      status: "fail",
+      code: "sandbox_policy_missing"
+    });
+    expect(result.checks.some((entry) => entry.status === "skip" && entry.code === "skipped_sandbox_gate_failed")).toBe(true);
+  });
+
+  test("fails sandboxGate with sandbox_policy_invalid before dependencies when real execution policy is malformed", async () => {
+    const result = await runDependencyPreflight({
+      loadWorkerConfig: () => makeWorkerConfig({
+        sandbox: resolveHostedSandboxConfig({
+          deploymentMode: "production",
+          env: {
+            SWITCHYARD_SANDBOX_REAL_EXECUTION: "enabled",
+            SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON: "{\"oops\":true}"
+          }
+        })
+      })
+    });
+
+    expect(result.ok).toBe(false);
+    const sandboxGate = result.checks.find((entry) => entry.name === "sandboxGate");
+    expect(sandboxGate).toMatchObject({
+      name: "sandboxGate",
+      status: "fail",
+      code: "sandbox_policy_invalid"
+    });
+    expect(result.checks.some((entry) => entry.status === "skip" && entry.code === "skipped_sandbox_gate_failed")).toBe(true);
   });
 
   test("surfaces schema migration required and malformed codes", async () => {
@@ -655,7 +795,8 @@ describe("runProductionPreflight", () => {
             deploymentMode: "production",
             redisUrl: "redis://:replace-with-password@redis.example:6379/0",
             queueName: "switchyard-hosted-runs",
-            objectStore: { backend: "memory", probe: "write_read_delete", redactedSummary: { backend: "memory" } }
+            objectStore: { backend: "memory", probe: "write_read_delete", redactedSummary: { backend: "memory" } },
+            sandbox: resolveHostedSandboxConfig({ deploymentMode: "production", env: {} })
           }),
           openPostgresDatabase: () => ({ close: async () => undefined } as never),
           checkPostgresSchemaCompatibility: async () => ({ ok: false, code: "postgres_unavailable", diagnostics: { raw: "replace-with-password" } }),

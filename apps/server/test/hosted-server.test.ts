@@ -882,7 +882,7 @@ describe("hosted server", () => {
         redactions: 0
       });
 
-      for (const route of ["/sandbox", "/exec", "/pty", "/terminal"]) {
+      for (const route of ["/sandbox", "/exec", "/shell", "/process", "/command", "/pty", "/terminal"]) {
         const res = await app.inject({ method: "POST", url: route, payload: {} });
         expect(res.statusCode).toBe(404);
       }

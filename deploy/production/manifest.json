@@ -16,6 +16,7 @@
         "SWITCHYARD_NODE_SHARED_TOKEN",
         "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
         "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        "SWITCHYARD_SANDBOX_REAL_EXECUTION",
         "SWITCHYARD_PUBLIC_METRICS"
       ],
       "healthChecks": [
@@ -25,7 +26,12 @@
       "policy": {
         "runtimeAllowlist": ["fake.deterministic"],
         "hostedRealRuntimeExecution": "disabled",
-        "objectStoreProbe": "write_read_delete"
+        "objectStoreProbe": "write_read_delete",
+        "sandboxExecution": {
+          "realExecution": "disabled",
+          "commandPolicy": "required_when_enabled",
+          "networkPolicy": "disabled"
+        }
       },
       "privateDependencies": ["postgres", "redis", "object-store"]
     },
@@ -39,7 +45,8 @@
         "SWITCHYARD_OBJECT_STORE_BACKEND",
         "SWITCHYARD_OBJECT_STORE_PROBE",
         "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        "SWITCHYARD_SANDBOX_REAL_EXECUTION"
       ],
       "readinessGate": {
         "command": ["node", "apps/worker/dist/ready.js"]
@@ -47,7 +54,12 @@
       "policy": {
         "runtimeAllowlist": ["fake.deterministic"],
         "hostedRealRuntimeExecution": "disabled",
-        "objectStoreProbe": "write_read_delete"
+        "objectStoreProbe": "write_read_delete",
+        "sandboxExecution": {
+          "realExecution": "disabled",
+          "commandPolicy": "required_when_enabled",
+          "networkPolicy": "disabled"
+        }
       },
       "privateDependencies": ["postgres", "redis", "object-store"]
     },
@@ -80,7 +92,8 @@
     "SWITCHYARD_OBJECT_STORE_PROBE",
     "SWITCHYARD_NODE_SHARED_TOKEN",
     "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-    "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+    "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+    "SWITCHYARD_SANDBOX_REAL_EXECUTION"
   ],
   "forbiddenSurfaces": [
     "dashboard",
@@ -90,6 +103,9 @@
     "browser",
     "/sandbox",
     "/exec",
+    "/shell",
+    "/process",
+    "/command",
     "/pty",
     "/terminal",
     "hosted-real-runtime",

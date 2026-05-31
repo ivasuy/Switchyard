@@ -1,5 +1,9 @@
 import { pathToFileURL } from "node:url";
-import { redactSecrets, validateHostedRuntimeAllowlist } from "../packages/core/src/index.js";
+import {
+  checkHostedSandboxReadiness,
+  redactSecrets,
+  validateHostedRuntimeAllowlist
+} from "../packages/core/src/index.js";
 import { BullMqRunQueue } from "../packages/queue/src/index.js";
 import {
   checkPostgresSchemaCompatibility,
@@ -119,12 +123,42 @@ export async function runProductionPreflight(options: {
 
   const hasConfigOrManifestFailure = checks.some((check) => check.status === "fail");
   if (hasConfigOrManifestFailure) {
-    appendDependencySkipChecks(checks, "skipped_config_invalid");
+    const sandboxConfigFailure = checks.find(
+      (check) => check.status === "fail" && check.code.startsWith("sandbox_")
+    );
+    if (sandboxConfigFailure && !checks.some((check) => check.name === "sandboxGate")) {
+      checks.push({
+        name: "sandboxGate",
+        status: "fail",
+        code: sandboxConfigFailure.code,
+        ...(sandboxConfigFailure.diagnostics ? { diagnostics: sandboxConfigFailure.diagnostics } : {})
+      });
+    }
+    appendDependencySkipChecks(checks, sandboxConfigFailure ? "skipped_sandbox_gate_failed" : "skipped_config_invalid");
     return buildResult(checks, manifestPath, now);
   }
 
   if (!serverConfig || !workerConfig) {
     appendDependencySkipChecks(checks, "skipped_config_invalid");
+    return buildResult(checks, manifestPath, now);
+  }
+
+  const sandboxGate = evaluateSandboxGate(workerConfig.sandbox);
+  if (sandboxGate.ok) {
+    checks.push({
+      name: "sandboxGate",
+      status: "pass",
+      code: sandboxGate.code,
+      ...(sandboxGate.diagnostics ? { diagnostics: redactDiagnostics(sandboxGate.diagnostics) } : {})
+    });
+  } else {
+    checks.push({
+      name: "sandboxGate",
+      status: "fail",
+      code: sandboxGate.code,
+      ...(sandboxGate.diagnostics ? { diagnostics: redactDiagnostics(sandboxGate.diagnostics) } : {})
+    });
+    appendDependencySkipChecks(checks, "skipped_sandbox_gate_failed");
     return buildResult(checks, manifestPath, now);
   }
 
@@ -298,6 +332,50 @@ function appendDependencySkipChecks(checks: ProductionPreflightCheck[], code: st
   checks.push({ name: "auditStore", status: "skip", code });
   checks.push({ name: "unownedResources", status: "skip", code });
   checks.push({ name: "hostedRuntimeGate", status: "skip", code });
+}
+
+function evaluateSandboxGate(sandbox: ReturnType<typeof loadWorkerConfig>["sandbox"]): {
+  ok: boolean;
+  code: string;
+  diagnostics?: Record<string, unknown>;
+} {
+  const readiness = checkHostedSandboxReadiness(sandbox);
+  const diagnostics = {
+    enabled: sandbox.enabled,
+    mode: sandbox.realExecution.mode,
+    policyCount: sandbox.realExecution.commandPolicy.length,
+    ptyDriverConfigured: sandbox.realExecution.ptyDriverConfigured,
+    summary: sandbox.redactedSummary
+  };
+  if (!readiness.ok) {
+    return {
+      ok: false,
+      code: readiness.code ?? "sandbox_config_invalid",
+      diagnostics
+    };
+  }
+
+  if (sandbox.realExecution.mode === "enabled") {
+    const networkPolicyDisabled = sandbox.realExecution.commandPolicy.every((entry) => entry.networkPolicy === "disabled");
+    if (!networkPolicyDisabled) {
+      return {
+        ok: false,
+        code: "sandbox_policy_invalid",
+        diagnostics
+      };
+    }
+    return {
+      ok: true,
+      code: "sandbox_gate_enabled",
+      diagnostics
+    };
+  }
+
+  return {
+    ok: true,
+    code: "sandbox_gate_disabled",
+    diagnostics
+  };
 }
 
 function runConfigCheck<T>(

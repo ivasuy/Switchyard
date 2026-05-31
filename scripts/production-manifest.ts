@@ -15,6 +15,11 @@ export interface ProductionManifestService {
     hostedRealRuntimeExecution?: string;
     realTools?: string;
     objectStoreProbe?: string;
+    sandboxExecution?: {
+      realExecution?: string;
+      commandPolicy?: string;
+      networkPolicy?: string;
+    };
   };
   runtimeAllowlist?: string[];
   hostedRealRuntimeExecution?: string;
@@ -56,12 +61,17 @@ const FORBIDDEN_SERVICE_NAMES = new Set([
   "oauth",
   "browser",
   "exec",
+  "shell",
+  "process",
+  "command",
   "sandbox",
   "pty",
   "terminal",
   "hosted-real-runtime",
   "real-tool"
 ]);
+const FORBIDDEN_SURFACE_TOKENS = ["sandbox", "exec", "shell", "process", "command", "pty", "terminal"] as const;
+const REQUIRED_FORBIDDEN_SURFACES = ["/sandbox", "/exec", "/shell", "/process", "/command", "/pty", "/terminal"] as const;
 
 const REQUIRED_TOP_LEVEL_ENV = [
   "SWITCHYARD_DEPLOYMENT_MODE",
@@ -73,7 +83,8 @@ const REQUIRED_TOP_LEVEL_ENV = [
   "SWITCHYARD_OBJECT_STORE_PROBE",
   "SWITCHYARD_NODE_SHARED_TOKEN",
   "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-  "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+  "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+  "SWITCHYARD_SANDBOX_REAL_EXECUTION"
 ] as const;
 
 const REQUIRED_SERVER_ENV = [
@@ -81,14 +92,16 @@ const REQUIRED_SERVER_ENV = [
   "SWITCHYARD_SERVER_AUTH_MODE",
   "SWITCHYARD_CONTROL_PLANE_STORE",
   "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-  "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+  "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+  "SWITCHYARD_SANDBOX_REAL_EXECUTION"
 ] as const;
 
 const REQUIRED_WORKER_ENV = [
   "SWITCHYARD_DEPLOYMENT_MODE",
   "SWITCHYARD_OBJECT_STORE_PROBE",
   "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
-  "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"
+  "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+  "SWITCHYARD_SANDBOX_REAL_EXECUTION"
 ] as const;
 
 export async function validateProductionManifest(path: string): Promise<ProductionManifestValidationResult> {
@@ -133,7 +146,7 @@ export async function validateProductionManifest(path: string): Promise<Producti
   }
 
   validateServiceCommands(manifest.services, errors);
-  validateForbiddenSurfaces(manifest.services, errors);
+  validateForbiddenSurfaces(manifest.services, manifest.forbiddenSurfaces, errors);
   validateRequiredEnv(manifest, errors);
   validateReadinessChecks(manifest.services.server, manifest.services.worker, errors);
   validateRuntimePosture(manifest.services, errors);
@@ -185,12 +198,21 @@ function validateServiceCommands(
 
 function validateForbiddenSurfaces(
   services: ProductionManifest["services"],
+  forbiddenSurfaces: string[] | undefined,
   errors: ProductionManifestError[]
 ): void {
   for (const name of Object.keys(services)) {
-    if (FORBIDDEN_SERVICE_NAMES.has(name)) {
+    const loweredName = name.toLowerCase();
+    const hasForbiddenToken = FORBIDDEN_SURFACE_TOKENS.some((token) => loweredName.includes(token));
+    if (FORBIDDEN_SERVICE_NAMES.has(loweredName) || hasForbiddenToken) {
       errors.push({ code: "manifest_forbidden_surface", service: name });
     }
+  }
+
+  const forbiddenSurfaceSet = new Set((forbiddenSurfaces ?? []).map((surface) => surface.trim().toLowerCase()));
+  const hasRequiredForbiddenSurfacePosture = REQUIRED_FORBIDDEN_SURFACES.every((surface) => forbiddenSurfaceSet.has(surface));
+  if (!hasRequiredForbiddenSurfacePosture) {
+    errors.push({ code: "manifest_forbidden_surface", service: "forbiddenSurfaces" });
   }
 }
 
@@ -251,6 +273,17 @@ function validateRuntimePosture(
     const fakeOnly = allowlist?.length === 1 && allowlist[0] === "fake.deterministic";
     if (!fakeOnly || hostedRealRuntimeExecution !== "disabled") {
       errors.push({ code: "manifest_forbidden_surface", service: name });
+    }
+
+    if (name === "server" || name === "worker") {
+      const sandboxExecution = service.policy?.sandboxExecution;
+      const hasRequiredSandboxExecutionPosture =
+        sandboxExecution?.realExecution === "disabled" &&
+        sandboxExecution?.networkPolicy === "disabled" &&
+        sandboxExecution?.commandPolicy === "required_when_enabled";
+      if (!hasRequiredSandboxExecutionPosture) {
+        errors.push({ code: "manifest_forbidden_surface", service: name });
+      }
     }
   }
 }

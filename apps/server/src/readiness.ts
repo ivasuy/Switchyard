@@ -187,16 +187,18 @@ export async function probeServerReadiness(input: {
   }
 
   const sandbox = checkHostedSandboxReadiness(input.config.sandbox);
+  const sandboxDiagnostics = buildSandboxDiagnostics(input.config);
   if (sandbox.ok) {
-    checks.sandbox = { ok: true };
+    checks.sandbox = {
+      ok: true,
+      diagnostics: sandboxDiagnostics
+    };
   } else {
     const code = sandbox.code ?? "sandbox_config_invalid";
     checks.sandbox = {
       ok: false,
       code,
-      diagnostics: redactSecrets({
-        summary: input.config.sandbox.redactedSummary
-      })
+      diagnostics: redactSecrets(sandboxDiagnostics)
     };
   }
 
@@ -295,4 +297,15 @@ function readinessCheck(ok: boolean, code?: string, diagnostics?: Record<string,
     out.diagnostics = diagnostics;
   }
   return out;
+}
+
+function buildSandboxDiagnostics(config: ServerConfig): Record<string, unknown> {
+  return {
+    enabled: config.sandbox.enabled,
+    valid: config.sandbox.valid,
+    mode: config.sandbox.realExecution.mode,
+    policyCount: config.sandbox.realExecution.commandPolicy.length,
+    ptyDriverConfigured: config.sandbox.realExecution.ptyDriverConfigured,
+    errors: [...config.sandbox.errors]
+  };
 }

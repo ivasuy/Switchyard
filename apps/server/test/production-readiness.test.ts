@@ -190,6 +190,46 @@ describe("production readiness", () => {
     expect(report.checks.schema).toMatchObject({ ok: false, code: "postgres_schema_migration_required" });
   });
 
+  it("exposes redacted sandbox diagnostics in readiness without command policy details", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(createAuthEnabledTestEnv()),
+      postgres: undefined,
+      queue: {
+        enqueue: async () => "job",
+        claim: async () => null,
+        ack: async () => {},
+        fail: async () => {},
+        retry: async () => {},
+        discard: async () => {},
+        getJob: async () => null,
+        recoverStaleClaims: async () => 0,
+        stats: async () => ({ queued: 0, claimed: 0 })
+      },
+      artifactContent: {
+        writeText: async () => ({ location: "x" }),
+        writeBytes: async () => ({ location: "x" }),
+        read: async () => ({ body: Buffer.from("ok"), contentType: "application/octet-stream" }),
+        probe: async () => {}
+      }
+    });
+
+    expect(report.checks.sandbox).toMatchObject({
+      ok: true,
+      diagnostics: {
+        enabled: true,
+        mode: "disabled",
+        policyCount: 0,
+        ptyDriverConfigured: false
+      }
+    });
+    const serialized = JSON.stringify(report.checks.sandbox.diagnostics ?? {});
+    expect(serialized).not.toContain("executablePath");
+    expect(serialized).not.toContain("cwd");
+    expect(serialized).not.toContain("argv");
+    expect(serialized).not.toContain("commandPolicy");
+    expect(serialized).not.toContain("env");
+  });
+
   it("keeps metrics protected behind metrics:read plus admin:read", async () => {
     const config = loadServerConfig(createAuthEnabledTestEnv());
     const app = await createServerApp(config);
