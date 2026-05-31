@@ -2,6 +2,45 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema.js";
 
+export const POSTGRES_SCHEMA_VERSION = 19;
+
+const SCHEMA_METADATA_KEY = "schema_version";
+
+const SCHEMA_METADATA_UPSERT_SQL = `
+INSERT INTO schema_metadata (key, value, updated_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (key)
+DO UPDATE SET
+  value = EXCLUDED.value,
+  updated_at = EXCLUDED.updated_at
+`;
+
+const destructiveSqlMatchers: RegExp[] = [
+  /\bDROP\s+TABLE\b/i,
+  /\bDROP\s+COLUMN\b/i,
+  /\bTRUNCATE\b/i,
+  /\bALTER\s+TABLE\b[\s\S]*\bALTER\s+COLUMN\b[\s\S]*\bSET\s+NOT\s+NULL\b/i,
+  /\bCREATE\s+TABLE\b[\s\S]*\bAS\s+SELECT\b/i,
+  /\bINSERT\s+INTO\b[\s\S]*\bSELECT\b/i
+];
+
+export type PostgresSchemaCompatibility =
+  | { ok: true; code: "postgres_schema_ready"; version: number }
+  | {
+      ok: false;
+      code:
+        | "postgres_schema_migration_required"
+        | "postgres_schema_version_unsupported"
+        | "postgres_schema_malformed"
+        | "postgres_unavailable";
+      version?: number;
+      diagnostics?: Record<string, unknown>;
+    };
+
+export interface CheckPostgresSchemaCompatibilityOptions {
+  skipProbe?: boolean;
+}
+
 export interface PostgresDatabaseHandle {
   pool: Pool;
   db: NodePgDatabase<typeof schema>;
@@ -23,7 +62,7 @@ export function openPostgresDatabase(connectionString: string): PostgresDatabase
 }
 
 export async function ensurePostgresSchema(handle: PostgresDatabaseHandle): Promise<void> {
-  await handle.pool.query(`
+  const migrationSql = `
 CREATE TABLE IF NOT EXISTS runs (
   id text PRIMARY KEY,
   runtime text NOT NULL,
@@ -323,10 +362,136 @@ CREATE UNIQUE INDEX IF NOT EXISTS resource_ownership_resource_idx
   ON resource_ownership(resource_type, resource_id);
 CREATE INDEX IF NOT EXISTS resource_ownership_scope_idx
   ON resource_ownership(resource_type, account_id, tenant_id, project_id, resource_id);
-`);
+
+CREATE TABLE IF NOT EXISTS schema_metadata (
+  key text PRIMARY KEY,
+  value text NOT NULL,
+  updated_at text NOT NULL
+);
+`;
+  assertPostgresMigrationSqlAdditive(migrationSql);
+  await handle.pool.query(migrationSql);
 }
 
 export async function probePostgresDatabase(handle: PostgresDatabaseHandle): Promise<{ ok: true }> {
   await handle.pool.query("select 1");
   return { ok: true };
+}
+
+export function assertPostgresMigrationSqlAdditive(sql: string): void {
+  for (const matcher of destructiveSqlMatchers) {
+    if (matcher.test(sql)) {
+      throw new Error(`destructive_migration_blocked: ${matcher.source}`);
+    }
+  }
+}
+
+export async function migratePostgresSchema(handle: PostgresDatabaseHandle): Promise<{ ok: true; version: number }> {
+  const migrationBlocks = [SCHEMA_METADATA_UPSERT_SQL];
+  await ensurePostgresSchema(handle);
+  for (const block of migrationBlocks) {
+    assertPostgresMigrationSqlAdditive(block);
+  }
+  await handle.pool.query(SCHEMA_METADATA_UPSERT_SQL, [
+    SCHEMA_METADATA_KEY,
+    String(POSTGRES_SCHEMA_VERSION),
+    new Date().toISOString()
+  ]);
+  return { ok: true, version: POSTGRES_SCHEMA_VERSION };
+}
+
+export async function checkPostgresSchemaCompatibility(
+  handle: PostgresDatabaseHandle,
+  options: CheckPostgresSchemaCompatibilityOptions = {}
+): Promise<PostgresSchemaCompatibility> {
+  if (!options.skipProbe) {
+    try {
+      await probePostgresDatabase(handle);
+    } catch {
+      return {
+        ok: false,
+        code: "postgres_unavailable",
+        diagnostics: { expectedVersion: POSTGRES_SCHEMA_VERSION }
+      };
+    }
+  }
+
+  let row: { value?: unknown } | undefined;
+  try {
+    const result = await handle.pool.query(
+      "SELECT value FROM schema_metadata WHERE key = $1 LIMIT 1",
+      [SCHEMA_METADATA_KEY]
+    );
+    row = result.rows[0] as { value?: unknown } | undefined;
+  } catch (error) {
+    if (isMissingRelationError(error)) {
+      return {
+        ok: false,
+        code: "postgres_schema_migration_required",
+        diagnostics: { expectedVersion: POSTGRES_SCHEMA_VERSION, metadataPresent: false }
+      };
+    }
+    return {
+      ok: false,
+      code: "postgres_unavailable",
+      diagnostics: { expectedVersion: POSTGRES_SCHEMA_VERSION }
+    };
+  }
+
+  const raw = typeof row?.value === "string" ? row.value.trim() : "";
+  if (!raw) {
+    return {
+      ok: false,
+      code: "postgres_schema_migration_required",
+      diagnostics: { expectedVersion: POSTGRES_SCHEMA_VERSION, metadataPresent: false }
+    };
+  }
+
+  const actualVersion = Number.parseInt(raw, 10);
+  if (!Number.isInteger(actualVersion)) {
+    return {
+      ok: false,
+      code: "postgres_schema_malformed",
+      diagnostics: { expectedVersion: POSTGRES_SCHEMA_VERSION, metadataPresent: true }
+    };
+  }
+
+  if (actualVersion > POSTGRES_SCHEMA_VERSION) {
+    return {
+      ok: false,
+      code: "postgres_schema_version_unsupported",
+      version: actualVersion,
+      diagnostics: {
+        expectedVersion: POSTGRES_SCHEMA_VERSION,
+        actualVersion,
+        metadataPresent: true
+      }
+    };
+  }
+
+  if (actualVersion < POSTGRES_SCHEMA_VERSION) {
+    return {
+      ok: false,
+      code: "postgres_schema_migration_required",
+      version: actualVersion,
+      diagnostics: {
+        expectedVersion: POSTGRES_SCHEMA_VERSION,
+        actualVersion,
+        metadataPresent: true
+      }
+    };
+  }
+
+  return { ok: true, code: "postgres_schema_ready", version: actualVersion };
+}
+
+function isMissingRelationError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  if ("code" in error && error.code === "42P01") {
+    return true;
+  }
+  const message = "message" in error && typeof error.message === "string" ? error.message : "";
+  return /relation .* does not exist/i.test(message);
 }

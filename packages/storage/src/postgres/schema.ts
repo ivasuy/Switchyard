@@ -299,3 +299,9 @@ export const resourceOwnership = pgTable("resource_ownership", {
   uniqueIndex("resource_ownership_resource_idx").on(table.resourceType, table.resourceId),
   index("resource_ownership_scope_idx").on(table.resourceType, table.accountId, table.tenantId, table.projectId, table.resourceId)
 ]);
+
+export const schemaMetadata = pgTable("schema_metadata", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
