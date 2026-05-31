@@ -1,5 +1,14 @@
 import type { RunQueuePort } from "@switchyard/core";
 
+export type HostedAdmissionOutcome = "accepted" | "denied" | "spend_control_denied";
+
+export interface HostedAdmissionMetricSeries {
+  runtimeMode: string;
+  reason: string;
+  outcome: HostedAdmissionOutcome;
+  count: number;
+}
+
 export interface HostedMetricsSnapshot {
   requests: { total: number };
   errors: { total: number; metricsCollection: number };
@@ -13,6 +22,9 @@ export interface HostedMetricsSnapshot {
     timeout: number;
     unsupportedInteraction: number;
     artifactPersisted: number;
+  };
+  hostedRuntimeAdmission: {
+    series: HostedAdmissionMetricSeries[];
   };
   queue: {
     available: boolean;
@@ -73,6 +85,9 @@ export class HostedMetrics {
       unsupportedInteraction: 0,
       artifactPersisted: 0
     },
+    hostedRuntimeAdmission: {
+      series: []
+    },
     queue: { available: true, enqueue: 0, claim: 0, ack: 0, retry: 0, failed: 0, exhausted: 0, queued: 0, claimed: 0 },
     worker: { attempts: 0, exhausted: 0 },
     objectStore: { reads: 0, writes: 0, failures: 0, probeFailures: 0, authFailures: 0, unavailable: 0, digestMismatches: 0 },
@@ -114,6 +129,33 @@ export class HostedMetrics {
     current[key] = value + 1;
   }
 
+  recordHostedAdmission(input: {
+    runtimeMode: string | undefined;
+    reason: string | undefined;
+    outcome: HostedAdmissionOutcome;
+  }): void {
+    const runtimeMode = normalizeMetricLabel(input.runtimeMode, "unknown_runtime_mode");
+    const reason = normalizeMetricLabel(input.reason, "unknown_reason");
+    const outcome = input.outcome;
+
+    const found = this.snapshot.hostedRuntimeAdmission.series.find((entry) =>
+      entry.runtimeMode === runtimeMode &&
+      entry.reason === reason &&
+      entry.outcome === outcome
+    );
+    if (found) {
+      found.count += 1;
+      return;
+    }
+
+    this.snapshot.hostedRuntimeAdmission.series.push({
+      runtimeMode,
+      reason,
+      outcome,
+      count: 1
+    });
+  }
+
   async captureQueue(queue: RunQueuePort): Promise<void> {
     const stats = await queue.stats();
     this.snapshot.queue.available = true;
@@ -130,4 +172,14 @@ export class HostedMetrics {
   toJSON(): HostedMetricsSnapshot {
     return structuredClone(this.snapshot);
   }
+}
+
+function normalizeMetricLabel(value: string | undefined, fallback: string): string {
+  if (!value) {
+    return fallback;
+  }
+  if (!/^[a-z0-9._-]{1,128}$/i.test(value)) {
+    return fallback;
+  }
+  return value;
 }

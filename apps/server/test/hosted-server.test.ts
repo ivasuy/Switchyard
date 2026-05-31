@@ -167,6 +167,30 @@ function createAuthEnabledTestEnv(overrides?: Record<string, string>) {
   };
 }
 
+function createProviderRuntimePolicyJson(maxPromptBytes = 60000): string {
+  return JSON.stringify({
+    version: 1,
+    modes: {
+      "codex.exec_json": {
+        enabled: true,
+        executablePath: "/bin/sh",
+        cwdPrefixes: ["/repo"],
+        envAllowlist: ["PATH"],
+        requiredEnv: [],
+        allowUserArgs: false,
+        fixedArgs: ["exec", "--json"],
+        sandbox: "read_only",
+        spendControls: {
+          maxActiveRuns: 10,
+          maxRunsPerHour: 50,
+          maxRunTimeoutSeconds: 600,
+          maxPromptBytes
+        }
+      }
+    }
+  });
+}
+
 describe("hosted server", () => {
   it("does not expose middleware tool invocation routes on hosted server", async () => {
     const app = await createServerApp({
@@ -888,6 +912,146 @@ describe("hosted server", () => {
       }
     } finally {
       await app.close();
+    }
+  });
+
+  it("emits hosted admission lifecycle metrics with outcome/runtime_mode/reason labels", async () => {
+    const acceptedAndWaitConfig = loadServerConfig({
+      SWITCHYARD_DEPLOYMENT_MODE: "test",
+      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+      SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+      SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createProviderRuntimePolicyJson(60000),
+      SWITCHYARD_OBJECT_STORE_BACKEND: "memory"
+    });
+    const acceptedAndWaitApp = await createServerApp(acceptedAndWaitConfig);
+    try {
+      const accepted = await acceptedAndWaitApp.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "codex",
+          provider: "openai",
+          model: "gpt-5",
+          adapterType: "process",
+          runtimeMode: "codex.exec_json",
+          cwd: "/repo",
+          task: "ok",
+          placement: "hosted"
+        }
+      });
+      expect(accepted.statusCode).toBe(202);
+
+      const waitDenied = await acceptedAndWaitApp.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "codex",
+          provider: "openai",
+          model: "gpt-5",
+          adapterType: "process",
+          runtimeMode: "codex.exec_json",
+          cwd: "/repo",
+          task: "wait denied",
+          placement: "hosted"
+        }
+      });
+      expect(waitDenied.statusCode).toBe(409);
+
+      const metrics = await acceptedAndWaitApp.inject({ method: "GET", url: "/metrics" });
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.json().hostedRuntimeAdmission.series).toEqual(expect.arrayContaining([
+        {
+          runtimeMode: "codex.exec_json",
+          reason: "admitted",
+          outcome: "accepted",
+          count: 1
+        },
+        {
+          runtimeMode: "codex.exec_json",
+          reason: "hosted_wait_unsupported",
+          outcome: "denied",
+          count: 1
+        }
+      ]));
+    } finally {
+      await acceptedAndWaitApp.close();
+    }
+
+    const missingPolicyConfig = loadServerConfig({
+      SWITCHYARD_DEPLOYMENT_MODE: "test",
+      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+      SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+      SWITCHYARD_OBJECT_STORE_BACKEND: "memory"
+    });
+    const missingPolicyApp = await createServerApp(missingPolicyConfig);
+    try {
+      const denied = await missingPolicyApp.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "codex",
+          provider: "openai",
+          model: "gpt-5",
+          adapterType: "process",
+          runtimeMode: "codex.exec_json",
+          cwd: "/repo",
+          task: "missing policy denied",
+          placement: "hosted"
+        }
+      });
+      expect(denied.statusCode).toBe(409);
+
+      const metrics = await missingPolicyApp.inject({ method: "GET", url: "/metrics" });
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.json().hostedRuntimeAdmission.series).toEqual(expect.arrayContaining([
+        {
+          runtimeMode: "codex.exec_json",
+          reason: "provider_runtime_policy_missing",
+          outcome: "denied",
+          count: 1
+        }
+      ]));
+    } finally {
+      await missingPolicyApp.close();
+    }
+
+    const spendDeniedConfig = loadServerConfig({
+      SWITCHYARD_DEPLOYMENT_MODE: "test",
+      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,codex.exec_json",
+      SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+      SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createProviderRuntimePolicyJson(4),
+      SWITCHYARD_OBJECT_STORE_BACKEND: "memory"
+    });
+    const spendDeniedApp = await createServerApp(spendDeniedConfig);
+    try {
+      const denied = await spendDeniedApp.inject({
+        method: "POST",
+        url: "/runs",
+        payload: {
+          runtime: "codex",
+          provider: "openai",
+          model: "gpt-5",
+          adapterType: "process",
+          runtimeMode: "codex.exec_json",
+          cwd: "/repo",
+          task: "this prompt exceeds the limit",
+          placement: "hosted"
+        }
+      });
+      expect(denied.statusCode).toBe(409);
+
+      const metrics = await spendDeniedApp.inject({ method: "GET", url: "/metrics" });
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.json().hostedRuntimeAdmission.series).toEqual(expect.arrayContaining([
+        {
+          runtimeMode: "codex.exec_json",
+          reason: "provider_prompt_too_large",
+          outcome: "spend_control_denied",
+          count: 1
+        }
+      ]));
+    } finally {
+      await spendDeniedApp.close();
     }
   });
 

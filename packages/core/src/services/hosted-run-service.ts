@@ -48,7 +48,14 @@ export interface HostedRunServiceDependencies {
   listOnlineNodes: () => Promise<ConnectedNode[]>;
   now?: () => string;
   waitForRun?: (runId: string) => Promise<Run>;
-  metrics?: { inc(path: string): void };
+  metrics?: {
+    inc(path: string): void;
+    recordHostedAdmission?(input: {
+      runtimeMode: string | undefined;
+      reason: string | undefined;
+      outcome: "accepted" | "denied" | "spend_control_denied";
+    }): void;
+  };
   logger?: {
     info(event: string, details?: Record<string, unknown>): void;
     warn(event: string, details?: Record<string, unknown>): void;
@@ -135,6 +142,7 @@ export class HostedRunService {
     const runtimeMode = input.runtimeMode;
     if (isRealHostedRuntimeMode(runtimeMode) && input.placement !== "hosted") {
       this.deps.metrics?.inc("placement.denied");
+      this.recordAdmission("denied", runtimeMode, "hosted_explicit_placement_required");
       this.deps.logger?.warn("hosted.runtime.placement.denied", {
         runtimeMode,
         reasonCode: "hosted_explicit_placement_required"
@@ -152,6 +160,7 @@ export class HostedRunService {
     });
     if (decision.decision === "reject") {
       this.deps.metrics?.inc("placement.denied");
+      this.recordAdmission("denied", runtimeMode, decision.reason);
       this.deps.logger?.warn("hosted.runtime.placement.denied", {
         runtimeMode: input.runtimeMode,
         reasonCode: decision.reason
@@ -167,6 +176,11 @@ export class HostedRunService {
       const preflightError = await this.preflightHosted(input, options, catalog);
       if (preflightError) {
         this.deps.metrics?.inc("placement.denied");
+        this.recordAdmission(
+          isSpendControlReason(preflightError.message) ? "spend_control_denied" : "denied",
+          runtimeMode,
+          preflightError.message
+        );
         this.deps.logger?.warn("hosted.runtime.placement.denied", {
           runtimeMode,
           reasonCode: preflightError.message
@@ -174,6 +188,7 @@ export class HostedRunService {
         throw preflightError;
       }
       this.deps.metrics?.inc("placement.accepted");
+      this.recordAdmission("accepted", runtimeMode, "admitted");
       this.deps.logger?.info("hosted.runtime.placement.accepted", {
         runtimeMode,
         adapterId: catalog?.adapterId,
@@ -315,6 +330,18 @@ export class HostedRunService {
       createdAt: endedAt
     });
   }
+
+  private recordAdmission(
+    outcome: "accepted" | "denied" | "spend_control_denied",
+    runtimeMode: string | undefined,
+    reason: string
+  ): void {
+    this.deps.metrics?.recordHostedAdmission?.({
+      runtimeMode,
+      reason,
+      outcome
+    });
+  }
 }
 
 function toPlacementRecord(runId: string, decision: ReturnType<PlacementService["decide"]>, createdAt: string): PlacementDecisionRecord {
@@ -348,4 +375,10 @@ function collectRunResponse(events: Array<{ type: string; sequence: number; payl
     text: outputs.at(-1)?.text ?? null,
     outputs
   };
+}
+
+function isSpendControlReason(reasonCode: string): boolean {
+  return reasonCode === "provider_prompt_too_large"
+    || reasonCode === "provider_spend_limit_exceeded"
+    || reasonCode === "provider_spend_controls_invalid";
 }

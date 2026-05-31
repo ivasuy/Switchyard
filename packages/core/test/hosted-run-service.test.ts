@@ -23,6 +23,11 @@ describe("HostedRunService provider admission preflight", () => {
     expect(harness.runCreate).not.toHaveBeenCalled();
     expect(harness.queueEnqueue).not.toHaveBeenCalled();
     expect(harness.placementCreate).not.toHaveBeenCalled();
+    expect(harness.recordHostedAdmission).toHaveBeenCalledWith({
+      runtimeMode: "codex.exec_json",
+      reason: "hosted_explicit_placement_required",
+      outcome: "denied"
+    });
   });
 
   it("denies wait=1 for hosted real modes before durable side effects", async () => {
@@ -38,6 +43,11 @@ describe("HostedRunService provider admission preflight", () => {
     expect(harness.runCreate).not.toHaveBeenCalled();
     expect(harness.queueEnqueue).not.toHaveBeenCalled();
     expect(harness.placementCreate).not.toHaveBeenCalled();
+    expect(harness.recordHostedAdmission).toHaveBeenCalledWith({
+      runtimeMode: "codex.exec_json",
+      reason: "hosted_wait_unsupported",
+      outcome: "denied"
+    });
   });
 
   it("denies production hosted real runs when provider activation is invalid", async () => {
@@ -68,6 +78,11 @@ describe("HostedRunService provider admission preflight", () => {
 
     expect(harness.runCreate).not.toHaveBeenCalled();
     expect(harness.queueEnqueue).not.toHaveBeenCalled();
+    expect(harness.recordHostedAdmission).toHaveBeenCalledWith({
+      runtimeMode: "codex.exec_json",
+      reason: "provider_runtime_policy_missing",
+      outcome: "denied"
+    });
   });
 
   it("denies provider_prompt_too_large before durable side effects", async () => {
@@ -85,6 +100,11 @@ describe("HostedRunService provider admission preflight", () => {
 
     expect(harness.runCreate).not.toHaveBeenCalled();
     expect(harness.queueEnqueue).not.toHaveBeenCalled();
+    expect(harness.recordHostedAdmission).toHaveBeenCalledWith({
+      runtimeMode: "codex.exec_json",
+      reason: "provider_prompt_too_large",
+      outcome: "spend_control_denied"
+    });
   });
 
   it("denies provider spend active/hourly/timeout limits before durable side effects", async () => {
@@ -130,6 +150,11 @@ describe("HostedRunService provider admission preflight", () => {
       expect(harness.runCreate, testCase.name).not.toHaveBeenCalled();
       expect(harness.queueEnqueue, testCase.name).not.toHaveBeenCalled();
       expect(harness.placementCreate, testCase.name).not.toHaveBeenCalled();
+      expect(harness.recordHostedAdmission, testCase.name).toHaveBeenCalledWith({
+        runtimeMode: "codex.exec_json",
+        reason: "provider_spend_limit_exceeded",
+        outcome: "spend_control_denied"
+      });
     }
   });
 
@@ -152,6 +177,11 @@ describe("HostedRunService provider admission preflight", () => {
     expect(harness.runCreate).toHaveBeenCalledTimes(1);
     expect(harness.placementCreate).toHaveBeenCalledTimes(1);
     expect(harness.queueEnqueue).toHaveBeenCalledTimes(1);
+    expect(harness.recordHostedAdmission).toHaveBeenCalledWith({
+      runtimeMode: "codex.exec_json",
+      reason: "admitted",
+      outcome: "accepted"
+    });
   });
 });
 
@@ -198,6 +228,7 @@ function createHarness(overrides?: Partial<{
   }));
   const placementCreate = vi.fn(async (record: Record<string, unknown>) => record);
   const queueEnqueue = vi.fn(async () => ({ runId: "run_created", placement: "hosted", jobId: "job_1", createdAt: "2026-05-31T00:00:01.000Z" }));
+  const recordHostedAdmission = vi.fn();
 
   const service = new HostedRunService({
     runService: {
@@ -250,10 +281,14 @@ function createHarness(overrides?: Partial<{
       ?? activationWithSpend({ maxPromptBytes: 1000, maxActiveRuns: 10, maxRunsPerHour: 10, maxRunTimeoutSeconds: 600 }),
     countActiveRunsByRuntimeMode: overrides?.countActiveRunsByRuntimeMode,
     countRunsInPastHourByRuntimeMode: overrides?.countRunsInPastHourByRuntimeMode,
+    metrics: {
+      inc: () => {},
+      recordHostedAdmission
+    },
     listOnlineNodes: async () => []
   });
 
-  return { service, runCreate, placementCreate, queueEnqueue };
+  return { service, runCreate, placementCreate, queueEnqueue, recordHostedAdmission };
 }
 
 function activationWithSpend(spendControls: {
