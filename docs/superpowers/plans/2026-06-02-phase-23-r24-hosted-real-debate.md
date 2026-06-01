@@ -1,81 +1,80 @@
 # Phase 23: R24 Hosted Real Debate - Implementation Plan
 
-**Spec:** `docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md`  
-**Branch:** `agent/phase-23-r24-hosted-real-debate`  
-**Base/spec commit:** `53473b38016136452bf6755f6dde2f875621c1a9`  
+**Spec:** docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md
+**Branch:** agent/phase-23-r24-hosted-real-debate
+**Base/spec commit:** 53473b38016136452bf6755f6dde2f875621c1a9
+**Architect review:** pass 1 revisions incorporated
 **Complexity:** L
 
 ## Goal
 
-Ship hosted/server-safe debate execution through the existing `/debates` route family, with deterministic no-spend defaults, explicit real-runtime and live-judge opt-ins, durable hosted state, tenant-safe ownership, and no new public participant, judge, model-judge, terminal, PTY, shell, process, sandbox, dashboard, or TUI routes.
+Ship hosted/server-safe debate execution through the existing /debates route family, with deterministic no-spend defaults, explicit real-runtime and live-judge opt-ins, durable hosted state, tenant-safe ownership, idempotent child-run creation, evidence no-leak authorization, and no new public participant, judge, model-judge, terminal, PTY, shell, process, sandbox, dashboard, or TUI routes.
 
 ## Scope Challenge
 
-1. Existing code already partially solves R24 through `DebateService`, `registerDebateRoutes`, `SqliteDebateStore`, `MessageRouter`, `ContextBuilder`, `RunService`, `HostedRunService`, `HostedRuntimeCatalog`, R23 bridge readiness helpers, `ControlPlaneService`, Postgres event/artifact stores, production preflight, production canary, and OpenAPI route-boundary tests. Extend these seams; do not create a second public debate API or a server-owned provider adapter path.
-2. The minimum shippable change is additive debate create contract validation, Postgres debate/message/evidence persistence, a durable debate execution job store, a staged debate orchestrator that creates normal run records per turn, an internal judge runner, hosted route auth/ownership/quota/audit wiring, worker claim/readiness integration, ops canary/preflight coverage, and product truth updates. Dashboard, TUI, public model judging, AgentField/Generic HTTP bridges, hosted Codex interactive, browser automation, hosted repo, generic process, and PTY stay out of scope.
-3. Complexity smell is real because the phase must touch contracts, storage, core orchestration, REST routing, hosted server wiring, worker readiness, ops scripts, OpenAPI, and docs. The plan controls blast radius with eight ownership slices and a staged durable debate-job state machine rather than a long blocking provider wait loop.
-4. Built-in and existing primitives are sufficient: Zod schemas, existing HTTP error envelope, existing Fastify hooks, existing control-plane ownership/quota/audit APIs, existing HostedRunService provider gates, existing R23 bridge readiness helpers, existing `runtime.output` events, existing MessageRouter, existing object-store artifact writer, existing Postgres additive migration guard, and existing production preflight/canary script structure. No new runtime dependency is planned.
-5. Distribution impact stays inside existing packages and existing operator commands. No new package, binary, public route family, dashboard, TUI, managed SaaS surface, or public arbitrary execution adapter ships.
+1. Existing code already provides DebateService, registerDebateRoutes, SqliteDebateStore, MessageRouter, ContextBuilder, RunService, HostedRunService, HostedRuntimeCatalog, R23 bridge readiness helpers, ControlPlaneService, Postgres event/artifact/run stores, production preflight, production canary, and OpenAPI route-boundary tests. Extend those seams only.
+2. Minimum shippable change is additive debate create contract validation, Postgres debate/message/evidence/job persistence, child-run idempotency, hosted evidence ownership preauthorization, staged debate orchestration, internal bounded judging, hosted route auth/ownership/quota/audit wiring, worker claim/readiness integration, ops canary/preflight coverage, and product truth updates.
+3. Complexity is split across ten disjoint ownership slices. The former combined core task is split into runtime/output helpers and service/judge/report orchestration. The former server task is split into app wiring and readiness diagnostics. Storage remains one task because schema, stores, idempotency keys, and unowned-resource counts must land together to preserve migration coherence.
+4. Built-in and existing primitives are sufficient: Zod schemas, existing HTTP error envelope, Fastify hooks, control-plane ownership/quota/audit APIs, HostedRunService gates, R23 bridge readiness helpers, runtime.output events, MessageRouter, object-store artifact writer, additive Postgres migration guard, and production preflight/canary script structure.
+5. Distribution impact stays inside existing packages and operator commands. No new package, binary, public route family, dashboard, TUI, managed SaaS surface, or public arbitrary execution adapter ships.
 
 ## Architecture
 
-R24 keeps the public API shape boring: local and hosted clients use only `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`. Request parsing remains inside the debate service and route family, but the admitted runtime matrix becomes explicit: omitted participant runtime fields still mean `fake.deterministic`; non-fake participants require `realRuntimeOptIn: true`; hosted real participants require `placement: "hosted"`; `judgeConfig` defaults to deterministic; model judge requires both `realRuntimeOptIn: true` and `confirmLiveProviderSpend: true`. The reserved output field `judge` remains rejected on create.
+R24 keeps the public API shape boring: local and hosted clients use only POST /debates, GET /debates/:id, and GET /debates/:id/events. Omitted participant runtime fields still mean fake.deterministic. A non-fake participant requires realRuntimeOptIn true and placement hosted. judgeConfig defaults to deterministic; model judge requires both realRuntimeOptIn true and confirmLiveProviderSpend true. The reserved output field judge remains rejected on create.
 
-Hosted async execution uses a durable debate execution job store with lease, retry, and next-attempt fields. The job state machine advances one small step per claim: create a participant turn run, wait for that child run to become terminal, route bounded output into a message, advance round/participant state, create a judge run when explicitly requested, parse bounded judge output, write the final report artifact, and mark the debate terminal. This avoids a worker deadlock where one worker blocks waiting for a child run that the same worker must later claim.
+Hosted create has an ownership-first order. Auth and scope checks run first. Ownership override fields are rejected next. In hosted mode, every evidence id is authorized against the caller before evidence store lookup or content loading. Unknown and unowned evidence ids use the same no-leak outcome and create no debate, run, job, quota, message, event, artifact, or provider side effect. Only after these checks can the service reserve quota, persist a debate, attach ownership, enqueue a debate job, and disclose the debate id.
+
+Hosted async execution uses a durable debate execution job store with lease, retry, and next-attempt fields. The job state machine advances one small step per claim: create or relink a child participant run, wait for that child run to become terminal, route bounded output into a message only while the debate is still nonterminal, advance round/participant state, create or relink a judge run when explicitly requested, parse bounded judge output, write the final report artifact, finalize active_debates quota, and mark the debate terminal. This avoids a single-worker deadlock where one worker blocks waiting for child runs it must later claim.
+
+Child participant and judge runs are idempotent. Each child run carries a DebateChildRunKey derived from debateId, participantId or judge, debateRound, debatePhase, and debateRunKind. Before createRun, core checks the job pending run id, the debate execution link table, and the run store by key. After createRun, core links the run to the job. If createRun succeeds and job update fails, stale-claim retry finds the existing run by key and links it instead of creating duplicate provider work.
+
+GET /debates/:id/events authorizes once at stream start and filters every emitted event by the authorized debateId. Provider output that arrives after debate terminalization is ignored or recorded as late without reopening the debate. Worker terminal success and terminal failure both finalize active_debates quota exactly once. Judge JSON output is byte-limited before JSON.parse.
 
 ```
 POST /debates
-  -> hosted auth hook for runs:write when control plane is enabled
-  -> parse body, reject reserved judge input, validate evidence before side effects
-  -> reject real runtime or live judge wait=1 before provider/queue/quota side effects
-  -> reserve debate quota, persist debate, attach ownership, audit admission
-  -> fake wait=1 executes local no-spend path
-  -> async hosted/local path enqueues durable debate job
+  -> hosted auth scope for runs:write
+  -> reject ownership override fields
+  -> authorize each evidence id before evidence lookup/content access
+  -> normalize runtime matrix and spend gates
+  -> reserve debate quota and attach debate ownership
+  -> fake wait=1 executes no-spend path
+  -> async path enqueues owned durable debate job
 
 worker tick
-  -> bridge jobs
-  -> tool jobs
-  -> debate job due claim
-  -> run jobs
+  -> recover stale debate claims
+  -> claim one due debate job
+  -> create or relink child run by DebateChildRunKey
+  -> release while child run is nonterminal
+  -> route terminal output only if debate is still nonterminal
+  -> judge/report/finalize quota/complete
 ```
-
-Participant and judge execution never constructs real provider adapters in the hosted server. The debate orchestrator creates normal run records and, for hosted real runtime modes, uses `HostedRunService` admission plus the existing run queue. The hosted worker remains the owner of provider sessions and the R23 bridge. `codex.exec_json` stays one-shot with no input or approval bridge claim; `claude_code.sdk` and `opencode.acp` preserve R23 input/approval bridge readiness and terminalize visibly when approval/input waits outlive the debate deadline.
-
-The deterministic judge is still the default and remains the path for required unit tests, smoke, preflight, and default canary. The internal model judge is not a public route: it is a bounded run created by debate orchestration with `debateRunKind: "judge"`, closed runtime-mode validation, explicit spend confirmation, prompt/output byte limits, and strict parser errors for missing, empty, invalid, or overlarge output.
-
-Hosted persistence becomes first-class before hosted `/debates` is exposed. Postgres stores must cover debate state, routed messages, evidence lookups, debate events, artifacts, and a debate execution outbox. Control-plane ownership must include debate resources and derived run/event/message/artifact resources before inspect/events/artifact reads can disclose existence. Readiness, preflight, and canary fail closed when the enabled hosted debate path lacks auth, ownership, quota, audit, queue/outbox, object-store, worker readiness, provider gates, or R23 bridge dependencies.
 
 ## File Structure
 
-- `packages/contracts/src/debate.ts` - additive create-contract and judge-config schemas, participant placement/opt-in fields, runtime-matrix helpers, and reserved input validation.
-- `packages/contracts/src/http-error.ts`, `packages/protocol-rest/src/http-errors.ts`, `packages/contracts/src/enterprise.ts`, `packages/contracts/src/endpoint-inventory.ts`, `packages/contracts/src/openapi.ts`, generated OpenAPI JSON, and contract tests - R24 named error codes, quota and ownership vocabulary, hosted `/debates` route inventory, and forbidden route assertions.
-- `packages/core/src/ports/debate-execution-store.ts`, `packages/storage/src/postgres/debate-store.ts`, `message-store.ts`, `evidence-store.ts`, `debate-execution-store.ts`, Postgres schema/database files, storage exports, and storage tests - durable hosted debate state, durable routed messages/evidence for inspect/report, and lease-based debate job claims.
-- `packages/core/src/services/debate-service.ts` plus focused debate helper files and core tests - closed runtime matrix, staged participant turn execution, runtime output extraction, deterministic and model judge runners, final report metadata, and no-spend default behavior.
-- `packages/protocol-rest/src/debate-routes.ts`, `packages/protocol-rest/src/hosted-auth.ts`, and protocol REST tests - existing debate routes gain hosted auth context, ownership-first inspect/events checks, durable job enqueue support, and broader named-error mapping without new routes.
-- `apps/server/src/app.ts`, `apps/server/src/readiness.ts`, and server tests - hosted server wires Postgres debate/message/evidence/job stores, DebateService, MessageRouter, ContextBuilder, debate readiness, and route registration.
-- `apps/worker/src/worker.ts`, `apps/worker/src/ready.ts`, and worker tests - hosted worker claims and advances debate execution jobs, exposes debate execution readiness, and keeps bridge/tool/run processing order safe.
-- `scripts/production-preflight.ts`, `scripts/production-canary.ts`, related tests, and production manifest - no-spend fake hosted debate preflight/canary plus explicit live participant/live judge gates.
-- Product, API, development, production, and adapter docs - exact R24 shipped and unshipped boundary.
+- Contracts and OpenAPI stay under packages/contracts and the protocol REST error map.
+- Durable debate stores and idempotency live under packages/storage/src/postgres and packages/core/src/ports.
+- Runtime normalization/output helpers are separate from DebateService.
+- DebateService owns orchestration, evidence authorization, child-run relinking, judge parsing, and report behavior.
+- Protocol REST owns the existing route family, auth rules, route dependency contract, SSE start authorization, and strict debateId filtering.
+- Server app wiring owns hosted dependency composition, quota, audit, and resource ownership attachment.
+- Server readiness owns hostedDebate diagnostics only.
+- Worker owns claim/release processing and terminal quota finalization.
+- Ops scripts own no-spend preflight/canary and explicit live-spend gates.
+- Docs own product, operator, and adapter truth.
 
-## Existing Context
+## Architect Pass 1 Reconciliation
 
-`docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md` defines the R24 API contract, runtime matrix, named failure codes, no-spend verification, hosted security posture, and auditor focus.
-
-`PROJECT.md` Phase 22 says R23 shipped hosted input/approval bridges only for worker-owned `claude_code.sdk` and structured `opencode.acp`, and that hosted debate real participants/model judging were still unshipped.
-
-`PRODUCT.md` current snapshot says fake-only remains default, production live probes are opt-in only, `codex.exec_json` is one-shot, `codex.interactive` remains local-only, and hosted debate real participants/model judging are not yet shipped.
-
-`packages/protocol-rest/src/debate-routes.ts` already registers only `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`. R24 must keep this route family and extend its dependencies.
-
-`packages/core/src/services/debate-service.ts` currently rejects all non-fake participants in `parseParticipant` and executes a local deterministic fake debate by creating normal fake runs, routing messages, appending debate events, running deterministic judging, and writing a final report.
-
-`packages/core/src/services/hosted-run-service.ts` already enforces hosted explicit placement, real-runtime allowlist, provider activation, wait restrictions for real hosted runs, prompt size, timeout, active-run, runs-per-hour, and spend controls.
-
-`packages/contracts/src/hosted-runtime-bridge.ts`, `apps/server/src/readiness.ts`, and `apps/worker/src/worker.ts` already model R23 bridge readiness for `claude_code.sdk` and `opencode.acp`; R24 must depend on these checks rather than adding new bridge support.
-
-`packages/storage/src/postgres/database.ts` already has `run_events.debate_id` and `artifacts.debate_id`, but no Postgres debate table, routed message table, evidence table, or debate execution outbox.
-
-`packages/contracts/src/openapi.contract.test.ts` already proves hosted OpenAPI does not contain forbidden hosted provider expansion or public judging routes. R24 must keep those assertions while adding hosted `/debates` to the existing route inventory.
+- A1 accepted: T4 requires hosted evidence authorization before evidence lookup/content loading, and T5 adds route-level no-side-effect tests.
+- A2 accepted: T2 adds DebateChildRunKey storage/index contracts, T4 and T8 add stale-claim crash tests proving no duplicate child run.
+- A3 accepted: T6 adds direct ownership attach failure tests for child run, message, event, artifact, and debate job before disclosure.
+- A4 accepted: T3 and T5 add placement-required behavior and tests before queue/provider side effects.
+- A5 accepted: T10 context_files now include every adapter doc it edits: docs/adapters/README.md, codex.md, claude-code.md, opencode.md, agentfield.md, and generic-http.md.
+- A6 accepted: T5 replaces the route dependency placeholder with exact dependency contract fields and route responsibilities.
+- A7 accepted: the plan splits core work into T3/T4 and server work into T6/T7; T2 remains unified with explicit justification in the scope challenge because migration/storage/idempotency must stay coherent.
+- E1 accepted: T3/T4/T8 handle provider output after terminalization by ignoring or recording late output without reopening debate.
+- E2 accepted: T5 requires SSE authorization at stream start and strict debateId filtering.
+- E3 accepted: T6 and T8 require active_debates quota finalization on terminal success and terminal failure.
+- E4 accepted: T4 requires judge byte-limit rejection before JSON.parse and adds a focused test.
 
 ## Task Graph
 
@@ -84,7 +83,7 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
 ```json
 {
   "id": "P23-T1-contracts-openapi-boundary",
-  "title": "Define debate contracts and route boundary",
+  "title": "Define debate contracts, errors, and route boundary",
   "files": [
     "packages/contracts/src/debate.ts",
     "packages/contracts/src/http-error.ts",
@@ -108,14 +107,14 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "packages/contracts/src/openapi.ts",
     "packages/contracts/src/openapi.contract.test.ts"
   ],
-  "instructions": "Add R24 debate request contracts without changing existing debate response compatibility. Extend debate create input parsing schemas or helpers to cover participant placement, realRuntimeOptIn, judgeConfig, confirmLiveProviderSpend, and reserved judge input rejection. Add the exact R24 named failure codes to the contracts HTTP schema and protocol REST status map. Use 400 for invalid create bodies and explicit opt-in failures, 409 for unsupported runtime/wait/approval-expiry states, 429 for quota/spend exhaustion, and 503 for store/queue/audit/object-store/worker dependency failures. Extend enterprise schemas with debate resource ownership and debates_per_hour plus active_debates quota kinds, keeping omitted or zero quotas backward compatible. Add hosted `/debates`, `/debates/:id`, and `/debates/:id/events` to hosted OpenAPI by reusing the existing local debate route inventory entries. Keep forbidden-route tests strict for `/debates/participants/real`, `/debates/judge`, `/model-judge`, `/judging`, `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`, dashboard, and TUI.",
+  "instructions": "Add R24 debate request contracts without changing existing debate response compatibility. Extend create input parsing for participant placement, realRuntimeOptIn, judgeConfig, confirmLiveProviderSpend, evidence ids, and reserved judge input rejection. Add named error codes for evidence no-leak denial, participant placement requirement, real participant opt-in, wait restrictions, runtime unsupported, idempotent child run collision, child run link failure, participant output errors, judge output errors, live spend denial, hosted debate queue/store/audit/quota/ownership/artifact failures, and live canary spend denial. Use 400 for invalid input and opt-in failures, 403 or no-leak 404 for ownership denials, 409 for unsupported runtime or wait states, 429 for quota/spend exhaustion, and 503 for dependency failures. Extend enterprise schemas with debate ownership resource type and debates_per_hour plus active_debates quota kinds. Add hosted /debates, /debates/:id, and /debates/:id/events to hosted OpenAPI by reusing the existing debate route family only. Keep forbidden-route tests strict for participant, judge, model-judge, arbitrary execution, dashboard, and TUI routes.",
   "acceptance": [
-    "CreateDebateRequest accepts fake defaults, opt-in real participant fields, deterministic judgeConfig, and model judgeConfig with explicit spend confirmation.",
-    "CreateDebateRequest rejects `judge` as input while debateSchema continues to allow `judge` as output.",
-    "All R24 named debate errors parse through httpErrorCodeSchema and have protocol REST status mappings.",
+    "CreateDebateRequest accepts fake defaults, explicit hosted real participant fields, deterministic judgeConfig, and model judgeConfig only with spend confirmation.",
+    "CreateDebateRequest rejects judge as input while debateSchema continues to allow judge as output.",
+    "httpErrorCodeSchema and protocol REST status mapping cover every R24 code including debate_evidence_not_found_or_denied, debate_participant_placement_required, debate_child_run_link_failed, hosted_debate_ownership_attach_failed, and debate_live_canary_spend_unconfirmed.",
     "Enterprise schemas accept debate resource ownership and additive debate quota kinds without requiring them in existing bootstrap fixtures.",
-    "Hosted OpenAPI includes only `POST /debates`, `GET /debates/{id}`, and `GET /debates/{id}/events` for debate behavior.",
-    "Hosted and local OpenAPI tests prove no forbidden participant, judge, model-judge, arbitrary execution, dashboard, or TUI route exists."
+    "Hosted OpenAPI includes only POST /debates, GET /debates/{id}, and GET /debates/{id}/events for debate behavior.",
+    "Hosted and local OpenAPI tests prove no public participant, judge, model-judge, arbitrary execution, dashboard, terminal, process, shell, sandbox, PTY, or TUI route exists."
   ],
   "checks": [
     "pnpm --filter @switchyard/contracts test",
@@ -126,24 +125,24 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
   "error_rescue_map": [
     {
       "codepath": "CreateDebateRequest schema",
-      "failure": "request includes reserved output field `judge`",
+      "failure": "request includes reserved output field judge",
       "exception": "ZodError or DebateServiceError invalid_input",
-      "rescue": "Reject before debate persistence, quota, queue, run creation, or provider side effects.",
-      "user_sees": "400 invalid_input with path `judge` and issue `field is reserved`."
+      "rescue": "Reject before evidence authorization, debate persistence, quota, queue, run creation, or provider side effects.",
+      "user_sees": "400 invalid_input with path judge and issue field is reserved."
     },
     {
       "codepath": "HTTP error contract",
       "failure": "new service code is missing from contracts or REST status map",
       "exception": "contract test failure",
-      "rescue": "Add the exact code to `httpErrorCodeSchema` and `STATUS_BY_CODE` with the status category required by the spec.",
-      "user_sees": "Named HTTP error instead of `internal_error`."
+      "rescue": "Add the exact code to httpErrorCodeSchema and STATUS_BY_CODE with the status category required by the spec.",
+      "user_sees": "Named HTTP error instead of internal_error."
     },
     {
       "codepath": "Hosted OpenAPI inventory",
-      "failure": "a forbidden route is added or hosted `/debates` is omitted",
+      "failure": "a forbidden route is added or hosted /debates is omitted",
       "exception": "OpenAPI contract assertion failure",
       "rescue": "Remove forbidden inventory entries and add only the three existing debate routes.",
-      "user_sees": "Hosted OpenAPI exposes the stable `/debates` family only."
+      "user_sees": "Hosted OpenAPI exposes the stable /debates family only."
     }
   ],
   "observability": {
@@ -176,13 +175,13 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     {
       "name": "all R24 debate codes are known",
       "lens": "integration",
-      "given": "the named failure code list from the spec",
-      "expect": "httpErrorCodeSchema parses each code and protocol REST maps each to non-500 status except true internal ownership attach errors"
+      "given": "the named failure code list from the spec and this plan",
+      "expect": "httpErrorCodeSchema parses each code and protocol REST maps expected codes to non-500 status except true unexpected exceptions"
     },
     {
       "name": "hosted OpenAPI route boundary",
       "lens": "integration",
-      "given": "generateOpenApiDocument({ surface: 'hosted_server' })",
+      "given": "generateOpenApiDocument({ surface: hosted_server })",
       "expect": "contains /debates, /debates/{id}, /debates/{id}/events and excludes all forbidden route families"
     }
   ],
@@ -191,12 +190,12 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       {
         "name": "debate create contract additions",
         "kind": "constant",
-        "signature": "CreateDebateRequest accepts participant placement/realRuntimeOptIn and judgeConfig; debateSchema remains output-compatible"
+        "signature": "CreateDebateRequest accepts participant placement/realRuntimeOptIn/evidenceIds and judgeConfig; debateSchema remains output-compatible"
       },
       {
         "name": "R24 debate HTTP error codes",
         "kind": "constant",
-        "signature": "httpErrorCodeSchema includes debate_* and hosted_debate_* codes from the spec"
+        "signature": "httpErrorCodeSchema includes debate_* and hosted_debate_* codes from the spec and architect pass 1 findings"
       },
       {
         "name": "debate ownership/quota vocabulary",
@@ -215,25 +214,28 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
 }
 ```
 
-### Task P23-T2-postgres-debate-durability
+### Task P23-T2-postgres-debate-durability-idempotency
 
 ```json
 {
-  "id": "P23-T2-postgres-debate-durability",
-  "title": "Add durable Postgres debate stores and job outbox",
+  "id": "P23-T2-postgres-debate-durability-idempotency",
+  "title": "Add durable Postgres debate stores and child-run idempotency",
   "files": [
     "packages/core/src/ports/debate-execution-store.ts",
+    "packages/core/src/ports/run-store.ts",
     "packages/core/src/ports/control-plane-store.ts",
     "packages/core/src/index.ts",
     "packages/storage/src/postgres/debate-store.ts",
     "packages/storage/src/postgres/message-store.ts",
     "packages/storage/src/postgres/evidence-store.ts",
     "packages/storage/src/postgres/debate-execution-store.ts",
+    "packages/storage/src/postgres/run-store.ts",
     "packages/storage/src/postgres/database.ts",
     "packages/storage/src/postgres/schema.ts",
     "packages/storage/src/postgres/control-plane-store.ts",
     "packages/storage/src/index.ts",
     "packages/storage/test/postgres-debate-store.test.ts",
+    "packages/storage/test/postgres-run-store.test.ts",
     "packages/storage/test/postgres-schema-compat.test.ts",
     "packages/storage/test/storage-package.test.ts"
   ],
@@ -243,24 +245,29 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
   "context_files": [
     "docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md",
     "packages/core/src/ports/debate-store.ts",
+    "packages/core/src/ports/run-store.ts",
     "packages/storage/src/sqlite/debate-store.ts",
     "packages/storage/src/sqlite/message-store.ts",
     "packages/storage/src/sqlite/evidence-store.ts",
     "packages/storage/src/postgres/database.ts",
-    "packages/storage/src/postgres/control-plane-store.ts"
+    "packages/storage/src/postgres/run-store.ts",
+    "packages/storage/src/postgres/control-plane-store.ts",
+    "packages/storage/test/postgres-storage.test.ts"
   ],
-  "instructions": "Add Postgres durability equivalent to the current SQLite debate path before hosted routes are exposed. Create `PostgresDebateStore` matching `DebateStore` create/get/update/list behavior and preserving optional judge/final report/stop/error fields. Add Postgres routed message and evidence stores sufficient for DebateService inspect, MessageRouter create/get/list, ContextBuilder evidence loading, and final report traceability. Add a `DebateExecutionStore` core port and Postgres implementation with enqueue, claim, release/requeue, complete, fail, recoverStaleClaims, get, and stats operations. The job record must include job id, debate id, stage, round, participant index, pending run id, pending judge run id, state, attempts, maxAttempts, claimedAt, leaseUntil, nextAttemptAt, failure reasonCode, owner ids when available, and timestamps. Update additive Postgres schema SQL and Drizzle schema. Bump `POSTGRES_SCHEMA_VERSION` and keep `assertPostgresMigrationSqlAdditive` passing. Extend control-plane unowned-resource counts to include debates, debate execution jobs, messages, and evidence rows that are visible hosted resources. Export the new stores and port from package indexes.",
+  "instructions": "Add Postgres durability equivalent to the current SQLite debate path before hosted routes are exposed. Implement Postgres debate, message, evidence, and debate execution stores. The debate execution job record must include job id, debate id, stage, round, phase, participant index, pending run id, pending judge run id, state, attempts, maxAttempts, claimedAt, leaseUntil, nextAttemptAt, failure reasonCode, owner ids when available, and timestamps. Add a stable DebateChildRunKey made from debateId, participantId or judge, debateRound, debatePhase, and debateRunKind. Extend RunStore and PostgresRunStore with findByDebateChildRunKey(key). Persist the key in run metadata under debateChildRunKey and add an additive unique Postgres index for that key so retries cannot create duplicate child runs. Extend DebateExecutionStore with linkPendingRun(jobId, key, runId, expectedStage) and findPendingRunByKey(key) so core can link an existing run after a stale claim. Update additive Postgres schema SQL and Drizzle schema, bump POSTGRES_SCHEMA_VERSION, keep assertPostgresMigrationSqlAdditive passing, and extend control-plane unowned-resource counts to include debates, debate jobs, messages, evidence rows, and debate-derived artifacts/events that are visible hosted resources.",
   "acceptance": [
     "PostgresDebateStore round-trips all Debate fields currently handled by SqliteDebateStore plus additive R24 fields.",
     "PostgresMessageStore supports create/get/update/list filters needed by MessageRouter and debate inspect.",
     "PostgresEvidenceStore supports create/get/update/list filters needed by evidence validation and ContextBuilder.",
-    "DebateExecutionStore claims only due queued jobs, leases claims, requeues recoverable stale claims, exhausts max-attempt stale claims, and records named reason codes.",
-    "Postgres schema migration is additive, versioned, and includes indexes for debate id, job state/lease/nextAttemptAt, messages channel, evidence debate id, and ownership scans.",
-    "Control-plane unowned-resource readiness can count debate, debate job, message, and evidence ownership gaps.",
-    "Storage package exports new Postgres stores and new core port without breaking SQLite tests."
+    "DebateExecutionStore claims only due queued jobs, leases claims, requeues recoverable stale claims, exhausts max-attempt stale claims, records named reason codes, and supports atomic pending-run linkage.",
+    "RunStore can find a child participant or judge run by the deterministic DebateChildRunKey, and Postgres prevents two runs with the same key.",
+    "Postgres schema migration is additive, versioned, and includes indexes for debate id, job state/lease/nextAttemptAt, messages channel, evidence debate id, run debateChildRunKey, and ownership scans.",
+    "Control-plane unowned-resource readiness can count debate, debate job, message, evidence, event, child run, and artifact ownership gaps.",
+    "Storage package exports new Postgres stores and new core ports without breaking SQLite tests."
   ],
   "checks": [
     "pnpm --filter @switchyard/storage test -- postgres-debate",
+    "pnpm --filter @switchyard/storage test -- postgres-run-store",
     "pnpm --filter @switchyard/storage test -- postgres-schema-compat",
     "pnpm --filter @switchyard/storage test -- storage-package",
     "pnpm --filter @switchyard/storage typecheck",
@@ -275,22 +282,22 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "user_sees": "production:migrate/preflight fails before destructive schema mutation."
     },
     {
-      "codepath": "PostgresDebateStore.fromRow",
-      "failure": "stored JSON field is malformed",
-      "exception": "SyntaxError",
-      "rescue": "Throw a store error with reasonCode hosted_debate_store_unavailable and leave row unchanged.",
-      "user_sees": "503 hosted_debate_store_unavailable instead of corrupted debate state."
+      "codepath": "PostgresRunStore.create with debateChildRunKey",
+      "failure": "duplicate child run key is inserted by a retry",
+      "exception": "unique constraint violation",
+      "rescue": "Read the existing run through findByDebateChildRunKey and let core link it to the pending debate job.",
+      "user_sees": "No duplicate participant or judge run appears on debate inspect."
     },
     {
-      "codepath": "DebateExecutionStore.claim",
-      "failure": "claimed job lease expires before completion",
-      "exception": "lease timeout detected by recoverStaleClaims",
-      "rescue": "Requeue if attempts remain, otherwise mark exhausted with hosted_debate_worker_unavailable or worker_retry_exhausted reason.",
-      "user_sees": "readiness/canary reports hosted_debate_worker_unavailable or debate terminal failure after max attempts."
+      "codepath": "DebateExecutionStore.linkPendingRun",
+      "failure": "job stage changed or pending run already linked",
+      "exception": "link_conflict",
+      "rescue": "Return conflict with current job snapshot so core re-reads and avoids duplicate run creation.",
+      "user_sees": "Debate stays pending or fails with debate_child_run_link_failed, not duplicate provider work."
     },
     {
       "codepath": "control-plane unowned counts",
-      "failure": "new debate rows lack ownership",
+      "failure": "new debate-derived rows lack ownership",
       "exception": "readiness count > 0",
       "rescue": "Expose unowned_resources_present diagnostics without leaking raw row contents.",
       "user_sees": "GET /ready 503 with low-cardinality unowned resource counts."
@@ -298,11 +305,11 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
   ],
   "observability": {
     "logs": [
-      "storage test diagnostics include debate job state and reasonCode on claim failures",
-      "readiness diagnostics include counts for unowned debates, debateJobs, messages, and evidence"
+      "storage diagnostics include debate job state, childRunKey, and reasonCode on claim/link failures",
+      "readiness diagnostics include counts for unowned debates, jobs, child runs, messages, events, evidence, and artifacts"
     ],
-    "success_metric": "Postgres debate/job/message/evidence stores pass parity and stale-claim tests",
-    "failure_metric": "hosted_debate_store_unavailable, hosted_debate_queue_unavailable, or unowned_resources_present appears in readiness/preflight"
+    "success_metric": "Postgres debate/job/message/evidence stores and run child-key lookup pass parity, stale-claim, and idempotency tests",
+    "failure_metric": "hosted_debate_store_unavailable, hosted_debate_queue_unavailable, debate_child_run_link_failed, or unowned_resources_present appears in readiness/preflight"
   },
   "test_cases": [
     {
@@ -324,6 +331,12 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "expect": "round trip returns those fields undefined rather than null in the public object"
     },
     {
+      "name": "child run key lookup and uniqueness",
+      "lens": "integration",
+      "given": "two create attempts with the same debateChildRunKey",
+      "expect": "the first run is readable by key and the second attempt is rejected or returns the existing run path without a duplicate"
+    },
+    {
       "name": "stale job requeues then exhausts",
       "lens": "error_path",
       "given": "claimed debate job with expired lease and attempts below max, then expired again at max",
@@ -338,7 +351,7 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     {
       "name": "unowned resource counts include debate resources",
       "lens": "integration",
-      "given": "Postgres debate, debate job, message, and evidence rows without resource_ownership rows",
+      "given": "Postgres debate, job, child run, message, event, evidence, and artifact rows without resource_ownership rows",
       "expect": "countUnownedResources increments the new low-cardinality counters"
     }
   ],
@@ -347,7 +360,12 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       {
         "name": "DebateExecutionStore",
         "kind": "class",
-        "signature": "interface DebateExecutionStore { enqueue(input) => Promise<DebateExecutionJob>; claim(options?) => Promise<ClaimedDebateExecutionJob | undefined>; release(jobId, update) => Promise<void>; complete(jobId) => Promise<void>; fail(jobId, failure) => Promise<void>; recoverStaleClaims(options?) => Promise<{ recovered:number; exhausted:number; invalid:number }>; stats() => Promise<{ queued:number; claimed:number; failed:number; exhausted:number }> }"
+        "signature": "interface DebateExecutionStore { enqueue(input) => Promise<DebateExecutionJob>; claim(options?) => Promise<ClaimedDebateExecutionJob | undefined>; linkPendingRun(jobId, key, runId, expectedStage) => Promise<LinkPendingRunResult>; findPendingRunByKey(key) => Promise<PendingRunLink | undefined>; release(jobId, update) => Promise<void>; complete(jobId) => Promise<void>; fail(jobId, failure) => Promise<void>; recoverStaleClaims(options?) => Promise<{ recovered:number; exhausted:number; invalid:number }>; stats() => Promise<{ queued:number; claimed:number; failed:number; exhausted:number }> }"
+      },
+      {
+        "name": "RunStore debate child lookup",
+        "kind": "function",
+        "signature": "findByDebateChildRunKey?(key: DebateChildRunKey) => Promise<Run | undefined>"
       },
       {
         "name": "PostgresDebateStore",
@@ -374,33 +392,31 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     ],
     "file_paths_consumed_by_other_tasks": [
       "packages/core/src/ports/debate-execution-store.ts",
+      "packages/core/src/ports/run-store.ts",
       "packages/storage/src/postgres/debate-store.ts",
       "packages/storage/src/postgres/debate-execution-store.ts",
       "packages/storage/src/postgres/message-store.ts",
-      "packages/storage/src/postgres/evidence-store.ts"
+      "packages/storage/src/postgres/evidence-store.ts",
+      "packages/storage/src/postgres/run-store.ts"
     ]
   }
 }
 ```
 
-### Task P23-T3-core-debate-runtime-judge
+### Task P23-T3-core-debate-runtime-output
 
 ```json
 {
-  "id": "P23-T3-core-debate-runtime-judge",
-  "title": "Extend core debate orchestration and judging",
+  "id": "P23-T3-core-debate-runtime-output",
+  "title": "Normalize debate runtimes and extract bounded output",
   "files": [
-    "packages/core/src/services/debate-service.ts",
     "packages/core/src/services/debate-runtime-matrix.ts",
     "packages/core/src/services/debate-output.ts",
-    "packages/core/src/services/debate-judge-runner.ts",
-    "packages/core/test/debate-service.test.ts",
-    "packages/core/test/debate-real-runtime.test.ts",
-    "packages/core/test/debate-judge-runner.test.ts"
+    "packages/core/test/debate-real-runtime.test.ts"
   ],
   "dependencies": [
     "P23-T1-contracts-openapi-boundary",
-    "P23-T2-postgres-debate-durability"
+    "P23-T2-postgres-debate-durability-idempotency"
   ],
   "context_files": [
     "docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md",
@@ -411,74 +427,211 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "packages/core/test/debate-service.test.ts",
     "packages/testkit/src/fake-runtime-adapter.ts"
   ],
-  "instructions": "Replace the fake-only guard with a closed R24 runtime matrix. Preserve existing fake deterministic `wait=1` behavior and final response shape. Add participant normalization for runtime/provider/model/adapterType/runtimeMode/placement/realRuntimeOptIn with fake defaults and exact rejection codes. Add judgeConfig parsing with deterministic default and model judge opt-in plus spend confirmation. Add prompt builders with byte limits for participant turns and judge runs. Add a staged execution API for durable jobs, for example `processExecutionJob(job)`, that advances one step without blocking on child hosted runs. One step may create a participant run, observe a terminal child run, route output, start judging, create a judge run, parse judge output, write report, or complete the debate. Extract participant and judge text only from persisted `runtime.output` events, enforce output byte caps, reject nil/empty/overlarge output with named codes, and never synthesize successful messages. Keep `codex.exec_json` one-shot and reject any debate codepath that assumes post-start input or approval for it. For `claude_code.sdk` and `opencode.acp`, rely on normal run statuses `waiting_for_input` and `waiting_for_approval`; if the debate deadline expires while waiting, terminalize with `debate_runtime_approval_expired`. The deterministic judge remains no-spend and default. The model judge creates a normal run with metadata `debateRunKind: 'judge'`, parses a bounded JSON response into the existing judge object, and rejects invalid/empty/overlarge output with named judge codes. Final report metadata must include debate id, stop reason, participant ids, participant run ids per turn, judge run id when present, evidence ids, message ids, and judge summary.",
+  "instructions": "Create helper modules for the closed R24 debate runtime matrix and participant output extraction. Preserve fake.deterministic defaults. Admit only fake.deterministic, codex.exec_json, claude_code.sdk, and opencode.acp. Reject codex.interactive, AgentField, Generic HTTP, browser, repo, generic process, terminal, shell, sandbox, and PTY debate execution. A non-fake participant must include realRuntimeOptIn true and placement hosted; omitted placement, local placement, or any non-hosted placement must fail with debate_participant_placement_required before queue, quota, run, provider, or evidence content side effects. Build deterministic DebateChildRunKey values for participant and judge runs. Expose output helpers that read only persisted runtime.output events, enforce byte caps before returning text, reject nil/blank/overlarge output with named codes, require matching debateId and childRunKey metadata, and expose a late-output classification for runs whose debate is already terminal.",
   "acceptance": [
-    "Existing fake deterministic debate tests still pass and `POST /debates?wait=1` semantics are preserved for no-spend fake debates.",
-    "Non-fake participants without `realRuntimeOptIn: true` fail with `debate_real_participant_opt_in_required` before debate, run, message, event, artifact, quota, queue, or provider side effects.",
-    "Real participant or live judge requests with `wait=1` fail with `debate_wait_real_runtime_unsupported` before provider side effects.",
-    "Allowed local and hosted runtime modes are exactly fake.deterministic, codex.exec_json, claude_code.sdk, and opencode.acp.",
-    "Unsupported debate runtime modes fail closed with named unsupported codes and do not enqueue child runs.",
-    "Each participant turn creates one normal run with debateId, participantId, participantRole, debateRunKind, debateRound, debatePhase, and bounded prompt metadata.",
-    "Participant output is read from persisted runtime.output events, bounded, routed through MessageRouter, and linked to debate events.",
-    "Missing, empty, failed, timed-out, waiting-expired, overlarge, or unowned participant output fails visibly with named participant errors and a failure report where possible.",
-    "Deterministic judge remains default and requires no provider calls.",
-    "Live model judge requires opt-in and spend confirmation, creates a normal run only through the closed matrix, and maps invalid output to named judge errors.",
-    "Final report artifact content and metadata include participant run ids and judge run id when present."
+    "Runtime normalization preserves fake defaults and exact backward-compatible fake wait behavior for the service that imports it.",
+    "Non-fake participants without realRuntimeOptIn true fail with debate_real_participant_opt_in_required before side effects.",
+    "Non-fake participants with realRuntimeOptIn true but omitted, local, or non-hosted placement fail with debate_participant_placement_required before side effects.",
+    "Unsupported runtime modes fail closed with named unsupported or bridge-unshipped codes and cannot enqueue child runs.",
+    "Participant prompt metadata includes debateId, participantId, participantRole, debateRunKind, debateRound, debatePhase, and debateChildRunKey.",
+    "Output extraction reads persisted runtime.output events only, rejects missing, empty, overlarge, or metadata-mismatched output, and never synthesizes successful messages.",
+    "Late output from a run whose debate is terminal is classified for ignore or late recording and cannot reopen the debate."
   ],
   "checks": [
-    "pnpm --filter @switchyard/core test -- debate",
+    "pnpm --filter @switchyard/core test -- debate-real-runtime",
     "pnpm --filter @switchyard/core typecheck"
   ],
   "error_rescue_map": [
     {
-      "codepath": "parseParticipant",
+      "codepath": "normalizeDebateRuntime",
       "failure": "non-fake runtime without realRuntimeOptIn",
       "exception": "DebateServiceError debate_real_participant_opt_in_required",
-      "rescue": "Reject before evidence side effects, debate persistence, quota, queue, run creation, or provider dispatch.",
+      "rescue": "Reject before evidence content loading, debate persistence, quota, queue, run creation, or provider dispatch.",
       "user_sees": "400 debate_real_participant_opt_in_required."
     },
     {
-      "codepath": "create wait validation",
-      "failure": "wait=1 with real participant or model judge",
-      "exception": "DebateServiceError debate_wait_real_runtime_unsupported",
-      "rescue": "Reject before provider or queue side effects.",
-      "user_sees": "409 debate_wait_real_runtime_unsupported."
+      "codepath": "normalizeDebateRuntime",
+      "failure": "non-fake runtime with missing or non-hosted placement",
+      "exception": "DebateServiceError debate_participant_placement_required",
+      "rescue": "Reject before evidence content loading, debate persistence, quota, queue, run creation, or provider dispatch.",
+      "user_sees": "400 debate_participant_placement_required."
+    },
+    {
+      "codepath": "extractParticipantOutput",
+      "failure": "runtime.output is missing, blank after trim, over byte cap, or metadata does not match expected debate id and child key",
+      "exception": "DebateServiceError debate_participant_output_missing|debate_participant_output_empty|debate_participant_output_too_large|debate_participant_output_unowned",
+      "rescue": "Return named failure to DebateService; do not create a message.",
+      "user_sees": "No fabricated participant message; inspect shows named output error."
+    }
+  ],
+  "observability": {
+    "logs": [
+      "warn debate.runtime.denied reasonCode runtime placement hasOptIn",
+      "warn debate.participant.output.rejected debateId runId reasonCode outputBytes"
+    ],
+    "success_metric": "runtime matrix and output helper tests cover every allowed and forbidden runtime path",
+    "failure_metric": "any unsupported runtime reaches run creation, or any malformed runtime.output becomes a message"
+  },
+  "test_cases": [
+    {
+      "name": "missing participant opt-in has no side effects",
+      "lens": "error_path",
+      "given": "codex.exec_json participant without realRuntimeOptIn",
+      "expect": "debate_real_participant_opt_in_required and zero debates/runs/messages/events/artifacts/jobs"
+    },
+    {
+      "name": "placement required for real participant",
+      "lens": "error_path",
+      "given": "opencode.acp participant with realRuntimeOptIn true and omitted, local, or worker placement cases",
+      "expect": "debate_participant_placement_required before queue/provider side effects"
+    },
+    {
+      "name": "unsupported runtime matrix fails closed",
+      "lens": "edge_unsupported_runtime",
+      "given": "codex.interactive, agentfield.async_rest, generic_http.async_rest, cursor, browser, repo, process, shell, terminal, sandbox, or pty runtimeMode",
+      "expect": "debate_runtime_unsupported or specific bridge-unshipped code before queue/provider side effects"
+    },
+    {
+      "name": "participant output errors",
+      "lens": "error_path",
+      "given": "terminal child run with no runtime.output, blank text, overlarge text, wrong debateId, and wrong childRunKey in separate cases",
+      "expect": "named participant output errors and no routed message"
+    },
+    {
+      "name": "late output classification",
+      "lens": "edge_late_output",
+      "given": "runtime.output arrives after debate status is already terminal",
+      "expect": "helper returns late classification and does not authorize reopen"
+    }
+  ],
+  "integration_contracts": {
+    "exports": [
+      {
+        "name": "normalizeDebateRuntime",
+        "kind": "function",
+        "signature": "normalizeDebateRuntime(participant, index, options) => DebateParticipantRuntimeConfig"
+      },
+      {
+        "name": "buildDebateChildRunKey",
+        "kind": "function",
+        "signature": "buildDebateChildRunKey({ debateId, participantId?, debateRound, debatePhase, debateRunKind }) => string"
+      },
+      {
+        "name": "extractDebateRuntimeOutput",
+        "kind": "function",
+        "signature": "extractDebateRuntimeOutput(events, expected: { debateId:string; childRunKey:string; maxBytes:number }) => ExtractedDebateOutput | DebateOutputError"
+      }
+    ],
+    "imports_from_other_tasks": [
+      {
+        "from_task": "P23-T1-contracts-openapi-boundary",
+        "name": "debate create contract additions",
+        "signature": "CreateDebateRequest accepts placement/realRuntimeOptIn and R24 error codes"
+      },
+      {
+        "from_task": "P23-T2-postgres-debate-durability-idempotency",
+        "name": "RunStore debate child lookup",
+        "signature": "findByDebateChildRunKey?(key: DebateChildRunKey) => Promise<Run | undefined>"
+      }
+    ],
+    "file_paths_consumed_by_other_tasks": [
+      "packages/core/src/services/debate-runtime-matrix.ts",
+      "packages/core/src/services/debate-output.ts"
+    ]
+  }
+}
+```
+
+### Task P23-T4-core-debate-orchestration-judge
+
+```json
+{
+  "id": "P23-T4-core-debate-orchestration-judge",
+  "title": "Orchestrate debate jobs, judging, evidence authorization, and reports",
+  "files": [
+    "packages/core/src/services/debate-service.ts",
+    "packages/core/src/services/debate-judge-runner.ts",
+    "packages/core/test/debate-service.test.ts",
+    "packages/core/test/debate-judge-runner.test.ts"
+  ],
+  "dependencies": [
+    "P23-T1-contracts-openapi-boundary",
+    "P23-T2-postgres-debate-durability-idempotency",
+    "P23-T3-core-debate-runtime-output"
+  ],
+  "context_files": [
+    "docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md",
+    "packages/core/src/services/debate-service.ts",
+    "packages/core/src/services/run-service.ts",
+    "packages/core/src/services/context-builder.ts",
+    "packages/core/src/services/message-router.ts",
+    "packages/core/src/services/hosted-run-service.ts",
+    "packages/core/src/ports/debate-store.ts",
+    "packages/core/src/ports/evidence-store.ts",
+    "packages/core/test/debate-service.test.ts",
+    "packages/testkit/src/fake-stores.ts"
+  ],
+  "instructions": "Extend DebateService with hosted-safe create and staged processExecutionJob behavior while importing runtime/output helpers from T3. In hosted mode, authorize every requested evidence id against the caller through the control-plane ownership hook before evidence store lookup, before ContextBuilder content loading, and before quota, debate, job, run, event, message, artifact, or provider side effects. Unknown and unowned evidence ids must use the same no-leak outcome, debate_evidence_not_found_or_denied or tenant_access_denied per existing hosted auth convention, and must not reveal which case occurred. Preserve fake deterministic wait=1 behavior. For async jobs, create participant and judge child runs idempotently: compute DebateChildRunKey, check the job pending run id, check DebateExecutionStore.findPendingRunByKey, check RunStore.findByDebateChildRunKey, create a run only when all are absent, then link the pending run through DebateExecutionStore.linkPendingRun. If createRun succeeds and job update fails, a stale-claim retry must find the existing run by key and link it rather than creating another run. Before routing terminal child output, re-read debate status and verify the expected debateId/childRunKey; if the debate is terminal, ignore or record a low-cardinality late-output event and do not reopen debate state. Deterministic judge remains default and no-spend. Model judge requires request opt-in and confirmLiveProviderSpend, creates a normal run with debateRunKind judge, and parses a bounded JSON object. Reject judge output over the byte cap before JSON.parse. Final report metadata must include debate id, stop reason, participant ids, participant run ids per turn, judge run id when present, evidence ids, message ids, and judge summary.",
+  "acceptance": [
+    "Existing fake deterministic debate tests still pass and POST /debates?wait=1 semantics are preserved for no-spend fake debates.",
+    "Hosted evidence authorization runs before evidence lookup or content loading and before all debate/run/job/quota/provider side effects.",
+    "Unknown and unowned evidence ids have identical no-leak behavior in hosted create tests.",
+    "Real participant or live judge requests with wait=1 fail with debate_wait_real_runtime_unsupported before provider or queue side effects.",
+    "Each participant turn creates one normal run with debateChildRunKey metadata and no duplicate run is created after stale claim recovery.",
+    "Participant output is read from persisted runtime.output events, bounded, routed through MessageRouter, and linked to debate events only while the debate is nonterminal.",
+    "Late provider completion after debate terminalization is ignored or recorded as late without reopening the debate.",
+    "Deterministic judge remains default and requires no provider calls.",
+    "Live model judge requires opt-in and spend confirmation, parses bounded JSON only after size check, and maps invalid output to named judge errors.",
+    "Final success and failure paths return enough information for server/worker hooks to finalize active_debates quota."
+  ],
+  "checks": [
+    "pnpm --filter @switchyard/core test -- debate-service",
+    "pnpm --filter @switchyard/core test -- debate-judge-runner",
+    "pnpm --filter @switchyard/core typecheck"
+  ],
+  "error_rescue_map": [
+    {
+      "codepath": "hosted evidence preauthorization",
+      "failure": "evidence id is unknown or owned by another tenant",
+      "exception": "ControlPlane denial or no ownership row",
+      "rescue": "Return no-leak denial before evidence store lookup, ContextBuilder content load, debate persistence, quota reservation, job enqueue, run creation, or provider dispatch.",
+      "user_sees": "400/403/404 named no-leak evidence denial with no debate id."
+    },
+    {
+      "codepath": "create child run for participant or judge",
+      "failure": "createRun succeeds but DebateExecutionStore.linkPendingRun fails or worker crashes before link",
+      "exception": "link_conflict|hosted_debate_queue_unavailable|stale claim",
+      "rescue": "On retry, read existing run by debateChildRunKey and link it; if conflicting metadata is found, fail with debate_child_run_link_failed.",
+      "user_sees": "No duplicate participant or judge provider run."
     },
     {
       "codepath": "participant run terminal observation",
       "failure": "run missing, failed, timeout, cancelled, still waiting past debate deadline, or wrong debate ownership metadata",
-      "exception": "DebateServiceError debate_participant_run_missing|debate_participant_run_failed|debate_participant_run_timeout|debate_runtime_approval_expired",
+      "exception": "DebateServiceError debate_participant_run_missing|debate_participant_run_failed|debate_participant_run_timeout|debate_runtime_approval_expired|debate_participant_output_unowned",
       "rescue": "Mark debate failed, append failure judge summary where possible, write failure report, and stop further turns.",
       "user_sees": "Inspect shows failed debate with named error code and final report when artifact write succeeds."
     },
     {
-      "codepath": "extractParticipantOutput",
-      "failure": "runtime.output is missing, blank after trim, or exceeds byte cap",
-      "exception": "DebateServiceError debate_participant_output_missing|debate_participant_output_empty|debate_participant_output_too_large",
-      "rescue": "Do not create a message; fail the debate visibly and write a failure report where possible.",
-      "user_sees": "No fabricated participant message; inspect shows named output error."
+      "codepath": "late participant output",
+      "failure": "provider run completes after debate already terminalized",
+      "exception": "terminal debate status check",
+      "rescue": "Do not route a message or reopen debate; optionally append redacted late-output audit/event with no prompt or provider body.",
+      "user_sees": "Debate remains terminal with original stop reason."
     },
     {
       "codepath": "model judge parser",
-      "failure": "live judge output is missing, empty, invalid JSON, lacks required summary/disagreement fields, or exceeds byte cap",
-      "exception": "DebateServiceError debate_judge_output_missing|debate_judge_output_empty|debate_judge_output_invalid|debate_judge_output_too_large",
-      "rescue": "Fail judging without storing a misleading successful judge result; write failure report where possible.",
+      "failure": "live judge output is missing, empty, overlarge, invalid JSON, or lacks required summary/disagreement fields",
+      "exception": "DebateServiceError debate_judge_output_missing|debate_judge_output_empty|debate_judge_output_too_large|debate_judge_output_invalid",
+      "rescue": "Check byte length before JSON.parse, fail judging without storing a misleading successful judge result, and write failure report where possible.",
       "user_sees": "Named judge error and failure summary instead of no_consensus success."
-    },
-    {
-      "codepath": "writeFinalReport",
-      "failure": "artifact content write fails",
-      "exception": "Error from artifactContent.writeText",
-      "rescue": "For successful debates fail with hosted_debate_artifact_write_failed; for already failing debates preserve metadata-only failure report if configured.",
-      "user_sees": "500/503 named artifact error or failed debate with contentStored false."
     }
   ],
   "observability": {
     "logs": [
       "info debate.create.accepted debateId placementSummary realParticipantCount judgeMode",
       "warn debate.create.denied reasonCode hasRealParticipant hasLiveJudge",
-      "info debate.participant.run.created debateId participantId runId runtimeMode placement round phase promptBytes",
-      "warn debate.participant.output.rejected debateId runId reasonCode outputBytes",
+      "info debate.participant.run.linked debateId participantId runId childRunKey reused",
+      "warn debate.participant.output.late debateId runId status",
       "info debate.judge.run.created debateId runId judgeMode runtimeMode promptBytes",
       "warn debate.judge.output.rejected debateId runId reasonCode outputBytes",
       "info debate.report.written debateId artifactId contentStored"
@@ -494,10 +647,10 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "expect": "status no_consensus, fake run ids, message ids, debate.judge.summary, and final report artifact"
     },
     {
-      "name": "missing participant opt-in has no side effects",
+      "name": "hosted evidence denied before lookup",
       "lens": "error_path",
-      "given": "codex.exec_json participant without realRuntimeOptIn",
-      "expect": "debate_real_participant_opt_in_required and zero debates/runs/messages/events/artifacts/jobs"
+      "given": "hosted create with evidence id unknown and evidence id owned by another tenant in separate cases",
+      "expect": "same no-leak denial and zero evidence store lookups, content loads, debates, runs, messages, events, artifacts, jobs, quota reservations, and provider calls"
     },
     {
       "name": "real wait fails before provider dispatch",
@@ -506,28 +659,22 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "expect": "debate_wait_real_runtime_unsupported and no child runs"
     },
     {
-      "name": "unsupported runtime matrix fails closed",
-      "lens": "edge_unsupported_runtime",
-      "given": "codex.interactive, agentfield.async_rest, generic_http.async_rest, cursor, browser, repo, process, or pty runtimeMode",
-      "expect": "debate_runtime_unsupported or specific bridge-unshipped code before queue/provider side effects"
+      "name": "stale claim after run create reuses child run",
+      "lens": "error_path",
+      "given": "participant createRun succeeds, pending job update fails, and the worker later recovers the stale claim",
+      "expect": "retry finds existing run by debateChildRunKey, links it, and total child run count remains one"
     },
     {
       "name": "one normal run per participant turn",
       "lens": "integration",
       "given": "async debate job advanced through one round",
-      "expect": "each participant turn has a unique run id and metadata debateRunKind participant_turn with round and phase"
+      "expect": "each participant turn has a unique run id and metadata debateRunKind participant_turn with round, phase, participantId, and debateChildRunKey"
     },
     {
-      "name": "participant output errors",
-      "lens": "error_path",
-      "given": "terminal child run with no runtime.output, blank text, and overlarge text in separate cases",
-      "expect": "debate_participant_output_missing, debate_participant_output_empty, and debate_participant_output_too_large respectively"
-    },
-    {
-      "name": "approval wait expires by debate deadline",
-      "lens": "error_path",
-      "given": "hosted Claude/OpenCode child run remains waiting_for_approval past maxDurationSeconds",
-      "expect": "debate_runtime_approval_expired and no additional participant turns"
+      "name": "late provider output does not reopen terminal debate",
+      "lens": "edge_late_output",
+      "given": "debate already failed or completed before child run terminal runtime.output appears",
+      "expect": "no routed message, no status reopen, and optional late-output event/audit only"
     },
     {
       "name": "deterministic judge default",
@@ -542,15 +689,15 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "expect": "debate_judge_live_spend_unconfirmed before judge run creation"
     },
     {
-      "name": "live judge fake-provider success",
-      "lens": "happy",
-      "given": "model judge test double returns bounded JSON with summary, disagreementSummary, consensus, winner none",
-      "expect": "judge object parsed, debate.judge.summary appended, final report metadata includes judgeRunId"
+      "name": "judge parser rejects overlarge before parse",
+      "lens": "error_path",
+      "given": "judge run runtime.output larger than cap and not valid JSON",
+      "expect": "debate_judge_output_too_large without invoking JSON.parse"
     },
     {
       "name": "invalid judge output fails visibly",
       "lens": "error_path",
-      "given": "judge run runtime.output is blank, invalid JSON, missing summary, and overlarge in separate cases",
+      "given": "judge run runtime.output is blank, invalid JSON, or missing summary in separate cases",
       "expect": "named judge output errors without successful judge result"
     }
   ],
@@ -564,40 +711,44 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       {
         "name": "DebateService.processExecutionJob",
         "kind": "function",
-        "signature": "processExecutionJob(job: DebateExecutionJob) => Promise<{ action: 'complete' | 'requeue' | 'fail'; reasonCode?: string; nextAttemptAt?: string }>"
+        "signature": "processExecutionJob(job: DebateExecutionJob) => Promise<{ action: complete|requeue|fail; reasonCode?: string; nextAttemptAt?: string; quotaFinalization?: DebateQuotaFinalization }>"
       },
       {
-        "name": "normalizeDebateRuntime",
-        "kind": "function",
-        "signature": "normalizeDebateRuntime(participant, index, options) => DebateParticipantRuntimeConfig"
+        "name": "DebateJudgeRunner",
+        "kind": "class",
+        "signature": "runDeterministic(input) => DebateJudge; parseModelJudgeOutput(text, limits) => DebateJudge | DebateJudgeOutputError"
       }
     ],
     "imports_from_other_tasks": [
       {
         "from_task": "P23-T1-contracts-openapi-boundary",
         "name": "debate create contract additions",
-        "signature": "CreateDebateRequest accepts participant placement/realRuntimeOptIn and judgeConfig; debateSchema remains output-compatible"
+        "signature": "CreateDebateRequest accepts participant placement/realRuntimeOptIn/evidenceIds and judgeConfig"
       },
       {
-        "from_task": "P23-T2-postgres-debate-durability",
-        "name": "DebateExecutionStore",
-        "signature": "interface DebateExecutionStore { enqueue(input) => Promise<DebateExecutionJob>; claim(options?) => Promise<ClaimedDebateExecutionJob | undefined>; release(jobId, update) => Promise<void>; complete(jobId) => Promise<void>; fail(jobId, failure) => Promise<void>; recoverStaleClaims(options?) => Promise<{ recovered:number; exhausted:number; invalid:number }>; stats() => Promise<{ queued:number; claimed:number; failed:number; exhausted:number }> }"
+        "from_task": "P23-T2-postgres-debate-durability-idempotency",
+        "name": "DebateExecutionStore and RunStore child lookup",
+        "signature": "linkPendingRun/findPendingRunByKey/findByDebateChildRunKey support idempotent child run creation"
+      },
+      {
+        "from_task": "P23-T3-core-debate-runtime-output",
+        "name": "runtime matrix and output helpers",
+        "signature": "normalizeDebateRuntime/buildDebateChildRunKey/extractDebateRuntimeOutput"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
       "packages/core/src/services/debate-service.ts",
-      "packages/core/src/services/debate-runtime-matrix.ts",
       "packages/core/src/services/debate-judge-runner.ts"
     ]
   }
 }
 ```
 
-### Task P23-T4-rest-debate-hosted-boundary
+### Task P23-T5-rest-debate-hosted-boundary
 
 ```json
 {
-  "id": "P23-T4-rest-debate-hosted-boundary",
+  "id": "P23-T5-rest-debate-hosted-boundary",
   "title": "Secure existing debate REST routes for hosted mode",
   "files": [
     "packages/protocol-rest/src/debate-routes.ts",
@@ -607,8 +758,8 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
   ],
   "dependencies": [
     "P23-T1-contracts-openapi-boundary",
-    "P23-T2-postgres-debate-durability",
-    "P23-T3-core-debate-runtime-judge"
+    "P23-T2-postgres-debate-durability-idempotency",
+    "P23-T4-core-debate-orchestration-judge"
   ],
   "context_files": [
     "docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md",
@@ -619,15 +770,17 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "packages/protocol-rest/test/hosted-tool-routes.test.ts",
     "packages/core/src/services/control-plane-service.ts"
   ],
-  "instructions": "Keep the exact public debate route family and add hosted semantics around it. Add hosted auth hook rules for `POST /debates` requiring `runs:write`, and `GET /debates/:id` plus `GET /debates/:id/events` requiring `runs:read`. Extend DebateRouteDependencies with optional controlPlane and debate execution store/enqueue support as needed by Task T3. When controlPlane is present, require hosted auth context before create/inspect/events. For inspect and events, authorize `resourceType: 'debate'` before checking the debate store so tenant mismatch cannot reveal existence. For create, reject ownership override fields such as accountId, tenantId, projectId, userId, apiKeyId at top level or inside participant metadata before service side effects. Pass auth/requestId into DebateService.create. Async hosted create must enqueue through the durable debate job store, not `queueMicrotask`; local/no-job-store behavior may retain existing microtask behavior. Expand sendFromServiceError to map R24 named debate codes to HTTP responses through Task T1 mapping, without falling back to generic internal_error for expected store, queue, participant, judge, quota, auth, and spend states.",
+  "instructions": "Keep the exact public debate route family and add hosted semantics around it. Add hosted auth hook rules for POST /debates requiring runs:write, and GET /debates/:id plus GET /debates/:id/events requiring runs:read. Extend DebateRouteDependencies with exact fields: service: DebateService; controlPlane?: ControlPlaneService; debateJobs?: DebateExecutionStore; requireHostedAuth?: boolean; routeMode?: local|hosted; getAuthContext(request): AuthContext|undefined; authorizeDebateRead(auth, debateId, requestId): Promise<AuthDecision>; enqueueDebateJob(debateId, auth, requestId): Promise<DebateExecutionJob>; mapServiceError(error): HttpErrorResponse. The route owns request parsing, auth scope checks, ownership override rejection, wait-mode validation at the HTTP boundary, no-leak read authorization before store-backed service reads, durable enqueue delegation, SSE stream authorization, strict SSE debateId filtering, and standard error envelope mapping. For create, reject ownership override fields such as accountId, tenantId, projectId, userId, and apiKeyId at top level or inside participant metadata before service side effects. Pass auth/requestId into DebateService.create. Hosted create must rely on DebateService evidence preauthorization and must not perform evidence store or content reads in the route. Async hosted create must enqueue through the durable debate job store; local no-job-store behavior may retain the existing microtask behavior only outside hosted mode.",
   "acceptance": [
     "No public route path is added beyond the existing three debate routes.",
     "Hosted auth requires runs:write for create and runs:read for inspect/events.",
-    "Inspect/events perform ownership authorization before store lookup and return no-leak denial for tenant mismatch.",
+    "Inspect and events perform ownership authorization before service/store reads and return no-leak denial for tenant mismatch.",
+    "SSE authorizes once at stream start and filters emitted events strictly by debateId so run or other debate events cannot leak.",
+    "Hosted create passes auth to DebateService so evidence ids are authorized before evidence lookup/content loading.",
     "Hosted async create uses durable debate job enqueue and never local microtask execution.",
-    "Fake `wait=1` remains supported and returns 201 with `{ debate, events, finalReportArtifact }`.",
-    "Real participant or live judge `wait=1` returns `debate_wait_real_runtime_unsupported` before enqueue/provider side effects.",
-    "R24 service errors map to named REST errors, not `internal_error`, except truly unexpected exceptions."
+    "Fake wait=1 remains supported and returns 201 with debate, events, and finalReportArtifact.",
+    "Real participant or live judge wait=1 returns debate_wait_real_runtime_unsupported before enqueue/provider side effects.",
+    "R24 service errors map to named REST errors, not internal_error, except truly unexpected exceptions."
   ],
   "checks": [
     "pnpm --filter @switchyard/protocol-rest test -- debate-routes",
@@ -650,18 +803,18 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "user_sees": "No cross-tenant existence leak."
     },
     {
+      "codepath": "GET /debates/:id/events SSE",
+      "failure": "event bus emits run events or a different debate id after stream authorization",
+      "exception": "event filter mismatch",
+      "rescue": "Drop the event and log low-cardinality sse_filtered counter.",
+      "user_sees": "Only events for the authorized debate id appear on the stream."
+    },
+    {
       "codepath": "async create enqueue",
       "failure": "durable debate job store unavailable",
       "exception": "DebateExecutionStoreError hosted_debate_queue_unavailable",
       "rescue": "Fail create before provider dispatch and release quota via service admission hooks.",
       "user_sees": "503 hosted_debate_queue_unavailable."
-    },
-    {
-      "codepath": "sendFromServiceError",
-      "failure": "expected R24 DebateServiceError not whitelisted",
-      "exception": "unhandled service error",
-      "rescue": "Map through sendHttpError using Task T1 status map and preserve details.",
-      "user_sees": "Named R24 code in standard error envelope."
     }
   ],
   "observability": {
@@ -669,6 +822,7 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "info debate.route.create.accepted routeId debates.create wait hostedAuth present",
       "warn debate.route.denied routeId reasonCode requestId",
       "warn debate.route.tenant_denied routeId debateId reasonCode",
+      "warn debate.route.sse_filtered debateId eventId eventDebateId",
       "error debate.route.enqueue_failed debateId reasonCode"
     ],
     "success_metric": "hosted create returns 202 with debate id and one durable debate job, while fake wait returns 201",
@@ -694,22 +848,28 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "expect": "tenant_access_denied or no-leak not-found before debate/messages/events/artifacts are fetched"
     },
     {
+      "name": "hosted create evidence no-leak no side effects",
+      "lens": "error_path",
+      "given": "POST /debates in hosted mode with unknown evidence id and unowned evidence id cases",
+      "expect": "same no-leak denial, DebateService evidence guard invoked, and zero debate/run/job/quota/provider side effects"
+    },
+    {
+      "name": "placement required routed response",
+      "lens": "error_path",
+      "given": "POST /debates with opencode.acp participant, realRuntimeOptIn true, and omitted or local placement",
+      "expect": "debate_participant_placement_required and no durable job"
+    },
+    {
       "name": "durable enqueue instead of microtask",
       "lens": "integration",
       "given": "hosted async fake debate create with job store spy",
-      "expect": "one job enqueued and DebateService.execute is not called by queueMicrotask"
+      "expect": "one job enqueued and local queueMicrotask execution is not called"
     },
     {
-      "name": "fake wait remains synchronous",
-      "lens": "happy",
-      "given": "POST /debates?wait=1 fake default participants",
-      "expect": "201 response includes debate, events, and finalReportArtifact"
-    },
-    {
-      "name": "real wait rejected in route response",
-      "lens": "error_path",
-      "given": "POST /debates?wait=1 with opt-in opencode.acp participant",
-      "expect": "debate_wait_real_runtime_unsupported and no durable job"
+      "name": "SSE start auth and strict filtering",
+      "lens": "integration",
+      "given": "authorized stream for debate A while event bus emits debate A, debate B, and run-only events",
+      "expect": "only debate A events are sent"
     },
     {
       "name": "no forbidden debate routes",
@@ -723,7 +883,7 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       {
         "name": "registerDebateRoutes",
         "kind": "function",
-        "signature": "registerDebateRoutes(app, deps: DebateRouteDependencies & { controlPlane?: ControlPlaneService; debateJobs?: DebateExecutionStore }) => void"
+        "signature": "registerDebateRoutes(app, deps: { service: DebateService; controlPlane?: ControlPlaneService; debateJobs?: DebateExecutionStore; requireHostedAuth?: boolean; routeMode?: local|hosted; getAuthContext(request): AuthContext|undefined; authorizeDebateRead(auth, debateId, requestId): Promise<AuthDecision>; enqueueDebateJob(debateId, auth, requestId): Promise<DebateExecutionJob>; mapServiceError(error): HttpErrorResponse }) => void"
       },
       {
         "name": "hosted debate auth rules",
@@ -738,14 +898,14 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
         "signature": "httpErrorCodeSchema includes debate_* and hosted_debate_* codes from the spec"
       },
       {
-        "from_task": "P23-T2-postgres-debate-durability",
+        "from_task": "P23-T2-postgres-debate-durability-idempotency",
         "name": "DebateExecutionStore",
-        "signature": "interface DebateExecutionStore { enqueue(input) => Promise<DebateExecutionJob>; claim(options?) => Promise<ClaimedDebateExecutionJob | undefined>; release(jobId, update) => Promise<void>; complete(jobId) => Promise<void>; fail(jobId, failure) => Promise<void>; recoverStaleClaims(options?) => Promise<{ recovered:number; exhausted:number; invalid:number }>; stats() => Promise<{ queued:number; claimed:number; failed:number; exhausted:number }> }"
+        "signature": "durable enqueue, claim, linkPendingRun, and stale recovery contract"
       },
       {
-        "from_task": "P23-T3-core-debate-runtime-judge",
+        "from_task": "P23-T4-core-debate-orchestration-judge",
         "name": "DebateService.create",
-        "signature": "create(input: unknown, options?: { wait?: boolean; auth?: AuthContext; requestId?: string }) => Promise<{ debate: Debate; events?: SwitchyardEvent[]; finalReportArtifact?: Artifact | null }>"
+        "signature": "create(input, { wait, auth, requestId }) performs evidence authorization and admission before side effects"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
@@ -756,46 +916,43 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
 }
 ```
 
-### Task P23-T5-hosted-server-debate-wiring
+### Task P23-T6-hosted-server-debate-wiring
 
 ```json
 {
-  "id": "P23-T5-hosted-server-debate-wiring",
-  "title": "Wire hosted server debate dependencies and readiness",
+  "id": "P23-T6-hosted-server-debate-wiring",
+  "title": "Wire hosted server debate routes, stores, ownership, quota, and audit",
   "files": [
     "apps/server/src/app.ts",
-    "apps/server/src/readiness.ts",
-    "apps/server/test/hosted-server.test.ts",
-    "apps/server/test/production-readiness.test.ts"
+    "apps/server/test/hosted-server.test.ts"
   ],
   "dependencies": [
     "P23-T1-contracts-openapi-boundary",
-    "P23-T2-postgres-debate-durability",
-    "P23-T3-core-debate-runtime-judge",
-    "P23-T4-rest-debate-hosted-boundary"
+    "P23-T2-postgres-debate-durability-idempotency",
+    "P23-T4-core-debate-orchestration-judge",
+    "P23-T5-rest-debate-hosted-boundary"
   ],
   "context_files": [
     "docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md",
     "apps/server/src/app.ts",
-    "apps/server/src/readiness.ts",
     "apps/server/test/hosted-server.test.ts",
-    "apps/server/test/production-readiness.test.ts",
     "packages/core/src/services/hosted-run-service.ts",
-    "packages/protocol-rest/src/debate-routes.ts"
+    "packages/core/src/services/control-plane-service.ts",
+    "packages/protocol-rest/src/debate-routes.ts",
+    "packages/storage/src/postgres/control-plane-store.ts"
   ],
-  "instructions": "Register existing debate routes in hosted server mode using the stores and services from prior tasks. Instantiate PostgresDebateStore, PostgresMessageStore, PostgresEvidenceStore, PostgresDebateExecutionStore, MessageRouter, ContextBuilder, and DebateService using the same runs/events/artifacts/eventBus/registry/hostedRuns/controlPlane dependencies already present in app.ts. Do not instantiate real provider adapters in the server; keep the server adapter map fake-only. Implement debate admission hooks in app.ts that reserve debates_per_hour and active_debates quotas when configured, attach ownership for debate rows and derived events/messages/artifacts/runs where available, record redacted audit events for admission denial, admission allow, participant dispatch, judge dispatch, terminal success/failure, and denied live spend, and release/finalize debate quota by outcome. Register `registerDebateRoutes` after hosted auth hooks so `request.hostedAuth` is available. Extend `/ready` and `probeServerReadiness` with `hostedDebate` diagnostics for debate store, message store, evidence store, event store, artifact store/content, debate execution outbox, run queue, control-plane ownership, quota, audit, route auth, hosted runtime gate, and R23 bridge readiness when the allowlist includes Claude/OpenCode. Readiness must fail closed with named hosted_debate_* codes when any enabled dependency is missing.",
+  "instructions": "Register existing debate routes in hosted server mode using stores and services from prior tasks. Instantiate PostgresDebateStore, PostgresMessageStore, PostgresEvidenceStore, PostgresDebateExecutionStore, MessageRouter, ContextBuilder, and DebateService using the existing runs/events/artifacts/eventBus/registry/hostedRuns/controlPlane dependencies in app.ts. Do not instantiate real provider adapters in the server; keep the server adapter map fake-only. Implement debate admission hooks in app.ts that reserve debates_per_hour and active_debates quotas when configured, attach ownership for the debate row before returning the id, attach ownership for the debate job before enqueue success is disclosed, attach ownership for child runs before their ids are surfaced in debate inspect, attach ownership for routed messages/events before they are visible, attach ownership for final report artifacts before artifact id/path disclosure, record redacted audit events for admission denial, admission allow, participant dispatch, judge dispatch, terminal success/failure, ownership attach failure, and denied live spend, and finalize active_debates quota by outcome. Ownership attach failure on debate, child run, message, event, artifact, or debate job must fail closed with hosted_debate_ownership_attach_failed or a no-leak denial before the derived resource id becomes visible. Register registerDebateRoutes after hosted auth hooks so request.hostedAuth is available.",
   "acceptance": [
-    "Hosted server registers `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events` only.",
-    "Hosted fake debate create with API key auth persists debate state and enqueues a durable debate job.",
-    "Hosted fake `wait=1` remains no-spend and returns completed debate, events, and finalReportArtifact in test mode only when it can execute without provider calls.",
+    "Hosted server registers POST /debates, GET /debates/:id, and GET /debates/:id/events only.",
+    "Hosted fake debate create with API key auth persists debate state and enqueues an owned durable debate job.",
+    "Hosted fake wait=1 remains no-spend and returns completed debate, events, and finalReportArtifact in test mode only when it can execute without provider calls.",
     "Server app never imports or constructs real provider adapters for debate participant or judge execution.",
-    "Debate route auth, ownership, quota, audit, and resource attachment are wired through the existing control plane.",
-    "Readiness reports hosted debate dependency checks and fails closed when store, queue, auth, quota, audit, object-store, hosted runtime gate, or bridge readiness is unavailable.",
+    "Debate route auth, evidence auth delegation, ownership, quota, audit, and resource attachment are wired through the existing control plane.",
+    "Ownership attach failures for child run, message, event, artifact, and debate job are directly tested before disclosure.",
     "Tenant mismatch on inspect/events does not leak debate existence through hosted server tests."
   ],
   "checks": [
     "pnpm --filter @switchyard/server test -- hosted-server",
-    "pnpm --filter @switchyard/server test -- production-readiness",
     "pnpm --filter @switchyard/server typecheck"
   ],
   "error_rescue_map": [
@@ -803,8 +960,8 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "codepath": "createServerApp debate store construction",
       "failure": "hosted debate enabled without Postgres debate store in staging/production",
       "exception": "missing postgres handle or store construction failure",
-      "rescue": "Expose hosted_debate_store_unavailable in readiness and fail route admission before create.",
-      "user_sees": "GET /ready 503 hosted_debate_store_unavailable; POST /debates 503 before provider work."
+      "rescue": "Fail route admission before create and leave readiness to T7.",
+      "user_sees": "POST /debates 503 hosted_debate_store_unavailable before provider work."
     },
     {
       "codepath": "debate quota reserve",
@@ -814,18 +971,18 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "user_sees": "429 hosted_debate_quota_exceeded or quota_exceeded."
     },
     {
-      "codepath": "debate ownership attachment",
-      "failure": "debate, child run, event, message, artifact, or job ownership cannot be attached",
+      "codepath": "derived debate ownership attachment",
+      "failure": "child run, event, message, artifact, or job ownership cannot be attached",
       "exception": "ownership attach returns not ok or throws",
-      "rescue": "Fail admission or terminalize debate with hosted_debate_ownership_attach_failed and record error audit.",
+      "rescue": "Do not disclose the derived id; fail admission or terminalize debate with hosted_debate_ownership_attach_failed and record error audit.",
       "user_sees": "Named ownership error with no cross-tenant data disclosure."
     },
     {
-      "codepath": "readiness hostedDebate check",
-      "failure": "R23 bridge dependencies missing while allowlist includes claude_code.sdk or opencode.acp",
-      "exception": "bridge readiness first failure",
-      "rescue": "Surface hosted_runtime_bridge_store_unavailable or worker unavailable code in hostedDebate diagnostics.",
-      "user_sees": "GET /ready 503 with hostedDebate and hostedRuntimeBridge named codes."
+      "codepath": "terminal quota finalization",
+      "failure": "finalize active_debates quota fails after terminal outcome",
+      "exception": "ControlPlane quota finalize error",
+      "rescue": "Record redacted audit and expose named server/worker metric while preserving terminal debate state.",
+      "user_sees": "Debate terminal result remains stable; readiness/canary can report quota finalization issue."
     }
   ],
   "observability": {
@@ -834,10 +991,10 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "warn hosted.debate.admission.denied reasonCode runtimeModes judgeMode",
       "info hosted.debate.job.enqueued debateId jobId",
       "warn hosted.debate.ownership.attach_failed resourceType resourceId reasonCode",
-      "info readiness.hosted_debate status code"
+      "info hosted.debate.quota.finalized debateId outcome"
     ],
-    "success_metric": "hostedDebate readiness check ok and hosted fake debate produces durable debate row plus job row",
-    "failure_metric": "hostedDebate readiness check fails with hosted_debate_store_unavailable, hosted_debate_queue_unavailable, hosted_debate_audit_unavailable, auth_required, quota_store_unavailable, object_store_unavailable, or hosted_runtime_bridge_store_unavailable"
+    "success_metric": "hosted fake debate produces owned debate row, job row, child resources, audit entries, and quota finalization",
+    "failure_metric": "hosted_debate_ownership_attach_failed, hosted_debate_quota_exceeded, hosted_debate_audit_unavailable, or quota finalization failure appears before cross-tenant disclosure"
   },
   "test_cases": [
     {
@@ -856,7 +1013,7 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "name": "hosted fake async persists and enqueues",
       "lens": "happy",
       "given": "POST /debates with fake participants and runs:write key",
-      "expect": "202, durable debate row, owned debate resource, durable debate job"
+      "expect": "202, durable debate row, owned debate resource, durable owned debate job"
     },
     {
       "name": "quota denial is audited",
@@ -865,16 +1022,140 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "expect": "429 hosted_debate_quota_exceeded and redacted denial audit payload"
     },
     {
+      "name": "derived ownership attach failures do not disclose ids",
+      "lens": "error_path",
+      "given": "control plane attach fails separately for child run, message, event, artifact, and debate job",
+      "expect": "hosted_debate_ownership_attach_failed or no-leak denial before that resource id appears in response, event stream, inspect, or artifact output"
+    },
+    {
       "name": "server source does not import provider adapters for debate",
       "lens": "integration",
       "given": "apps/server/src/app.ts source",
       "expect": "no imports from @switchyard/adapters and only FakeRuntimeAdapter is constructed"
+    }
+  ],
+  "integration_contracts": {
+    "exports": [
+      {
+        "name": "hosted debate app wiring",
+        "kind": "function",
+        "signature": "createServerApp(config) registers debate routes with DebateService, Postgres stores, controlPlane, hostedRuns, registry, eventBus, and debateJobs"
+      },
+      {
+        "name": "hosted debate ownership hooks",
+        "kind": "function",
+        "signature": "attachDebateOwnership(resourceType: debate|debate_job|run|message|event|artifact, resourceId, auth) => Promise<void> throws hosted_debate_ownership_attach_failed before disclosure"
+      }
+    ],
+    "imports_from_other_tasks": [
+      {
+        "from_task": "P23-T2-postgres-debate-durability-idempotency",
+        "name": "Postgres debate stores and DebateExecutionStore",
+        "signature": "durable stores and job outbox constructors"
+      },
+      {
+        "from_task": "P23-T4-core-debate-orchestration-judge",
+        "name": "DebateService.create/processExecutionJob",
+        "signature": "service exposes admission and quota finalization outputs"
+      },
+      {
+        "from_task": "P23-T5-rest-debate-hosted-boundary",
+        "name": "registerDebateRoutes",
+        "signature": "route dependency contract with auth, enqueue, and error mapping fields"
+      }
+    ],
+    "file_paths_consumed_by_other_tasks": [
+      "apps/server/src/app.ts"
+    ]
+  }
+}
+```
+
+### Task P23-T7-hosted-debate-readiness
+
+```json
+{
+  "id": "P23-T7-hosted-debate-readiness",
+  "title": "Add hosted debate readiness diagnostics",
+  "files": [
+    "apps/server/src/readiness.ts",
+    "apps/server/test/production-readiness.test.ts"
+  ],
+  "dependencies": [
+    "P23-T1-contracts-openapi-boundary",
+    "P23-T2-postgres-debate-durability-idempotency",
+    "P23-T6-hosted-server-debate-wiring"
+  ],
+  "context_files": [
+    "docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md",
+    "apps/server/src/readiness.ts",
+    "apps/server/test/production-readiness.test.ts",
+    "packages/core/src/services/hosted-runtime-catalog.ts",
+    "packages/storage/src/postgres/control-plane-store.ts",
+    "packages/protocol-rest/src/hosted-auth.ts"
+  ],
+  "instructions": "Extend /ready and probeServerReadiness with hostedDebate diagnostics independent from route wiring. Check debate store, message store, evidence store, event store, artifact metadata store, artifact content store, debate execution outbox, run queue, control-plane ownership, quota, audit, route auth configuration, hosted runtime allowlist, provider activation gates, unowned debate-derived resource counts, and R23 bridge readiness when the allowlist includes Claude or OpenCode. Fail closed with named hosted_debate_* or existing hosted_runtime_bridge_* codes when any enabled dependency is missing. Diagnostics must be low-cardinality and must not include prompts, provider output, evidence content, API keys, tenant ids, or raw resource ids.",
+  "acceptance": [
+    "Readiness reports hostedDebate dependency checks when hosted debate is enabled.",
+    "Readiness fails closed when store, queue, auth, quota, audit, object-store, runtime policy, unowned resources, or bridge readiness is unavailable.",
+    "Readiness success does not require live provider spend.",
+    "Diagnostics are low-cardinality and redacted.",
+    "This task owns readiness only; server route/store/control-plane wiring remains in T6."
+  ],
+  "checks": [
+    "pnpm --filter @switchyard/server test -- production-readiness",
+    "pnpm --filter @switchyard/server typecheck"
+  ],
+  "error_rescue_map": [
+    {
+      "codepath": "readiness hostedDebate store checks",
+      "failure": "debate store or debate outbox unavailable",
+      "exception": "probe failure",
+      "rescue": "Return hosted_debate_store_unavailable or hosted_debate_queue_unavailable and skip provider probes.",
+      "user_sees": "GET /ready 503 with hostedDebate named code."
+    },
+    {
+      "codepath": "readiness ownership checks",
+      "failure": "unowned debate-derived resources exist",
+      "exception": "unowned resource count > 0",
+      "rescue": "Return unowned_resources_present with resource-type counts only.",
+      "user_sees": "GET /ready 503 with low-cardinality ownership diagnostics."
+    },
+    {
+      "codepath": "readiness bridge dependency",
+      "failure": "allowlist includes claude_code.sdk or opencode.acp and bridge store/worker is missing",
+      "exception": "bridge readiness false",
+      "rescue": "Surface hosted_runtime_bridge_store_unavailable or hosted_runtime_bridge_worker_unavailable in hostedDebate diagnostics.",
+      "user_sees": "GET /ready 503 with hostedDebate and bridge named codes."
+    }
+  ],
+  "observability": {
+    "logs": [
+      "info readiness.hosted_debate status code",
+      "warn readiness.hosted_debate.unowned resourceType count",
+      "warn readiness.hosted_debate.bridge_unavailable code"
+    ],
+    "success_metric": "hostedDebate readiness check ok with fake/no-spend posture and all dependencies present",
+    "failure_metric": "hostedDebate readiness check fails with named dependency code and redacted diagnostics"
+  },
+  "test_cases": [
+    {
+      "name": "readiness all debate dependencies ready",
+      "lens": "happy",
+      "given": "staging/production readiness with all debate dependencies, no unowned rows, fake default allowlist",
+      "expect": "hostedDebate ok true and no live provider calls"
     },
     {
       "name": "readiness missing debate store",
       "lens": "error_path",
       "given": "staging/production readiness without Postgres debate store dependency",
       "expect": "hostedDebate check fails hosted_debate_store_unavailable"
+    },
+    {
+      "name": "readiness unowned derived resource",
+      "lens": "error_path",
+      "given": "unowned child run, message, event, artifact, or debate job count is nonzero",
+      "expect": "hostedDebate check fails unowned_resources_present with type counts only"
     },
     {
       "name": "readiness bridge dependency",
@@ -886,11 +1167,6 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
   "integration_contracts": {
     "exports": [
       {
-        "name": "hosted debate app wiring",
-        "kind": "function",
-        "signature": "createServerApp(config) registers debate routes with DebateService, Postgres stores, controlPlane, hostedRuns, registry, eventBus, and debateJobs"
-      },
-      {
         "name": "hostedDebate readiness check",
         "kind": "constant",
         "signature": "probeServerReadiness returns checks.hostedDebate with low-cardinality diagnostics and named codes"
@@ -898,44 +1174,28 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     ],
     "imports_from_other_tasks": [
       {
-        "from_task": "P23-T2-postgres-debate-durability",
-        "name": "PostgresDebateStore",
-        "signature": "new PostgresDebateStore(handle?: PostgresDatabaseHandle) implements DebateStore"
+        "from_task": "P23-T2-postgres-debate-durability-idempotency",
+        "name": "control-plane unowned resource counts",
+        "signature": "counts include debate, job, child run, message, event, evidence, and artifact resources"
       },
       {
-        "from_task": "P23-T2-postgres-debate-durability",
-        "name": "PostgresMessageStore",
-        "signature": "new PostgresMessageStore(handle?: PostgresDatabaseHandle) implements MessageStore"
-      },
-      {
-        "from_task": "P23-T2-postgres-debate-durability",
-        "name": "PostgresEvidenceStore",
-        "signature": "new PostgresEvidenceStore(handle?: PostgresDatabaseHandle) implements EvidenceStore"
-      },
-      {
-        "from_task": "P23-T3-core-debate-runtime-judge",
-        "name": "DebateService.create",
-        "signature": "create(input: unknown, options?: { wait?: boolean; auth?: AuthContext; requestId?: string }) => Promise<{ debate: Debate; events?: SwitchyardEvent[]; finalReportArtifact?: Artifact | null }>"
-      },
-      {
-        "from_task": "P23-T4-rest-debate-hosted-boundary",
-        "name": "registerDebateRoutes",
-        "signature": "registerDebateRoutes(app, deps: DebateRouteDependencies & { controlPlane?: ControlPlaneService; debateJobs?: DebateExecutionStore }) => void"
+        "from_task": "P23-T6-hosted-server-debate-wiring",
+        "name": "hosted debate app wiring",
+        "signature": "route/store/control-plane dependencies exist for readiness probing"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
-      "apps/server/src/app.ts",
       "apps/server/src/readiness.ts"
     ]
   }
 }
 ```
 
-### Task P23-T6-worker-debate-job-execution
+### Task P23-T8-worker-debate-job-execution
 
 ```json
 {
-  "id": "P23-T6-worker-debate-job-execution",
+  "id": "P23-T8-worker-debate-job-execution",
   "title": "Teach hosted worker to advance debate jobs",
   "files": [
     "apps/worker/src/worker.ts",
@@ -944,9 +1204,10 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "apps/worker/test/production-worker-readiness.test.ts"
   ],
   "dependencies": [
-    "P23-T2-postgres-debate-durability",
-    "P23-T3-core-debate-runtime-judge",
-    "P23-T5-hosted-server-debate-wiring"
+    "P23-T2-postgres-debate-durability-idempotency",
+    "P23-T4-core-debate-orchestration-judge",
+    "P23-T6-hosted-server-debate-wiring",
+    "P23-T7-hosted-debate-readiness"
   ],
   "context_files": [
     "docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md",
@@ -955,14 +1216,18 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "apps/worker/src/hosted-runtime-adapters.ts",
     "apps/worker/test/hosted-worker.test.ts",
     "apps/worker/test/production-worker-readiness.test.ts",
-    "packages/core/src/services/debate-service.ts"
+    "packages/core/src/services/debate-service.ts",
+    "packages/core/src/services/hosted-runtime-bridge-service.ts"
   ],
-  "instructions": "Add debate job processing to the hosted worker without changing provider adapter ownership. Instantiate PostgresDebateStore, PostgresMessageStore, PostgresEvidenceStore, PostgresDebateExecutionStore, MessageRouter, ContextBuilder, and DebateService in worker mode with the worker-owned RuntimeRunnerService and existing run/event/session/artifact stores. Process at most one debate job per tick after hosted runtime bridge and tool jobs, and before ordinary run jobs or after ordinary run jobs only if tests prove no child-run starvation. The selected ordering must prevent a claimed debate job from blocking the same worker from processing child run jobs. On each claim, call DebateService.processExecutionJob, then complete, fail, or release/requeue the job with nextAttemptAt based on the returned action. Recover stale debate claims during claim readiness and mark exhausted claims as terminal debate failures with named hosted_debate_worker_unavailable or worker retry reason. Worker readiness must include debate execution capability when hosted debate is expected: debate job store, claim/release functions, run dispatch, participant output collection, judge runner, artifact writer, object store, and R23 bridge readiness for Claude/OpenCode allowlist modes.",
+  "instructions": "Add debate job processing to the hosted worker without changing provider adapter ownership. Instantiate PostgresDebateStore, PostgresMessageStore, PostgresEvidenceStore, PostgresDebateExecutionStore, MessageRouter, ContextBuilder, and DebateService in worker mode with the worker-owned RuntimeRunnerService and existing run/event/session/artifact stores. Process at most one debate job per tick in an ordering proven by tests to avoid child-run starvation. On each claim, call DebateService.processExecutionJob, then complete, fail, or release/requeue with nextAttemptAt. Recover stale debate claims. If stale recovery finds an existing participant or judge run by DebateChildRunKey, relink it and do not create a duplicate. If a provider run completes after the debate terminalized, do not route output or reopen status. On any terminal success or terminal failure, invoke quota finalization for active_debates exactly once. Worker readiness must include debate execution capability when hosted debate is expected: debate job store, claim/release functions, run dispatch, participant output collection, judge runner, artifact writer, object store, quota finalizer, and R23 bridge readiness for Claude/OpenCode allowlist modes.",
   "acceptance": [
     "Worker tick can claim and advance a hosted fake debate job without live provider calls.",
     "Worker does not block indefinitely waiting for child hosted run completion; pending child runs are observed in later job advances.",
     "Stale debate job claims are recovered or exhausted with named reason codes.",
-    "Worker readiness reports debate capability and fails closed when debate job store, object store, run dispatch, artifact writer, or bridge readiness is missing.",
+    "Stale retry after createRun succeeded but pending-run link failed reuses the existing run and creates no duplicate child run.",
+    "Late provider completion after debate terminalization is ignored or recorded as late without reopening debate state.",
+    "Worker terminal success and terminal failure both finalize active_debates quota exactly once.",
+    "Worker readiness reports debate capability and fails closed when debate job store, object store, run dispatch, artifact writer, quota finalizer, or bridge readiness is missing.",
     "Real provider adapters remain worker-owned through existing hosted runtime adapter construction only.",
     "Default worker tests remain fake/no-spend unless a test injects fake provider adapters."
   ],
@@ -988,16 +1253,23 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     },
     {
       "codepath": "stale debate claim recovery",
-      "failure": "worker crashes after claiming debate job",
+      "failure": "worker crashes after createRun succeeded and before pending-run link persisted",
       "exception": "expired lease",
-      "rescue": "Recover to queued if attempts remain; exhaust and fail debate when attempts are exhausted.",
-      "user_sees": "debate eventually retries or terminalizes with hosted_debate_worker_unavailable."
+      "rescue": "Recover to queued, find existing run by DebateChildRunKey, link it, and continue.",
+      "user_sees": "debate eventually retries without duplicate provider work."
+    },
+    {
+      "codepath": "worker terminal failure",
+      "failure": "debate fails after active_debates quota was reserved",
+      "exception": "terminal failure action",
+      "rescue": "Finalize active_debates quota exactly once and record redacted audit.",
+      "user_sees": "Quota is not leaked by failed debate."
     },
     {
       "codepath": "artifact writer during worker finalization",
       "failure": "object store write fails",
       "exception": "object_store_unavailable|object_store_timeout",
-      "rescue": "Fail job and debate with hosted_debate_artifact_write_failed and redacted diagnostics.",
+      "rescue": "Fail job and debate with hosted_debate_artifact_write_failed and finalize quota.",
       "user_sees": "failed debate with named artifact code."
     }
   ],
@@ -1007,7 +1279,8 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "info worker.debate_job.released workerId jobId debateId nextAttemptAt reasonCode",
       "info worker.debate_job.completed workerId jobId debateId",
       "warn worker.debate_job.failed workerId jobId debateId reasonCode",
-      "warn worker.debate_job.recovered recovered exhausted invalid"
+      "warn worker.debate_job.recovered recovered exhausted invalid",
+      "info worker.debate.quota.finalized debateId outcome"
     ],
     "success_metric": "worker advances fake hosted debate jobs to terminal debate state with final report and no live provider calls",
     "failure_metric": "readiness or job failure uses hosted_debate_queue_unavailable, hosted_debate_worker_unavailable, hosted_debate_artifact_write_failed, or bridge readiness codes"
@@ -1026,28 +1299,28 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
       "expect": "job released with nextAttemptAt, no duplicate run id, debate remains nonterminal"
     },
     {
-      "name": "child run terminal output routes message",
-      "lens": "integration",
-      "given": "pending participant run completed with runtime.output text",
-      "expect": "worker advance creates routed message, appends debate.agent.argument or debate.agent.rebuttal, and moves job stage forward"
+      "name": "stale claim after createRun reuses existing run",
+      "lens": "error_path",
+      "given": "createRun succeeded, pending link failed, claim expired, and retry runs",
+      "expect": "findByDebateChildRunKey returns existing run and total child run count remains one"
     },
     {
-      "name": "stale debate claim recovered",
+      "name": "late child run output ignored",
+      "lens": "edge_late_output",
+      "given": "debate is terminal before pending participant run completes with runtime.output",
+      "expect": "no message routed, no status reopen, optional late-output diagnostic only"
+    },
+    {
+      "name": "worker terminal failure finalizes quota",
       "lens": "error_path",
-      "given": "claimed debate job with expired lease and attempts remaining",
-      "expect": "claim readiness recovery requeues it"
+      "given": "debate job fails due to artifact write or output error after active_debates reserve",
+      "expect": "quota finalizer called once and debate remains terminal failed"
     },
     {
       "name": "stale debate claim exhausted",
       "lens": "error_path",
       "given": "claimed debate job with expired lease at max attempts",
-      "expect": "job exhausted and debate failed with hosted_debate_worker_unavailable"
-    },
-    {
-      "name": "worker readiness debate store missing",
-      "lens": "error_path",
-      "given": "hosted debate expected but debate execution store dependency absent",
-      "expect": "readiness not ok with hosted_debate_queue_unavailable"
+      "expect": "job exhausted, debate failed with hosted_debate_worker_unavailable, and active_debates finalized"
     },
     {
       "name": "bridge readiness required for debate allowlist",
@@ -1071,19 +1344,19 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     ],
     "imports_from_other_tasks": [
       {
-        "from_task": "P23-T2-postgres-debate-durability",
-        "name": "DebateExecutionStore",
-        "signature": "interface DebateExecutionStore { enqueue(input) => Promise<DebateExecutionJob>; claim(options?) => Promise<ClaimedDebateExecutionJob | undefined>; release(jobId, update) => Promise<void>; complete(jobId) => Promise<void>; fail(jobId, failure) => Promise<void>; recoverStaleClaims(options?) => Promise<{ recovered:number; exhausted:number; invalid:number }>; stats() => Promise<{ queued:number; claimed:number; failed:number; exhausted:number }> }"
+        "from_task": "P23-T2-postgres-debate-durability-idempotency",
+        "name": "DebateExecutionStore and RunStore child lookup",
+        "signature": "durable job claim/link and findByDebateChildRunKey"
       },
       {
-        "from_task": "P23-T3-core-debate-runtime-judge",
+        "from_task": "P23-T4-core-debate-orchestration-judge",
         "name": "DebateService.processExecutionJob",
-        "signature": "processExecutionJob(job: DebateExecutionJob) => Promise<{ action: 'complete' | 'requeue' | 'fail'; reasonCode?: string; nextAttemptAt?: string }>"
+        "signature": "processExecutionJob(job) returns action and quotaFinalization metadata"
       },
       {
-        "from_task": "P23-T5-hosted-server-debate-wiring",
+        "from_task": "P23-T7-hosted-debate-readiness",
         "name": "hostedDebate readiness check",
-        "signature": "probeServerReadiness returns checks.hostedDebate with low-cardinality diagnostics and named codes"
+        "signature": "readiness dependency vocabulary and named codes"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
@@ -1094,11 +1367,11 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
 }
 ```
 
-### Task P23-T7-preflight-canary-no-spend
+### Task P23-T9-preflight-canary-no-spend
 
 ```json
 {
-  "id": "P23-T7-preflight-canary-no-spend",
+  "id": "P23-T9-preflight-canary-no-spend",
   "title": "Add no-spend debate preflight and canary gates",
   "files": [
     "scripts/production-preflight.ts",
@@ -1110,9 +1383,10 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
   ],
   "dependencies": [
     "P23-T1-contracts-openapi-boundary",
-    "P23-T4-rest-debate-hosted-boundary",
-    "P23-T5-hosted-server-debate-wiring",
-    "P23-T6-worker-debate-job-execution"
+    "P23-T5-rest-debate-hosted-boundary",
+    "P23-T6-hosted-server-debate-wiring",
+    "P23-T7-hosted-debate-readiness",
+    "P23-T8-worker-debate-job-execution"
   ],
   "context_files": [
     "docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md",
@@ -1123,7 +1397,7 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "deploy/production/manifest.json",
     "apps/server/src/readiness.ts"
   ],
-  "instructions": "Extend production preflight and canary without adding live spend to defaults. Preflight must include hosted debate dependency checks for auth, Postgres schema, debate store, message/evidence stores, event store, artifact store/content, debate execution outbox, run queue, object store, ownership, quota, audit, worker readiness, provider activation gates, and R23 bridge readiness when Claude/OpenCode are allowlisted. Default canary must create a fake hosted debate through `/debates`, poll inspect/events until terminal or timeout, verify participant run ids, event ids, message ids, judge, stop reason, final report artifact metadata, metrics, and audit evidence, and make no provider calls. Add allowed canary paths for `/debates`, `/debates/:id`, and `/debates/:id/events`. Add optional live participant and live judge flags such as `--live-debate-runtimes`, `--live-debate-judge`, and `--confirm-live-provider-spend`. If a live debate flag is supplied without spend confirmation, fail fast with `debate_live_canary_spend_unconfirmed` before any network request that can create provider work. Keep existing live external tool and provider bridge flags intact.",
+  "instructions": "Extend production preflight and canary without adding live spend to defaults. Preflight must include hosted debate dependency checks for auth, Postgres schema, debate store, message/evidence stores, event store, artifact store/content, debate execution outbox, run queue, object store, ownership, quota, audit, worker readiness, provider activation gates, and R23 bridge readiness when Claude/OpenCode are allowlisted. Default canary must create a fake hosted debate through /debates, poll inspect/events until terminal or timeout, verify participant run ids, event ids, message ids, judge, stop reason, final report artifact metadata, metrics, audit evidence, SSE debateId filtering if streaming canary mode is enabled, and no live provider calls. Add allowed canary paths for /debates, /debates/:id, and /debates/:id/events. Add optional live participant and live judge flags such as --live-debate-runtimes, --live-debate-judge, and --confirm-live-provider-spend. If a live debate flag is supplied without spend confirmation, fail fast with debate_live_canary_spend_unconfirmed before any network request that can create provider work.",
   "acceptance": [
     "Production preflight passes the fake/no-spend hosted debate posture when all dependencies are ready.",
     "Production preflight fails closed with named hosted_debate_* or existing dependency codes when debate store, queue, auth, quota, audit, object store, worker readiness, provider activation, or bridge readiness is missing.",
@@ -1131,7 +1405,7 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "Default canary verifies debate inspect/events/artifact/audit traceability and makes no live provider calls.",
     "Live participant canary requires an explicit live flag and spend confirmation.",
     "Live judge canary requires an explicit live flag and spend confirmation.",
-    "Supplying a live debate flag without spend confirmation fails with `debate_live_canary_spend_unconfirmed` before provider dispatch."
+    "Supplying a live debate flag without spend confirmation fails with debate_live_canary_spend_unconfirmed before provider dispatch."
   ],
   "checks": [
     "pnpm exec vitest run scripts/production-preflight.test.ts scripts/production-canary.test.ts deploy/production/production-manifest.test.ts",
@@ -1237,17 +1511,17 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
         "signature": "httpErrorCodeSchema includes debate_* and hosted_debate_* codes from the spec"
       },
       {
-        "from_task": "P23-T4-rest-debate-hosted-boundary",
+        "from_task": "P23-T5-rest-debate-hosted-boundary",
         "name": "hosted debate auth rules",
         "signature": "POST /debates -> runs:write; GET /debates/:id and /debates/:id/events -> runs:read"
       },
       {
-        "from_task": "P23-T5-hosted-server-debate-wiring",
+        "from_task": "P23-T7-hosted-debate-readiness",
         "name": "hostedDebate readiness check",
         "signature": "probeServerReadiness returns checks.hostedDebate with low-cardinality diagnostics and named codes"
       },
       {
-        "from_task": "P23-T6-worker-debate-job-execution",
+        "from_task": "P23-T8-worker-debate-job-execution",
         "name": "worker debate readiness",
         "signature": "WorkerReadinessReport.checks.hostedDebate?: { ok:boolean; code?: string; diagnostics?: Record<string, unknown> }"
       }
@@ -1260,12 +1534,12 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
 }
 ```
 
-### Task P23-T8-product-docs-truth
+### Task P23-T10-product-docs-truth
 
 ```json
 {
-  "id": "P23-T8-product-docs-truth",
-  "title": "Update product and operator truth",
+  "id": "P23-T10-product-docs-truth",
+  "title": "Update product, operator, and adapter truth",
   "files": [
     "PRODUCT.md",
     "README.md",
@@ -1281,12 +1555,14 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
   ],
   "dependencies": [
     "P23-T1-contracts-openapi-boundary",
-    "P23-T2-postgres-debate-durability",
-    "P23-T3-core-debate-runtime-judge",
-    "P23-T4-rest-debate-hosted-boundary",
-    "P23-T5-hosted-server-debate-wiring",
-    "P23-T6-worker-debate-job-execution",
-    "P23-T7-preflight-canary-no-spend"
+    "P23-T2-postgres-debate-durability-idempotency",
+    "P23-T3-core-debate-runtime-output",
+    "P23-T4-core-debate-orchestration-judge",
+    "P23-T5-rest-debate-hosted-boundary",
+    "P23-T6-hosted-server-debate-wiring",
+    "P23-T7-hosted-debate-readiness",
+    "P23-T8-worker-debate-job-execution",
+    "P23-T9-preflight-canary-no-spend"
   ],
   "context_files": [
     "docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md",
@@ -1295,15 +1571,21 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "README.md",
     "docs/development/API.md",
     "docs/development/DEVELOPMENT.md",
+    "docs/adapters/README.md",
+    "docs/adapters/codex.md",
+    "docs/adapters/claude-code.md",
+    "docs/adapters/opencode.md",
+    "docs/adapters/agentfield.md",
+    "docs/adapters/generic-http.md",
     "deploy/production/README.md"
   ],
-  "instructions": "Update product truth after implementation without overclaiming. State that R24 ships hosted/server-safe debate through the existing `/debates` route family, fake deterministic hosted debate as the default no-spend path, opt-in local/hosted debate participant runs for fake.deterministic, codex.exec_json, claude_code.sdk, and opencode.acp, and an internal bounded judge runner with deterministic default and live model judge only behind request opt-in and spend confirmation. State that debate participant and judge execution use existing run/runtime contracts and preserve run/message/event/artifact traceability. State hosted debate requires durable Postgres debate/message/evidence/job state, ownership, quota, audit, queue/outbox, object store, worker readiness, provider activation, and R23 bridge readiness where applicable. Explicitly say codex.exec_json remains one-shot, hosted codex.interactive remains unshipped, AgentField/Generic HTTP hosted debate bridges remain unshipped, public model judge routes remain unshipped, browser automation remains unshipped, hosted repo remains unshipped, generic process/PTy adapters remain unshipped, dashboard/TUI remain unshipped, and managed SaaS/billing/OAuth remain unshipped. Document production preflight and canary commands, no-spend default, and live debate spend confirmation gates.",
+  "instructions": "Update product truth after implementation without overclaiming. State that R24 ships hosted/server-safe debate through the existing /debates route family, fake deterministic hosted debate as the default no-spend path, opt-in hosted debate participant runs for fake.deterministic, codex.exec_json, claude_code.sdk, and opencode.acp, and an internal bounded judge runner with deterministic default and live model judge only behind request opt-in and spend confirmation. State that debate participant and judge execution use existing run/runtime contracts and preserve run/message/event/artifact traceability. State hosted debate requires durable Postgres debate/message/evidence/job state, child-run idempotency, evidence ownership preauthorization, ownership, quota, audit, queue/outbox, object store, worker readiness, provider activation, and R23 bridge readiness where applicable. Explicitly say codex.exec_json remains one-shot, hosted codex.interactive remains unshipped, AgentField/Generic HTTP hosted debate bridges remain unshipped, public model judge routes remain unshipped, browser automation remains unshipped, hosted repo remains unshipped, generic process and PTY adapters remain unshipped, dashboard/TUI remain unshipped, and managed SaaS/billing/OAuth remain unshipped. Document production preflight and canary commands, no-spend default, and live debate spend confirmation gates.",
   "acceptance": [
     "PRODUCT.md current snapshot reflects R24 shipped and unshipped boundary.",
     "README and development API docs list only existing debate routes and no public model judge route.",
-    "Development docs describe fake default, real participant opt-in, live judge opt-in, wait=1 fake-only support, and named failure codes.",
+    "Development docs describe fake default, real participant opt-in, placement hosted requirement, live judge opt-in, wait=1 fake-only support, and named failure codes.",
     "Production docs document hosted debate readiness/preflight/canary dependencies and live spend confirmation flags.",
-    "Adapter docs state codex.exec_json one-shot, Claude/OpenCode R23 bridge dependency, and AgentField/Generic HTTP hosted debate bridge unshipped status.",
+    "Adapter docs state codex.exec_json one-shot, Claude/OpenCode R23 bridge dependency, and AgentField/Generic HTTP bridge unshipped status.",
     "Docs do not claim dashboard, TUI, public arbitrary execution routes, PTY/terminal automation, browser automation, hosted repo, generic process/PTY adapters, public model judging, managed SaaS, billing, OAuth, SSO, SCIM, or hosted Codex interactive."
   ],
   "checks": [
@@ -1311,7 +1593,15 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "pnpm --filter @switchyard/contracts openapi:check:hosted",
     "git diff --check"
   ],
-  "error_rescue_map": [],
+  "error_rescue_map": [
+    {
+      "codepath": "docs shipped/unshipped boundary",
+      "failure": "docs imply public model judging, hosted codex.interactive, AgentField/Generic HTTP hosted bridge, dashboard, TUI, PTY, process, browser, repo, managed SaaS, billing, or OAuth shipped",
+      "exception": "grep or review failure",
+      "rescue": "Rewrite as explicitly unshipped and keep the route list limited to existing /debates routes.",
+      "user_sees": "Accurate product truth without overclaiming."
+    }
+  ],
   "observability": {
     "logs": [
       "documentation-only task; verification is rg/openapi/git diff checks"
@@ -1355,7 +1645,7 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
     "exports": [],
     "imports_from_other_tasks": [
       {
-        "from_task": "P23-T7-preflight-canary-no-spend",
+        "from_task": "P23-T9-preflight-canary-no-spend",
         "name": "runProductionCanary",
         "signature": "runProductionCanary(options: ProductionCanaryOptions & { liveDebateRuntimes?: boolean; liveDebateJudge?: boolean; confirmLiveProviderSpend?: boolean }) => Promise<ProductionCanaryResult>"
       }
@@ -1367,116 +1657,107 @@ Hosted persistence becomes first-class before hosted `/debates` is exposed. Post
 
 ## Integration Points
 
-The contract task lands the shared request, error, ownership, quota, and OpenAPI vocabulary first. The storage task then provides durable Postgres debate state and job claims. Core debate orchestration imports those contracts and job records to normalize inputs and advance debate jobs. REST routes use the updated DebateService and durable job store while enforcing hosted auth and ownership. Hosted server wiring composes stores, service, control plane hooks, and readiness. Hosted worker wiring processes the same durable jobs. Ops scripts call the hosted `/debates` routes and readiness outputs. Docs land last so product truth describes the implemented shape.
+The contract task lands shared request, error, ownership, quota, and OpenAPI vocabulary first. Storage then provides durable Postgres debate state, job claims, child-run idempotency, and unowned-resource counts. Runtime helper work normalizes allowed participant modes and extracts bounded output. DebateService imports those helpers and owns evidence authorization, staged orchestration, judge parsing, report writing, terminal status checks, and quota finalization metadata. REST routes use DebateService and durable enqueue while enforcing hosted auth, no-leak reads, and SSE filtering. Hosted server wiring composes stores, service, control-plane hooks, ownership attachment, quota, and audit. Readiness probes those dependencies. Hosted worker processes durable jobs. Ops scripts call hosted /debates and readiness outputs. Docs land last.
 
 Cross-task contract walk:
 
-- T3 imports T1 debate request and error vocabulary, and T2 DebateExecutionStore.
-- T4 imports T1 REST error mapping, T2 DebateExecutionStore, and T3 DebateService.
-- T5 imports T2 Postgres stores, T3 DebateService, and T4 registerDebateRoutes/auth rules.
-- T6 imports T2 DebateExecutionStore and T3 DebateService.processExecutionJob.
-- T7 imports the route/readiness behavior from T4/T5/T6 through HTTP and readiness contracts.
-- T8 imports T7 operator command behavior for documentation.
+- T2 imports T1 debate ownership/quota vocabulary.
+- T3 imports T1 request/error vocabulary and T2 child-run lookup contracts.
+- T4 imports T1 contracts, T2 stores/idempotency, and T3 runtime/output helpers.
+- T5 imports T1 errors, T2 DebateExecutionStore, and T4 DebateService.
+- T6 imports T2 Postgres stores, T4 DebateService, and T5 route contract.
+- T7 imports T2 unowned-resource counts and T6 wiring.
+- T8 imports T2 DebateExecutionStore/RunStore, T4 processExecutionJob, and T7 readiness vocabulary.
+- T9 imports T5 route behavior, T7 readiness, and T8 worker readiness.
+- T10 imports T9 operator behavior for documentation.
 
 No two tasks own the same file.
 
 ## Architect Review Focus
 
-1. Staged async debate job state machine: verify the plan cannot deadlock a single worker by claiming a debate job and then blocking on a child run that needs the same worker.
-2. Hosted tenant boundary: verify inspect/events authorize `resourceType: "debate"` before debate store lookup and derived message/event/artifact/run ownership is attached before disclosure.
-3. Provider-spend boundary: verify missing participant opt-in, live judge spend confirmation, provider activation, quota, and bridge readiness all fail before provider dispatch.
-4. Route surface boundary: verify hosted OpenAPI gains only the existing `/debates` family and no judging, participant, model, terminal, PTY, sandbox, shell, process, dashboard, or TUI route.
-5. Durable state boundary: verify hosted debate does not rely on server-local memory, SQLite-only stores, or microtasks.
-6. R23 bridge interaction: verify Claude/OpenCode debate runs rely on existing bridge readiness and do not create new public bridge behavior.
-7. No-spend default: verify required tests, smoke, preflight, and default canary cannot accidentally execute live provider paths.
+1. Verify evidence authorization happens before evidence store lookup and content loading in hosted create.
+2. Verify child participant and judge run creation is idempotent across createRun success plus pending-link crash.
+3. Verify ownership attach failures for child run, message, event, artifact, and debate job cannot disclose ids or cross-tenant state.
+4. Verify placement hosted is mandatory for every non-fake participant with realRuntimeOptIn true.
+5. Verify SSE stream start authorization and strict debateId event filtering.
+6. Verify worker terminal failure finalizes active_debates quota.
+7. Verify judge parser checks size before JSON.parse.
+8. Verify docs and OpenAPI keep the public route boundary limited to the existing /debates family.
 
 ## Known High-Risk Seams
 
-- The existing debate service is synchronous fake-only; converting it to staged async execution must preserve fake `wait=1` behavior while avoiding long hosted waits.
-- Postgres currently has debate-aware events/artifacts but no durable debate/message/evidence/job stores. Store parity and schema migrations are high blast-radius.
-- Hosted run creation can enqueue child run jobs. Debate job processing must requeue and observe child run terminal state rather than blocking.
-- Ownership must be attached for resources created outside normal run routes, especially debate rows, debate jobs, routed messages, run events, artifacts, and judge runs.
-- Model judge parsing can easily overclaim success. Empty, invalid, missing, and overlarge judge output must be terminal named failures.
-- OpenAPI and docs may overstate the hosted bridge and model judging surface. Forbidden route/source tests and documentation grep are required.
+- Evidence authorization order: any evidence store/content access before hosted ownership authorization leaks existence or content.
+- Child run idempotency: createRun and job pending-run persistence cross service boundaries and must survive stale claim retry.
+- Derived ownership attachment: child run, message, event, artifact, and job ids must not be disclosed before ownership is attached.
+- SSE filtering: event bus traffic may include run events or other debate events, so stream filtering must be exact.
+- Late provider output: terminal debates must not reopen when child runs finish late.
+- Quota accounting: active_debates must finalize on success, failure, cancellation, exhausted retry, and artifact failure.
+- Judge parsing: live model output must be capped before parse to avoid memory or CPU abuse.
+- Server/provider boundary: server must remain fake-only for adapters; worker owns real provider dispatch.
+- No-spend defaults: tests, preflight, and canary must not make live provider calls unless explicit live flags and spend confirmation are present.
 
 ## Phase-Level Acceptance Criteria
 
-- [ ] Hosted/server exposes debate create/inspect/events only through the existing `/debates` route family; no new participant, judge, model-judge, terminal, PTY, sandbox, process, shell, dashboard, or TUI route is added.
-- [ ] Hosted/server registers existing debate routes with API-key auth, ownership-first access checks, quota, audit, durable Postgres debate state, and no cross-tenant resource leakage.
-- [ ] `POST /debates?wait=1` remains supported for fake deterministic no-spend debates and rejects real participant or live judge requests with `debate_wait_real_runtime_unsupported` before provider side effects.
-- [ ] Fake deterministic participants and deterministic judge remain the default and power all required tests, smoke, preflight, and default canary.
-- [ ] Real participant runtimes require explicit request opt-in and pass the exact shipped runtime matrix; omitted opt-in fails with `debate_real_participant_opt_in_required`.
-- [ ] Local and hosted participant turns for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` use normal run lifecycle records with debate/participant metadata and bounded prompts.
-- [ ] Hosted real participant turns use existing `HostedRunService`, provider activation, provider spend controls, run queue, worker execution, and R23 bridge readiness. The server never constructs provider adapters.
-- [ ] `codex.exec_json` participant turns remain one-shot and never claim post-start input, approval bridge, or session resume.
-- [ ] `claude_code.sdk` and `opencode.acp` participant turns preserve existing hosted input/approval bridge behavior and terminalize visibly if approval/input waits exceed debate limits.
-- [ ] `codex.interactive`, AgentField, Generic HTTP, Cursor, OpenClaw, Paperclip, browser, repo, generic process, and PTY debate runtime paths fail closed with named unsupported codes.
-- [ ] Participant runtime output is read from persisted run events, bounded, redacted where needed, converted to durable messages through `MessageRouter`, and linked to debate events.
-- [ ] Nil, empty, failed, timed-out, waiting-expired, overlarge, or unowned participant run output fails visibly with named participant errors and a failure report where possible.
-- [ ] Internal judge runner supports deterministic fake default and opt-in live model judging through existing run/runtime contracts only.
-- [ ] Live judge requires request-level opt-in, spend confirmation, provider activation, run quota, timeout, output bounds, and canary opt-in. Missing confirmation fails with `debate_judge_live_spend_unconfirmed`.
-- [ ] Judge output is parsed into the existing `judge` object, with invalid/empty/overlarge output mapped to named judge errors.
-- [ ] Final report artifacts include debate id, stop reason, participant ids, participant run ids, judge run id when present, evidence ids, message ids, and judge summary.
-- [ ] Debate event replay/live streaming remains debate-scoped and ordered by persisted event sequence, including participant turn, judge summary, consensus, and artifact-created events.
-- [ ] Hosted debate readiness, preflight, canary, metrics, logs, audit, docs, OpenAPI, and product truth match the exact shipped/unshipped boundary.
-- [ ] Default test/smoke/preflight/canary paths perform no live provider calls and have assertions proving live paths are skipped unless explicitly confirmed.
+- Hosted /debates route family exists with auth, ownership, quota, audit, durable state, no-spend default, and no forbidden public routes.
+- Hosted create preauthorizes evidence ids before lookup/content access and has no side effects on unknown/unowned evidence.
+- Non-fake participants require realRuntimeOptIn true and placement hosted.
+- Participant and judge child runs are idempotent across stale claims.
+- Derived resource ownership attach failures fail closed before disclosure.
+- SSE events are authorized and filtered by debate id.
+- Worker handles stale claims, late outputs, terminal failures, quota finalization, and bridge readiness.
+- Deterministic fake judge is default; live model judge is explicit and spend-gated.
+- Production preflight/canary default to fake/no-spend and live-spend canary fails before provider dispatch without confirmation.
+- PRODUCT, README, development, production, and adapter docs reflect shipped and unshipped truth.
 
 ## Verification Strategy
 
-Task-level checks are mandatory before GREEN for each implementer. Phase audit should run this command set from the phase branch after task merges:
-
-```bash
-pnpm --filter @switchyard/contracts test
-pnpm --filter @switchyard/contracts openapi:check
-pnpm --filter @switchyard/contracts openapi:check:hosted
-pnpm --filter @switchyard/storage test -- postgres-debate
-pnpm --filter @switchyard/storage test -- postgres-schema-compat
-pnpm --filter @switchyard/core test -- debate
-pnpm --filter @switchyard/protocol-rest test -- debate-routes
-pnpm --filter @switchyard/server test -- hosted-server
-pnpm --filter @switchyard/server test -- production-readiness
-pnpm --filter @switchyard/worker test -- hosted-worker
-pnpm --filter @switchyard/worker test -- production-worker-readiness
-pnpm exec vitest run scripts/production-preflight.test.ts scripts/production-canary.test.ts deploy/production/production-manifest.test.ts
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm lint
-git diff --check
-```
-
-Auditor should also run source/route greps:
-
-```bash
-rg -n "/debates/participants/real|/debates/judge|/model-judge|/judging|/exec|/shell|/process|/command|/pty|/terminal|/sandbox" packages apps scripts docs PRODUCT.md README.md
-rg -n "@switchyard/adapters|ClaudeCode|OpenCode|CodexExec|provider adapter" apps/server/src packages/protocol-rest/src
-rg -n "confirmLiveProviderSpend|debate_live_canary_spend_unconfirmed|debate_live_canary_skipped_default" scripts apps packages
-```
+- pnpm --filter @switchyard/contracts test
+- pnpm --filter @switchyard/contracts openapi:check
+- pnpm --filter @switchyard/contracts openapi:check:hosted
+- pnpm --filter @switchyard/storage test -- postgres-debate
+- pnpm --filter @switchyard/storage test -- postgres-run-store
+- pnpm --filter @switchyard/storage test -- postgres-schema-compat
+- pnpm --filter @switchyard/core test -- debate-real-runtime
+- pnpm --filter @switchyard/core test -- debate-service
+- pnpm --filter @switchyard/core test -- debate-judge-runner
+- pnpm --filter @switchyard/protocol-rest test -- debate-routes
+- pnpm --filter @switchyard/protocol-rest test -- hosted-auth
+- pnpm --filter @switchyard/server test -- hosted-server
+- pnpm --filter @switchyard/server test -- production-readiness
+- pnpm --filter @switchyard/worker test -- hosted-worker
+- pnpm --filter @switchyard/worker test -- production-worker-readiness
+- pnpm exec vitest run scripts/production-preflight.test.ts scripts/production-canary.test.ts deploy/production/production-manifest.test.ts
+- pnpm typecheck
+- pnpm build
+- pnpm lint
+- git diff --check
+- local placeholder-language scan over the plan artifact
+- rg -n "(/debates/participants/real|/debates/judge|/model-judge|/judging|/exec|/shell|/process|/command|/pty|/terminal|/sandbox)" packages/contracts/openapi.hosted-server.json packages/contracts/openapi.local-daemon.json
 
 ## Self-Review
 
-1. Spec coverage: all Phase 23 acceptance criteria map to T1 through T8 and the phase-level acceptance checklist.
-2. Placeholder scan: no placeholder markers are intentionally present in this plan.
-3. Type consistency: cross-task imports reference exported contracts with matching signatures.
-4. Ownership disjoint: each listed file is owned by exactly one task.
-5. Context files real: every context file listed is an existing path in this worktree.
-6. Acceptance testable: every acceptance item is phrased as observable behavior or an exact command result.
-7. Dependency order sane: contracts precede storage/core; storage/core precede REST/server/worker; ops/docs come last.
-8. Checks runnable: commands use existing package scripts and vitest invocation style from the repo.
-9. Error/rescue maps present: all runtime tasks have named error/rescue rows; the docs-only task has an empty map by design.
-10. Observability present: every runtime task has low-cardinality log and metric expectations.
-11. Test cases enumerate acceptance and shadow paths: nil, empty, unsupported, denied, stale, timeout, missing, overlarge, invalid, and integration paths are explicit.
-12. Integration contracts walk: every import from another task resolves to an export in an upstream task.
-13. Contract types match: DebateService, DebateExecutionStore, registerDebateRoutes, readiness, preflight, and canary signatures are consistent across tasks.
+1. Existing code challenged: yes; plan extends current debate, hosted auth, stores, worker, readiness, preflight, canary, and OpenAPI seams.
+2. Minimal changes challenged: yes; no dashboard, TUI, new route family, generic adapter, or SaaS surface.
+3. Complexity challenged: yes; ten tasks split core and server seams, with T2 kept unified for migration coherence.
+4. Built-in check passed: yes; existing schemas, stores, control plane, run service, event bus, bridge readiness, and ops scripts are reused.
+5. Distribution check passed: yes; no new package or binary.
+6. File ownership is disjoint across all tasks.
+7. Every task has non-empty context_files grounded in existing repo files.
+8. Every task has instructions, acceptance, checks, error rescue, observability, test cases, and integration contracts.
+9. No task depends on a new public participant, judge, model-judge, terminal, PTY, shell, process, sandbox, dashboard, or TUI route.
+10. No-spend defaults are explicit in contracts, service, worker, preflight, canary, and docs.
+11. Hosted tenant ownership, quota, audit, and no-leak behavior are covered before disclosure.
+12. Architect pass 1 findings A1-A7 and edge cases E1-E4 are mapped to tasks and tests.
+13. Verification commands cover contracts, storage, core, protocol REST, server, worker, scripts, docs, typecheck, build, lint, and diff hygiene.
 
 ## Plan Completeness Self-Test
 
-- [x] Every acceptance criterion in the spec has at least one task that delivers it.
-- [x] Every task has at least one acceptance criterion.
-- [x] Every acceptance criterion has at least one test case.
-- [x] Every error_rescue_map entry has a matching error_path, happy_shadow, edge, or integration test case.
-- [x] Every integration_contracts.imports_from_other_tasks resolves to a real export elsewhere in this plan.
-- [x] Every context_files path exists in the project.
-- [x] No task edits a file owned by another task.
-- [x] No placeholder text is intentionally present.
-- [x] Complexity is L; the phase is not split because the product outcome needs one integrated hosted debate vertical, and the task graph isolates ownership across eight slices.
+1. Required task fields present: yes.
+2. Context files non-empty: yes.
+3. Context files exist in this worktree: validated after authoring.
+4. File ownership disjoint: validated after authoring.
+5. Dependencies form an acyclic graph: yes.
+6. Acceptance criteria include happy, shadow, error, edge, and integration lenses: yes.
+7. Error rescue maps include user-visible outcomes: yes.
+8. Observability includes logs, success metric, and failure metric: yes.
+9. Integration contracts identify exports, imports, and consumed file paths: yes.
