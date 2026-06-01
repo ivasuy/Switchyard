@@ -1,6 +1,9 @@
 import { basename } from "node:path";
 import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import {
+  AdapterProtocolError,
+  HostedRuntimeBridgeService,
   HostedWorkerService,
   checkHostedSandboxReadiness,
   createDisabledRealToolPolicyConfig,
@@ -34,6 +37,7 @@ import {
   PostgresApprovalStore,
   PostgresArtifactStore,
   PostgresControlPlaneStore,
+  PostgresHostedRuntimeBridgeCommandStore,
   type PostgresDatabaseHandle,
   PostgresEventStore,
   type PostgresSchemaCompatibility,
@@ -58,6 +62,16 @@ type RunRecord = NonNullable<Awaited<ReturnType<RunStore["get"]>>>;
 type ToolInvocationRecord = NonNullable<Awaited<ReturnType<ToolInvocationStore["get"]>>>;
 type ArtifactRecord = Awaited<ReturnType<ArtifactStore["create"]>>;
 type SwitchyardEventRecord = Awaited<ReturnType<EventStore["append"]>>;
+type HostedRuntimeBridgeReadinessCheckName =
+  | "command_store"
+  | "worker_claim"
+  | "adapter_capability"
+  | "session_reconciliation"
+  | "approval_sender";
+type HostedRuntimeBridgeReadinessReport = {
+  status: "ready" | "not_ready";
+  checks: Array<{ name: HostedRuntimeBridgeReadinessCheckName; ok: boolean; reasonCode?: string }>;
+};
 
 const TOOL_KIND_REPO = `re${"po"}`;
 const TOOL_KIND_BROWSER = `bro${"wser"}`;
@@ -67,6 +81,20 @@ const POLICY_KEY_FETCH = `fe${"tch"}` as const;
 const POLICY_KEY_WEB = `web_${"se"}${"arch"}` as const;
 const POLICY_KEY_GH = `git${"hub"}` as const;
 const POLICY_KEY_SH = `sh${"ell"}` as const;
+const HOSTED_BRIDGE_SUPPORTED_MODES = ["claude_code.sdk", "opencode.acp"] as const;
+const DEFAULT_BRIDGE_LEASE_MS = 30_000;
+const DEFAULT_RUNTIME_APPROVAL_TTL_MS = 5 * 60 * 1000;
+
+type HostedBridgeSupportedMode = (typeof HOSTED_BRIDGE_SUPPORTED_MODES)[number];
+type HostedRuntimeBridgeCommandPayloadStore = {
+  put(input: { commandId: string; payload: Record<string, unknown> }): Promise<void>;
+  get(commandId: string): Promise<Record<string, unknown> | undefined>;
+  delete(commandId: string): Promise<void>;
+};
+type HostedRuntimeBridgeWorkerRuntime = Pick<
+  HostedRuntimeBridgeService,
+  "claimAndApplyNext" | "reconcileHostedRuntimeSessions" | "createWorkerRuntimeApproval" | "terminalizePendingRuntimeApprovalsForRun"
+>;
 
 export interface WorkerReadinessReport {
   ok: boolean;
@@ -79,6 +107,7 @@ export interface WorkerReadinessReport {
     hostedRuntimeGate?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     providerRuntimePolicy?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     providerRuntimeAdapters?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
+    hostedRuntimeBridge?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     sandbox?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     tools?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
   };
@@ -130,6 +159,10 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   logger?: RuntimeLogger;
   incrementToolMetric?: (metric: string, labels: Record<string, string>) => void;
   controlPlaneStore?: ControlPlaneStore;
+  bridgeCommandStore?: PostgresHostedRuntimeBridgeCommandStore;
+  bridgeCommandPayloads?: HostedRuntimeBridgeCommandPayloadStore;
+  bridgeWorkerRuntime?: HostedRuntimeBridgeWorkerRuntime;
+  workerId?: string;
 }): HostedWorkerApp {
   const tools = config.tools ?? {
     hostedRealTools: "disabled",
@@ -238,8 +271,19 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       : undefined
   );
 
+  const workerId = deps?.workerId ?? resolveHostedWorkerId(runtimeConfig);
+  const requiredBridgeModes = hostedBridgeModesFromAllowlist(runtimeConfig.hostedRuntimeAllowlist);
+  const bridgeSupportEnabled = runtimeConfig.hostedRealRuntimeExecution === "enabled" && requiredBridgeModes.length > 0;
+  const bridgeCommandStore = deps?.bridgeCommandStore ?? new PostgresHostedRuntimeBridgeCommandStore(postgres);
+  const bridgeCommandPayloads = deps?.bridgeCommandPayloads;
+  const bridgeStoreReady = Boolean(bridgeCommandStore && bridgeCommandPayloads);
+  const bridgeEnabledModes = bridgeSupportEnabled && bridgeStoreReady
+    ? new Set<HostedBridgeSupportedMode>(requiredBridgeModes)
+    : new Set<HostedBridgeSupportedMode>();
+
   const adapters = buildHostedWorkerAdapters(runtimeConfig, {
     ...(deps?.adapters ?? {}),
+    hostedBridgeEnabledModes: bridgeEnabledModes,
     logger: runtimeLogger
   });
   const toolAdapters = buildWorkerHostedToolAdapters(runtimeConfig, deps?.toolAdapters);
@@ -248,6 +292,45 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     ...(deps?.processFactory ? { processFactory: deps.processFactory } : {}),
     ...(deps?.ptyFactory ? { ptyFactory: deps.ptyFactory } : {})
   });
+  const bridgeWorkerRuntime: HostedRuntimeBridgeWorkerRuntime | undefined = deps?.bridgeWorkerRuntime ?? (
+    bridgeCommandPayloads
+      ? new HostedRuntimeBridgeService({
+        runs,
+        sessions,
+        approvals,
+        commands: bridgeCommandStore,
+        runtimeRunner: {
+          sendInput: async () => undefined
+        },
+        commandPayloads: bridgeCommandPayloads,
+        logger: runtimeLogger,
+        preflight: {
+          attachOwnershipFromRun: async ({ resourceType, resourceId, runId }) => {
+            if (!controlPlaneStore) {
+              return;
+            }
+            const runOwnership = await controlPlaneStore.getOwnership({
+              resourceType: "run",
+              resourceId: runId
+            });
+            if (!runOwnership) {
+              throw new Error("approval_ownership_attach_failed");
+            }
+            await controlPlaneStore.attachOwnership({
+              resourceType,
+              resourceId,
+              accountId: runOwnership.accountId,
+              tenantId: runOwnership.tenantId,
+              projectId: runOwnership.projectId,
+              userId: runOwnership.userId,
+              apiKeyId: runOwnership.apiKeyId,
+              createdAt: new Date().toISOString()
+            });
+          }
+        }
+      })
+      : undefined
+  );
   const runner = new RuntimeRunnerService({
     runs,
     events,
@@ -258,8 +341,80 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       writeText: async (path, content) => {
         return artifactContent.writeText(path, content, { contentType: "application/x-ndjson" });
       }
-    }
+    },
+    ...(bridgeWorkerRuntime
+      ? {
+        runtimeApprovals: {
+          create: async (input) => {
+            try {
+              const deadline = resolveRuntimeApprovalDeadline(input.payload, new Date().toISOString());
+              await bridgeWorkerRuntime.createWorkerRuntimeApproval({
+                runId: input.runId,
+                approvalType: input.approvalType,
+                payload: input.payload,
+                workerId,
+                deadline
+              });
+            } catch (error) {
+              throw new AdapterProtocolError("Runtime approval creation failed.", {
+                reasonCode: extractReasonCode(error) ?? "runtime_approval_bridge_unconfigured"
+              });
+            }
+          },
+          terminalizePendingForRun: async (runId, input) => {
+            try {
+              return bridgeWorkerRuntime.terminalizePendingRuntimeApprovalsForRun({
+                runId,
+                reasonCode: input.message,
+                terminalEvent: input.terminalEvent
+              });
+            } catch (error) {
+              throw new AdapterProtocolError("Runtime approval cleanup failed.", {
+                reasonCode: extractReasonCode(error) ?? "runtime_approval_bridge_unconfigured"
+              });
+            }
+          }
+        }
+      }
+      : {})
   });
+  const hostedRuntimeBridge = bridgeWorkerRuntime && deps?.bridgeWorkerRuntime
+    ? bridgeWorkerRuntime
+    : (bridgeWorkerRuntime
+      ? new HostedRuntimeBridgeService({
+        runs,
+        sessions,
+        approvals,
+        commands: bridgeCommandStore,
+        runtimeRunner: runner,
+        ...(bridgeCommandPayloads ? { commandPayloads: bridgeCommandPayloads } : {}),
+        logger: runtimeLogger,
+        preflight: {
+          attachOwnershipFromRun: async ({ resourceType, resourceId, runId }) => {
+            if (!controlPlaneStore) {
+              return;
+            }
+            const runOwnership = await controlPlaneStore.getOwnership({
+              resourceType: "run",
+              resourceId: runId
+            });
+            if (!runOwnership) {
+              throw new Error("approval_ownership_attach_failed");
+            }
+            await controlPlaneStore.attachOwnership({
+              resourceType,
+              resourceId,
+              accountId: runOwnership.accountId,
+              tenantId: runOwnership.tenantId,
+              projectId: runOwnership.projectId,
+              userId: runOwnership.userId,
+              apiKeyId: runOwnership.apiKeyId,
+              createdAt: new Date().toISOString()
+            });
+          }
+        }
+      })
+      : undefined);
   const runService = new RunService({ runs, events, runner });
 
   const service = new HostedWorkerService({
@@ -281,6 +436,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
 
   let cachedReadiness: { checkedAtMs: number; status: WorkerReadinessReport } | undefined;
   let reconciledStaleRunningTools = false;
+  let reconciledHostedBridge = false;
   const quotaLimitByAccount = new Map<string, number>();
 
   async function resolveToolArtifactQuotaLimit(accountId: string): Promise<number> {
@@ -329,11 +485,21 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         }
       }
 
+      await reconcileHostedBridgeSessionOwnership();
+      const bridgeWorked = await processHostedRuntimeBridge();
+      if (bridgeWorked) {
+        return true;
+      }
+
       const toolWorked = await processToolJobs();
       if (toolWorked) {
         return true;
       }
-      return service.processNext();
+      const runWorked = await service.processNext();
+      if (runWorked) {
+        await reconcileHostedBridgeSessionOwnership();
+      }
+      return runWorked;
     },
     ready: async (options) => {
       if (options?.mode === "claim") {
@@ -355,6 +521,70 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       }
     }
   };
+
+  async function processHostedRuntimeBridge(): Promise<boolean> {
+    if (!bridgeSupportEnabled || !hostedRuntimeBridge) {
+      return false;
+    }
+
+    if (!reconciledHostedBridge) {
+      const reconciled = await hostedRuntimeBridge.reconcileHostedRuntimeSessions({ workerId });
+      reconciledHostedBridge = true;
+      if (reconciled.reconciled > 0 || reconciled.failed > 0) {
+        runtimeLogger.warn("worker.runtime_bridge.reconcile", {
+          workerId,
+          reconciled: String(reconciled.reconciled),
+          failed: String(reconciled.failed)
+        });
+      }
+    }
+
+    return await hostedRuntimeBridge.claimAndApplyNext({
+      workerId,
+      leaseMs: DEFAULT_BRIDGE_LEASE_MS
+    });
+  }
+
+  async function reconcileHostedBridgeSessionOwnership(): Promise<void> {
+    if (!bridgeSupportEnabled || requiredBridgeModes.length === 0) {
+      return;
+    }
+    const active = await runs.list({
+      placement: ["hosted"],
+      status: ["starting", "running", "waiting_for_input", "waiting_for_approval"],
+      limit: 5_000
+    });
+    for (const run of active.runs) {
+      if (!run.runtimeMode || !isBridgeSupportedMode(run.runtimeMode)) {
+        continue;
+      }
+      const session = await sessions.getByRunId(run.id);
+      if (!session || isTerminalSession(session.status)) {
+        continue;
+      }
+      const currentState = asRecord(session.state);
+      const currentWorker = typeof currentState["hostedWorkerId"] === "string"
+        ? currentState["hostedWorkerId"].trim()
+        : "";
+      const bridgeCapable = currentState["hostedBridgeCapable"] === true;
+      const runtimeSessionId = typeof currentState["hostedRuntimeSessionId"] === "string"
+        ? currentState["hostedRuntimeSessionId"].trim()
+        : "";
+      if (currentWorker === workerId && bridgeCapable && runtimeSessionId === session.id) {
+        continue;
+      }
+      await sessions.update({
+        ...session,
+        state: {
+          ...currentState,
+          hostedWorkerId: workerId,
+          hostedRuntimeSessionId: session.id,
+          hostedBridgeCapable: bridgeEnabledModes.has(run.runtimeMode as HostedBridgeSupportedMode)
+        },
+        updatedAt: new Date().toISOString()
+      });
+    }
+  }
 
   async function processToolJobs(): Promise<boolean> {
     if (runtimeConfig.tools.hostedRealTools !== "enabled") {
@@ -950,6 +1180,45 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         return markFailure(firstAdapterFailureCode(adapterCheck.modes));
       }
 
+      if (bridgeSupportEnabled) {
+        const adapterCapabilities = requiredBridgeModes.reduce<Record<string, boolean>>((acc, mode) => {
+          const adapterId = mode === "claude_code.sdk" ? "claude_code" : "opencode";
+          acc[mode] = Boolean(adapters.get(adapterId)) && bridgeEnabledModes.has(mode);
+          return acc;
+        }, {});
+        const bridgeReadiness = getWorkerRuntimeBridgeReadiness({
+          commandStore: bridgeStoreReady ? bridgeCommandPayloads : undefined,
+          workerClaim: hostedRuntimeBridge,
+          sessionReconciliation: hostedRuntimeBridge,
+          approvalSender: hostedRuntimeBridge,
+          adapterCapabilities
+        });
+        const firstFailure = bridgeReadiness.checks.find((entry: { ok: boolean; reasonCode?: string }) => !entry.ok)?.reasonCode
+          ?? "hosted_runtime_bridge_worker_unavailable";
+        checks.hostedRuntimeBridge = {
+          ok: bridgeReadiness.status === "ready",
+          ...(bridgeReadiness.status === "ready" ? {} : { code: firstFailure }),
+          diagnostics: {
+            workerId,
+            bridgeModes: requiredBridgeModes,
+            status: bridgeReadiness.status,
+            checks: bridgeReadiness.checks
+          }
+        };
+        if (bridgeReadiness.status !== "ready") {
+          return markFailure(firstFailure);
+        }
+      } else {
+        checks.hostedRuntimeBridge = {
+          ok: true,
+          diagnostics: {
+            workerId,
+            bridgeModes: requiredBridgeModes,
+            status: "disabled"
+          }
+        };
+      }
+
       const toolCheck = checkConfiguredHostedToolAdapters(runtimeConfig);
       if (runtimeConfig.tools.hostedRealTools === "enabled") {
         if (!hasToolQueueSupport(toolQueue)) {
@@ -1018,6 +1287,31 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       };
     }
   }
+}
+
+export function getWorkerRuntimeBridgeReadiness(deps: {
+  commandStore?: unknown;
+  sessionReconciliation?: unknown;
+  adapterCapabilities?: Record<string, boolean>;
+  approvalSender?: unknown;
+  workerClaim?: unknown;
+}): HostedRuntimeBridgeReadinessReport {
+  const check = (name: HostedRuntimeBridgeReadinessCheckName, ok: boolean, reasonCode: string) =>
+    ok ? { name, ok: true as const } : { name, ok: false as const, reasonCode };
+  const adapterCapabilities = deps.adapterCapabilities ?? {};
+  const adapterCapable = Object.keys(adapterCapabilities).length > 0
+    && Object.values(adapterCapabilities).every((value) => value === true);
+  const checks: HostedRuntimeBridgeReadinessReport["checks"] = [
+    check("command_store", isPresent(deps.commandStore), "hosted_runtime_bridge_store_unavailable"),
+    check("worker_claim", isPresent(deps.workerClaim), "hosted_runtime_bridge_worker_unavailable"),
+    check("adapter_capability", adapterCapable, "hosted_runtime_bridge_operation_unsupported"),
+    check("session_reconciliation", isPresent(deps.sessionReconciliation), "hosted_runtime_bridge_worker_unavailable"),
+    check("approval_sender", isPresent(deps.approvalSender), "hosted_runtime_bridge_worker_unavailable")
+  ];
+  return {
+    status: checks.every((entry: { ok: boolean }) => entry.ok) ? "ready" : "not_ready",
+    checks
+  };
 }
 
 function hasToolQueueSupport(queue: Partial<ToolQueuePort>): queue is ToolQueuePort {
@@ -1156,4 +1450,40 @@ function normalizeReadinessCode(error: unknown, fallback: string): string {
     return message;
   }
   return fallback;
+}
+
+function hostedBridgeModesFromAllowlist(allowlist: readonly string[]): HostedBridgeSupportedMode[] {
+  return HOSTED_BRIDGE_SUPPORTED_MODES.filter((mode) => allowlist.includes(mode));
+}
+
+function isBridgeSupportedMode(mode: string): mode is HostedBridgeSupportedMode {
+  return (HOSTED_BRIDGE_SUPPORTED_MODES as readonly string[]).includes(mode);
+}
+
+function resolveHostedWorkerId(config: WorkerConfig): string {
+  const envId = typeof process.env.SWITCHYARD_WORKER_ID === "string"
+    ? process.env.SWITCHYARD_WORKER_ID.trim()
+    : "";
+  if (envId.length > 0) {
+    return envId;
+  }
+  const host = hostname();
+  const queue = config.queueName ?? "switchyard-hosted-runs";
+  return `worker_${createHash("sha256").update(`${host}:${queue}`).digest("hex").slice(0, 16)}`;
+}
+
+function resolveRuntimeApprovalDeadline(payload: Record<string, unknown>, nowIso: string): string {
+  const expiresAt = payload["expiresAt"];
+  if (typeof expiresAt === "string" && Number.isFinite(Date.parse(expiresAt))) {
+    return expiresAt;
+  }
+  return new Date(Date.parse(nowIso) + DEFAULT_RUNTIME_APPROVAL_TTL_MS).toISOString();
+}
+
+function isTerminalSession(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function isPresent(value: unknown): boolean {
+  return value !== undefined && value !== null;
 }

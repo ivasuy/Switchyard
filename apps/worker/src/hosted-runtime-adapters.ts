@@ -31,6 +31,7 @@ export interface HostedWorkerAdapterFactoryDeps {
   claudeClient?: ClaudeCodeClient;
   claudeProcessFactory?: ClaudeCodeCliProcessFactory;
   opencodeProcessFactory?: OpenCodeAcpAdapterOptions["processFactory"];
+  hostedBridgeEnabledModes?: ReadonlySet<HostedRuntimeModeSlug>;
   logger?: RuntimeLogger;
 }
 
@@ -78,6 +79,7 @@ export function buildHostedWorkerAdapters(
         maxBudgetUsd: config.claudeCode.maxBudgetUsd,
         permissionMode: "read_only",
         disabledTools: ["Bash", "WebFetch", "WebSearch"],
+        hostedBridgeEnabled: deps.hostedBridgeEnabledModes?.has("claude_code.sdk") ?? false,
         ...(hostedProviderCommand ? { hostedProviderCommand } : {}),
         ...(safeLogger ? { logger: safeLogger } : {})
       };
@@ -95,6 +97,7 @@ export function buildHostedWorkerAdapters(
         requestTimeoutMs: config.acp.requestTimeoutMs,
         cancelTimeoutMs: config.acp.cancelTimeoutMs,
         maxMessageBytes: config.acp.maxMessageBytes,
+        hostedBridgeEnabled: deps.hostedBridgeEnabledModes?.has("opencode.acp") ?? false,
         ...(deps.opencodeProcessFactory ? { processFactory: deps.opencodeProcessFactory } : {}),
         logger: safeLogger,
         ...(hostedProviderCommand ? { hostedProviderCommand } : {})

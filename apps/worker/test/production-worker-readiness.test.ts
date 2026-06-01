@@ -253,6 +253,36 @@ describe("production worker readiness", () => {
     }
   });
 
+  it("fails closed when hosted bridge is enabled without shared bridge store dependencies", async () => {
+    const worker = createHostedWorker({
+      ...baseConfig(),
+      deploymentMode: "staging",
+      hostedRuntimeAllowlist: ["fake.deterministic", "claude_code.sdk"],
+      hostedRealRuntimeExecution: "enabled",
+      providerRuntimeActivation: baseConfig().providerRuntimeActivation
+    }, {
+      queue: new MemoryRunQueue(),
+      runs: new InMemoryRunStore(),
+      events: new InMemoryEventStore(),
+      postgres: fakePostgresHandle(),
+      ensurePostgresSchema: async () => {},
+      probePostgres: async () => {},
+      checkSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 })
+    });
+
+    try {
+      const readiness = await worker.ready();
+      expect(readiness.ok).toBe(false);
+      expect(readiness.reason).toBe("hosted_runtime_bridge_store_unavailable");
+      expect(readiness.checks?.hostedRuntimeBridge).toMatchObject({
+        ok: false,
+        code: "hosted_runtime_bridge_store_unavailable"
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
   it("does not claim jobs when sandbox readiness fails with missing policy", async () => {
     const queue = new MemoryRunQueue();
     let claimCalls = 0;

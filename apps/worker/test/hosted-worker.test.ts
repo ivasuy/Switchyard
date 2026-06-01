@@ -13,7 +13,7 @@ import type { SandboxProcessFactory } from "@switchyard/adapters";
 import { loadWorkerConfig } from "../src/config.js";
 import { buildHostedWorkerAdapters, createHostedSafeLogger } from "../src/hosted-runtime-adapters.js";
 import { createWorkerHostedSandboxService } from "../src/sandbox.js";
-import { createHostedWorker } from "../src/worker.js";
+import { createHostedWorker, getWorkerRuntimeBridgeReadiness } from "../src/worker.js";
 
 const defaultSandbox = () => resolveHostedSandboxConfig({ deploymentMode: "test", env: {} });
 
@@ -371,6 +371,43 @@ describe("hosted worker app", () => {
     expect(workerSource).not.toContain("github");
     expect(workerSource).not.toContain("repo");
     expect(workerSource).not.toContain("shell");
+    expect(adapterSource).not.toContain("CodexInteractiveAdapter");
+    expect(adapterSource).not.toContain("codex.interactive");
+  });
+
+  it("reports runtime bridge readiness dependencies with aggregate failures", () => {
+    const notReady = getWorkerRuntimeBridgeReadiness({
+      commandStore: undefined,
+      workerClaim: undefined,
+      sessionReconciliation: undefined,
+      approvalSender: undefined,
+      adapterCapabilities: {
+        "claude_code.sdk": true,
+        "opencode.acp": false
+      }
+    });
+
+    expect(notReady.status).toBe("not_ready");
+    expect(notReady.checks).toEqual([
+      { name: "command_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" },
+      { name: "worker_claim", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
+      { name: "adapter_capability", ok: false, reasonCode: "hosted_runtime_bridge_operation_unsupported" },
+      { name: "session_reconciliation", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
+      { name: "approval_sender", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" }
+    ]);
+
+    const ready = getWorkerRuntimeBridgeReadiness({
+      commandStore: { put: async () => undefined, get: async () => undefined, delete: async () => undefined },
+      workerClaim: { claimAndApplyNext: async () => false },
+      sessionReconciliation: { reconcileHostedRuntimeSessions: async () => ({ reconciled: 0, failed: 0 }) },
+      approvalSender: { createWorkerRuntimeApproval: async () => ({ id: "approval_1" }) },
+      adapterCapabilities: {
+        "claude_code.sdk": true,
+        "opencode.acp": true
+      }
+    });
+    expect(ready.status).toBe("ready");
+    expect(ready.checks.every((entry) => entry.ok)).toBe(true);
   });
 
   it("parses real-runtime worker config and rejects production real allowlist without policy activation", () => {
