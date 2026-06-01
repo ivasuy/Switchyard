@@ -88,6 +88,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private readonly requestTimeoutMs: number;
   private readonly permissionMode: ClaudePermissionMode;
   private readonly disabledTools: string[];
+  private readonly hostedBridgeEnabled: boolean;
 
   constructor(private readonly options: ClaudeCodeAdapterOptions) {
     this.logger = options.logger;
@@ -97,6 +98,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 5000;
     this.permissionMode = options.permissionMode ?? "read_only";
     this.disabledTools = options.disabledTools ?? ["Bash", "WebFetch", "WebSearch"];
+    this.hostedBridgeEnabled = options.hostedBridgeEnabled ?? false;
   }
 
   async check(): Promise<RuntimeAdapterCheck> {
@@ -166,25 +168,34 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   async send(session: Record<string, unknown>, input: Record<string, unknown>): Promise<void> {
     const stored = this.requireSession(session);
-    if (stored.hostedProviderMode) {
+    if (stored.hostedProviderMode && !this.hostedBridgeEnabled) {
       throw new AdapterProtocolError("Hosted Claude input bridge is unsupported.", {
         reasonCode: "hosted_input_bridge_unsupported"
-      });
-    }
-    if (stored.terminalSeen) {
-      throw new AdapterProtocolError("Claude session is not active.", {
-        reasonCode: "runtime_input_not_active"
       });
     }
 
     const text = input["text"];
     if (typeof text === "string") {
+      if (stored.terminalSeen) {
+        throw new AdapterProtocolError("Claude session is not active.", {
+          reasonCode: "runtime_input_not_active"
+        });
+      }
       if (text.trim().length === 0) {
         throw new AdapterProtocolError("Claude input text must be non-empty.", {
           reasonCode: "runtime_input_empty"
         });
       }
-      await stored.clientSession.sendUserMessage(text);
+      try {
+        await stored.clientSession.sendUserMessage(text);
+      } catch (error) {
+        throw new AdapterProtocolError("Claude input send failed.", {
+          reasonCode: "claude_input_send_failed",
+          details: {
+            error: error instanceof Error ? error.message : String(error)
+          }
+        });
+      }
       stored.normalizedRecords.push(redactSecrets({
         type: "input.accepted",
         text,
@@ -203,17 +214,31 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           reasonCode: "runtime_approval_pause_not_active"
         });
       }
+      if (stored.terminalSeen) {
+        throw new AdapterProtocolError("Runtime approval pause is not active.", {
+          reasonCode: "runtime_approval_pause_not_active"
+        });
+      }
       const decision = input["decision"] === "rejected" ? "rejected" : "approved";
       const message = typeof input["message"] === "string" && input["message"].trim().length > 0
         ? input["message"].trim()
         : `${decision} by local-user`;
       const answers = isRecord(input["answers"]) ? input["answers"] : undefined;
-      await stored.clientSession.resolveApproval({
-        runtimeApprovalToken,
-        decision,
-        message,
-        ...(answers ? { answers } : {})
-      });
+      try {
+        await stored.clientSession.resolveApproval({
+          runtimeApprovalToken,
+          decision,
+          message,
+          ...(answers ? { answers } : {})
+        });
+      } catch (error) {
+        throw new AdapterProtocolError("Claude approval resolution failed.", {
+          reasonCode: "claude_approval_resolution_failed",
+          details: {
+            error: error instanceof Error ? error.message : String(error)
+          }
+        });
+      }
       stored.pendingRuntimeApprovalTokens.delete(runtimeApprovalToken);
       stored.normalizedRecords.push(redactSecrets({
         type: "approval.resolution",
@@ -263,7 +288,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
       for (const event of mapped.events) {
         sequence += 1;
-        if (stored.hostedProviderMode && event.type === "approval.requested") {
+        if (stored.hostedProviderMode && !this.hostedBridgeEnabled && event.type === "approval.requested") {
           stored.terminalSeen = true;
           yield {
             id: `event_${crypto.randomUUID()}`,

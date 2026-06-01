@@ -199,6 +199,36 @@ describe("ClaudeCodeAdapter", () => {
     });
   });
 
+  it("yields approval.requested in hosted mode when bridge is enabled", async () => {
+    const fake = createFakeClaudeCodeClient({ approvalToken: "pause-1" });
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "claude_code.sdk",
+      executablePath: "/opt/provider/bin/claude",
+      argv: [],
+      cwd: "/repo",
+      env: { ANTHROPIC_API_KEY: "api-secret" },
+      envKeys: ["ANTHROPIC_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new ClaudeCodeAdapter({
+      client: fake.client,
+      hostedProviderCommand,
+      hostedBridgeEnabled: true
+    });
+    const session = await adapter.start(makeStartRequest());
+
+    const iterator = adapter.events({ ...session, runId: "run_claude" })[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first.value).toMatchObject({
+      type: "approval.requested",
+      payload: {
+        runtimeApprovalToken: "pause-1"
+      }
+    });
+    await adapter.cancel({ ...session, runId: "run_claude" });
+  });
+
   it("rejects hosted post-start input with hosted_input_bridge_unsupported while preserving timeout/cancellation mapping", async () => {
     const fake = createFakeClaudeCodeClient({ waitForInputText: true });
     const hostedProviderCommand: ProviderResolvedCommand = {
@@ -224,5 +254,128 @@ describe("ClaudeCodeAdapter", () => {
       events.push(event);
     }
     expect(events.some((event) => event.type === "run.cancelled")).toBe(true);
+  });
+
+  it("accepts hosted post-start text input when bridge is enabled", async () => {
+    const fake = createFakeClaudeCodeClient({ waitForInputText: true });
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "claude_code.sdk",
+      executablePath: "/opt/provider/bin/claude",
+      argv: [],
+      cwd: "/repo",
+      env: { ANTHROPIC_API_KEY: "api-secret" },
+      envKeys: ["ANTHROPIC_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new ClaudeCodeAdapter({
+      client: fake.client,
+      hostedProviderCommand,
+      hostedBridgeEnabled: true
+    });
+    const session = await adapter.start(makeStartRequest());
+
+    await expect(adapter.send({ ...session, runId: "run_claude" }, { text: "continue" })).resolves.toBeUndefined();
+    expect(fake.state.sentUserMessages).toEqual(["continue"]);
+  });
+
+  it("rejects terminal hosted sessions before client send", async () => {
+    const fake = createFakeClaudeCodeClient({
+      initialEvents: [{ type: "completed", usage: { inputTokens: 1, outputTokens: 1 } }]
+    });
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "claude_code.sdk",
+      executablePath: "/opt/provider/bin/claude",
+      argv: [],
+      cwd: "/repo",
+      env: { ANTHROPIC_API_KEY: "api-secret" },
+      envKeys: ["ANTHROPIC_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new ClaudeCodeAdapter({
+      client: fake.client,
+      hostedProviderCommand,
+      hostedBridgeEnabled: true
+    });
+    const session = await adapter.start(makeStartRequest());
+
+    for await (const _event of adapter.events({ ...session, runId: "run_claude" })) {
+      // drain to terminal
+    }
+
+    await expect(adapter.send({ ...session, runId: "run_claude" }, { text: "continue" })).rejects.toMatchObject({
+      reasonCode: "runtime_input_not_active"
+    });
+    expect(fake.state.sentUserMessages).toEqual([]);
+  });
+
+  it("maps hosted client send failures to named adapter failure", async () => {
+    const fake = createFakeClaudeCodeClient({
+      waitForInputText: true,
+      sendUserMessageError: "send exploded"
+    });
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "claude_code.sdk",
+      executablePath: "/opt/provider/bin/claude",
+      argv: [],
+      cwd: "/repo",
+      env: { ANTHROPIC_API_KEY: "api-secret" },
+      envKeys: ["ANTHROPIC_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new ClaudeCodeAdapter({
+      client: fake.client,
+      hostedProviderCommand,
+      hostedBridgeEnabled: true
+    });
+    const session = await adapter.start(makeStartRequest());
+
+    await expect(adapter.send({ ...session, runId: "run_claude" }, { text: "continue" })).rejects.toMatchObject({
+      reasonCode: "claude_input_send_failed"
+    });
+    expect(fake.state.sentUserMessages).toEqual([]);
+  });
+
+  it("resolves hosted approvals once and then rejects stale tokens", async () => {
+    const fake = createFakeClaudeCodeClient({ approvalToken: "pause-1" });
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "claude_code.sdk",
+      executablePath: "/opt/provider/bin/claude",
+      argv: [],
+      cwd: "/repo",
+      env: { ANTHROPIC_API_KEY: "api-secret" },
+      envKeys: ["ANTHROPIC_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new ClaudeCodeAdapter({
+      client: fake.client,
+      hostedProviderCommand,
+      hostedBridgeEnabled: true
+    });
+    const session = await adapter.start(makeStartRequest());
+
+    const drainPromise = (async () => {
+      for await (const _event of adapter.events({ ...session, runId: "run_claude" })) {
+        // consume approval event and completion
+      }
+    })();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await expect(adapter.send({ ...session, runId: "run_claude" }, {
+      type: "approval_resolution",
+      runtimeApprovalToken: "pause-1",
+      decision: "approved"
+    })).resolves.toBeUndefined();
+    await expect(adapter.send({ ...session, runId: "run_claude" }, {
+      type: "approval_resolution",
+      runtimeApprovalToken: "pause-1",
+      decision: "approved"
+    })).rejects.toMatchObject({ reasonCode: "runtime_approval_pause_not_active" });
+    await drainPromise;
+
+    expect(fake.state.resolvedApprovals).toHaveLength(1);
   });
 });

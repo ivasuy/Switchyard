@@ -30,6 +30,9 @@ export interface FakeClaudeCodeScenario {
   initialEvents?: ClaudeCodeProviderEvent[];
   waitForInputText?: boolean;
   approvalToken?: string;
+  terminalState?: "completed" | "failed";
+  sendUserMessageError?: string;
+  resolveApprovalError?: string;
   malformedStream?: boolean;
   includeUnknownEvents?: number;
 }
@@ -43,6 +46,9 @@ export interface FakeClaudeCodeClientState {
     answers?: Record<string, unknown>;
   }>;
   cancelled: boolean;
+  terminalState: "active" | "completed" | "failed" | "cancelled";
+  sendUserMessageFailures: string[];
+  resolveApprovalFailures: string[];
   liveProbeCalls: Array<{ maxBudgetUsd: number; permissionMode: string; disabledTools: string[] }>;
 }
 
@@ -54,6 +60,9 @@ export function createFakeClaudeCodeClient(scenario: FakeClaudeCodeScenario = {}
     sentUserMessages: [],
     resolvedApprovals: [],
     cancelled: false,
+    terminalState: "active",
+    sendUserMessageFailures: [],
+    resolveApprovalFailures: [],
     liveProbeCalls: []
   };
 
@@ -66,16 +75,44 @@ export function createFakeClaudeCodeClient(scenario: FakeClaudeCodeScenario = {}
       queueMicrotask(() => {
         for (const event of scenario.initialEvents ?? []) {
           queue.push(event);
+          if (event.type === "completed") {
+            terminal = true;
+            state.terminalState = "completed";
+          }
+          if (event.type === "failed") {
+            terminal = true;
+            state.terminalState = "failed";
+          }
+          if (event.type === "cancelled") {
+            terminal = true;
+            state.terminalState = "cancelled";
+          }
         }
         const unknownCount = scenario.includeUnknownEvents ?? 0;
         for (let index = 0; index < unknownCount; index += 1) {
           queue.push({ type: `unknown_${index}` });
         }
 
+        if (scenario.terminalState === "completed" && !terminal) {
+          queue.push({ type: "completed", usage: { inputTokens: 1, outputTokens: 1 } });
+          queue.close();
+          terminal = true;
+          state.terminalState = "completed";
+          return;
+        }
+        if (scenario.terminalState === "failed" && !terminal) {
+          queue.push({ type: "failed", reasonCode: "claude_fake_terminal_failed" });
+          queue.close();
+          terminal = true;
+          state.terminalState = "failed";
+          return;
+        }
+
         if (!scenario.waitForInputText && !approvalToken) {
           queue.push({ type: "completed", usage: { inputTokens: 1, outputTokens: 2 } });
           queue.close();
           terminal = true;
+          state.terminalState = "completed";
           return;
         }
 
@@ -95,21 +132,32 @@ export function createFakeClaudeCodeClient(scenario: FakeClaudeCodeScenario = {}
         processId: 9999,
         events: () => queue.iterate(),
         async sendUserMessage(text: string) {
+          if (scenario.sendUserMessageError) {
+            state.sendUserMessageFailures.push(scenario.sendUserMessageError);
+            throw new Error(scenario.sendUserMessageError);
+          }
           state.sentUserMessages.push(text);
           if (!terminal && scenario.waitForInputText) {
             queue.push({ type: "assistant_text_delta", text: `echo:${text}` });
             queue.push({ type: "completed", usage: { inputTokens: 1, outputTokens: 2 } });
             queue.close();
             terminal = true;
+            state.terminalState = "completed";
           }
         },
         async resolveApproval(input) {
+          if (scenario.resolveApprovalError) {
+            state.resolveApprovalFailures.push(scenario.resolveApprovalError);
+            throw new Error(scenario.resolveApprovalError);
+          }
           state.resolvedApprovals.push(input);
           if (!terminal) {
             if (input.decision === "rejected") {
               queue.push({ type: "failed", reasonCode: "provider_denied" });
+              state.terminalState = "failed";
             } else {
               queue.push({ type: "completed", usage: { inputTokens: 1, outputTokens: 2 } });
+              state.terminalState = "completed";
             }
             queue.close();
             terminal = true;
@@ -121,6 +169,7 @@ export function createFakeClaudeCodeClient(scenario: FakeClaudeCodeScenario = {}
             queue.push({ type: "cancelled" });
             queue.close();
             terminal = true;
+            state.terminalState = "cancelled";
           }
         }
       };

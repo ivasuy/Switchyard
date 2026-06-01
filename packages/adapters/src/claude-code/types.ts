@@ -51,6 +51,7 @@ export interface ClaudeCodeCliClientOptions {
   permissionMode?: ClaudePermissionMode;
   disabledTools?: string[];
   hostedProviderCommand?: ProviderResolvedCommand;
+  hostedBridgeEnabled?: boolean;
 }
 
 export interface ClaudeCodeAdapterOptions {
@@ -63,6 +64,7 @@ export interface ClaudeCodeAdapterOptions {
   permissionMode?: ClaudePermissionMode;
   disabledTools?: string[];
   hostedProviderCommand?: ProviderResolvedCommand;
+  hostedBridgeEnabled?: boolean;
   doctor?: Omit<ClaudeCodeDoctorOptions, "command" | "liveProbe" | "maxBudgetUsd" | "requestTimeoutMs" | "permissionMode" | "disabledTools">;
 }
 
