@@ -399,6 +399,67 @@ describe("OpenCodeAcpAdapter", () => {
     expect(stats.permissionResponses).toBe(1);
   });
 
+  it("redacts hosted permission action summaries before approval events", async () => {
+    const rawReason = "Need token=secret-token-value at /Users/example/secret-key/project.txt";
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "opencode.acp",
+      executablePath: "/opt/provider/bin/opencode",
+      argv: ["acp"],
+      cwd: "/repo",
+      env: {},
+      envKeys: [],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new OpenCodeAcpAdapter({
+      hostedProviderCommand,
+      hostedBridgeEnabled: true,
+      processFactory: () => {
+        const handle = startFakeAcpRuntimeProcess({ scenario: "permission_request" });
+        const originalWrite = handle.process.stdout.write.bind(handle.process.stdout);
+        handle.process.stdout.write = ((data: string | Uint8Array) => {
+          const text = typeof data === "string" ? data : Buffer.from(data).toString("utf8");
+          if (text.includes("\"method\":\"session/request_permission\"")) {
+            const message = JSON.parse(text) as { params?: Record<string, unknown> };
+            message.params = { ...(message.params ?? {}), reason: rawReason };
+            return originalWrite(`${JSON.stringify(message)}\n`);
+          }
+          return originalWrite(data as string);
+        }) as typeof handle.process.stdout.write;
+        return handle.process;
+      },
+      probeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    const session = await adapter.start({
+      runId: "run_perm_redacted",
+      runtime: "opencode",
+      runtimeMode: "opencode.acp",
+      provider: "opencode",
+      model: "opencode-default",
+      cwd: "/repo",
+      task: "permission path",
+      metadata: {}
+    });
+
+    const iterator = adapter.events({ ...session, runId: "run_perm_redacted" })[Symbol.asyncIterator]();
+    let approvalAction = "";
+    for (let i = 0; i < 6; i += 1) {
+      const next = await iterator.next();
+      if (next.done) {
+        break;
+      }
+      if (next.value.type === "approval.requested") {
+        approvalAction = String(next.value.payload["action"] ?? "");
+        break;
+      }
+    }
+
+    expect(approvalAction).toContain("[REDACTED");
+    expect(approvalAction).not.toContain("secret-token-value");
+    expect(approvalAction).not.toContain("/Users/example");
+    expect(approvalAction).not.toContain("/Users/example/secret-key/project.txt");
+  });
+
   it("rejects concurrent hosted prompt input while prompt is in flight", async () => {
     const hostedProviderCommand: ProviderResolvedCommand = {
       runtimeMode: "opencode.acp",

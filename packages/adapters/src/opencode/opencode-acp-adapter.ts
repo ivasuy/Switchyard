@@ -832,6 +832,17 @@ function summarizePermissionAction(params: Record<string, unknown> | undefined):
   if (!reason || reason.length === 0) {
     return undefined;
   }
+  const sanitized = sanitizeHostedPermissionText(reason);
   const maxLength = 160;
-  return reason.length > maxLength ? `${reason.slice(0, maxLength - 3)}...` : reason;
+  return sanitized.length > maxLength ? `${sanitized.slice(0, maxLength - 3)}...` : sanitized;
+}
+
+function sanitizeHostedPermissionText(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
+    .replace(/(authorization\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/([A-Za-z0-9_-]*token[A-Za-z0-9_-]*\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/([A-Za-z0-9_-]*(?:_key|_secret)[A-Za-z0-9_-]*\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/(^|[\s,;])\/[A-Za-z0-9._~+/-]+/g, "$1[REDACTED_PATH]")
+    .replace(/\/([^/\s"]*(?:token|secret|key)[^/\s"]*)/gi, "/[REDACTED_SEGMENT]");
 }
