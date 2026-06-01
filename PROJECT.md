@@ -319,3 +319,23 @@ The shipped boundary remains explicit: R22 does not ship dashboard/TUI, arbitrar
 
 ### Deferred Concerns
 - None.
+
+## Phase 22: R23 Hosted Runtime Input And Approval Bridges
+**Date:** 2026-06-02T00:59:24+05:30
+**Spec:** docs/superpowers/specs/2026-06-01-phase-22-r23-hosted-runtime-bridges.md
+**Plan:** docs/superpowers/plans/2026-06-01-phase-22-r23-hosted-runtime-bridges.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-22-report.md
+**Branch:** agent/phase-22-r23-hosted-runtime-bridges (audit GREEN; branch retained locally)
+**PR:** not created - native TUI/subagent workflow requested; branch left unmerged per user instruction.
+
+### What changed
+R23 is now shipped on the phase branch. Switchyard adds hosted runtime input and approval bridges for worker-owned `claude_code.sdk` and structured `opencode.acp` using the existing `POST /runs/:id/input` and approval list/get/approve/reject endpoints. The server remains the admission layer for auth, ownership, quota, audit, idempotency, and durable command creation; the hosted worker remains the owner of provider sessions and applies accepted bridge commands through the existing runtime runner path.
+
+The release adds strict hosted bridge contracts and OpenAPI route-boundary tests, Postgres-backed hosted runtime bridge command and payload stores, core bridge orchestration with payload hashing and quota finalization, server admission wiring, hosted Claude input/approval handling, ACP held-permission response support, hosted OpenCode structured permission approval handling, worker claim/reconciliation/readiness wiring, production preflight/canary coverage, and product/development docs that state the exact shipped bridge matrix.
+
+The shipped boundary remains explicit: R23 does not ship dashboard/TUI, new public bridge/input/approval/session routes, public arbitrary subprocess/PTY execution, terminal or PTY automation, hosted `codex.interactive`, hosted Codex approval/input bridges beyond explicit `codex.exec_json` unsupported behavior, AgentField or Generic HTTP hosted bridges, Cursor/OpenClaw/Paperclip adapters, browser automation, hosted repo execution, hosted debate real participant runtimes/model judging, managed SaaS/signup/billing UI, OAuth/OIDC/SAML/SSO/SCIM, or live provider spend in required tests/default smoke/default preflight/default canary.
+
+Usable hosted runtime bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker. Missing bridge stores fail closed in readiness/preflight/admission, and stale claimed non-idempotent provider input after worker crash fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked` instead of blindly retrying provider input.
+
+### Deferred Concerns
+- None.
