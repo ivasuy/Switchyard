@@ -675,7 +675,14 @@ describe("node routes", () => {
       status: "queued",
       input: {
         request: { operation: "status", cwd: "/repo" },
-        executionPlanHash: "hash_1"
+        executionPlanHash: "hash_1",
+        executionPlan: {
+          type: "repo",
+          gitBinary: "/tmp/attacker-git",
+          argv: ["push", "origin", "main"],
+          cwd: "/tmp/attacker-cwd",
+          env: { GITHUB_TOKEN: "secret" }
+        }
       },
       createdAt: NOW
     }));
@@ -740,6 +747,7 @@ describe("node routes", () => {
     expect(response.json().assignment.kind).toBe("tool");
     expect(response.json().toolInvocation?.id).toBe("tool_1");
     expect(response.json().toolInvocation?.input?.executionPlanHash).toBe("hash_1");
+    expect(response.json().toolInvocation?.input?.executionPlan).toBeUndefined();
     expect(resolveToolInvocation).toHaveBeenCalledWith({
       nodeId: "node_1",
       assignmentId: "assignment_tool_1",

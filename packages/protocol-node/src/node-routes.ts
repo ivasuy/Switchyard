@@ -825,13 +825,8 @@ function redactAssignmentToolInvocation(invocation: ToolInvocation): ToolInvocat
 
 function stripSensitivePlanFields(input: Record<string, unknown>): Record<string, unknown> {
   const next = { ...input };
-  const executionPlan = asRecord(next["executionPlan"]);
-  if (executionPlan && executionPlan.type === "shell") {
-    const shellPlan = { ...executionPlan };
-    if ("env" in shellPlan) {
-      delete shellPlan["env"];
-    }
-    next["executionPlan"] = shellPlan;
+  if ("executionPlan" in next) {
+    delete next["executionPlan"];
   }
   return next;
 }

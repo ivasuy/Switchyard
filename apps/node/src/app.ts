@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import type {
   Artifact,
   Assignment,
@@ -7,6 +8,13 @@ import type {
   Run,
   SwitchyardEvent,
   ToolInvocation
+} from "@switchyard/contracts";
+import {
+  fetchToolInputSchema,
+  githubToolInputSchema,
+  repoToolInputSchema,
+  shellToolInputSchema,
+  webSearchToolInputSchema
 } from "@switchyard/contracts";
 import { AdapterProtocolError, LocalNodePolicyService, type ToolAdapter } from "@switchyard/core";
 import { NodeClient, NodeClientError } from "@switchyard/protocol-node";
@@ -116,7 +124,11 @@ export function createNodeApp(config: NodeAppConfig, deps?: {
         try {
           const execution = deps?.executeToolAssignment
             ? await deps.executeToolAssignment({ assignment, run, toolInvocation })
-            : await executeToolAssignment({ assignment, run, toolInvocation }, { toolAdapters });
+            : await executeToolAssignment({ assignment, run, toolInvocation }, {
+              toolAdapters,
+              nodePolicy: config.policy,
+              nodeTools: config.tools
+            });
           await syncExecutionArtifacts({
             client,
             nodeId,
@@ -199,7 +211,11 @@ export function createNodeApp(config: NodeAppConfig, deps?: {
 
 export async function executeToolAssignment(
   input: { assignment: Assignment; run: Run; toolInvocation: ToolInvocation },
-  deps: { toolAdapters: Map<string, ToolAdapter> }
+  deps: {
+    toolAdapters: Map<string, ToolAdapter>;
+    nodePolicy: NodePolicy;
+    nodeTools: NodeAppConfig["tools"];
+  }
 ): Promise<NodeExecutionResult> {
   if (input.toolInvocation.type === "browser") {
     throw new AdapterProtocolError("Browser tool is not shipped on connected nodes", { reasonCode: "browser_tool_unshipped" });
@@ -208,14 +224,7 @@ export async function executeToolAssignment(
   if (!adapter) {
     throw new AdapterProtocolError(`Tool adapter unavailable for ${input.toolInvocation.type}`, { reasonCode: "tool_adapter_unavailable" });
   }
-  const request = asRecord(input.toolInvocation.input["request"]) ?? {};
-  const executionPlan = asRecord(input.toolInvocation.input["executionPlan"]);
-  const invokeInput = input.toolInvocation.type === "fake_echo"
-    ? request
-    : {
-      request,
-      ...(executionPlan ? { executionPlan } : {})
-    };
+  const invokeInput = buildNodeOwnedInvokeInput(input.toolInvocation, deps.nodePolicy, deps.nodeTools);
 
   const callEvent: SwitchyardEvent = {
     id: `event_${randomUUID()}`,
@@ -308,6 +317,177 @@ function buildNodeToolAdapterConfig(config: NodeAppConfig): NodeToolAdapterConfi
     shell: {
       catalog: config.tools.shellCatalog
     }
+  };
+}
+
+const NODE_TOOL_LIMITS = {
+  timeoutMs: 30_000,
+  maxInlineOutputBytes: 32_768,
+  maxArtifactBytes: 1_048_576,
+  fetchMaxResponseBytes: 128_000,
+  webSearchMaxResults: 8,
+  webSearchMaxResponseBytes: 64_000,
+  githubMaxResponseBytes: 128_000,
+  repoMaxOutputBytes: 262_144
+} as const;
+
+function buildNodeOwnedInvokeInput(
+  toolInvocation: ToolInvocation,
+  nodePolicy: NodePolicy,
+  nodeTools: NodeAppConfig["tools"]
+): Record<string, unknown> {
+  const request = asRecord(toolInvocation.input["request"]) ?? {};
+  if (toolInvocation.type === "fake_echo") {
+    return request;
+  }
+
+  switch (toolInvocation.type) {
+    case "fetch":
+      return { request, executionPlan: deriveFetchExecutionPlan(request) };
+    case "web_search":
+      return { request, executionPlan: deriveWebSearchExecutionPlan(request) };
+    case "github":
+      return { request, executionPlan: deriveGithubExecutionPlan(request) };
+    case "repo":
+      return { request, executionPlan: deriveRepoExecutionPlan(request, nodePolicy, nodeTools) };
+    case "shell":
+      return { request, executionPlan: deriveShellExecutionPlan(request, nodePolicy, nodeTools) };
+    default:
+      throw new AdapterProtocolError("Tool type is not supported on connected node", { reasonCode: "tool_adapter_unavailable" });
+  }
+}
+
+function deriveFetchExecutionPlan(request: Record<string, unknown>): Record<string, unknown> {
+  const parsed = fetchToolInputSchema.safeParse(request);
+  if (!parsed.success) {
+    throw new AdapterProtocolError("Fetch input is invalid", { reasonCode: "fetch_input_invalid" });
+  }
+  const url = new URL(parsed.data.url);
+  return {
+    type: "fetch",
+    method: parsed.data.method,
+    url: url.toString(),
+    allowedHosts: [url.hostname.toLowerCase()],
+    allowedHeaders: [],
+    maxRedirects: 3,
+    allowedContentTypes: ["text/plain", "application/json", "text/html"],
+    captureContent: parsed.data.captureContent ?? false,
+    timeoutMs: NODE_TOOL_LIMITS.timeoutMs,
+    maxResponseBytes: NODE_TOOL_LIMITS.fetchMaxResponseBytes,
+    maxInlineOutputBytes: NODE_TOOL_LIMITS.maxInlineOutputBytes,
+    maxArtifactBytes: NODE_TOOL_LIMITS.maxArtifactBytes
+  };
+}
+
+function deriveWebSearchExecutionPlan(request: Record<string, unknown>): Record<string, unknown> {
+  const parsed = webSearchToolInputSchema.safeParse(request);
+  if (!parsed.success) {
+    throw new AdapterProtocolError("Search query is invalid", { reasonCode: "web_search_query_invalid" });
+  }
+  return {
+    type: "web_search",
+    providerId: "node_owned_provider",
+    baseUrl: "https://node-owned.invalid/search",
+    query: parsed.data.query,
+    maxResults: Math.min(parsed.data.maxResults ?? NODE_TOOL_LIMITS.webSearchMaxResults, NODE_TOOL_LIMITS.webSearchMaxResults),
+    timeoutMs: NODE_TOOL_LIMITS.timeoutMs,
+    maxResponseBytes: NODE_TOOL_LIMITS.webSearchMaxResponseBytes,
+    maxInlineOutputBytes: NODE_TOOL_LIMITS.maxInlineOutputBytes,
+    maxArtifactBytes: NODE_TOOL_LIMITS.maxArtifactBytes
+  };
+}
+
+function deriveGithubExecutionPlan(request: Record<string, unknown>): Record<string, unknown> {
+  const parsed = githubToolInputSchema.safeParse(request);
+  if (!parsed.success) {
+    throw new AdapterProtocolError("GitHub operation is denied", { reasonCode: "github_operation_denied" });
+  }
+  return {
+    type: "github",
+    operation: parsed.data.operation,
+    owner: parsed.data.owner,
+    repo: parsed.data.repo,
+    ...(parsed.data.number !== undefined ? { number: parsed.data.number } : {}),
+    ...(parsed.data.ref !== undefined ? { ref: parsed.data.ref } : {}),
+    ...(parsed.data.base !== undefined ? { base: parsed.data.base } : {}),
+    ...(parsed.data.head !== undefined ? { head: parsed.data.head } : {}),
+    ...(parsed.data.path !== undefined ? { path: parsed.data.path } : {}),
+    timeoutMs: NODE_TOOL_LIMITS.timeoutMs,
+    maxResponseBytes: NODE_TOOL_LIMITS.githubMaxResponseBytes,
+    maxInlineOutputBytes: NODE_TOOL_LIMITS.maxInlineOutputBytes,
+    maxArtifactBytes: NODE_TOOL_LIMITS.maxArtifactBytes
+  };
+}
+
+function deriveRepoExecutionPlan(
+  request: Record<string, unknown>,
+  nodePolicy: NodePolicy,
+  nodeTools: NodeAppConfig["tools"]
+): Record<string, unknown> {
+  const parsed = repoToolInputSchema.safeParse(request);
+  if (!parsed.success) {
+    throw new AdapterProtocolError("Repo operation is denied", { reasonCode: "repo_operation_denied" });
+  }
+  const cwd = resolve(parsed.data.cwd);
+  const allowedPrefixes = nodePolicy.allowToolCwdPrefixes.length > 0
+    ? nodePolicy.allowToolCwdPrefixes
+    : nodePolicy.allowCwdPrefixes;
+  if (!isPathWithinPrefixes(cwd, allowedPrefixes)) {
+    throw new AdapterProtocolError("Repo cwd denied by node policy", { reasonCode: "repo_cwd_denied" });
+  }
+  const pathspec = parsed.data.pathspec ?? [];
+  return {
+    type: "repo",
+    operation: parsed.data.operation,
+    cwd,
+    cwdPolicySummary: summarizePrefix(cwd, allowedPrefixes),
+    gitBinary: nodeTools.gitBinary,
+    argv: buildRepoArgv(parsed.data.operation, pathspec),
+    pathspec,
+    timeoutMs: NODE_TOOL_LIMITS.timeoutMs,
+    maxOutputBytes: NODE_TOOL_LIMITS.repoMaxOutputBytes,
+    maxInlineOutputBytes: NODE_TOOL_LIMITS.maxInlineOutputBytes,
+    maxArtifactBytes: NODE_TOOL_LIMITS.maxArtifactBytes
+  };
+}
+
+function deriveShellExecutionPlan(
+  request: Record<string, unknown>,
+  nodePolicy: NodePolicy,
+  nodeTools: NodeAppConfig["tools"]
+): Record<string, unknown> {
+  for (const forbidden of ["command", "shell", "executablePath", "env", "pty", "terminal", "process"]) {
+    if (forbidden in request) {
+      throw new AdapterProtocolError("Shell command denied", { reasonCode: "shell_command_denied" });
+    }
+  }
+  const parsed = shellToolInputSchema.safeParse(request);
+  if (!parsed.success) {
+    throw new AdapterProtocolError("Shell command is not configured", { reasonCode: "shell_command_not_configured" });
+  }
+  const command = nodeTools.shellCatalog[parsed.data.commandId];
+  if (!command) {
+    throw new AdapterProtocolError("Shell command is not configured", { reasonCode: "shell_command_not_configured" });
+  }
+  const cwd = resolve(parsed.data.cwd);
+  const allowedPrefixes = nodePolicy.allowToolCwdPrefixes.length > 0
+    ? nodePolicy.allowToolCwdPrefixes
+    : nodePolicy.allowCwdPrefixes;
+  if (!isPathWithinPrefixes(cwd, allowedPrefixes)) {
+    throw new AdapterProtocolError("Repo cwd denied by node policy", { reasonCode: "repo_cwd_denied" });
+  }
+  return {
+    type: "shell",
+    commandId: parsed.data.commandId,
+    executablePath: command.executablePath,
+    argv: [...command.fixedArgs, ...(parsed.data.args ?? [])],
+    cwd,
+    cwdPolicySummary: summarizePrefix(cwd, allowedPrefixes),
+    env: { ...command.env },
+    timeoutMs: Math.min(command.timeoutMs, NODE_TOOL_LIMITS.timeoutMs),
+    maxOutputBytes: command.maxOutputBytes,
+    maxInlineOutputBytes: NODE_TOOL_LIMITS.maxInlineOutputBytes,
+    maxArtifactBytes: NODE_TOOL_LIMITS.maxArtifactBytes
   };
 }
 
@@ -448,4 +628,45 @@ function decideToolWithLocalPolicy(
     return { decision: "deny", reasonCode: "node_policy_denied" };
   }
   return { decision: "allow", reasonCode: "allow" };
+}
+
+function isPathWithinPrefixes(path: string, prefixes: string[]): boolean {
+  if (prefixes.length === 0) {
+    return false;
+  }
+  return prefixes.some((prefix) => {
+    const normalizedPrefix = normalizePrefix(prefix);
+    return `${path}/`.startsWith(normalizedPrefix);
+  });
+}
+
+function normalizePrefix(prefix: string): string {
+  const normalized = resolve(prefix);
+  return normalized.endsWith("/") ? normalized : `${normalized}/`;
+}
+
+function summarizePrefix(path: string, prefixes: string[]): string {
+  for (const prefix of prefixes) {
+    if (isPathWithinPrefixes(path, [prefix])) {
+      return prefix;
+    }
+  }
+  return "[none]";
+}
+
+function buildRepoArgv(operation: "status" | "diff" | "show" | "ls_files" | "grep", pathspec: string[]): string[] {
+  switch (operation) {
+    case "status":
+      return ["status", "--short", "--branch"];
+    case "diff":
+      return pathspec.length > 0 ? ["diff", "--", ...pathspec] : ["diff"];
+    case "show":
+      return pathspec.length > 0 ? ["show", "--", ...pathspec] : ["show", "--stat", "--no-patch"];
+    case "ls_files":
+      return pathspec.length > 0 ? ["ls-files", "--", ...pathspec] : ["ls-files"];
+    case "grep":
+      return pathspec.length > 0 ? ["grep", "-n", "--", ...pathspec] : ["grep", "-n", "."];
+    default:
+      return ["status"];
+  }
 }
