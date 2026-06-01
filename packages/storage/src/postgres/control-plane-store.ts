@@ -128,9 +128,24 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
   private readonly auditEvents: AuditLogEvent[] = [];
   private readonly runStatusById = new Map<string, string>();
   private readonly nodeStateById = new Map<string, { status: string; heartbeatExpiresAt?: string }>();
+  private readonly toolInvocationResourceIds = new Set<string>();
+  private readonly approvalResourceIds = new Set<string>();
   private readonly criticalChains = new Map<string, Promise<void>>();
 
   constructor(private readonly handle?: PostgresDatabaseHandle) {}
+
+  trackInMemoryResourceForOwnership(resourceType: ResourceType, resourceId: string): void {
+    if (this.handle) {
+      return;
+    }
+    if (resourceType === "tool_invocation") {
+      this.toolInvocationResourceIds.add(resourceId);
+      return;
+    }
+    if (resourceType === "approval") {
+      this.approvalResourceIds.add(resourceId);
+    }
+  }
 
   async loadApiKeyBundleByHash(input: LoadApiKeyBundleInput): Promise<AuthBundle | null> {
     if (this.handle) {
@@ -657,6 +672,12 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
     }
 
     const ownedKeySet = new Set(this.ownership.keys());
+    const unownedToolInvocations = [...this.toolInvocationResourceIds].filter(
+      (resourceId) => !ownedKeySet.has(ownershipKey("tool_invocation", resourceId))
+    ).length;
+    const unownedApprovals = [...this.approvalResourceIds].filter(
+      (resourceId) => !ownedKeySet.has(ownershipKey("approval", resourceId))
+    ).length;
     const unownedAudit = this.auditEvents.filter((event) => !ownedKeySet.has(ownershipKey("audit_log_event", event.id))).length;
     const unownedReservations = [...this.reservations.values()].filter(
       (entry) => !ownedKeySet.has(ownershipKey("quota", entry.id))
@@ -665,8 +686,8 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
       runs: 0,
       runEvents: 0,
       artifacts: 0,
-      toolInvocations: 0,
-      approvals: 0,
+      toolInvocations: unownedToolInvocations,
+      approvals: unownedApprovals,
       placements: 0,
       nodes: 0,
       assignments: 0,
@@ -1025,6 +1046,14 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
 
   private captureInMemoryResourceState(input: AttachOwnershipInput): void {
     const metadata = (input as { metadata?: Record<string, unknown> }).metadata;
+    if (input.resourceType === "tool_invocation") {
+      this.toolInvocationResourceIds.add(input.resourceId);
+      return;
+    }
+    if (input.resourceType === "approval") {
+      this.approvalResourceIds.add(input.resourceId);
+      return;
+    }
     if (!metadata) {
       return;
     }

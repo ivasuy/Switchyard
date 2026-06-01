@@ -39,7 +39,10 @@ export class PostgresAssignmentStore implements NodeAssignmentStore {
         "SELECT * FROM assignments WHERE node_id = $1 AND status = 'pending' ORDER BY created_at ASC",
         [nodeId]
       );
-      return result.rows.map(rowToAssignment);
+      return result.rows.flatMap((row) => {
+        const assignment = rowToAssignment(row);
+        return assignment ? [assignment] : [];
+      });
     }
     return [...this.items.values()].filter((assignment) => assignment.nodeId === nodeId && assignment.status === "pending");
   }
@@ -47,10 +50,19 @@ export class PostgresAssignmentStore implements NodeAssignmentStore {
   async claim(input: { assignmentId: string; nodeId: string; now: string }): Promise<Assignment | undefined> {
     if (this.handle) {
       const result = await this.handle.pool.query(
-        "UPDATE assignments SET status = 'claimed', claimed_at = $3 WHERE id = $1 AND node_id = $2 AND status = 'pending' RETURNING *",
+        `UPDATE assignments
+         SET status = 'claimed', claimed_at = $3
+         WHERE id = $1
+           AND node_id = $2
+           AND status = 'pending'
+           AND (kind IS DISTINCT FROM 'tool' OR tool_invocation_id IS NOT NULL)
+         RETURNING *`,
         [input.assignmentId, input.nodeId, input.now]
       );
-      return result.rows[0] ? rowToAssignment(result.rows[0]) : undefined;
+      if (!result.rows[0]) {
+        return undefined;
+      }
+      return rowToAssignment(result.rows[0]);
     }
     const assignment = this.items.get(input.assignmentId);
     if (!assignment || assignment.nodeId !== input.nodeId || assignment.status !== "pending") {
@@ -112,7 +124,10 @@ export class PostgresAssignmentStore implements NodeAssignmentStore {
         "UPDATE assignments SET status = 'expired', failed_at = $1 WHERE status = 'pending' RETURNING *",
         [now]
       );
-      return result.rows.map(rowToAssignment);
+      return result.rows.flatMap((row) => {
+        const assignment = rowToAssignment(row);
+        return assignment ? [assignment] : [];
+      });
     }
     const expired: Assignment[] = [];
     for (const assignment of this.items.values()) {
@@ -167,7 +182,7 @@ export class PostgresAssignmentStore implements NodeAssignmentStore {
   }
 }
 
-function rowToAssignment(row: Record<string, unknown>): Assignment {
+function rowToAssignment(row: Record<string, unknown>): Assignment | undefined {
   const assignment: Assignment = {
     id: row["id"] as string,
     runId: row["run_id"] as string,
@@ -178,6 +193,9 @@ function rowToAssignment(row: Record<string, unknown>): Assignment {
     lastEventSequence: row["last_event_sequence"] as number,
     createdAt: row["created_at"] as string
   };
+  if (assignment.kind === "tool" && !row["tool_invocation_id"]) {
+    return undefined;
+  }
   if (row["tool_invocation_id"]) assignment.toolInvocationId = row["tool_invocation_id"] as string;
   if (row["claimed_at"]) assignment.claimedAt = row["claimed_at"] as string;
   if (row["started_at"]) assignment.startedAt = row["started_at"] as string;

@@ -172,6 +172,45 @@ describe("postgres hosted tool stores", () => {
     expect(assignment?.toolInvocationId).toBeUndefined();
   });
 
+  it("does not claim malformed tool assignment rows missing toolInvocationId", async () => {
+    const handle = {
+      pool: {
+        query: async (sql: string) => {
+          if (sql.includes("UPDATE assignments")) {
+            return {
+              rows: [
+                {
+                  id: "assignment_tool_bad_1",
+                  run_id: "run_1",
+                  node_id: "node_1",
+                  kind: "tool",
+                  tool_invocation_id: null,
+                  status: "claimed",
+                  retry_count: 0,
+                  last_event_sequence: 0,
+                  created_at: "2026-06-01T10:00:00.000Z",
+                  claimed_at: "2026-06-01T10:01:00.000Z"
+                }
+              ]
+            };
+          }
+          return { rows: [] };
+        }
+      },
+      db: {} as PostgresDatabaseHandle["db"],
+      real: true as const,
+      close: async () => {}
+    } satisfies PostgresDatabaseHandle;
+
+    const store = new PostgresAssignmentStore(handle);
+    const claimed = await store.claim({
+      assignmentId: "assignment_tool_bad_1",
+      nodeId: "node_1",
+      now: "2026-06-01T10:01:00.000Z"
+    });
+    expect(claimed).toBeUndefined();
+  });
+
   it("reports unowned tool invocation and approval counts", async () => {
     const counts = new Map<string, number>([
       ["run", 0],
@@ -202,6 +241,39 @@ describe("postgres hosted tool stores", () => {
     const summary = await store.countUnownedResources();
     expect(summary.toolInvocations).toBe(2);
     expect(summary.approvals).toBe(3);
+  });
+
+  it("reports unowned tool invocation and approval counts on memory store path", async () => {
+    const store = new PostgresControlPlaneStore();
+    store.trackInMemoryResourceForOwnership("tool_invocation", "tool_1");
+    store.trackInMemoryResourceForOwnership("tool_invocation", "tool_2");
+    store.trackInMemoryResourceForOwnership("approval", "approval_1");
+    store.trackInMemoryResourceForOwnership("approval", "approval_2");
+
+    await store.attachOwnership({
+      resourceType: "tool_invocation",
+      resourceId: "tool_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      apiKeyId: "api_key_1",
+      createdAt: "2026-06-01T10:00:00.000Z"
+    });
+    await store.attachOwnership({
+      resourceType: "approval",
+      resourceId: "approval_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      apiKeyId: "api_key_1",
+      createdAt: "2026-06-01T10:00:00.000Z"
+    });
+
+    const summary = await store.countUnownedResources();
+    expect(summary.toolInvocations).toBe(1);
+    expect(summary.approvals).toBe(1);
   });
 
   it("fails closed for legacy tool entitlements/quotas in production bootstrap", async () => {
