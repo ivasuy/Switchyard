@@ -22,7 +22,7 @@ import { evidenceItemSchema } from "./evidence.js";
 import { contextPacketSchema } from "./context.js";
 import { approvalSchema } from "./approval.js";
 import { createToolInvocationRequestSchema, toolInvocationSchema } from "./tool.js";
-import { debateSchema } from "./debate.js";
+import { debateSchema, createDebateRequestSchema } from "./debate.js";
 import { httpErrorEnvelopeSchema } from "./http-error.js";
 import { nodeSchema } from "./node.js";
 import {
@@ -312,9 +312,7 @@ const SCHEMA_BY_REF: Record<string, z.ZodTypeAny> = {
   }),
 
   CreateDebateQuery: z.object({ wait: z.enum(["1"]).optional() }),
-  CreateDebateRequest: z.object({
-    topic: z.string().min(1)
-  }).passthrough(),
+  CreateDebateRequest: createDebateRequestSchema,
   CreateDebateResponse: z.object({ debate: debateSchema }).passthrough(),
   GetDebateResponse: z.object({ debate: debateSchema }).passthrough(),
 

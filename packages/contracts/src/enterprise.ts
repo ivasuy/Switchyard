@@ -147,6 +147,8 @@ export const billingPlanSchema = z
 export const quotaKindSchema = z.enum([
   "runs_per_hour",
   "active_runs",
+  "debates_per_hour",
+  "active_debates",
   "artifact_read_bytes_per_hour",
   "connected_nodes",
   "tool_invocations_per_hour",
@@ -205,6 +207,7 @@ export const quotaReservationSchema = z
 
 export const resourceOwnershipTypeSchema = z.enum([
   "run",
+  "debate",
   "run_event",
   "artifact",
   "tool_invocation",

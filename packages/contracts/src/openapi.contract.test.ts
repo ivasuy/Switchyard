@@ -227,6 +227,15 @@ describe("openapi generation", () => {
     expect(document.paths["/audit/events"]?.get?.operationId).toBe("listAuditEvents");
   });
 
+  it("includes only existing hosted debate route family members", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const debatePaths = Object.keys(document.paths).filter((path) => path.startsWith("/debates"));
+    expect(debatePaths.sort()).toEqual(["/debates", "/debates/{id}", "/debates/{id}/events"]);
+    expect(document.paths["/debates"]?.post?.operationId).toBe("createDebate");
+    expect(document.paths["/debates/{id}"]?.get?.operationId).toBe("getDebate");
+    expect(document.paths["/debates/{id}/events"]?.get?.operationId).toBe("streamDebateEvents");
+  });
+
   it("keeps hosted /health and /ready public", () => {
     const document = generateOpenApiDocument({ surface: "hosted_server" });
     expect(document.paths["/health"]?.get?.security).toBeUndefined();
@@ -316,6 +325,27 @@ describe("openapi generation", () => {
     expect(local.paths["/memory/search"]?.get?.operationId).toBe("searchMemory");
     expect(hosted.paths["/tools/invocations"]?.post?.operationId).toBe("invokeTool");
     expect(hosted.paths["/tools/invocations"]?.get?.operationId).toBe("listToolInvocations");
+  });
+
+  it("keeps local and hosted debate/public execution boundaries closed", () => {
+    for (const document of [generateOpenApiDocument(), generateOpenApiDocument({ surface: "hosted_server" })]) {
+      const paths = Object.keys(document.paths);
+      const lower = paths.map((path) => path.toLowerCase());
+
+      expect(lower.some((path) => path.includes("/debates/participants/real"))).toBe(false);
+      expect(lower.some((path) => path.includes("/debates/judge"))).toBe(false);
+      expect(lower.some((path) => path.includes("/model-judge"))).toBe(false);
+      expect(lower.some((path) => path.includes("/judging"))).toBe(false);
+
+      expect(lower.some((path) => path.includes("/dashboard"))).toBe(false);
+      expect(lower.some((path) => path.includes("/tui"))).toBe(false);
+      expect(lower.some((path) => path.includes("/terminal"))).toBe(false);
+      expect(lower.some((path) => path.includes("/pty"))).toBe(false);
+      expect(lower.some((path) => path.includes("/sandbox"))).toBe(false);
+      expect(lower.some((path) => path.includes("/exec"))).toBe(false);
+      expect(lower.some((path) => path.includes("/shell"))).toBe(false);
+      expect(lower.some((path) => path.includes("/process"))).toBe(false);
+    }
   });
 
   it("keeps arbitrary execution operation ids out of OpenAPI", () => {
@@ -549,10 +579,13 @@ describe("openapi generation", () => {
     expect(quotaKindSchema.parse("tool_artifact_bytes_per_hour")).toBe("tool_artifact_bytes_per_hour");
     expect(quotaKindSchema.parse("runtime_bridge_commands_per_hour")).toBe("runtime_bridge_commands_per_hour");
     expect(quotaKindSchema.parse("active_runtime_bridge_commands")).toBe("active_runtime_bridge_commands");
+    expect(quotaKindSchema.parse("debates_per_hour")).toBe("debates_per_hour");
+    expect(quotaKindSchema.parse("active_debates")).toBe("active_debates");
 
     expect(resourceOwnershipTypeSchema.parse("tool_invocation")).toBe("tool_invocation");
     expect(resourceOwnershipTypeSchema.parse("approval")).toBe("approval");
     expect(resourceOwnershipTypeSchema.parse("runtime_bridge_command")).toBe("runtime_bridge_command");
+    expect(resourceOwnershipTypeSchema.parse("debate")).toBe("debate");
 
     expect(auditEventTypeSchema.parse("tool.execution_completed")).toBe("tool.execution_completed");
     expect(auditResourceTypeSchema.parse("tool_invocation")).toBe("tool_invocation");

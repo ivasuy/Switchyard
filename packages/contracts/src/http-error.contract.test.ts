@@ -39,6 +39,42 @@ const R22_TOOL_ERROR_CODES = [
   "browser_tool_unshipped"
 ] as const;
 
+const R24_DEBATE_ERROR_CODES = [
+  "debate_evidence_not_found_or_denied",
+  "debate_real_participant_opt_in_required",
+  "debate_runtime_unsupported",
+  "debate_wait_real_runtime_unsupported",
+  "debate_participant_count_invalid",
+  "debate_participant_placement_required",
+  "debate_participant_run_missing",
+  "debate_participant_run_failed",
+  "debate_participant_run_timeout",
+  "debate_participant_output_missing",
+  "debate_participant_output_empty",
+  "debate_participant_output_too_large",
+  "debate_runtime_approval_expired",
+  "debate_child_run_link_failed",
+  "debate_judge_config_invalid",
+  "debate_judge_runtime_unsupported",
+  "debate_judge_live_spend_unconfirmed",
+  "debate_judge_run_failed",
+  "debate_judge_timeout",
+  "debate_judge_output_missing",
+  "debate_judge_output_empty",
+  "debate_judge_output_invalid",
+  "debate_judge_output_too_large",
+  "hosted_debate_store_unavailable",
+  "hosted_debate_queue_unavailable",
+  "hosted_debate_worker_unavailable",
+  "hosted_debate_ownership_attach_failed",
+  "hosted_debate_quota_exceeded",
+  "hosted_debate_audit_unavailable",
+  "hosted_debate_artifact_write_failed",
+  "hosted_debate_event_persist_failed",
+  "debate_live_canary_spend_unconfirmed",
+  "debate_fake_canary_failed"
+] as const;
+
 function protocolErrorCodes(): string[] {
   const here = dirname(fileURLToPath(import.meta.url));
   const protocolFile = join(here, "../../protocol-rest/src/http-errors.ts");
@@ -118,5 +154,21 @@ describe("http error contract", () => {
       "hosted_runtime_bridge_non_idempotent_retry_blocked"
     );
     expect(protocolStatusFor("adapter_protocol_failed")).toBe(409);
+  });
+
+  it("includes all named R24 debate HTTP errors in contracts and protocol status mappings", () => {
+    for (const code of R24_DEBATE_ERROR_CODES) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+    }
+
+    expect(protocolStatusFor("debate_evidence_not_found_or_denied")).toBe(404);
+    expect(protocolStatusFor("debate_participant_placement_required")).toBe(400);
+    expect(protocolStatusFor("debate_judge_live_spend_unconfirmed")).toBe(400);
+    expect(protocolStatusFor("debate_runtime_unsupported")).toBe(409);
+    expect(protocolStatusFor("debate_wait_real_runtime_unsupported")).toBe(409);
+    expect(protocolStatusFor("debate_child_run_link_failed")).toBe(503);
+    expect(protocolStatusFor("hosted_debate_ownership_attach_failed")).toBe(503);
+    expect(protocolStatusFor("hosted_debate_quota_exceeded")).toBe(429);
+    expect(protocolStatusFor("debate_live_canary_spend_unconfirmed")).toBe(400);
   });
 });

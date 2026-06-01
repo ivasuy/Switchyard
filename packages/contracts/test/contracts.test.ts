@@ -31,6 +31,7 @@ import {
   contextPacketSchema,
   contextSectionSchema,
   debateSchema,
+  createDebateRequestSchema,
   errorSchema,
   eventSchema,
   evidenceItemSchema,
@@ -774,6 +775,171 @@ describe("Switchyard contracts", () => {
     expect(debate.messageIds).toEqual([]);
     expect(debate.eventIds).toEqual([]);
     expect(debate.budget.status).toBe("within_budget");
+  });
+
+  it("parses R24 create debate request defaults for fake deterministic participants", () => {
+    const request = createDebateRequestSchema.parse({
+      topic: "Should Switchyard use ACP first?",
+      participants: [{ role: "affirmative" }, { role: "skeptic" }]
+    });
+
+    expect(request.participants).toEqual([
+      {
+        role: "affirmative",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        runtimeMode: "fake.deterministic",
+        placement: "local",
+        realRuntimeOptIn: false
+      },
+      {
+        role: "skeptic",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        runtimeMode: "fake.deterministic",
+        placement: "local",
+        realRuntimeOptIn: false
+      }
+    ]);
+    expect(request.judgeConfig).toEqual({ mode: "deterministic" });
+    expect(request.evidenceIds).toEqual([]);
+  });
+
+  it("parses R24 create debate request for hosted real participants and deterministic judge", () => {
+    const request = createDebateRequestSchema.parse({
+      topic: "Should Switchyard use hosted real debate now?",
+      participants: [
+        {
+          role: "affirmative",
+          runtime: "claude_code",
+          provider: "anthropic",
+          model: "claude-code",
+          adapterType: "native",
+          runtimeMode: "claude_code.sdk",
+          placement: "hosted",
+          realRuntimeOptIn: true
+        },
+        {
+          role: "skeptic",
+          runtime: "opencode",
+          provider: "opencode",
+          model: "opencode-default",
+          adapterType: "acpx",
+          runtimeMode: "opencode.acp",
+          placement: "hosted",
+          realRuntimeOptIn: true
+        }
+      ],
+      judgeConfig: {
+        mode: "deterministic"
+      },
+      evidenceIds: ["evidence_123"]
+    });
+
+    expect(request.participants[0]?.placement).toBe("hosted");
+    expect(request.participants[1]?.runtimeMode).toBe("opencode.acp");
+    expect(request.judgeConfig).toEqual({ mode: "deterministic" });
+  });
+
+  it("parses R24 model judge only with spend confirmation", () => {
+    const request = createDebateRequestSchema.parse({
+      topic: "Should model judge run live?",
+      participants: [{ role: "affirmative" }, { role: "skeptic" }],
+      judgeConfig: {
+        mode: "model",
+        runtime: "claude_code",
+        provider: "anthropic",
+        model: "claude-code",
+        adapterType: "native",
+        runtimeMode: "claude_code.sdk",
+        placement: "hosted",
+        realRuntimeOptIn: true,
+        confirmLiveProviderSpend: true
+      }
+    });
+
+    expect(request.judgeConfig).toEqual({
+      mode: "model",
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      adapterType: "native",
+      runtimeMode: "claude_code.sdk",
+      placement: "hosted",
+      realRuntimeOptIn: true,
+      confirmLiveProviderSpend: true
+    });
+
+    expect(() =>
+      createDebateRequestSchema.parse({
+        topic: "missing confirmation",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }],
+        judgeConfig: {
+          mode: "model",
+          runtime: "claude_code",
+          provider: "anthropic",
+          model: "claude-code",
+          adapterType: "native",
+          runtimeMode: "claude_code.sdk",
+          placement: "hosted",
+          realRuntimeOptIn: true
+        }
+      })
+    ).toThrow();
+  });
+
+  it("rejects reserved judge input field in create debate request while debate output accepts judge", () => {
+    expect(() =>
+      createDebateRequestSchema.parse({
+        topic: "Should judge be input?",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }],
+        judge: {
+          consensus: "no_consensus",
+          summary: "invalid",
+          disagreementSummary: "invalid",
+          winner: "none"
+        }
+      })
+    ).toThrow();
+
+    const debate = debateSchema.parse({
+      id: "debate_456",
+      topic: "Output may include judge",
+      mode: "mixed_model_panel",
+      status: "completed",
+      participants: [],
+      limits: {
+        maxRounds: 1,
+        maxTurnsPerAgent: 1,
+        maxSearchesPerAgent: 0,
+        maxTotalMessages: 1,
+        maxDurationSeconds: 10,
+        maxCostUsd: 0,
+        requireCitations: false,
+        requireDisagreementSummary: true,
+        stopOnConsensus: false,
+        stopOnLowNewInformation: false,
+        humanStopAllowed: false
+      },
+      judge: {
+        consensus: "no_consensus",
+        summary: "No consensus",
+        disagreementSummary: "Both sides remain unconvinced",
+        winner: "none"
+      },
+      budget: {
+        status: "within_budget",
+        maxCostUsd: 0,
+        spentCostUsd: 0
+      },
+      createdAt: "2026-06-02T00:00:00.000Z"
+    });
+
+    expect(debate.judge?.consensus).toBe("no_consensus");
   });
 
   it("parses the normalized event envelope", () => {

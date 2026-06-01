@@ -1423,6 +1423,576 @@
         ],
         "type": "object"
       },
+      "CreateDebateQuery": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "wait": {
+            "enum": [
+              "1"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateDebateRequest": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": {},
+        "properties": {
+          "evidenceIds": {
+            "default": [],
+            "items": {
+              "pattern": "^evidence_[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "judgeConfig": {
+            "default": {
+              "mode": "deterministic"
+            },
+            "oneOf": [
+              {
+                "additionalProperties": {},
+                "properties": {
+                  "mode": {
+                    "const": "deterministic",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": {},
+                "properties": {
+                  "adapterType": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "confirmLiveProviderSpend": {
+                    "const": true,
+                    "type": "boolean"
+                  },
+                  "mode": {
+                    "const": "model",
+                    "type": "string"
+                  },
+                  "model": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "placement": {
+                    "enum": [
+                      "local",
+                      "hosted",
+                      "connected_local_node"
+                    ],
+                    "type": "string"
+                  },
+                  "provider": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "realRuntimeOptIn": {
+                    "const": true,
+                    "type": "boolean"
+                  },
+                  "runtime": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "runtimeMode": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "realRuntimeOptIn",
+                  "confirmLiveProviderSpend"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "limits": {
+            "additionalProperties": false,
+            "properties": {
+              "humanStopAllowed": {
+                "type": "boolean"
+              },
+              "maxCostUsd": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "maxDurationSeconds": {
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              "maxRounds": {
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              "maxSearchesPerAgent": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxTotalMessages": {
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              "maxTurnsPerAgent": {
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              "requireCitations": {
+                "type": "boolean"
+              },
+              "requireDisagreementSummary": {
+                "type": "boolean"
+              },
+              "stopOnConsensus": {
+                "type": "boolean"
+              },
+              "stopOnLowNewInformation": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "participants": {
+            "items": {
+              "additionalProperties": {},
+              "properties": {
+                "adapterType": {
+                  "default": "process",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "model": {
+                  "default": "test-model",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "placement": {
+                  "default": "local",
+                  "enum": [
+                    "local",
+                    "hosted",
+                    "connected_local_node"
+                  ],
+                  "type": "string"
+                },
+                "provider": {
+                  "default": "test",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "realRuntimeOptIn": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "role": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "runtime": {
+                  "default": "fake",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "runtimeMode": {
+                  "default": "fake.deterministic",
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "role",
+                "runtime",
+                "provider",
+                "model",
+                "adapterType",
+                "runtimeMode",
+                "placement",
+                "realRuntimeOptIn"
+              ],
+              "type": "object"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "topic": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "participants",
+          "judgeConfig",
+          "evidenceIds"
+        ],
+        "type": "object"
+      },
+      "CreateDebateResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": {},
+        "properties": {
+          "debate": {
+            "additionalProperties": false,
+            "properties": {
+              "budget": {
+                "additionalProperties": false,
+                "properties": {
+                  "maxCostUsd": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "spentCostUsd": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "status": {
+                    "enum": [
+                      "within_budget",
+                      "near_limit",
+                      "exceeded",
+                      "unknown"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "status",
+                  "maxCostUsd",
+                  "spentCostUsd"
+                ],
+                "type": "object"
+              },
+              "completedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "createdAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "error": {
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "message": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "eventIds": {
+                "default": [],
+                "items": {
+                  "pattern": "^event_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "evidenceIds": {
+                "default": [],
+                "items": {
+                  "pattern": "^evidence_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "finalReportArtifactId": {
+                "pattern": "^artifact_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "finalReportPath": {
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^debate_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "judge": {
+                "additionalProperties": false,
+                "properties": {
+                  "consensus": {
+                    "enum": [
+                      "consensus_found",
+                      "no_consensus"
+                    ],
+                    "type": "string"
+                  },
+                  "disagreementSummary": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "evidenceIds": {
+                    "default": [],
+                    "items": {
+                      "pattern": "^evidence_[A-Za-z0-9_-]+$",
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "messageIds": {
+                    "default": [],
+                    "items": {
+                      "pattern": "^message_[A-Za-z0-9_-]+$",
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "summary": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "winner": {
+                    "const": "none",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "consensus",
+                  "summary",
+                  "disagreementSummary",
+                  "winner",
+                  "evidenceIds",
+                  "messageIds"
+                ],
+                "type": "object"
+              },
+              "limits": {
+                "additionalProperties": false,
+                "properties": {
+                  "humanStopAllowed": {
+                    "type": "boolean"
+                  },
+                  "maxCostUsd": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "maxDurationSeconds": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "maxRounds": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "maxSearchesPerAgent": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "maxTotalMessages": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "maxTurnsPerAgent": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "requireCitations": {
+                    "type": "boolean"
+                  },
+                  "requireDisagreementSummary": {
+                    "type": "boolean"
+                  },
+                  "stopOnConsensus": {
+                    "type": "boolean"
+                  },
+                  "stopOnLowNewInformation": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "maxRounds",
+                  "maxTurnsPerAgent",
+                  "maxSearchesPerAgent",
+                  "maxTotalMessages",
+                  "maxDurationSeconds",
+                  "maxCostUsd",
+                  "requireCitations",
+                  "requireDisagreementSummary",
+                  "stopOnConsensus",
+                  "stopOnLowNewInformation",
+                  "humanStopAllowed"
+                ],
+                "type": "object"
+              },
+              "messageIds": {
+                "default": [],
+                "items": {
+                  "pattern": "^message_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "mode": {
+                "enum": [
+                  "cross_provider_debate",
+                  "same_provider_model_debate",
+                  "same_provider_claude_debate",
+                  "mixed_model_panel",
+                  "judge_and_jury",
+                  "research_debate"
+                ],
+                "type": "string"
+              },
+              "participants": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "pattern": "^participant_[A-Za-z0-9_-]+$",
+                      "type": "string"
+                    },
+                    "model": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "provider": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "role": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "runId": {
+                      "pattern": "^run_[A-Za-z0-9_-]+$",
+                      "type": "string"
+                    },
+                    "runIds": {
+                      "default": [],
+                      "items": {
+                        "pattern": "^run_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "runtime": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "created",
+                        "starting",
+                        "running",
+                        "completed",
+                        "failed",
+                        "cancelled"
+                      ],
+                      "type": "string"
+                    },
+                    "turnsUsed": {
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "runIds",
+                    "runtime",
+                    "provider",
+                    "model",
+                    "role",
+                    "status",
+                    "turnsUsed"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "status": {
+                "enum": [
+                  "created",
+                  "context_building",
+                  "researching",
+                  "arguing",
+                  "rebuttal",
+                  "judging",
+                  "consensus_found",
+                  "no_consensus",
+                  "stopped_by_user",
+                  "completed",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "stopReason": {
+                "enum": [
+                  "max_rounds",
+                  "max_total_messages",
+                  "max_turns_per_agent",
+                  "max_duration_seconds",
+                  "max_cost_usd",
+                  "consensus",
+                  "completed",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "topic": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "updatedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "topic",
+              "mode",
+              "status",
+              "participants",
+              "limits",
+              "evidenceIds",
+              "messageIds",
+              "eventIds",
+              "budget",
+              "createdAt"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "debate"
+        ],
+        "type": "object"
+      },
       "CreateRunQuery": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -2602,6 +3172,354 @@
         },
         "type": "object"
       },
+      "GetDebateResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": {},
+        "properties": {
+          "debate": {
+            "additionalProperties": false,
+            "properties": {
+              "budget": {
+                "additionalProperties": false,
+                "properties": {
+                  "maxCostUsd": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "spentCostUsd": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "status": {
+                    "enum": [
+                      "within_budget",
+                      "near_limit",
+                      "exceeded",
+                      "unknown"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "status",
+                  "maxCostUsd",
+                  "spentCostUsd"
+                ],
+                "type": "object"
+              },
+              "completedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "createdAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "error": {
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "message": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "eventIds": {
+                "default": [],
+                "items": {
+                  "pattern": "^event_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "evidenceIds": {
+                "default": [],
+                "items": {
+                  "pattern": "^evidence_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "finalReportArtifactId": {
+                "pattern": "^artifact_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "finalReportPath": {
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^debate_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "judge": {
+                "additionalProperties": false,
+                "properties": {
+                  "consensus": {
+                    "enum": [
+                      "consensus_found",
+                      "no_consensus"
+                    ],
+                    "type": "string"
+                  },
+                  "disagreementSummary": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "evidenceIds": {
+                    "default": [],
+                    "items": {
+                      "pattern": "^evidence_[A-Za-z0-9_-]+$",
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "messageIds": {
+                    "default": [],
+                    "items": {
+                      "pattern": "^message_[A-Za-z0-9_-]+$",
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "summary": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "winner": {
+                    "const": "none",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "consensus",
+                  "summary",
+                  "disagreementSummary",
+                  "winner",
+                  "evidenceIds",
+                  "messageIds"
+                ],
+                "type": "object"
+              },
+              "limits": {
+                "additionalProperties": false,
+                "properties": {
+                  "humanStopAllowed": {
+                    "type": "boolean"
+                  },
+                  "maxCostUsd": {
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "maxDurationSeconds": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "maxRounds": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "maxSearchesPerAgent": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "maxTotalMessages": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "maxTurnsPerAgent": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "requireCitations": {
+                    "type": "boolean"
+                  },
+                  "requireDisagreementSummary": {
+                    "type": "boolean"
+                  },
+                  "stopOnConsensus": {
+                    "type": "boolean"
+                  },
+                  "stopOnLowNewInformation": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "maxRounds",
+                  "maxTurnsPerAgent",
+                  "maxSearchesPerAgent",
+                  "maxTotalMessages",
+                  "maxDurationSeconds",
+                  "maxCostUsd",
+                  "requireCitations",
+                  "requireDisagreementSummary",
+                  "stopOnConsensus",
+                  "stopOnLowNewInformation",
+                  "humanStopAllowed"
+                ],
+                "type": "object"
+              },
+              "messageIds": {
+                "default": [],
+                "items": {
+                  "pattern": "^message_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "mode": {
+                "enum": [
+                  "cross_provider_debate",
+                  "same_provider_model_debate",
+                  "same_provider_claude_debate",
+                  "mixed_model_panel",
+                  "judge_and_jury",
+                  "research_debate"
+                ],
+                "type": "string"
+              },
+              "participants": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "pattern": "^participant_[A-Za-z0-9_-]+$",
+                      "type": "string"
+                    },
+                    "model": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "provider": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "role": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "runId": {
+                      "pattern": "^run_[A-Za-z0-9_-]+$",
+                      "type": "string"
+                    },
+                    "runIds": {
+                      "default": [],
+                      "items": {
+                        "pattern": "^run_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "runtime": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "created",
+                        "starting",
+                        "running",
+                        "completed",
+                        "failed",
+                        "cancelled"
+                      ],
+                      "type": "string"
+                    },
+                    "turnsUsed": {
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "runIds",
+                    "runtime",
+                    "provider",
+                    "model",
+                    "role",
+                    "status",
+                    "turnsUsed"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "status": {
+                "enum": [
+                  "created",
+                  "context_building",
+                  "researching",
+                  "arguing",
+                  "rebuttal",
+                  "judging",
+                  "consensus_found",
+                  "no_consensus",
+                  "stopped_by_user",
+                  "completed",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "stopReason": {
+                "enum": [
+                  "max_rounds",
+                  "max_total_messages",
+                  "max_turns_per_agent",
+                  "max_duration_seconds",
+                  "max_cost_usd",
+                  "consensus",
+                  "completed",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              "topic": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "updatedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "topic",
+              "mode",
+              "status",
+              "participants",
+              "limits",
+              "evidenceIds",
+              "messageIds",
+              "eventIds",
+              "budget",
+              "createdAt"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "debate"
+        ],
+        "type": "object"
+      },
       "GetRunResponse": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -3139,6 +4057,7 @@
                 "enum": [
                   "run_not_found",
                   "debate_not_found",
+                  "debate_evidence_not_found_or_denied",
                   "artifact_not_found",
                   "missing_artifact_content",
                   "provider_not_found",
@@ -3150,6 +4069,38 @@
                   "evidence_not_found",
                   "approval_not_found",
                   "tool_invocation_not_found",
+                  "debate_real_participant_opt_in_required",
+                  "debate_runtime_unsupported",
+                  "debate_wait_real_runtime_unsupported",
+                  "debate_participant_count_invalid",
+                  "debate_participant_placement_required",
+                  "debate_participant_run_missing",
+                  "debate_participant_run_failed",
+                  "debate_participant_run_timeout",
+                  "debate_participant_output_missing",
+                  "debate_participant_output_empty",
+                  "debate_participant_output_too_large",
+                  "debate_runtime_approval_expired",
+                  "debate_child_run_link_failed",
+                  "debate_judge_config_invalid",
+                  "debate_judge_runtime_unsupported",
+                  "debate_judge_live_spend_unconfirmed",
+                  "debate_judge_run_failed",
+                  "debate_judge_timeout",
+                  "debate_judge_output_missing",
+                  "debate_judge_output_empty",
+                  "debate_judge_output_invalid",
+                  "debate_judge_output_too_large",
+                  "hosted_debate_store_unavailable",
+                  "hosted_debate_queue_unavailable",
+                  "hosted_debate_worker_unavailable",
+                  "hosted_debate_ownership_attach_failed",
+                  "hosted_debate_quota_exceeded",
+                  "hosted_debate_audit_unavailable",
+                  "hosted_debate_artifact_write_failed",
+                  "hosted_debate_event_persist_failed",
+                  "debate_live_canary_spend_unconfirmed",
+                  "debate_fake_canary_failed",
                   "approval_not_pending",
                   "tool_run_required",
                   "tool_target_invalid",
@@ -7706,6 +8657,270 @@
         ],
         "x-switchyard-error-envelope": "contracts",
         "x-switchyard-no-body": true
+      }
+    },
+    "/debates": {
+      "post": {
+        "operationId": "createDebate",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDebateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateDebateResponse"
+                }
+              }
+            },
+            "description": "Accepted debate"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "Create debate",
+        "tags": [
+          "debate",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts"
+      }
+    },
+    "/debates/{id}": {
+      "get": {
+        "operationId": "getDebate",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetDebateResponse"
+                }
+              }
+            },
+            "description": "Debate details"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "Get debate",
+        "tags": [
+          "debate",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts",
+        "x-switchyard-no-body": true
+      }
+    },
+    "/debates/{id}/events": {
+      "get": {
+        "operationId": "streamDebateEvents",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "lastEventId",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "live",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "stopAfter",
+            "required": false,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SseEventStream"
+                }
+              }
+            },
+            "description": "SSE debate events"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "Replay or stream debate events",
+        "tags": [
+          "debate",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts",
+        "x-switchyard-no-body": true,
+        "x-switchyard-stream": {
+          "kind": "sse"
+        }
       }
     },
     "/doctor": {

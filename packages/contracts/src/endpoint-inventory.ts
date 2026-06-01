@@ -623,7 +623,10 @@ const HOSTED_SERVER_LOCAL_ROUTE_KEYS = new Set<string>([
   "GET /approvals",
   "GET /approvals/:id",
   "POST /approvals/:id/approve",
-  "POST /approvals/:id/reject"
+  "POST /approvals/:id/reject",
+  "POST /debates",
+  "GET /debates/:id",
+  "GET /debates/:id/events"
 ]);
 
 const HOSTED_SERVER_REUSED_LOCAL_ROUTES = LOCAL_DAEMON_ROUTE_INVENTORY
