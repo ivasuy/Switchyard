@@ -229,9 +229,18 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     summary.runId = runId;
     addStep(steps, now, startedAtMs, "run.create", "pass", "run_created", { httpStatus: created.status, details: { runId } });
 
-    const toolProbe = await runToolProbes({ state, runId, steps, now, startedAtMs });
-    if (!toolProbe.ok) {
-      return finalize(false, toolProbe.code, steps, summary, now, startedAtMs);
+    if (options.liveExternalTools) {
+      const toolProbe = await runToolProbes({ state, runId, steps, now, startedAtMs });
+      if (!toolProbe.ok) {
+        return finalize(false, toolProbe.code, steps, summary, now, startedAtMs);
+      }
+    } else {
+      addStep(steps, now, startedAtMs, "tools", "info", "tool_probes_skipped_default", {
+        details: {
+          reason: "live_external_tools_not_enabled",
+          enableWith: "--live-external-tools --confirm-live-tool-spend"
+        }
+      });
     }
 
     const runDeadline = startedAtMs + timeoutMs;

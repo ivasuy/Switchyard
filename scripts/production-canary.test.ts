@@ -230,7 +230,106 @@ function buildR22HappyPlan(contentBytes: Uint8Array): PlannedResponse[] {
   ];
 }
 
+function buildNoToolHappyPlan(contentBytes: Uint8Array): PlannedResponse[] {
+  const digest = `sha256:${sha256Hex(contentBytes)}`;
+  return [
+    {
+      method: "GET",
+      path: "/auth/whoami",
+      responder: () => jsonResponse(200, { auth: { account: { id: "account_1" } } })
+    },
+    {
+      method: "GET",
+      path: "/entitlements",
+      responder: () => jsonResponse(200, { entitlement: { entitlements: { allowHostedTools: true } } })
+    },
+    {
+      method: "GET",
+      path: "/ready",
+      responder: () => jsonResponse(200, { ok: true, checks: { schema: { ok: true, code: "postgres_schema_ready" } } })
+    },
+    {
+      method: "POST",
+      path: "/runs",
+      responder: ({ init }) => {
+        const body = JSON.parse(String(init.body ?? "{}"));
+        expect(body.runtimeMode).toBe("fake.deterministic");
+        expect(body.metadata.switchyardCanary).toBe("r22-tools-production");
+        return jsonResponse(202, { run: { id: "run_1", status: "queued" } });
+      }
+    },
+    {
+      method: "GET",
+      path: "/runs/run_1",
+      responder: () => jsonResponse(200, { run: { id: "run_1", status: "completed" } })
+    },
+    {
+      method: "GET",
+      path: "/runs/run_1/events",
+      responder: () => textResponse(200, sseEvent({ event: "ok" }), "text/event-stream")
+    },
+    {
+      method: "GET",
+      path: "/runs/run_1/artifacts",
+      responder: () => jsonResponse(200, {
+        artifacts: [
+          {
+            id: "artifact_1",
+            metadata: {
+              digest,
+              size: contentBytes.byteLength
+            }
+          }
+        ]
+      })
+    },
+    {
+      method: "GET",
+      path: "/artifacts/artifact_1/content",
+      responder: () => bytesResponse(200, contentBytes)
+    },
+    {
+      method: "GET",
+      path: "/metrics",
+      responder: () => jsonResponse(200, { requests: { total: 1 }, auth: { succeeded: 1 } })
+    },
+    {
+      method: "GET",
+      path: "/audit/events",
+      responder: () => jsonResponse(200, {
+        events: [
+          {
+            id: "audit_1",
+            resourceType: "run",
+            resourceId: "run_1",
+            payload: { switchyardCanary: "r22-tools-production" }
+          }
+        ]
+      })
+    }
+  ];
+}
+
 describe("runProductionCanary", () => {
+  test("default canary skips live-capable tool probes unless explicitly enabled", async () => {
+    const baseUrl = "https://switchyard.example";
+    const bytes = new TextEncoder().encode("canary artifact output");
+    const { fetchImpl, calls } = createPlannedFetch(baseUrl, buildNoToolHappyPlan(bytes));
+
+    const result = await runProductionCanary({
+      baseUrl,
+      apiKey: "test-key",
+      fetchImpl,
+      timeoutMs: 5_000,
+      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50))
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.code).toBe("canary_ok");
+    expect(calls.some((call) => new URL(call.url).pathname === "/tools/invocations")).toBe(false);
+    expect(result.steps.some((step) => step.name === "tools" && step.code === "tool_probes_skipped_default")).toBe(true);
+  });
+
   test("happy path validates tool probes plus artifact and audit evidence", async () => {
     const baseUrl = "https://switchyard.example";
     const bytes = new TextEncoder().encode("canary artifact output");
@@ -241,7 +340,9 @@ describe("runProductionCanary", () => {
       apiKey: "live-key-123",
       fetchImpl,
       timeoutMs: 5_000,
-      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50))
+      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50)),
+      liveExternalTools: true,
+      confirmLiveToolSpend: true
     });
 
     expect(result.ok).toBe(true);
@@ -304,7 +405,9 @@ describe("runProductionCanary", () => {
       apiKey: "test-key",
       fetchImpl,
       timeoutMs: 5000,
-      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50))
+      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50)),
+      liveExternalTools: true,
+      confirmLiveToolSpend: true
     });
 
     expectFailure(result, "tool_canary_denied");
@@ -331,7 +434,9 @@ describe("runProductionCanary", () => {
       apiKey: "test-key",
       fetchImpl,
       timeoutMs: 5000,
-      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50))
+      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50)),
+      liveExternalTools: true,
+      confirmLiveToolSpend: true
     });
 
     expectFailure(result, "approval_canary_failed");

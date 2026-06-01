@@ -1276,6 +1276,38 @@ describe("runProductionPreflight", () => {
     }));
   });
 
+  test("fails tools check when enabled tools are configured with real adapter mode", async () => {
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          serverAuthMode: "api_key",
+          tools: {
+            hostedRealTools: "enabled",
+            connectedNodeRealTools: "disabled",
+            policySourceKind: "json",
+            policy: makeToolPolicy()
+          }
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          tools: {
+            hostedRealTools: "enabled",
+            connectedNodeRealTools: "disabled",
+            adapterMode: "real",
+            policySourceKind: "json",
+            policy: makeToolPolicy()
+          }
+        })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "tools",
+      status: "fail",
+      code: "tool_policy_config_invalid"
+    }));
+  });
+
   test("fails hosted policy when repo or browser are enabled, and fails connected-node when node checks are absent", async () => {
     const result = await runDependencyPreflight({
       loadServerConfig: () =>

@@ -669,6 +669,10 @@ function appendToolsCheck(
     fail("tool_policy_config_invalid");
     return;
   }
+  if (workerTools.adapterMode !== "fake") {
+    fail("tool_policy_config_invalid");
+    return;
+  }
   if (input.serverConfig.serverAuthMode !== "api_key") {
     fail("tool_hosted_auth_required");
     return;
