@@ -1424,6 +1424,40 @@
                 "pattern": "^run_[A-Za-z0-9_-]+$",
                 "type": "string"
               },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
               "type": {
                 "const": "fetch",
                 "type": "string"
@@ -1464,6 +1498,40 @@
               "runId": {
                 "pattern": "^run_[A-Za-z0-9_-]+$",
                 "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
               },
               "type": {
                 "const": "web_search",
@@ -1543,6 +1611,40 @@
                 "pattern": "^run_[A-Za-z0-9_-]+$",
                 "type": "string"
               },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
               "type": {
                 "const": "github",
                 "type": "string"
@@ -1599,6 +1701,40 @@
                 "pattern": "^run_[A-Za-z0-9_-]+$",
                 "type": "string"
               },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
               "type": {
                 "const": "repo",
                 "type": "string"
@@ -1650,6 +1786,40 @@
                 "pattern": "^run_[A-Za-z0-9_-]+$",
                 "type": "string"
               },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
               "type": {
                 "const": "shell",
                 "type": "string"
@@ -1697,6 +1867,40 @@
                 "pattern": "^run_[A-Za-z0-9_-]+$",
                 "type": "string"
               },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
               "type": {
                 "const": "browser",
                 "type": "string"
@@ -1740,6 +1944,40 @@
               "runId": {
                 "pattern": "^run_[A-Za-z0-9_-]+$",
                 "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
               },
               "type": {
                 "const": "fake_echo",
@@ -2545,10 +2783,60 @@
                   "approval_not_found",
                   "tool_invocation_not_found",
                   "approval_not_pending",
+                  "tool_run_required",
+                  "tool_target_invalid",
+                  "tool_target_mismatch",
+                  "tool_hosted_auth_required",
+                  "tool_store_unavailable",
+                  "tool_dispatch_unavailable",
+                  "tool_dispatch_failed",
+                  "tool_dispatch_retry_exhausted",
                   "tool_policy_denied",
                   "tool_policy_config_invalid",
                   "tool_policy_failed",
+                  "tool_real_tools_disabled",
+                  "tool_hosted_tools_disabled",
+                  "tool_connected_node_tools_disabled",
+                  "tool_approval_required",
+                  "tool_approval_rejected",
+                  "tool_approval_expired",
                   "tool_adapter_unavailable",
+                  "tool_input_limit_exceeded",
+                  "tool_concurrency_limit_exceeded",
+                  "tool_output_limit_exceeded",
+                  "tool_artifact_write_failed",
+                  "tool_redaction_failed",
+                  "tool_worker_restarted",
+                  "tool_node_unavailable",
+                  "tool_node_execution_failed",
+                  "tool_assignment_expired",
+                  "tool_assignment_mismatch",
+                  "hosted_runtime_approval_bridge_unshipped",
+                  "approval_scope_denied",
+                  "repo_hosted_unshipped",
+                  "browser_tool_unshipped",
+                  "fetch_url_invalid",
+                  "fetch_host_not_allowlisted",
+                  "fetch_private_network_denied",
+                  "fetch_redirect_denied",
+                  "fetch_method_denied",
+                  "fetch_content_type_denied",
+                  "web_search_provider_unconfigured",
+                  "web_search_query_invalid",
+                  "github_token_missing",
+                  "github_repo_not_allowlisted",
+                  "github_operation_denied",
+                  "github_not_found",
+                  "github_rate_limited",
+                  "repo_cwd_denied",
+                  "repo_operation_denied",
+                  "repo_pathspec_invalid",
+                  "shell_command_denied",
+                  "shell_command_not_configured",
+                  "tool_process_spawn_failed",
+                  "tool_process_nonzero_exit",
+                  "tool_process_timeout",
+                  "tool_process_cancelled",
                   "approval_required",
                   "unsupported_tool",
                   "invalid_input",

@@ -14,6 +14,7 @@ import {
 } from "./ids.js";
 import { executionPlacementSchema } from "./run.js";
 import { userSchema } from "./user.js";
+import { toolTypeSchema } from "./tool.js";
 
 const slugSchema = z
   .string()
@@ -28,6 +29,8 @@ export const billingPlanStatusSchema = z.enum(["active", "archived"]);
 export const authScopeSchema = z.enum([
   "runs:write",
   "runs:read",
+  "tools:write",
+  "tools:read",
   "artifacts:read",
   "registry:read",
   "nodes:write",
@@ -103,7 +106,11 @@ export const billingPlanEntitlementsSchema = z
     allowedRuntimeModes: z.array(runtimeModeSlugSchema),
     allowHostedRealRuntime: z.boolean(),
     allowConnectedNodes: z.boolean(),
+    allowHostedTools: z.boolean().default(false),
+    allowConnectedNodeTools: z.boolean().default(false),
+    allowedToolTypes: z.array(toolTypeSchema).default([]),
     allowArtifactContentRead: z.boolean(),
+    allowToolArtifactContentRead: z.boolean().default(false),
     allowMetricsRead: z.boolean(),
     allowAuditRead: z.boolean()
   })
@@ -115,7 +122,10 @@ export const billingPlanQuotasSchema = z
     maxActiveRuns: z.number().int().nonnegative(),
     maxRunTimeoutSeconds: z.number().int().positive(),
     maxConnectedNodes: z.number().int().nonnegative(),
-    maxArtifactContentReadBytesPerHour: z.number().int().nonnegative()
+    maxArtifactContentReadBytesPerHour: z.number().int().nonnegative(),
+    maxToolInvocationsPerHour: z.number().int().nonnegative().default(0),
+    maxActiveToolInvocations: z.number().int().nonnegative().default(0),
+    maxToolArtifactBytesPerHour: z.number().int().nonnegative().default(0)
   })
   .strict();
 
@@ -136,7 +146,10 @@ export const quotaKindSchema = z.enum([
   "runs_per_hour",
   "active_runs",
   "artifact_read_bytes_per_hour",
-  "connected_nodes"
+  "connected_nodes",
+  "tool_invocations_per_hour",
+  "active_tool_invocations",
+  "tool_artifact_bytes_per_hour"
 ]);
 
 export const entitlementSnapshotSchema = z
@@ -190,6 +203,8 @@ export const resourceOwnershipTypeSchema = z.enum([
   "run",
   "run_event",
   "artifact",
+  "tool_invocation",
+  "approval",
   "placement_decision",
   "node",
   "assignment",
@@ -238,13 +253,24 @@ export const auditEventTypeSchema = z.enum([
   "node.register_allowed",
   "node.register_denied",
   "config.fail_closed",
-  "api_key.revoked"
+  "api_key.revoked",
+  "tool.invoke_allowed",
+  "tool.invoke_denied",
+  "tool.approval_requested",
+  "tool.approval_resolved",
+  "tool.execution_dispatched",
+  "tool.execution_started",
+  "tool.execution_completed",
+  "tool.execution_failed",
+  "tool.execution_cancelled"
 ]);
 
 export const auditResourceTypeSchema = z.enum([
   "auth",
   "run",
   "artifact",
+  "tool_invocation",
+  "approval",
   "node",
   "assignment",
   "quota",

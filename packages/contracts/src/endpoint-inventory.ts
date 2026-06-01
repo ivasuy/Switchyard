@@ -617,7 +617,14 @@ const HOSTED_SERVER_LOCAL_ROUTE_KEYS = new Set<string>([
   "POST /runtime-modes/:id/check",
   "GET /doctor",
   "GET /artifacts/:id",
-  "GET /artifacts/:id/content"
+  "GET /artifacts/:id/content",
+  "POST /tools/invocations",
+  "GET /tools/invocations",
+  "GET /tools/invocations/:id",
+  "GET /approvals",
+  "GET /approvals/:id",
+  "POST /approvals/:id/approve",
+  "POST /approvals/:id/reject"
 ]);
 
 const HOSTED_SERVER_REUSED_LOCAL_ROUTES = LOCAL_DAEMON_ROUTE_INVENTORY

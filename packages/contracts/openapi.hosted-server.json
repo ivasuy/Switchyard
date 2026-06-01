@@ -14,6 +14,236 @@
         ],
         "type": "object"
       },
+      "ApprovalResolutionResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": {},
+        "properties": {
+          "approval": {
+            "additionalProperties": false,
+            "properties": {
+              "approvalType": {
+                "enum": [
+                  "before_commit",
+                  "before_push",
+                  "before_pr",
+                  "before_destructive_command",
+                  "before_external_web_action",
+                  "before_external_message",
+                  "before_spending_budget",
+                  "before_cross_runtime_delegation",
+                  "before_same_provider_model_delegation",
+                  "before_local_process_execution"
+                ],
+                "type": "string"
+              },
+              "createdAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^approval_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "payload": {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "resolvedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "approved",
+                  "rejected",
+                  "expired"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "approvalType",
+              "status",
+              "payload",
+              "createdAt"
+            ],
+            "type": "object"
+          },
+          "event": {
+            "additionalProperties": false,
+            "properties": {
+              "createdAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "debateId": {
+                "pattern": "^debate_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^event_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "participantId": {
+                "pattern": "^participant_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "payload": {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "provider": {
+                "anyOf": [
+                  {
+                    "pattern": "^provider_[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "sequence": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "enum": [
+                  "run.queued",
+                  "run.started",
+                  "runtime.output",
+                  "runtime.status",
+                  "tool.call",
+                  "tool.result",
+                  "message.sent",
+                  "artifact.created",
+                  "debate.round.started",
+                  "debate.agent.argument",
+                  "debate.agent.rebuttal",
+                  "debate.evidence.added",
+                  "debate.judge.summary",
+                  "debate.consensus",
+                  "approval.requested",
+                  "approval.approved",
+                  "approval.rejected",
+                  "approval.expired",
+                  "run.completed",
+                  "run.cancelled",
+                  "run.failed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "type",
+              "sequence",
+              "payload",
+              "createdAt"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "approval"
+        ],
+        "type": "object"
+      },
+      "ApprovalResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "approval": {
+            "additionalProperties": false,
+            "properties": {
+              "approvalType": {
+                "enum": [
+                  "before_commit",
+                  "before_push",
+                  "before_pr",
+                  "before_destructive_command",
+                  "before_external_web_action",
+                  "before_external_message",
+                  "before_spending_budget",
+                  "before_cross_runtime_delegation",
+                  "before_same_provider_model_delegation",
+                  "before_local_process_execution"
+                ],
+                "type": "string"
+              },
+              "createdAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^approval_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "payload": {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "resolvedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "approved",
+                  "rejected",
+                  "expired"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "approvalType",
+              "status",
+              "payload",
+              "createdAt"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "approval"
+        ],
+        "type": "object"
+      },
       "ArtifactResponse": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -268,6 +498,14 @@
                     "pattern": "^assignment_[A-Za-z0-9_-]+$",
                     "type": "string"
                   },
+                  "kind": {
+                    "default": "run",
+                    "enum": [
+                      "run",
+                      "tool"
+                    ],
+                    "type": "string"
+                  },
                   "lastArtifactSyncAt": {
                     "format": "date-time",
                     "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
@@ -309,12 +547,17 @@
                       "expired"
                     ],
                     "type": "string"
+                  },
+                  "toolInvocationId": {
+                    "pattern": "^tool_[A-Za-z0-9_-]+$",
+                    "type": "string"
                   }
                 },
                 "required": [
                   "id",
                   "runId",
                   "nodeId",
+                  "kind",
                   "status",
                   "retryCount",
                   "lastEventSequence",
@@ -448,11 +691,110 @@
                 "type": "null"
               }
             ]
+          },
+          "toolInvocation": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "approvalId": {
+                    "pattern": "^approval_[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  },
+                  "completedAt": {
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                    "type": "string"
+                  },
+                  "error": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "code": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "message": {
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "code",
+                      "message"
+                    ],
+                    "type": "object"
+                  },
+                  "id": {
+                    "pattern": "^tool_[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  },
+                  "input": {
+                    "additionalProperties": {},
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "output": {
+                    "additionalProperties": {},
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "runId": {
+                    "pattern": "^run_[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "queued",
+                      "running",
+                      "completed",
+                      "failed",
+                      "cancelled",
+                      "denied"
+                    ],
+                    "type": "string"
+                  },
+                  "type": {
+                    "enum": [
+                      "web_search",
+                      "fetch",
+                      "browser",
+                      "repo",
+                      "shell",
+                      "github",
+                      "fake_echo"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "status",
+                  "input",
+                  "createdAt"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
           "assignment",
-          "run"
+          "run",
+          "toolInvocation"
         ],
         "type": "object"
       },
@@ -471,6 +813,58 @@
               "cancelled"
             ],
             "type": "string"
+          },
+          "toolInvocation": {
+            "additionalProperties": false,
+            "properties": {
+              "completedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "error": {
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "message": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "id": {
+                "pattern": "^tool_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "output": {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "completed",
+                  "failed",
+                  "cancelled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "type": "object"
           }
         },
         "required": [
@@ -657,6 +1051,14 @@
                 "pattern": "^assignment_[A-Za-z0-9_-]+$",
                 "type": "string"
               },
+              "kind": {
+                "default": "run",
+                "enum": [
+                  "run",
+                  "tool"
+                ],
+                "type": "string"
+              },
               "lastArtifactSyncAt": {
                 "format": "date-time",
                 "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
@@ -698,12 +1100,17 @@
                   "expired"
                 ],
                 "type": "string"
+              },
+              "toolInvocationId": {
+                "pattern": "^tool_[A-Za-z0-9_-]+$",
+                "type": "string"
               }
             },
             "required": [
               "id",
               "runId",
               "nodeId",
+              "kind",
               "status",
               "retryCount",
               "lastEventSequence",
@@ -789,7 +1196,16 @@
                     "node.register_allowed",
                     "node.register_denied",
                     "config.fail_closed",
-                    "api_key.revoked"
+                    "api_key.revoked",
+                    "tool.invoke_allowed",
+                    "tool.invoke_denied",
+                    "tool.approval_requested",
+                    "tool.approval_resolved",
+                    "tool.execution_dispatched",
+                    "tool.execution_started",
+                    "tool.execution_completed",
+                    "tool.execution_failed",
+                    "tool.execution_cancelled"
                   ],
                   "type": "string"
                 },
@@ -829,6 +1245,8 @@
                     "auth",
                     "run",
                     "artifact",
+                    "tool_invocation",
+                    "approval",
                     "node",
                     "assignment",
                     "quota",
@@ -1204,6 +1622,626 @@
         ],
         "type": "object"
       },
+      "CreateToolInvocationRequest": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "captureContent": {
+                    "type": "boolean"
+                  },
+                  "headers": {
+                    "additionalProperties": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "propertyNames": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "method": {
+                    "default": "GET",
+                    "enum": [
+                      "GET",
+                      "HEAD"
+                    ],
+                    "type": "string"
+                  },
+                  "url": {
+                    "format": "uri",
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url",
+                  "method"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": {
+                "const": "fetch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "maxResults": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 50,
+                    "type": "integer"
+                  },
+                  "query": {
+                    "maxLength": 2048,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": {
+                "const": "web_search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "base": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "head": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "number": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "operation": {
+                    "enum": [
+                      "get_issue",
+                      "get_pull",
+                      "list_pull_files",
+                      "get_file",
+                      "compare_refs"
+                    ],
+                    "type": "string"
+                  },
+                  "owner": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "path": {
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "ref": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "repo": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "owner",
+                  "repo"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": {
+                "const": "github",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "cwd": {
+                    "minLength": 1,
+                    "pattern": "^([A-Za-z]:[\\\\/]|\\/)",
+                    "type": "string"
+                  },
+                  "operation": {
+                    "enum": [
+                      "status",
+                      "diff",
+                      "show",
+                      "ls_files",
+                      "grep"
+                    ],
+                    "type": "string"
+                  },
+                  "pathspec": {
+                    "items": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 64,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "cwd"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": {
+                "const": "repo",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "args": {
+                    "items": {
+                      "maxLength": 1024,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 32,
+                    "type": "array"
+                  },
+                  "commandId": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "cwd": {
+                    "minLength": 1,
+                    "pattern": "^([A-Za-z]:[\\\\/]|\\/)",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "commandId",
+                  "cwd"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": {
+                "const": "shell",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "additionalProperties": {},
+                    "propertyNames": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "url": {
+                    "format": "uri",
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": {
+                "const": "browser",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approvalPolicy": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": {},
+                "properties": {
+                  "requiresApproval": {
+                    "type": "boolean"
+                  },
+                  "risk": {
+                    "enum": [
+                      "safe",
+                      "risky",
+                      "destructive"
+                    ],
+                    "type": "string"
+                  },
+                  "text": {
+                    "maxLength": 8192,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement": {
+                        "const": "hosted",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "nodeId": {
+                        "pattern": "^node_[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      },
+                      "placement": {
+                        "const": "connected_local_node",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placement"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": {
+                "const": "fake_echo",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "DoctorSummaryResponse": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -1330,6 +2368,10 @@
                   "allowConnectedNodes": {
                     "type": "boolean"
                   },
+                  "allowConnectedNodeTools": {
+                    "default": false,
+                    "type": "boolean"
+                  },
                   "allowedPlacements": {
                     "items": {
                       "enum": [
@@ -1348,10 +2390,34 @@
                     },
                     "type": "array"
                   },
+                  "allowedToolTypes": {
+                    "default": [],
+                    "items": {
+                      "enum": [
+                        "web_search",
+                        "fetch",
+                        "browser",
+                        "repo",
+                        "shell",
+                        "github",
+                        "fake_echo"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
                   "allowHostedRealRuntime": {
                     "type": "boolean"
                   },
+                  "allowHostedTools": {
+                    "default": false,
+                    "type": "boolean"
+                  },
                   "allowMetricsRead": {
+                    "type": "boolean"
+                  },
+                  "allowToolArtifactContentRead": {
+                    "default": false,
                     "type": "boolean"
                   }
                 },
@@ -1360,7 +2426,11 @@
                   "allowedRuntimeModes",
                   "allowHostedRealRuntime",
                   "allowConnectedNodes",
+                  "allowHostedTools",
+                  "allowConnectedNodeTools",
+                  "allowedToolTypes",
                   "allowArtifactContentRead",
+                  "allowToolArtifactContentRead",
                   "allowMetricsRead",
                   "allowAuditRead"
                 ],
@@ -1397,6 +2467,12 @@
                     "minimum": 0,
                     "type": "integer"
                   },
+                  "maxActiveToolInvocations": {
+                    "default": 0,
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
                   "maxArtifactContentReadBytesPerHour": {
                     "maximum": 9007199254740991,
                     "minimum": 0,
@@ -1416,6 +2492,18 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991,
                     "type": "integer"
+                  },
+                  "maxToolArtifactBytesPerHour": {
+                    "default": 0,
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "maxToolInvocationsPerHour": {
+                    "default": 0,
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
                   }
                 },
                 "required": [
@@ -1423,7 +2511,10 @@
                   "maxActiveRuns",
                   "maxRunTimeoutSeconds",
                   "maxConnectedNodes",
-                  "maxArtifactContentReadBytesPerHour"
+                  "maxArtifactContentReadBytesPerHour",
+                  "maxToolInvocationsPerHour",
+                  "maxActiveToolInvocations",
+                  "maxToolArtifactBytesPerHour"
                 ],
                 "type": "object"
               },
@@ -1432,6 +2523,8 @@
                   "enum": [
                     "runs:write",
                     "runs:read",
+                    "tools:write",
+                    "tools:read",
                     "artifacts:read",
                     "registry:read",
                     "nodes:write",
@@ -2040,10 +3133,60 @@
                   "approval_not_found",
                   "tool_invocation_not_found",
                   "approval_not_pending",
+                  "tool_run_required",
+                  "tool_target_invalid",
+                  "tool_target_mismatch",
+                  "tool_hosted_auth_required",
+                  "tool_store_unavailable",
+                  "tool_dispatch_unavailable",
+                  "tool_dispatch_failed",
+                  "tool_dispatch_retry_exhausted",
                   "tool_policy_denied",
                   "tool_policy_config_invalid",
                   "tool_policy_failed",
+                  "tool_real_tools_disabled",
+                  "tool_hosted_tools_disabled",
+                  "tool_connected_node_tools_disabled",
+                  "tool_approval_required",
+                  "tool_approval_rejected",
+                  "tool_approval_expired",
                   "tool_adapter_unavailable",
+                  "tool_input_limit_exceeded",
+                  "tool_concurrency_limit_exceeded",
+                  "tool_output_limit_exceeded",
+                  "tool_artifact_write_failed",
+                  "tool_redaction_failed",
+                  "tool_worker_restarted",
+                  "tool_node_unavailable",
+                  "tool_node_execution_failed",
+                  "tool_assignment_expired",
+                  "tool_assignment_mismatch",
+                  "hosted_runtime_approval_bridge_unshipped",
+                  "approval_scope_denied",
+                  "repo_hosted_unshipped",
+                  "browser_tool_unshipped",
+                  "fetch_url_invalid",
+                  "fetch_host_not_allowlisted",
+                  "fetch_private_network_denied",
+                  "fetch_redirect_denied",
+                  "fetch_method_denied",
+                  "fetch_content_type_denied",
+                  "web_search_provider_unconfigured",
+                  "web_search_query_invalid",
+                  "github_token_missing",
+                  "github_repo_not_allowlisted",
+                  "github_operation_denied",
+                  "github_not_found",
+                  "github_rate_limited",
+                  "repo_cwd_denied",
+                  "repo_operation_denied",
+                  "repo_pathspec_invalid",
+                  "shell_command_denied",
+                  "shell_command_not_configured",
+                  "tool_process_spawn_failed",
+                  "tool_process_nonzero_exit",
+                  "tool_process_timeout",
+                  "tool_process_cancelled",
                   "approval_required",
                   "unsupported_tool",
                   "invalid_input",
@@ -2121,6 +3264,116 @@
         },
         "required": [
           "error"
+        ],
+        "type": "object"
+      },
+      "ListApprovalsQuery": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "approvalType": {
+            "type": "string"
+          },
+          "before": {
+            "type": "string"
+          },
+          "limit": {
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ListApprovalsResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "approvals": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "approvalType": {
+                  "enum": [
+                    "before_commit",
+                    "before_push",
+                    "before_pr",
+                    "before_destructive_command",
+                    "before_external_web_action",
+                    "before_external_message",
+                    "before_spending_budget",
+                    "before_cross_runtime_delegation",
+                    "before_same_provider_model_delegation",
+                    "before_local_process_execution"
+                  ],
+                  "type": "string"
+                },
+                "createdAt": {
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                  "type": "string"
+                },
+                "id": {
+                  "pattern": "^approval_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "payload": {
+                  "additionalProperties": {},
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "resolvedAt": {
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                  "type": "string"
+                },
+                "runId": {
+                  "pattern": "^run_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "pending",
+                    "approved",
+                    "rejected",
+                    "expired"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "approvalType",
+                "status",
+                "payload",
+                "createdAt"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "approvals",
+          "nextCursor"
         ],
         "type": "object"
       },
@@ -2291,6 +3544,29 @@
                       },
                       "type": "array"
                     },
+                    "allowToolCwdPrefixes": {
+                      "default": [],
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "allowToolTypes": {
+                      "default": [],
+                      "items": {
+                        "enum": [
+                          "web_search",
+                          "fetch",
+                          "browser",
+                          "repo",
+                          "shell",
+                          "github",
+                          "fake_echo"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
                     "artifactSync": {
                       "default": "full",
                       "enum": [
@@ -2311,6 +3587,24 @@
                       "exclusiveMinimum": 0,
                       "maximum": 9007199254740991,
                       "type": "integer"
+                    },
+                    "maxToolArtifactBytes": {
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991,
+                      "type": "integer"
+                    },
+                    "toolApprovalRequired": {
+                      "default": true,
+                      "type": "boolean"
+                    },
+                    "toolArtifactSync": {
+                      "default": "full",
+                      "enum": [
+                        "none",
+                        "metadata_only",
+                        "full"
+                      ],
+                      "type": "string"
                     }
                   },
                   "required": [
@@ -2318,7 +3612,11 @@
                     "denyAdapterTypes",
                     "allowCwdPrefixes",
                     "allowEventTypes",
-                    "artifactSync"
+                    "artifactSync",
+                    "allowToolTypes",
+                    "allowToolCwdPrefixes",
+                    "toolArtifactSync",
+                    "toolApprovalRequired"
                   ],
                   "type": "object"
                 },
@@ -3296,6 +4594,144 @@
         ],
         "type": "object"
       },
+      "ListToolInvocationsQuery": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "before": {
+            "type": "string"
+          },
+          "limit": {
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ListToolInvocationsResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "invocations": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "approvalId": {
+                  "pattern": "^approval_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "completedAt": {
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                  "type": "string"
+                },
+                "createdAt": {
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                  "type": "string"
+                },
+                "error": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "message": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "type": "object"
+                },
+                "id": {
+                  "pattern": "^tool_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "input": {
+                  "additionalProperties": {},
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "output": {
+                  "additionalProperties": {},
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "runId": {
+                  "pattern": "^run_[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "queued",
+                    "running",
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "denied"
+                  ],
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "web_search",
+                    "fetch",
+                    "browser",
+                    "repo",
+                    "shell",
+                    "github",
+                    "fake_echo"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "type",
+                "status",
+                "input",
+                "createdAt"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "invocations",
+          "nextCursor"
+        ],
+        "type": "object"
+      },
       "ModelResponse": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -3388,6 +4824,29 @@
                 },
                 "type": "array"
               },
+              "allowToolCwdPrefixes": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "allowToolTypes": {
+                "default": [],
+                "items": {
+                  "enum": [
+                    "web_search",
+                    "fetch",
+                    "browser",
+                    "repo",
+                    "shell",
+                    "github",
+                    "fake_echo"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "artifactSync": {
                 "default": "full",
                 "enum": [
@@ -3408,6 +4867,24 @@
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991,
                 "type": "integer"
+              },
+              "maxToolArtifactBytes": {
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              "toolApprovalRequired": {
+                "default": true,
+                "type": "boolean"
+              },
+              "toolArtifactSync": {
+                "default": "full",
+                "enum": [
+                  "none",
+                  "metadata_only",
+                  "full"
+                ],
+                "type": "string"
               }
             },
             "required": [
@@ -3415,7 +4892,11 @@
               "denyAdapterTypes",
               "allowCwdPrefixes",
               "allowEventTypes",
-              "artifactSync"
+              "artifactSync",
+              "allowToolTypes",
+              "allowToolCwdPrefixes",
+              "toolArtifactSync",
+              "toolApprovalRequired"
             ],
             "type": "object"
           }
@@ -3486,6 +4967,29 @@
                     },
                     "type": "array"
                   },
+                  "allowToolCwdPrefixes": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "allowToolTypes": {
+                    "default": [],
+                    "items": {
+                      "enum": [
+                        "web_search",
+                        "fetch",
+                        "browser",
+                        "repo",
+                        "shell",
+                        "github",
+                        "fake_echo"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
                   "artifactSync": {
                     "default": "full",
                     "enum": [
@@ -3506,6 +5010,24 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991,
                     "type": "integer"
+                  },
+                  "maxToolArtifactBytes": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "toolApprovalRequired": {
+                    "default": true,
+                    "type": "boolean"
+                  },
+                  "toolArtifactSync": {
+                    "default": "full",
+                    "enum": [
+                      "none",
+                      "metadata_only",
+                      "full"
+                    ],
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -3513,7 +5035,11 @@
                   "denyAdapterTypes",
                   "allowCwdPrefixes",
                   "allowEventTypes",
-                  "artifactSync"
+                  "artifactSync",
+                  "allowToolTypes",
+                  "allowToolCwdPrefixes",
+                  "toolArtifactSync",
+                  "toolApprovalRequired"
                 ],
                 "type": "object"
               },
@@ -3598,6 +5124,29 @@
                 },
                 "type": "array"
               },
+              "allowToolCwdPrefixes": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "allowToolTypes": {
+                "default": [],
+                "items": {
+                  "enum": [
+                    "web_search",
+                    "fetch",
+                    "browser",
+                    "repo",
+                    "shell",
+                    "github",
+                    "fake_echo"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "artifactSync": {
                 "default": "full",
                 "enum": [
@@ -3618,6 +5167,24 @@
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991,
                 "type": "integer"
+              },
+              "maxToolArtifactBytes": {
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991,
+                "type": "integer"
+              },
+              "toolApprovalRequired": {
+                "default": true,
+                "type": "boolean"
+              },
+              "toolArtifactSync": {
+                "default": "full",
+                "enum": [
+                  "none",
+                  "metadata_only",
+                  "full"
+                ],
+                "type": "string"
               }
             },
             "required": [
@@ -3625,7 +5192,11 @@
               "denyAdapterTypes",
               "allowCwdPrefixes",
               "allowEventTypes",
-              "artifactSync"
+              "artifactSync",
+              "allowToolTypes",
+              "allowToolCwdPrefixes",
+              "toolArtifactSync",
+              "toolApprovalRequired"
             ],
             "type": "object"
           },
@@ -3704,6 +5275,29 @@
                     },
                     "type": "array"
                   },
+                  "allowToolCwdPrefixes": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "allowToolTypes": {
+                    "default": [],
+                    "items": {
+                      "enum": [
+                        "web_search",
+                        "fetch",
+                        "browser",
+                        "repo",
+                        "shell",
+                        "github",
+                        "fake_echo"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
                   "artifactSync": {
                     "default": "full",
                     "enum": [
@@ -3724,6 +5318,24 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991,
                     "type": "integer"
+                  },
+                  "maxToolArtifactBytes": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "toolApprovalRequired": {
+                    "default": true,
+                    "type": "boolean"
+                  },
+                  "toolArtifactSync": {
+                    "default": "full",
+                    "enum": [
+                      "none",
+                      "metadata_only",
+                      "full"
+                    ],
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -3731,7 +5343,11 @@
                   "denyAdapterTypes",
                   "allowCwdPrefixes",
                   "allowEventTypes",
-                  "artifactSync"
+                  "artifactSync",
+                  "allowToolTypes",
+                  "allowToolCwdPrefixes",
+                  "toolArtifactSync",
+                  "toolApprovalRequired"
                 ],
                 "type": "object"
               },
@@ -3833,6 +5449,29 @@
                     },
                     "type": "array"
                   },
+                  "allowToolCwdPrefixes": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "allowToolTypes": {
+                    "default": [],
+                    "items": {
+                      "enum": [
+                        "web_search",
+                        "fetch",
+                        "browser",
+                        "repo",
+                        "shell",
+                        "github",
+                        "fake_echo"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
                   "artifactSync": {
                     "default": "full",
                     "enum": [
@@ -3853,6 +5492,24 @@
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991,
                     "type": "integer"
+                  },
+                  "maxToolArtifactBytes": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "toolApprovalRequired": {
+                    "default": true,
+                    "type": "boolean"
+                  },
+                  "toolArtifactSync": {
+                    "default": "full",
+                    "enum": [
+                      "none",
+                      "metadata_only",
+                      "full"
+                    ],
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -3860,7 +5517,11 @@
                   "denyAdapterTypes",
                   "allowCwdPrefixes",
                   "allowEventTypes",
-                  "artifactSync"
+                  "artifactSync",
+                  "allowToolTypes",
+                  "allowToolCwdPrefixes",
+                  "toolArtifactSync",
+                  "toolApprovalRequired"
                 ],
                 "type": "object"
               },
@@ -4007,6 +5668,29 @@
           "ok",
           "checks"
         ],
+        "type": "object"
+      },
+      "ResolveApprovalRequest": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "answers": {
+            "items": {
+              "additionalProperties": {},
+              "propertyNames": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "RuntimeModeCheckResponse": {
@@ -4624,6 +6308,168 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "string"
       },
+      "ToolInvocationResponse": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": {},
+        "properties": {
+          "approval": {
+            "additionalProperties": false,
+            "properties": {
+              "approvalType": {
+                "enum": [
+                  "before_commit",
+                  "before_push",
+                  "before_pr",
+                  "before_destructive_command",
+                  "before_external_web_action",
+                  "before_external_message",
+                  "before_spending_budget",
+                  "before_cross_runtime_delegation",
+                  "before_same_provider_model_delegation",
+                  "before_local_process_execution"
+                ],
+                "type": "string"
+              },
+              "createdAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^approval_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "payload": {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "resolvedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "approved",
+                  "rejected",
+                  "expired"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "approvalType",
+              "status",
+              "payload",
+              "createdAt"
+            ],
+            "type": "object"
+          },
+          "invocation": {
+            "additionalProperties": false,
+            "properties": {
+              "approvalId": {
+                "pattern": "^approval_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "completedAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "createdAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+                "type": "string"
+              },
+              "error": {
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "message": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "id": {
+                "pattern": "^tool_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "input": {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "output": {
+                "additionalProperties": {},
+                "propertyNames": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^run_[A-Za-z0-9_-]+$",
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "queued",
+                  "running",
+                  "completed",
+                  "failed",
+                  "cancelled",
+                  "denied"
+                ],
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "web_search",
+                  "fetch",
+                  "browser",
+                  "repo",
+                  "shell",
+                  "github",
+                  "fake_echo"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "type",
+              "status",
+              "input",
+              "createdAt"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "invocation"
+        ],
+        "type": "object"
+      },
       "WhoamiResponse": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -4722,6 +6568,8 @@
                       "enum": [
                         "runs:write",
                         "runs:read",
+                        "tools:write",
+                        "tools:read",
                         "artifacts:read",
                         "registry:read",
                         "nodes:write",
@@ -4789,6 +6637,10 @@
                       "allowConnectedNodes": {
                         "type": "boolean"
                       },
+                      "allowConnectedNodeTools": {
+                        "default": false,
+                        "type": "boolean"
+                      },
                       "allowedPlacements": {
                         "items": {
                           "enum": [
@@ -4807,10 +6659,34 @@
                         },
                         "type": "array"
                       },
+                      "allowedToolTypes": {
+                        "default": [],
+                        "items": {
+                          "enum": [
+                            "web_search",
+                            "fetch",
+                            "browser",
+                            "repo",
+                            "shell",
+                            "github",
+                            "fake_echo"
+                          ],
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
                       "allowHostedRealRuntime": {
                         "type": "boolean"
                       },
+                      "allowHostedTools": {
+                        "default": false,
+                        "type": "boolean"
+                      },
                       "allowMetricsRead": {
+                        "type": "boolean"
+                      },
+                      "allowToolArtifactContentRead": {
+                        "default": false,
                         "type": "boolean"
                       }
                     },
@@ -4819,7 +6695,11 @@
                       "allowedRuntimeModes",
                       "allowHostedRealRuntime",
                       "allowConnectedNodes",
+                      "allowHostedTools",
+                      "allowConnectedNodeTools",
+                      "allowedToolTypes",
                       "allowArtifactContentRead",
+                      "allowToolArtifactContentRead",
                       "allowMetricsRead",
                       "allowAuditRead"
                     ],
@@ -4856,6 +6736,12 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "maxActiveToolInvocations": {
+                        "default": 0,
+                        "maximum": 9007199254740991,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "maxArtifactContentReadBytesPerHour": {
                         "maximum": 9007199254740991,
                         "minimum": 0,
@@ -4875,6 +6761,18 @@
                         "exclusiveMinimum": 0,
                         "maximum": 9007199254740991,
                         "type": "integer"
+                      },
+                      "maxToolArtifactBytesPerHour": {
+                        "default": 0,
+                        "maximum": 9007199254740991,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "maxToolInvocationsPerHour": {
+                        "default": 0,
+                        "maximum": 9007199254740991,
+                        "minimum": 0,
+                        "type": "integer"
                       }
                     },
                     "required": [
@@ -4882,7 +6780,10 @@
                       "maxActiveRuns",
                       "maxRunTimeoutSeconds",
                       "maxConnectedNodes",
-                      "maxArtifactContentReadBytesPerHour"
+                      "maxArtifactContentReadBytesPerHour",
+                      "maxToolInvocationsPerHour",
+                      "maxActiveToolInvocations",
+                      "maxToolArtifactBytesPerHour"
                     ],
                     "type": "object"
                   },
@@ -4891,6 +6792,8 @@
                       "enum": [
                         "runs:write",
                         "runs:read",
+                        "tools:write",
+                        "tools:read",
                         "artifacts:read",
                         "registry:read",
                         "nodes:write",
@@ -5110,6 +7013,344 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/approvals": {
+      "get": {
+        "operationId": "listApprovals",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "approvalType",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "runId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListApprovalsResponse"
+                }
+              }
+            },
+            "description": "Approval list"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "List approvals",
+        "tags": [
+          "middleware",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts",
+        "x-switchyard-no-body": true
+      }
+    },
+    "/approvals/{id}": {
+      "get": {
+        "operationId": "getApproval",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            },
+            "description": "Approval"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "Get approval",
+        "tags": [
+          "middleware",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts",
+        "x-switchyard-no-body": true
+      }
+    },
+    "/approvals/{id}/approve": {
+      "post": {
+        "operationId": "approveApproval",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveApprovalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResolutionResponse"
+                }
+              }
+            },
+            "description": "Approval resolution"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "Approve",
+        "tags": [
+          "middleware",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts"
+      }
+    },
+    "/approvals/{id}/reject": {
+      "post": {
+        "operationId": "rejectApproval",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveApprovalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResolutionResponse"
+                }
+              }
+            },
+            "description": "Approval resolution"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "Reject",
+        "tags": [
+          "middleware",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts"
+      }
+    },
     "/artifacts/{id}": {
       "get": {
         "operationId": "getArtifact",
@@ -8068,6 +10309,264 @@
         "summary": "Get runtime",
         "tags": [
           "registry",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts",
+        "x-switchyard-no-body": true
+      }
+    },
+    "/tools/invocations": {
+      "get": {
+        "operationId": "listToolInvocations",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "runId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListToolInvocationsResponse"
+                }
+              }
+            },
+            "description": "Tool invocation list"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "List tool invocations",
+        "tags": [
+          "middleware",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts",
+        "x-switchyard-no-body": true
+      },
+      "post": {
+        "operationId": "invokeTool",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateToolInvocationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolInvocationResponse"
+                }
+              }
+            },
+            "description": "Tool invocation result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "Invoke tool",
+        "tags": [
+          "middleware",
+          "surface:hosted_server"
+        ],
+        "x-switchyard-error-envelope": "contracts"
+      }
+    },
+    "/tools/invocations/{id}": {
+      "get": {
+        "operationId": "getToolInvocation",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolInvocationResponse"
+                }
+              }
+            },
+            "description": "Tool invocation"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpErrorEnvelope"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "security": [
+          {
+            "SwitchyardApiKey": []
+          }
+        ],
+        "summary": "Get tool invocation",
+        "tags": [
+          "middleware",
           "surface:hosted_server"
         ],
         "x-switchyard-error-envelope": "contracts",

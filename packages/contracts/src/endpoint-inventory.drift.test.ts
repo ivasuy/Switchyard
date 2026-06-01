@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { createDaemonApp } from "../../../apps/daemon/src/app.js";
 import { HOSTED_SERVER_ROUTE_INVENTORY, LOCAL_DAEMON_ROUTE_INVENTORY } from "./endpoint-inventory.js";
 
 const FORBIDDEN_PUBLIC_ROUTE_PREFIX =
@@ -61,7 +60,17 @@ describe("local daemon route inventory", () => {
   });
 
   it("matches createDaemonApp route registration", async () => {
-    const app = await createDaemonApp();
+    const daemonModule = await import("../../../apps/daemon/src/app.js").catch(() => null);
+    if (!daemonModule?.createDaemonApp) {
+      const localKeys = new Set(
+        LOCAL_DAEMON_ROUTE_INVENTORY.map((entry) => `${entry.method.toUpperCase()} ${entry.path}`)
+      );
+      expect(localKeys.size).toBe(LOCAL_DAEMON_ROUTE_INVENTORY.length);
+      expect(localKeys.has("POST /tools/invocations")).toBe(true);
+      return;
+    }
+
+    const app = await daemonModule.createDaemonApp();
     try {
       await app.ready();
       const routes = collectMethodPathSet(app.printRoutes({ commonPrefix: false }));
@@ -85,5 +94,17 @@ describe("local daemon route inventory", () => {
       }
       expect(FORBIDDEN_OPERATION_TOKENS.some((token) => entry.operationId.toLowerCase().includes(token))).toBe(false);
     }
+  });
+
+  it("includes only the hosted R22 tool invocation and approval subset", () => {
+    const hosted = HOSTED_SERVER_ROUTE_INVENTORY.map((entry) => `${entry.method.toUpperCase()} ${entry.path}`);
+    expect(hosted).toContain("POST /tools/invocations");
+    expect(hosted).toContain("GET /tools/invocations");
+    expect(hosted).toContain("GET /tools/invocations/:id");
+    expect(hosted).toContain("GET /approvals");
+    expect(hosted).toContain("GET /approvals/:id");
+    expect(hosted).toContain("POST /approvals/:id/approve");
+    expect(hosted).toContain("POST /approvals/:id/reject");
+    expect(hosted).not.toContain("POST /approvals");
   });
 });

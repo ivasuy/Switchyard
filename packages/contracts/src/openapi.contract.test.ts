@@ -9,6 +9,21 @@ import {
   renderOpenApiJson
 } from "./openapi.js";
 import { runOpenApiCli } from "./openapi-cli.js";
+import { createToolInvocationRequestSchema } from "./tool.js";
+import {
+  authScopeSchema,
+  auditEventTypeSchema,
+  auditResourceTypeSchema,
+  billingPlanSchema,
+  quotaKindSchema,
+  resourceOwnershipTypeSchema
+} from "./enterprise.js";
+import {
+  assignmentClaimResponseSchema,
+  assignmentCompleteRequestSchema,
+  assignmentSchema
+} from "./assignment.js";
+import { nodePolicySchema } from "./node.js";
 
 const FORBIDDEN_PUBLIC_ROUTE_PREFIX =
   /^\/(exec|shell|process|command|pty|terminal|sandbox|browser|search|github|fetch|repo|dashboard|tui)(\/|$)/;
@@ -285,7 +300,8 @@ describe("openapi generation", () => {
     }
 
     expect(local.paths["/memory/search"]?.get?.operationId).toBe("searchMemory");
-    expect(hosted.paths["/tools/invocations"]).toBeUndefined();
+    expect(hosted.paths["/tools/invocations"]?.post?.operationId).toBe("invokeTool");
+    expect(hosted.paths["/tools/invocations"]?.get?.operationId).toBe("listToolInvocations");
   });
 
   it("keeps arbitrary execution operation ids out of OpenAPI", () => {
@@ -392,5 +408,203 @@ describe("openapi generation", () => {
     expect(toolInvocationProps["toolInvocation"]).toBeUndefined();
     expect(listProps["invocations"]).toBeDefined();
     expect(listProps["toolInvocations"]).toBeUndefined();
+  });
+
+  it("accepts R22 hosted and connected-node invocation targets and keeps local compatibility", () => {
+    const localCompatible = createToolInvocationRequestSchema.parse({
+      runId: "run_local_1",
+      type: "fetch",
+      input: { url: "https://example.com", method: "GET" }
+    });
+    expect(localCompatible.type).toBe("fetch");
+
+    const hostedTarget = createToolInvocationRequestSchema.parse({
+      runId: "run_hosted_1",
+      type: "fetch",
+      target: { placement: "hosted" },
+      input: { url: "https://example.com", method: "GET" }
+    });
+    expect(hostedTarget.target?.placement).toBe("hosted");
+
+    const nodeTarget = createToolInvocationRequestSchema.parse({
+      runId: "run_node_1",
+      type: "repo",
+      target: { placement: "connected_local_node", nodeId: "node_123" },
+      input: { operation: "status", cwd: "/tmp/repo" }
+    });
+    expect(nodeTarget.target?.placement).toBe("connected_local_node");
+    expect(nodeTarget.target).toEqual(expect.objectContaining({ nodeId: "node_123" }));
+  });
+
+  it("rejects malformed R22 invocation targets", () => {
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        runId: "run_bad_1",
+        type: "fetch",
+        target: { placement: "local" },
+        input: { url: "https://example.com", method: "GET" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        runId: "run_bad_2",
+        type: "fetch",
+        target: { placement: "hosted", nodeId: "node_123" },
+        input: { url: "https://example.com", method: "GET" }
+      })
+    ).toThrow();
+  });
+
+  it("accepts R22 tool enterprise scopes, entitlements, quotas, ownership, and audit types", () => {
+    expect(authScopeSchema.parse("tools:write")).toBe("tools:write");
+    expect(authScopeSchema.parse("tools:read")).toBe("tools:read");
+    expect(() => authScopeSchema.parse("tools:admin")).toThrow();
+
+    const plan = billingPlanSchema.parse({
+      id: "billing_plan_basic",
+      slug: "basic",
+      displayName: "Basic",
+      status: "active",
+      entitlements: {
+        allowedPlacements: ["local"],
+        allowedRuntimeModes: ["fake.deterministic"],
+        allowHostedRealRuntime: false,
+        allowConnectedNodes: false,
+        allowArtifactContentRead: false,
+        allowMetricsRead: false,
+        allowAuditRead: false,
+        allowHostedTools: false,
+        allowConnectedNodeTools: false,
+        allowedToolTypes: [],
+        allowToolArtifactContentRead: false
+      },
+      quotas: {
+        maxRunsPerHour: 100,
+        maxActiveRuns: 10,
+        maxRunTimeoutSeconds: 1800,
+        maxConnectedNodes: 2,
+        maxArtifactContentReadBytesPerHour: 1_000_000,
+        maxToolInvocationsPerHour: 200,
+        maxActiveToolInvocations: 5,
+        maxToolArtifactBytesPerHour: 2_000_000
+      },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(plan.entitlements.allowHostedTools).toBe(false);
+    expect(plan.quotas.maxToolInvocationsPerHour).toBe(200);
+
+    expect(quotaKindSchema.parse("tool_invocations_per_hour")).toBe("tool_invocations_per_hour");
+    expect(quotaKindSchema.parse("active_tool_invocations")).toBe("active_tool_invocations");
+    expect(quotaKindSchema.parse("tool_artifact_bytes_per_hour")).toBe("tool_artifact_bytes_per_hour");
+
+    expect(resourceOwnershipTypeSchema.parse("tool_invocation")).toBe("tool_invocation");
+    expect(resourceOwnershipTypeSchema.parse("approval")).toBe("approval");
+
+    expect(auditEventTypeSchema.parse("tool.execution_completed")).toBe("tool.execution_completed");
+    expect(auditResourceTypeSchema.parse("tool_invocation")).toBe("tool_invocation");
+    expect(auditResourceTypeSchema.parse("approval")).toBe("approval");
+  });
+
+  it("keeps run assignment compatibility and accepts R22 tool assignment extensions", () => {
+    const runAssignment = assignmentSchema.parse({
+      id: "assignment_run_1",
+      runId: "run_123",
+      nodeId: "node_123",
+      status: "pending",
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(runAssignment.kind).toBe("run");
+
+    const toolAssignment = assignmentSchema.parse({
+      id: "assignment_tool_1",
+      runId: "run_123",
+      nodeId: "node_123",
+      status: "pending",
+      kind: "tool",
+      toolInvocationId: "tool_123",
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(toolAssignment.kind).toBe("tool");
+    expect(toolAssignment.toolInvocationId).toBe("tool_123");
+
+    expect(() =>
+      assignmentSchema.parse({
+        id: "assignment_tool_2",
+        runId: "run_123",
+        nodeId: "node_123",
+        status: "pending",
+        kind: "tool",
+        createdAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    const claimResponse = assignmentClaimResponseSchema.parse({
+      assignment: toolAssignment,
+      run: null,
+      toolInvocation: {
+        id: "tool_123",
+        runId: "run_123",
+        type: "fetch",
+        status: "queued",
+        input: {},
+        createdAt: "2026-06-01T00:00:00.000Z"
+      }
+    });
+    expect(claimResponse.toolInvocation?.id).toBe("tool_123");
+
+    const runClaimResponse = assignmentClaimResponseSchema.parse({
+      assignment: runAssignment,
+      run: null
+    });
+    expect(runClaimResponse.assignment?.id).toBe("assignment_run_1");
+    expect(runClaimResponse.toolInvocation).toBeNull();
+  });
+
+  it("accepts optional terminal tool invocation patch in assignment completion", () => {
+    const request = assignmentCompleteRequestSchema.parse({
+      status: "completed",
+      toolInvocation: {
+        id: "tool_123",
+        status: "completed",
+        output: {
+          ok: true
+        }
+      }
+    });
+    expect(request.toolInvocation?.status).toBe("completed");
+  });
+
+  it("parses node policy tool fields without requiring raw command catalogs", () => {
+    const policy = nodePolicySchema.parse({
+      allowRuntimeModes: ["codex.exec_json"],
+      denyAdapterTypes: [],
+      allowCwdPrefixes: ["/workspace"],
+      allowEventTypes: ["tool.result"],
+      artifactSync: "full",
+      maxArtifactBytes: 1024,
+      allowToolTypes: ["fetch", "repo"],
+      allowToolCwdPrefixes: ["/workspace/repo"],
+      toolArtifactSync: "metadata_only",
+      maxToolArtifactBytes: 2048,
+      toolApprovalRequired: true
+    });
+    expect(policy.allowToolTypes).toEqual(["fetch", "repo"]);
+    expect(policy.toolApprovalRequired).toBe(true);
+  });
+
+  it("documents hosted R22 tool invocation and approval route subset with auth, excluding POST /approvals", () => {
+    const hosted = generateOpenApiDocument({ surface: "hosted_server" });
+    const expectedSecurity = [{ SwitchyardApiKey: [] }];
+
+    expect(hosted.paths["/tools/invocations"]?.post?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/tools/invocations"]?.get?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/tools/invocations/{id}"]?.get?.security).toEqual(expectedSecurity);
+
+    expect(hosted.paths["/approvals"]?.get?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/approvals"]?.post).toBeUndefined();
+    expect(hosted.paths["/approvals/{id}"]?.get?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/approvals/{id}/approve"]?.post?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/approvals/{id}/reject"]?.post?.security).toEqual(expectedSecurity);
   });
 });

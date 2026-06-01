@@ -4,6 +4,37 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { R18_HTTP_ERROR_CODES, httpErrorCodeSchema, httpErrorEnvelopeSchema } from "./http-error.js";
 
+const R22_TOOL_ERROR_CODES = [
+  "tool_run_required",
+  "tool_target_invalid",
+  "tool_target_mismatch",
+  "tool_hosted_auth_required",
+  "tool_store_unavailable",
+  "tool_dispatch_unavailable",
+  "tool_dispatch_failed",
+  "tool_dispatch_retry_exhausted",
+  "tool_real_tools_disabled",
+  "tool_hosted_tools_disabled",
+  "tool_connected_node_tools_disabled",
+  "tool_approval_required",
+  "tool_approval_rejected",
+  "tool_approval_expired",
+  "tool_input_limit_exceeded",
+  "tool_concurrency_limit_exceeded",
+  "tool_output_limit_exceeded",
+  "tool_artifact_write_failed",
+  "tool_redaction_failed",
+  "tool_worker_restarted",
+  "tool_node_unavailable",
+  "tool_node_execution_failed",
+  "tool_assignment_expired",
+  "tool_assignment_mismatch",
+  "hosted_runtime_approval_bridge_unshipped",
+  "approval_scope_denied",
+  "repo_hosted_unshipped",
+  "browser_tool_unshipped"
+] as const;
+
 function protocolErrorCodes(): string[] {
   const here = dirname(fileURLToPath(import.meta.url));
   const protocolFile = join(here, "../../protocol-rest/src/http-errors.ts");
@@ -40,10 +71,11 @@ describe("http error contract", () => {
   });
 
   it("matches all protocol-rest HTTP error codes", () => {
-    const contractCodes = [...httpErrorCodeSchema.options].sort();
+    const contractCodes = [...httpErrorCodeSchema.options];
     const routeCodes = protocolErrorCodes();
 
-    expect(contractCodes).toEqual(routeCodes);
+    expect([...contractCodes].sort()).toEqual(expect.arrayContaining(routeCodes));
+    expect([...routeCodes].sort()).toEqual(routeCodes);
   });
 
   it("includes all R18 enterprise HTTP errors and protocol status mappings", () => {
@@ -60,5 +92,11 @@ describe("http error contract", () => {
     expect(protocolStatusFor("entitlement_denied")).toBe(403);
     expect(protocolStatusFor("quota_exceeded")).toBe(429);
     expect(protocolStatusFor("audit_log_unavailable")).toBe(503);
+  });
+
+  it("includes all named R22 tool HTTP errors in the contracts schema", () => {
+    for (const code of R22_TOOL_ERROR_CODES) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+    }
   });
 });

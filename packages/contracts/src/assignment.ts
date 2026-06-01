@@ -1,8 +1,9 @@
 import { z } from "zod";
-import { artifactIdSchema, isoDateSchema, nodeIdSchema, runIdSchema } from "./ids.js";
+import { artifactIdSchema, isoDateSchema, nodeIdSchema, runIdSchema, toolInvocationIdSchema } from "./ids.js";
 import { eventSchema } from "./event.js";
 import { artifactTypeSchema } from "./artifact.js";
 import { runSchema } from "./run.js";
+import { toolInvocationSchema, toolTypeSchema } from "./tool.js";
 
 export const assignmentStatusSchema = z.enum([
   "pending",
@@ -18,6 +19,8 @@ export const assignmentSchema = z.object({
   id: z.string().regex(/^assignment_[A-Za-z0-9_-]+$/),
   runId: runIdSchema,
   nodeId: nodeIdSchema,
+  kind: z.enum(["run", "tool"]).default("run"),
+  toolInvocationId: toolInvocationIdSchema.optional(),
   status: assignmentStatusSchema,
   claimedAt: isoDateSchema.optional(),
   startedAt: isoDateSchema.optional(),
@@ -28,6 +31,14 @@ export const assignmentSchema = z.object({
   lastArtifactSyncAt: isoDateSchema.optional(),
   error: z.string().min(1).optional(),
   createdAt: isoDateSchema
+}).superRefine((value, ctx) => {
+  if (value.kind === "tool" && value.toolInvocationId === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["toolInvocationId"],
+      message: "toolInvocationId is required when assignment kind is tool"
+    });
+  }
 });
 
 export const nodeRegisterRequestSchema = z.object({
@@ -41,7 +52,12 @@ export const nodeRegisterRequestSchema = z.object({
       allowCwdPrefixes: z.array(z.string()).default([]),
       allowEventTypes: z.array(z.string()).default([]),
       artifactSync: z.enum(["none", "metadata_only", "full"]).default("full"),
-      maxArtifactBytes: z.number().int().positive().optional()
+      maxArtifactBytes: z.number().int().positive().optional(),
+      allowToolTypes: z.array(toolTypeSchema).default([]),
+      allowToolCwdPrefixes: z.array(z.string()).default([]),
+      toolArtifactSync: z.enum(["none", "metadata_only", "full"]).default("full"),
+      maxToolArtifactBytes: z.number().int().positive().optional(),
+      toolApprovalRequired: z.boolean().default(true)
     })
     .optional(),
   version: z.string().min(1).optional()
@@ -63,7 +79,8 @@ export const assignmentRejectRequestSchema = z.object({
 
 export const assignmentClaimResponseSchema = z.object({
   assignment: assignmentSchema.nullable(),
-  run: runSchema.nullable()
+  run: runSchema.nullable(),
+  toolInvocation: toolInvocationSchema.nullable().optional().default(null)
 });
 
 export const assignmentEventSyncRequestSchema = z.object({
@@ -111,7 +128,17 @@ export const assignmentArtifactContentMetadataSchema = z.object({
 
 export const assignmentCompleteRequestSchema = z.object({
   status: z.enum(["completed", "failed", "cancelled"]),
-  error: z.string().min(1).optional()
+  error: z.string().min(1).optional(),
+  toolInvocation: z.object({
+    id: toolInvocationIdSchema,
+    status: z.enum(["completed", "failed", "cancelled"]),
+    output: z.record(z.string(), z.unknown()).optional(),
+    error: z.object({
+      code: z.string().min(1),
+      message: z.string().min(1)
+    }).optional(),
+    completedAt: isoDateSchema.optional()
+  }).optional()
 });
 
 export type Assignment = z.infer<typeof assignmentSchema>;

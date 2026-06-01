@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { approvalIdSchema, isoDateSchema, runIdSchema, toolInvocationIdSchema } from "./ids.js";
+import { approvalIdSchema, isoDateSchema, nodeIdSchema, runIdSchema, toolInvocationIdSchema } from "./ids.js";
 
 export const toolTypeSchema = z.enum(["web_search", "fetch", "browser", "repo", "shell", "github", "fake_echo"]);
 export const toolInvocationStatusSchema = z.enum(["queued", "running", "completed", "failed", "cancelled", "denied"]);
@@ -87,48 +87,50 @@ export const fakeEchoToolInputSchema = z.object({
   requiresApproval: z.boolean().optional()
 }).passthrough();
 
+export const toolInvocationTargetSchema = z.discriminatedUnion("placement", [
+  z.object({
+    placement: z.literal("hosted")
+  }).strict(),
+  z.object({
+    placement: z.literal("connected_local_node"),
+    nodeId: nodeIdSchema.optional()
+  }).strict()
+]);
+
+const createToolInvocationBaseSchema = z.object({
+  runId: runIdSchema.optional(),
+  target: toolInvocationTargetSchema.optional(),
+  approvalPolicy: nonEmptyTrimmedString.optional()
+});
+
 export const createToolInvocationRequestSchema = z.discriminatedUnion("type", [
-  z.object({
-    runId: runIdSchema.optional(),
+  createToolInvocationBaseSchema.extend({
     type: z.literal("fetch"),
-    input: fetchToolInputSchema,
-    approvalPolicy: nonEmptyTrimmedString.optional()
+    input: fetchToolInputSchema
   }).strict(),
-  z.object({
-    runId: runIdSchema.optional(),
+  createToolInvocationBaseSchema.extend({
     type: z.literal("web_search"),
-    input: webSearchToolInputSchema,
-    approvalPolicy: nonEmptyTrimmedString.optional()
+    input: webSearchToolInputSchema
   }).strict(),
-  z.object({
-    runId: runIdSchema.optional(),
+  createToolInvocationBaseSchema.extend({
     type: z.literal("github"),
-    input: githubToolInputSchema,
-    approvalPolicy: nonEmptyTrimmedString.optional()
+    input: githubToolInputSchema
   }).strict(),
-  z.object({
-    runId: runIdSchema.optional(),
+  createToolInvocationBaseSchema.extend({
     type: z.literal("repo"),
-    input: repoToolInputSchema,
-    approvalPolicy: nonEmptyTrimmedString.optional()
+    input: repoToolInputSchema
   }).strict(),
-  z.object({
-    runId: runIdSchema.optional(),
+  createToolInvocationBaseSchema.extend({
     type: z.literal("shell"),
-    input: shellToolInputSchema,
-    approvalPolicy: nonEmptyTrimmedString.optional()
+    input: shellToolInputSchema
   }).strict(),
-  z.object({
-    runId: runIdSchema.optional(),
+  createToolInvocationBaseSchema.extend({
     type: z.literal("browser"),
-    input: browserToolInputSchema,
-    approvalPolicy: nonEmptyTrimmedString.optional()
+    input: browserToolInputSchema
   }).strict(),
-  z.object({
-    runId: runIdSchema.optional(),
+  createToolInvocationBaseSchema.extend({
     type: z.literal("fake_echo"),
-    input: fakeEchoToolInputSchema,
-    approvalPolicy: nonEmptyTrimmedString.optional()
+    input: fakeEchoToolInputSchema
   }).strict()
 ]);
 
