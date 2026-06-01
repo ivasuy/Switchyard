@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import type { Approval, AuthContext, HostedRuntimeBridgeCommand, Run, RuntimeSession } from "@switchyard/contracts";
 import { HostedRuntimeBridgeService, HostedRuntimeBridgeServiceError } from "../src/services/hosted-runtime-bridge-service.js";
 import type {
@@ -581,6 +582,79 @@ describe("hosted runtime bridge service", () => {
     expect(command?.reasonCode).toBe("hosted_runtime_bridge_session_not_owned");
   });
 
+  it("worker re-reads approval state for approval resolution commands before dispatch", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    const runnerCalls: Array<Record<string, unknown>> = [];
+    await runs.create(makeRun({ runtimeMode: "opencode.acp" }));
+    await sessions.create(makeSession({
+      runtimeMode: "opencode.acp",
+      state: { hostedWorkerId: "worker_a", hostedBridgeCapable: true }
+    }));
+    await approvals.create({
+      id: "approval_pending",
+      runId: "run_1",
+      approvalType: "before_external_message",
+      status: "pending",
+      payload: {
+        runtimeApprovalToken: "request_2",
+        runtimeMode: "opencode.acp",
+        expiresAt: "2026-06-02T01:00:00.000Z"
+      },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    await commands.create({
+      runId: "run_1",
+      approvalId: "approval_pending",
+      runtimeSessionId: "session_1",
+      runtimeMode: "opencode.acp",
+      operation: "approval_resolution",
+      idempotencyKey: "approval_dispatch",
+      payloadHash: payloadHashForTest({
+        type: "approval_resolution",
+        runtimeApprovalToken: "request_2",
+        decision: "approved",
+        message: "approved by hosted-api"
+      }),
+      payloadBytes: 1,
+      redactedPayload: {
+        kind: "approval_resolution",
+        runtimeApprovalToken: "request_2",
+        decision: "approved",
+        message: "approved by hosted-api",
+        redacted: true
+      },
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      apiKeyId: "api_key_1",
+      maxAttempts: 3,
+      expiresAt: "2026-06-02T01:00:00.000Z"
+    });
+
+    const service = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      runtimeRunner: {
+        sendInput: async (runId: string, payload: Record<string, unknown>) => {
+          runnerCalls.push({ runId, payload });
+        }
+      }
+    });
+
+    const applied = await service.claimAndApplyNext({ workerId: "worker_a", leaseMs: 5_000 });
+    expect(applied).toBe(true);
+    expect(runnerCalls).toHaveLength(0);
+    const command = await commands.getByIdempotencyKey("approval_dispatch");
+    expect(command?.status).toBe("failed");
+    expect(command?.reasonCode).toBe("approval_not_pending");
+  });
+
   it("reconciliation blocks non-idempotent stale retries and terminalizes stuck waiting approvals", async () => {
     const runs = new MemoryRunStore();
     const sessions = new MemorySessionStore();
@@ -657,3 +731,20 @@ describe("hosted runtime bridge service", () => {
     expect(approval?.status).toBe("rejected");
   });
 });
+
+function payloadHashForTest(payload: Record<string, unknown>): string {
+  return createHash("sha256").update(canonicalJsonForTest(payload)).digest("hex");
+}
+
+function canonicalJsonForTest(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJsonForTest(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJsonForTest(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}

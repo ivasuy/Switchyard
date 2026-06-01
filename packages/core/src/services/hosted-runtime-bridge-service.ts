@@ -489,6 +489,14 @@ export class HostedRuntimeBridgeService {
       return true;
     }
 
+    if (command.operation === "approval_resolution") {
+      const approvalReason = await this.validateApprovalResolutionCommand(command, run.id, now);
+      if (approvalReason) {
+        await this.failClaimedCommand(command, input.workerId, approvalReason);
+        return true;
+      }
+    }
+
     const dispatchPayload = payloadForWorkerDispatch(command);
     if (!dispatchPayload) {
       await this.failClaimedCommand(command, input.workerId, "hosted_runtime_bridge_payload_mismatch");
@@ -658,6 +666,40 @@ export class HostedRuntimeBridgeService {
       })
     };
     return this.deps.approvals.updateIfStatus(approval.id, "pending", next);
+  }
+
+  private async validateApprovalResolutionCommand(
+    command: HostedRuntimeBridgeCommand,
+    runId: string,
+    now: string
+  ): Promise<string | undefined> {
+    if (!command.approvalId) {
+      return "approval_not_pending";
+    }
+    const approval = await this.deps.approvals.get(command.approvalId);
+    if (!approval) {
+      return "approval_not_pending";
+    }
+    if (approval.runId !== runId) {
+      return "approval_not_pending";
+    }
+    if (approval.status === "pending") {
+      return "approval_not_pending";
+    }
+    const runtimeApprovalToken = typeof approval.payload["runtimeApprovalToken"] === "string"
+      ? approval.payload["runtimeApprovalToken"]
+      : undefined;
+    const commandToken = typeof command.redactedPayload["runtimeApprovalToken"] === "string"
+      ? command.redactedPayload["runtimeApprovalToken"]
+      : undefined;
+    if (!runtimeApprovalToken || !commandToken || runtimeApprovalToken !== commandToken) {
+      return "approval_not_pending";
+    }
+    const expiresAt = approval.payload["expiresAt"];
+    if (typeof expiresAt === "string" && Number.isFinite(Date.parse(expiresAt)) && Date.parse(expiresAt) <= Date.parse(now)) {
+      return "acp_permission_request_expired";
+    }
+    return undefined;
   }
 
   private async failClaimedCommand(
