@@ -120,7 +120,7 @@ export class NodeCoordinatorService {
     if (!run) {
       throw new NodeCoordinatorError("assignment_not_found", `Run not found: ${input.runId}`);
     }
-    if (run.placement !== "connected_local_node") {
+    if (!this.isToolAssignmentPlacementEligible(run)) {
       throw new NodeCoordinatorError("node_policy_denied", "Run is not eligible for connected-node tool assignment");
     }
 
@@ -275,6 +275,21 @@ export class NodeCoordinatorService {
         `Node ${node.id} policy denied ${toolType} for invocation ${toolInvocationId}`
       );
     }
+  }
+
+  private isToolAssignmentPlacementEligible(run: Run): boolean {
+    if (run.placement === "connected_local_node") {
+      return true;
+    }
+    if (run.placement !== "hosted") {
+      return false;
+    }
+    const metadata = run.metadata ?? {};
+    if (metadata["allowToolPlacementOffload"] === true) {
+      return true;
+    }
+    const placements = metadata["toolOffloadPlacements"];
+    return Array.isArray(placements) && placements.includes("connected_local_node");
   }
 }
 

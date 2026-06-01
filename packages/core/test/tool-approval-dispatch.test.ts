@@ -158,7 +158,87 @@ function enabledHostedPolicy(): LocalPolicyGate {
   });
 }
 
+function enabledHostedAllowPolicy(): LocalPolicyGate {
+  const config = createDisabledRealToolPolicyConfig();
+  return new LocalPolicyGate({
+    ...config,
+    global: { ...config.global, enabled: true, approvalDefault: "allow" },
+    hosted: { enabled: true, allowedToolTypes: ["fetch", "web_search", "github", "shell", "fake_echo"] },
+    connectedLocalNode: { enabled: true, allowedToolTypes: ["fetch", "web_search", "github", "repo", "shell", "fake_echo"] },
+    fetch: { ...config.fetch, enabled: true, allowedHosts: ["example.com"], allowWithoutApproval: true }
+  });
+}
+
 describe("tool approval dispatch", () => {
+  it("dispatches hosted allow-without-approval tools immediately through outbox", async () => {
+    const runs = new MemoryRunStore();
+    await runs.create(makeRun("run_allow_1", "hosted"));
+    const outbox = new MemoryOutboxStore();
+    const dispatches: Array<{ approvalId: string; toolInvocationId: string; idempotencyKey: string }> = [];
+
+    const service = new HostedToolService({
+      runs,
+      approvals: new MemoryApprovalStore(),
+      invocations: new MemoryInvocationStore(),
+      events: new MemoryEventStore(),
+      policy: enabledHostedAllowPolicy(),
+      dispatchOutbox: outbox,
+      dispatch: async ({ approvalId, invocation, idempotencyKey }) => {
+        dispatches.push({ approvalId, toolInvocationId: invocation.id, idempotencyKey });
+        return { dispatchId: `job_${idempotencyKey}`, target: "hosted" };
+      }
+    });
+
+    const created = await service.invoke({
+      runId: "run_allow_1",
+      type: "fetch",
+      input: { url: "https://example.com/no-approval", method: "GET" },
+      target: { placement: "hosted" }
+    });
+
+    expect(created.statusCode).toBe(202);
+    expect(created.approval).toBeUndefined();
+    expect(created.invocation.status).toBe("queued");
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0]?.approvalId).toMatch(/^approval_auto_/);
+    const record = await outbox.getByApprovalAndInvocation(dispatches[0]!.approvalId, created.invocation.id);
+    expect(record?.dispatchStatus).toBe("dispatched");
+  });
+
+  it("dedupes repeated no-approval hosted invoke when idempotency key is reused", async () => {
+    const runs = new MemoryRunStore();
+    await runs.create(makeRun("run_allow_2", "hosted"));
+    const outbox = new MemoryOutboxStore();
+    const dispatchKeys = new Set<string>();
+
+    const service = new HostedToolService({
+      runs,
+      approvals: new MemoryApprovalStore(),
+      invocations: new MemoryInvocationStore(),
+      events: new MemoryEventStore(),
+      policy: enabledHostedAllowPolicy(),
+      dispatchOutbox: outbox,
+      dispatch: async ({ idempotencyKey }) => {
+        dispatchKeys.add(idempotencyKey);
+        return { dispatchId: `job_${idempotencyKey}`, target: "hosted" };
+      }
+    });
+
+    const input = {
+      runId: "run_allow_2",
+      type: "fetch" as const,
+      input: { url: "https://example.com/idempotent", method: "GET" },
+      target: { placement: "hosted" as const },
+      idempotencyKey: "invoke_same"
+    };
+
+    const first = await service.invoke(input);
+    const second = await service.invoke(input);
+
+    expect(first.invocation.id).toBe(second.invocation.id);
+    expect(dispatchKeys.size).toBe(1);
+  });
+
   it("approves exactly once and dispatches once", async () => {
     const runs = new MemoryRunStore();
     await runs.create(makeRun("run_1", "hosted"));
@@ -393,5 +473,121 @@ describe("tool approval dispatch", () => {
 
     expect(first.id).toBe(second.id);
     expect(assignments.items.size).toBe(1);
+  });
+
+  it("allows connected-node tool assignment for explicitly marked hosted offload runs", async () => {
+    class MemoryNodeStore implements NodeStore {
+      readonly items = new Map<string, ConnectedNode>();
+      async upsert(node: ConnectedNode): Promise<ConnectedNode> { this.items.set(node.id, node); return node; }
+      async get(id: string): Promise<ConnectedNode | undefined> { return this.items.get(id); }
+      async list() { return [...this.items.values()]; }
+      async markOffline() { return undefined; }
+      async listEligible() { return [...this.items.values()]; }
+    }
+
+    class MemoryAssignments implements NodeAssignmentStore {
+      readonly items = new Map<string, Assignment>();
+      async create(value: Assignment): Promise<Assignment> { this.items.set(value.id, value); return value; }
+      async get(id: string): Promise<Assignment | undefined> { return this.items.get(id); }
+      async update(value: Assignment): Promise<Assignment> { this.items.set(value.id, value); return value; }
+      async listClaimable() { return []; }
+      async claim() { return undefined; }
+      async complete() { return undefined; }
+      async fail() { return undefined; }
+      async cancel() { return undefined; }
+      async expireStale() { return []; }
+    }
+
+    const runs = new MemoryRunStore();
+    await runs.create({
+      ...makeRun("run_offload_allowed", "hosted"),
+      metadata: { allowToolPlacementOffload: true }
+    });
+    const nodes = new MemoryNodeStore();
+    await nodes.upsert({
+      id: "node_offload",
+      mode: "hybrid",
+      status: "online",
+      capabilities: ["tool.fetch"],
+      policy: {
+        allowRuntimeModes: [],
+        denyAdapterTypes: [],
+        allowCwdPrefixes: [],
+        allowEventTypes: [],
+        artifactSync: "full",
+        allowToolTypes: ["fetch"],
+        allowToolCwdPrefixes: [],
+        toolArtifactSync: "full",
+        toolApprovalRequired: true
+      },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+
+    const coordinator = new NodeCoordinatorService({
+      nodes,
+      assignments: new MemoryAssignments(),
+      runs,
+      now: () => "2026-06-01T00:00:00.000Z"
+    });
+
+    const assignment = await coordinator.createToolAssignment({
+      runId: "run_offload_allowed",
+      toolInvocationId: "tool_offload_1",
+      requiredCapability: "tool.fetch",
+      idempotencyKey: "offload_allowed"
+    });
+
+    expect(assignment.kind).toBe("tool");
+    expect(assignment.nodeId).toBe("node_offload");
+  });
+
+  it("rejects connected-node tool assignment for unmarked hosted runs", async () => {
+    class MemoryNodeStore implements NodeStore {
+      readonly items = new Map<string, ConnectedNode>();
+      async upsert(node: ConnectedNode): Promise<ConnectedNode> { this.items.set(node.id, node); return node; }
+      async get(id: string): Promise<ConnectedNode | undefined> { return this.items.get(id); }
+      async list() { return [...this.items.values()]; }
+      async markOffline() { return undefined; }
+      async listEligible() { return [...this.items.values()]; }
+    }
+
+    class MemoryAssignments implements NodeAssignmentStore {
+      readonly items = new Map<string, Assignment>();
+      async create(value: Assignment): Promise<Assignment> { this.items.set(value.id, value); return value; }
+      async get(id: string): Promise<Assignment | undefined> { return this.items.get(id); }
+      async update(value: Assignment): Promise<Assignment> { this.items.set(value.id, value); return value; }
+      async listClaimable() { return []; }
+      async claim() { return undefined; }
+      async complete() { return undefined; }
+      async fail() { return undefined; }
+      async cancel() { return undefined; }
+      async expireStale() { return []; }
+    }
+
+    const runs = new MemoryRunStore();
+    await runs.create(makeRun("run_offload_denied", "hosted"));
+    const nodes = new MemoryNodeStore();
+    await nodes.upsert({
+      id: "node_denied",
+      mode: "hybrid",
+      status: "online",
+      capabilities: ["tool.fetch"],
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    const assignments = new MemoryAssignments();
+    const coordinator = new NodeCoordinatorService({
+      nodes,
+      assignments,
+      runs,
+      now: () => "2026-06-01T00:00:00.000Z"
+    });
+
+    await expect(coordinator.createToolAssignment({
+      runId: "run_offload_denied",
+      toolInvocationId: "tool_offload_2",
+      requiredCapability: "tool.fetch",
+      idempotencyKey: "offload_denied"
+    })).rejects.toMatchObject({ code: "node_policy_denied" });
+    expect(assignments.items.size).toBe(0);
   });
 });

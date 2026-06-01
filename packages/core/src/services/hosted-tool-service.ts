@@ -77,6 +77,7 @@ export interface HostedInvokeInput {
   input: Record<string, unknown>;
   target?: { placement: "hosted" | "connected_local_node"; nodeId?: string };
   approvalPolicy?: string;
+  idempotencyKey?: string;
 }
 
 export interface HostedInvokeResult {
@@ -148,9 +149,22 @@ export class HostedToolService {
       throw new ServiceError("tool_policy_denied", "Tool invocation denied by policy", [{ path: "toolInvocationId", issue: denied.id }]);
     }
 
-    const invocationId = `tool_${crypto.randomUUID()}`;
+    const invocationId = decision.decision === "allow" && input.idempotencyKey
+      ? deterministicHostedInvocationId(run.id, input.type, input.idempotencyKey)
+      : `tool_${crypto.randomUUID()}`;
     const executionPlanHash = hashExecutionPlan(decision.executionPlan);
     const approvalId = decision.decision === "approval_required" ? `approval_${crypto.randomUUID()}` : undefined;
+
+    if (decision.decision === "allow" && input.idempotencyKey) {
+      const existing = await this.deps.invocations.get(invocationId);
+      if (existing) {
+        await this.recoverNoApprovalDispatch(existing, executionPlanHash);
+        return {
+          statusCode: 202,
+          invocation: existing
+        };
+      }
+    }
 
     const quota = await this.deps.preflight?.reservePostPolicyQuota?.({
       runId: run.id,
@@ -230,6 +244,14 @@ export class HostedToolService {
         allowAuditPayload.approvalId = approval.id;
       }
       await this.deps.preflight?.recordAudit?.(allowAuditPayload);
+
+      if (!approval) {
+        await this.dispatchInvocation({
+          approvalId: automaticApprovalIdForInvocation(invocation.id),
+          invocation,
+          executionPlanHash
+        });
+      }
 
       return {
         statusCode: 202,
@@ -401,9 +423,30 @@ export class HostedToolService {
     invocation: ToolInvocation;
     executionPlanHash: string;
   }): Promise<void> {
+    await this.dispatchInvocation({
+      approvalId: input.approval.id,
+      invocation: input.invocation,
+      executionPlanHash: input.executionPlanHash
+    });
+  }
+
+  private async recoverNoApprovalDispatch(invocation: ToolInvocation, executionPlanHash: string): Promise<void> {
+    const approvalId = automaticApprovalIdForInvocation(invocation.id);
+    const record = await this.deps.dispatchOutbox.getByApprovalAndInvocation(approvalId, invocation.id);
+    if (record?.dispatchStatus === "dispatched") {
+      return;
+    }
+    await this.dispatchInvocation({ approvalId, invocation, executionPlanHash });
+  }
+
+  private async dispatchInvocation(input: {
+    approvalId: string;
+    invocation: ToolInvocation;
+    executionPlanHash: string;
+  }): Promise<void> {
     const placement = this.extractPlacement(input.invocation);
     const outbox = await this.deps.dispatchOutbox.upsertByApprovalAndInvocation({
-      approvalId: input.approval.id,
+      approvalId: input.approvalId,
       toolInvocationId: input.invocation.id,
       runId: input.invocation.runId ?? "",
       targetPlacement: placement,
@@ -426,7 +469,7 @@ export class HostedToolService {
       }
       const dispatched = await this.deps.dispatch({
         invocation: input.invocation,
-        approvalId: input.approval.id,
+        approvalId: input.approvalId,
         target: dispatchTarget,
         executionPlanHash: input.executionPlanHash,
         idempotencyKey: outbox.id
@@ -576,6 +619,19 @@ function boundRecord(input: Record<string, unknown>, maxBytes = 16_384): Record<
     hash,
     maxBytes
   };
+}
+
+function deterministicHostedInvocationId(runId: string, toolType: string, idempotencyKey: string): string {
+  const digest = createHash("sha256")
+    .update(`hosted-tool:${runId}:${toolType}:${idempotencyKey}`)
+    .digest("hex")
+    .slice(0, 40);
+  return `tool_${digest}`;
+}
+
+function automaticApprovalIdForInvocation(toolInvocationId: string): string {
+  const suffix = toolInvocationId.startsWith("tool_") ? toolInvocationId.slice("tool_".length) : toolInvocationId;
+  return `approval_auto_${suffix}`;
 }
 
 export { ServiceError as HostedToolServiceError };
