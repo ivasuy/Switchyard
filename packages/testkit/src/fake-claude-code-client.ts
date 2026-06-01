@@ -33,6 +33,7 @@ export interface FakeClaudeCodeScenario {
   terminalState?: "completed" | "failed";
   sendUserMessageError?: string;
   resolveApprovalError?: string;
+  resolveApprovalDelayMs?: number;
   malformedStream?: boolean;
   includeUnknownEvents?: number;
 }
@@ -49,6 +50,7 @@ export interface FakeClaudeCodeClientState {
   terminalState: "active" | "completed" | "failed" | "cancelled";
   sendUserMessageFailures: string[];
   resolveApprovalFailures: string[];
+  resolveApprovalCalls: number;
   liveProbeCalls: Array<{ maxBudgetUsd: number; permissionMode: string; disabledTools: string[] }>;
 }
 
@@ -63,6 +65,7 @@ export function createFakeClaudeCodeClient(scenario: FakeClaudeCodeScenario = {}
     terminalState: "active",
     sendUserMessageFailures: [],
     resolveApprovalFailures: [],
+    resolveApprovalCalls: 0,
     liveProbeCalls: []
   };
 
@@ -146,6 +149,10 @@ export function createFakeClaudeCodeClient(scenario: FakeClaudeCodeScenario = {}
           }
         },
         async resolveApproval(input) {
+          state.resolveApprovalCalls += 1;
+          if (typeof scenario.resolveApprovalDelayMs === "number" && scenario.resolveApprovalDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, scenario.resolveApprovalDelayMs));
+          }
           if (scenario.resolveApprovalError) {
             state.resolveApprovalFailures.push(scenario.resolveApprovalError);
             throw new Error(scenario.resolveApprovalError);

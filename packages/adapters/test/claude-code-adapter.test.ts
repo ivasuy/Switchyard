@@ -313,7 +313,7 @@ describe("ClaudeCodeAdapter", () => {
   it("maps hosted client send failures to named adapter failure", async () => {
     const fake = createFakeClaudeCodeClient({
       waitForInputText: true,
-      sendUserMessageError: "send exploded"
+      sendUserMessageError: "api-secret leaked"
     });
     const hostedProviderCommand: ProviderResolvedCommand = {
       runtimeMode: "claude_code.sdk",
@@ -332,9 +332,17 @@ describe("ClaudeCodeAdapter", () => {
     });
     const session = await adapter.start(makeStartRequest());
 
-    await expect(adapter.send({ ...session, runId: "run_claude" }, { text: "continue" })).rejects.toMatchObject({
-      reasonCode: "claude_input_send_failed"
+    const sendError = await adapter.send({ ...session, runId: "run_claude" }, { text: "continue" }).then(
+      () => undefined,
+      (error) => error as { reasonCode?: string; details?: Record<string, unknown> }
+    );
+    expect(sendError).toMatchObject({
+      reasonCode: "claude_input_send_failed",
+      details: {
+        error: "redacted_client_error"
+      }
     });
+    expect(JSON.stringify(sendError?.details ?? {})).not.toContain("api-secret leaked");
     expect(fake.state.sentUserMessages).toEqual([]);
   });
 
@@ -377,5 +385,100 @@ describe("ClaudeCodeAdapter", () => {
     await drainPromise;
 
     expect(fake.state.resolvedApprovals).toHaveLength(1);
+  });
+
+  it("prevents concurrent hosted approval resolution duplicates", async () => {
+    const fake = createFakeClaudeCodeClient({
+      approvalToken: "pause-1",
+      resolveApprovalDelayMs: 25
+    });
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "claude_code.sdk",
+      executablePath: "/opt/provider/bin/claude",
+      argv: [],
+      cwd: "/repo",
+      env: { ANTHROPIC_API_KEY: "api-secret" },
+      envKeys: ["ANTHROPIC_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new ClaudeCodeAdapter({
+      client: fake.client,
+      hostedProviderCommand,
+      hostedBridgeEnabled: true
+    });
+    const session = await adapter.start(makeStartRequest());
+
+    const drainPromise = (async () => {
+      for await (const _event of adapter.events({ ...session, runId: "run_claude" })) {
+        // consume approval event and completion
+      }
+    })();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const results = await Promise.allSettled([
+      adapter.send({ ...session, runId: "run_claude" }, {
+        type: "approval_resolution",
+        runtimeApprovalToken: "pause-1",
+        decision: "approved"
+      }),
+      adapter.send({ ...session, runId: "run_claude" }, {
+        type: "approval_resolution",
+        runtimeApprovalToken: "pause-1",
+        decision: "approved"
+      })
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected && rejected.status === "rejected" ? rejected.reason : undefined).toMatchObject({
+      reasonCode: "runtime_approval_pause_not_active"
+    });
+    expect(fake.state.resolveApprovalCalls).toBe(1);
+    await drainPromise;
+  });
+
+  it("redacts hosted approval resolution failure details", async () => {
+    const fake = createFakeClaudeCodeClient({
+      approvalToken: "pause-1",
+      resolveApprovalError: "approval-token secret-value"
+    });
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "claude_code.sdk",
+      executablePath: "/opt/provider/bin/claude",
+      argv: [],
+      cwd: "/repo",
+      env: { ANTHROPIC_API_KEY: "api-secret" },
+      envKeys: ["ANTHROPIC_API_KEY"],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new ClaudeCodeAdapter({
+      client: fake.client,
+      hostedProviderCommand,
+      hostedBridgeEnabled: true
+    });
+    const session = await adapter.start(makeStartRequest());
+
+    const iterator = adapter.events({ ...session, runId: "run_claude" })[Symbol.asyncIterator]();
+    await iterator.next();
+
+    const resolutionError = await adapter.send({ ...session, runId: "run_claude" }, {
+      type: "approval_resolution",
+      runtimeApprovalToken: "pause-1",
+      decision: "approved"
+    }).then(
+      () => undefined,
+      (error) => error as { reasonCode?: string; details?: Record<string, unknown> }
+    );
+    expect(resolutionError).toMatchObject({
+      reasonCode: "claude_approval_resolution_failed",
+      details: {
+        error: "redacted_client_error"
+      }
+    });
+    expect(JSON.stringify(resolutionError?.details ?? {})).not.toContain("approval-token secret-value");
+    await adapter.cancel({ ...session, runId: "run_claude" });
   });
 });

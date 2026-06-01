@@ -21,6 +21,7 @@ import { checkClaudeCodeAvailability } from "./claude-code-doctor.js";
 import { finalizeTranscript, serializeNormalizedRecord } from "./transcript-bounds.js";
 
 const MAX_TRANSCRIPT_BYTES = 1024 * 1024;
+const REDACTED_CLIENT_ERROR_MARKER = "redacted_client_error";
 
 interface StoredClaudeSession {
   startedAt: string;
@@ -188,11 +189,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
       try {
         await stored.clientSession.sendUserMessage(text);
-      } catch (error) {
+      } catch {
         throw new AdapterProtocolError("Claude input send failed.", {
           reasonCode: "claude_input_send_failed",
           details: {
-            error: error instanceof Error ? error.message : String(error)
+            error: REDACTED_CLIENT_ERROR_MARKER
           }
         });
       }
@@ -219,6 +220,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           reasonCode: "runtime_approval_pause_not_active"
         });
       }
+      stored.pendingRuntimeApprovalTokens.delete(runtimeApprovalToken);
       const decision = input["decision"] === "rejected" ? "rejected" : "approved";
       const message = typeof input["message"] === "string" && input["message"].trim().length > 0
         ? input["message"].trim()
@@ -231,15 +233,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           message,
           ...(answers ? { answers } : {})
         });
-      } catch (error) {
+      } catch {
         throw new AdapterProtocolError("Claude approval resolution failed.", {
           reasonCode: "claude_approval_resolution_failed",
           details: {
-            error: error instanceof Error ? error.message : String(error)
+            error: REDACTED_CLIENT_ERROR_MARKER
           }
         });
       }
-      stored.pendingRuntimeApprovalTokens.delete(runtimeApprovalToken);
       stored.normalizedRecords.push(redactSecrets({
         type: "approval.resolution",
         runtimeApprovalToken,
