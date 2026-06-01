@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { boolean, index, integer, jsonb, pgTable, text, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const runs = pgTable("runs", {
@@ -17,7 +18,12 @@ export const runs = pgTable("runs", {
   createdAt: text("created_at").notNull(),
   startedAt: text("started_at"),
   endedAt: text("ended_at")
-}, (table) => [index("runs_created_idx").on(table.createdAt, table.id)]);
+}, (table) => [
+  index("runs_created_idx").on(table.createdAt, table.id),
+  uniqueIndex("runs_debate_child_run_key_unique_idx")
+    .on(sql`(${table.metadata} ->> 'debateChildRunKey')`)
+    .where(sql`${table.metadata} ? 'debateChildRunKey'`)
+]);
 
 export const runEvents = pgTable("run_events", {
   id: text("id").primaryKey(),
@@ -31,6 +37,93 @@ export const runEvents = pgTable("run_events", {
   payload: jsonb("payload").notNull(),
   createdAt: text("created_at").notNull()
 }, (table) => [index("run_events_run_seq_idx").on(table.runId, table.sequence)]);
+
+export const debates = pgTable("debates", {
+  id: text("id").primaryKey(),
+  topic: text("topic").notNull(),
+  mode: text("mode").notNull(),
+  status: text("status").notNull(),
+  participantsJson: jsonb("participants_json").notNull(),
+  limitsJson: jsonb("limits_json").notNull(),
+  evidenceIdsJson: jsonb("evidence_ids_json").notNull(),
+  messageIdsJson: jsonb("message_ids_json").notNull(),
+  eventIdsJson: jsonb("event_ids_json").notNull(),
+  budgetJson: jsonb("budget_json").notNull(),
+  judgeJson: jsonb("judge_json"),
+  finalReportArtifactId: text("final_report_artifact_id"),
+  finalReportPath: text("final_report_path"),
+  stopReason: text("stop_reason"),
+  errorJson: jsonb("error_json"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at"),
+  completedAt: text("completed_at")
+}, (table) => [
+  index("debates_created_idx").on(table.createdAt, table.id),
+  index("debates_status_idx").on(table.status, table.createdAt, table.id)
+]);
+
+export const messages = pgTable("messages", {
+  id: text("id").primaryKey(),
+  fromRunId: text("from_run_id"),
+  toRunId: text("to_run_id"),
+  channel: text("channel"),
+  debateId: text("debate_id"),
+  content: text("content").notNull(),
+  attachmentsJson: jsonb("attachments_json").notNull(),
+  deliveryStatus: text("delivery_status").notNull(),
+  createdAt: text("created_at").notNull(),
+  deliveredAt: text("delivered_at")
+}, (table) => [
+  index("messages_channel_idx").on(table.channel, table.createdAt, table.id),
+  index("messages_from_run_idx").on(table.fromRunId, table.createdAt, table.id),
+  index("messages_to_run_idx").on(table.toRunId, table.createdAt, table.id),
+  index("messages_debate_idx").on(table.debateId, table.createdAt, table.id)
+]);
+
+export const evidenceItems = pgTable("evidence_items", {
+  id: text("id").primaryKey(),
+  debateId: text("debate_id"),
+  sourceType: text("source_type").notNull(),
+  url: text("url"),
+  title: text("title").notNull(),
+  snippet: text("snippet"),
+  fetchedContentPath: text("fetched_content_path"),
+  reliability: text("reliability").notNull(),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  index("evidence_items_debate_idx").on(table.debateId, table.createdAt, table.id),
+  index("evidence_items_source_reliability_idx").on(table.sourceType, table.reliability, table.createdAt, table.id)
+]);
+
+export const debateExecutionJobs = pgTable("debate_execution_jobs", {
+  id: text("id").primaryKey(),
+  debateId: text("debate_id").notNull(),
+  stage: text("stage").notNull(),
+  debateRound: integer("debate_round").notNull(),
+  debatePhase: text("debate_phase").notNull(),
+  participantIndex: integer("participant_index"),
+  pendingRunId: text("pending_run_id"),
+  pendingJudgeRunId: text("pending_judge_run_id"),
+  pendingChildRunKey: text("pending_child_run_key"),
+  state: text("state").notNull(),
+  attempts: integer("attempts").notNull(),
+  maxAttempts: integer("max_attempts").notNull(),
+  claimedAt: text("claimed_at"),
+  leaseUntil: text("lease_until"),
+  nextAttemptAt: text("next_attempt_at").notNull(),
+  reasonCode: text("reason_code"),
+  accountId: text("account_id"),
+  tenantId: text("tenant_id"),
+  projectId: text("project_id"),
+  userId: text("user_id"),
+  apiKeyId: text("api_key_id"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  index("debate_execution_jobs_debate_idx").on(table.debateId, table.createdAt, table.id),
+  index("debate_execution_jobs_claim_idx").on(table.state, table.leaseUntil, table.nextAttemptAt, table.updatedAt, table.id),
+  index("debate_execution_jobs_pending_key_idx").on(table.pendingChildRunKey, table.updatedAt, table.id)
+]);
 
 export const runtimeSessions = pgTable("runtime_sessions", {
   id: text("id").primaryKey(),

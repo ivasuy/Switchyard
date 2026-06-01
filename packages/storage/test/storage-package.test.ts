@@ -13,8 +13,12 @@ import {
   PostgresControlPlaneStore,
   PostgresAssignmentStore,
   PostgresArtifactStore,
+  PostgresDebateExecutionStore,
+  PostgresDebateStore,
+  PostgresEvidenceStore,
   PostgresEventStore,
   PostgresHostedRuntimeBridgeCommandStore,
+  PostgresMessageStore,
   PostgresNodeStore,
   PostgresPlacementStore,
   PostgresRegistryStore,
@@ -104,6 +108,10 @@ describe("storage package", () => {
     expect(typeof PostgresEventStore).toBe("function");
     expect(typeof PostgresSessionStore).toBe("function");
     expect(typeof PostgresArtifactStore).toBe("function");
+    expect(typeof PostgresDebateStore).toBe("function");
+    expect(typeof PostgresMessageStore).toBe("function");
+    expect(typeof PostgresEvidenceStore).toBe("function");
+    expect(typeof PostgresDebateExecutionStore).toBe("function");
     expect(typeof PostgresRegistryStore).toBe("function");
     expect(typeof PostgresPlacementStore).toBe("function");
     expect(typeof PostgresNodeStore).toBe("function");

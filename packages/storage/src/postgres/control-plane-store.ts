@@ -645,7 +645,25 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
 
   async countUnownedResources(): Promise<UnownedResourceCounts> {
     if (this.handle) {
-      const [runs, runEvents, artifacts, toolInvocations, approvals, placements, nodes, assignments, auditEvents, quotaReservations] = await Promise.all([
+      const [
+        runs,
+        runEvents,
+        artifacts,
+        toolInvocations,
+        approvals,
+        placements,
+        nodes,
+        assignments,
+        auditEvents,
+        quotaReservations,
+        debates,
+        debateExecutionJobs,
+        messages,
+        evidence,
+        childRuns,
+        debateArtifacts,
+        debateEvents
+      ] = await Promise.all([
         this.countUnownedByType("run", "runs"),
         this.countUnownedByType("run_event", "run_events"),
         this.countUnownedByType("artifact", "artifacts"),
@@ -655,7 +673,14 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         this.countUnownedByType("node", "nodes"),
         this.countUnownedByType("assignment", "assignments"),
         this.countUnownedByType("audit_log_event", "audit_log_events"),
-        this.countUnownedByType("quota", "quota_reservations")
+        this.countUnownedByType("quota", "quota_reservations"),
+        this.countUnownedByType("debate", "debates"),
+        this.countDebateDerivedByDebateOwnership("debate_execution_jobs", "debate_id"),
+        this.countDebateDerivedByDebateOwnership("messages", "debate_id"),
+        this.countDebateDerivedByDebateOwnership("evidence_items", "debate_id"),
+        this.countChildRunOwnershipGaps(),
+        this.countDebateDerivedByOwnershipType("artifacts", "debate_id", "artifact"),
+        this.countDebateDerivedByOwnershipType("run_events", "debate_id", "run_event")
       ]);
       return {
         runs,
@@ -667,7 +692,14 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         nodes,
         assignments,
         auditEvents,
-        quotaReservations
+        quotaReservations,
+        debates,
+        debateExecutionJobs,
+        messages,
+        evidence,
+        childRuns,
+        debateArtifacts,
+        debateEvents
       } as UnownedResourceCounts;
     }
 
@@ -692,7 +724,14 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
       nodes: 0,
       assignments: 0,
       auditEvents: unownedAudit,
-      quotaReservations: unownedReservations
+      quotaReservations: unownedReservations,
+      debates: 0,
+      debateExecutionJobs: 0,
+      messages: 0,
+      evidence: 0,
+      childRuns: 0,
+      debateArtifacts: 0,
+      debateEvents: 0
     } as UnownedResourceCounts;
   }
 
@@ -1040,6 +1079,50 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         AND o.resource_id = t.id
        WHERE o.resource_id IS NULL`,
       [resourceType]
+    );
+    return Number(result.rows[0]?.["count"] ?? 0);
+  }
+
+  private async countDebateDerivedByDebateOwnership(table: string, debateColumn: string): Promise<number> {
+    const result = await this.handle!.pool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM ${table} t
+       LEFT JOIN resource_ownership o
+         ON o.resource_type = 'debate'
+        AND o.resource_id = t.${debateColumn}
+       WHERE t.${debateColumn} IS NOT NULL
+         AND o.resource_id IS NULL`
+    );
+    return Number(result.rows[0]?.["count"] ?? 0);
+  }
+
+  private async countDebateDerivedByOwnershipType(
+    table: string,
+    debateColumn: string,
+    ownershipType: ResourceType
+  ): Promise<number> {
+    const result = await this.handle!.pool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM ${table} t
+       LEFT JOIN resource_ownership o
+         ON o.resource_type = $1
+        AND o.resource_id = t.id
+       WHERE t.${debateColumn} IS NOT NULL
+         AND o.resource_id IS NULL`,
+      [ownershipType]
+    );
+    return Number(result.rows[0]?.["count"] ?? 0);
+  }
+
+  private async countChildRunOwnershipGaps(): Promise<number> {
+    const result = await this.handle!.pool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM runs r
+       LEFT JOIN resource_ownership o
+         ON o.resource_type = 'run'
+        AND o.resource_id = r.id
+       WHERE r.metadata ? 'debateChildRunKey'
+         AND o.resource_id IS NULL`
     );
     return Number(result.rows[0]?.["count"] ?? 0);
   }

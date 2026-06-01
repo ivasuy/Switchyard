@@ -2,7 +2,7 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema.js";
 
-export const POSTGRES_SCHEMA_VERSION = 22;
+export const POSTGRES_SCHEMA_VERSION = 23;
 
 const SCHEMA_METADATA_KEY = "schema_version";
 
@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS runs (
   ended_at text
 );
 CREATE INDEX IF NOT EXISTS runs_created_idx ON runs(created_at, id);
+CREATE UNIQUE INDEX IF NOT EXISTS runs_debate_child_run_key_unique_idx
+  ON runs ((metadata ->> 'debateChildRunKey'))
+  WHERE metadata ? 'debateChildRunKey';
 
 CREATE TABLE IF NOT EXISTS run_events (
   id text PRIMARY KEY,
@@ -97,6 +100,92 @@ CREATE TABLE IF NOT EXISTS run_events (
 );
 CREATE INDEX IF NOT EXISTS run_events_run_seq_idx ON run_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS run_events_debate_seq_idx ON run_events(debate_id, sequence);
+
+CREATE TABLE IF NOT EXISTS debates (
+  id text PRIMARY KEY,
+  topic text NOT NULL,
+  mode text NOT NULL,
+  status text NOT NULL,
+  participants_json jsonb NOT NULL,
+  limits_json jsonb NOT NULL,
+  evidence_ids_json jsonb NOT NULL,
+  message_ids_json jsonb NOT NULL,
+  event_ids_json jsonb NOT NULL,
+  budget_json jsonb NOT NULL,
+  judge_json jsonb,
+  final_report_artifact_id text,
+  final_report_path text,
+  stop_reason text,
+  error_json jsonb,
+  created_at text NOT NULL,
+  updated_at text,
+  completed_at text
+);
+CREATE INDEX IF NOT EXISTS debates_created_idx ON debates(created_at, id);
+CREATE INDEX IF NOT EXISTS debates_status_idx ON debates(status, created_at, id);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id text PRIMARY KEY,
+  from_run_id text,
+  to_run_id text,
+  channel text,
+  debate_id text,
+  content text NOT NULL,
+  attachments_json jsonb NOT NULL,
+  delivery_status text NOT NULL,
+  created_at text NOT NULL,
+  delivered_at text
+);
+CREATE INDEX IF NOT EXISTS messages_channel_idx ON messages(channel, created_at, id);
+CREATE INDEX IF NOT EXISTS messages_from_run_idx ON messages(from_run_id, created_at, id);
+CREATE INDEX IF NOT EXISTS messages_to_run_idx ON messages(to_run_id, created_at, id);
+CREATE INDEX IF NOT EXISTS messages_debate_idx ON messages(debate_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS evidence_items (
+  id text PRIMARY KEY,
+  debate_id text,
+  source_type text NOT NULL,
+  url text,
+  title text NOT NULL,
+  snippet text,
+  fetched_content_path text,
+  reliability text NOT NULL,
+  created_at text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS evidence_items_debate_idx ON evidence_items(debate_id, created_at, id);
+CREATE INDEX IF NOT EXISTS evidence_items_source_reliability_idx
+  ON evidence_items(source_type, reliability, created_at, id);
+
+CREATE TABLE IF NOT EXISTS debate_execution_jobs (
+  id text PRIMARY KEY,
+  debate_id text NOT NULL,
+  stage text NOT NULL,
+  debate_round integer NOT NULL,
+  debate_phase text NOT NULL,
+  participant_index integer,
+  pending_run_id text,
+  pending_judge_run_id text,
+  pending_child_run_key text,
+  state text NOT NULL,
+  attempts integer NOT NULL,
+  max_attempts integer NOT NULL,
+  claimed_at text,
+  lease_until text,
+  next_attempt_at text NOT NULL,
+  reason_code text,
+  account_id text,
+  tenant_id text,
+  project_id text,
+  user_id text,
+  api_key_id text,
+  created_at text NOT NULL,
+  updated_at text NOT NULL
+);
+CREATE INDEX IF NOT EXISTS debate_execution_jobs_debate_idx ON debate_execution_jobs(debate_id, created_at, id);
+CREATE INDEX IF NOT EXISTS debate_execution_jobs_claim_idx
+  ON debate_execution_jobs(state, lease_until, next_attempt_at, updated_at, id);
+CREATE INDEX IF NOT EXISTS debate_execution_jobs_pending_key_idx
+  ON debate_execution_jobs(pending_child_run_key, updated_at, id);
 
 CREATE TABLE IF NOT EXISTS runtime_sessions (
   id text PRIMARY KEY,

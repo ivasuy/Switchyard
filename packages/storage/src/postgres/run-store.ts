@@ -1,4 +1,5 @@
 import type { Run } from "@switchyard/contracts";
+import { DEBATE_CHILD_RUN_KEY_METADATA_FIELD } from "@switchyard/core";
 import type {
   GuardedPreparedMetadataUpdateInput,
   GuardedPreparedMetadataUpdateResult,
@@ -37,6 +38,30 @@ export class PostgresRunStore implements RunStore {
     }
     this.items.set(run.id, run);
     return run;
+  }
+
+  async findByDebateChildRunKey(key: string): Promise<Run | undefined> {
+    if (this.handle) {
+      const result = await this.handle.pool.query(
+        `SELECT *
+         FROM runs
+         WHERE metadata ->> $1 = $2
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [DEBATE_CHILD_RUN_KEY_METADATA_FIELD, key]
+      );
+      return result.rows[0] ? rowToRun(result.rows[0]) : undefined;
+    }
+
+    const matching = [...this.items.values()]
+      .filter((run) => {
+        const value = run.metadata?.[DEBATE_CHILD_RUN_KEY_METADATA_FIELD];
+        return typeof value === "string" && value === key;
+      })
+      .sort((left, right) =>
+        left.createdAt === right.createdAt ? right.id.localeCompare(left.id) : left.createdAt > right.createdAt ? -1 : 1
+      );
+    return matching[0];
   }
 
   async updatePreparedMetadataIfMatch(

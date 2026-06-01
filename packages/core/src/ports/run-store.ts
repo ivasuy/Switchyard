@@ -1,5 +1,8 @@
 import type { Run } from "@switchyard/contracts";
 
+export type DebateChildRunKey = string;
+export const DEBATE_CHILD_RUN_KEY_METADATA_FIELD = "debateChildRunKey";
+
 export interface RunCursor {
   createdAt: string;
   id: string;
@@ -46,6 +49,7 @@ export interface RunStore {
   create(run: Run): Promise<Run>;
   get(id: string): Promise<Run | undefined>;
   update(run: Run): Promise<Run>;
+  findByDebateChildRunKey?(key: DebateChildRunKey): Promise<Run | undefined>;
   updatePreparedMetadataIfMatch?(input: GuardedPreparedMetadataUpdateInput): Promise<GuardedPreparedMetadataUpdateResult>;
   list(filter: ListRunsFilter): Promise<ListRunsResult>;
 }

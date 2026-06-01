@@ -174,6 +174,22 @@ describe("postgres schema compatibility", () => {
     expect(joined).toContain("hosted_runtime_bridge_commands_claim_idx");
   });
 
+  it("includes debate, evidence, message, job, and child-run-key migration indexes", async () => {
+    const { handle, state } = makeFakeHandle({ metadataValue: undefined });
+
+    await migratePostgresSchema(handle);
+
+    const joined = state.queryLog.join("\n");
+    expect(joined).toContain("CREATE TABLE IF NOT EXISTS debates");
+    expect(joined).toContain("CREATE TABLE IF NOT EXISTS messages");
+    expect(joined).toContain("CREATE TABLE IF NOT EXISTS evidence_items");
+    expect(joined).toContain("CREATE TABLE IF NOT EXISTS debate_execution_jobs");
+    expect(joined).toContain("runs_debate_child_run_key_unique_idx");
+    expect(joined).toContain("debate_execution_jobs_claim_idx");
+    expect(joined).toContain("messages_channel_idx");
+    expect(joined).toContain("evidence_items_debate_idx");
+  });
+
   it("can verify and migrate against real postgres when SWITCHYARD_TEST_POSTGRES_URL is set", async () => {
     const url = process.env["SWITCHYARD_TEST_POSTGRES_URL"];
     if (!url) {
