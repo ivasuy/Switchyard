@@ -5,17 +5,23 @@ This document covers the shipped API surfaces:
 - Local daemon (`local_daemon` OpenAPI surface): no-auth by default, local-first runtime/middleware contract.
 - Hosted server (`hosted_server` OpenAPI surface): API-key-authenticated enterprise control-plane foundation for tenant/project ownership, entitlements/quotas, and audit events.
 
-R21 scope note: production hosted provider execution is now shipped for the known provider set `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`, but only as explicit operator opt-in. Fake-only remains default. Operators must run no-spend smoke first, then a spend-gated canary before routing real traffic, and keep rollback to fake-only available via config change + restart.
+R22 scope note: hosted and connected-node real-tool execution is now shipped for the exact R22 boundary:
+
+- hosted worker: `fetch`, `web_search`, `github`, command-catalog `shell`
+- connected node: `fetch`, `web_search`, `github`, `repo`, command-catalog `shell`
+
+Fake/no-spend remains the default posture for required tests, smoke, preflight, and default canary.
 
 R19 scope note: production hosted deployment readiness is shipped for the existing safe hosted boundary. This release is API/ops-first (manifests, preflight/migrate/canary, readiness/schema codes, rollback posture), not a managed SaaS launch.
 
 R20 boundary note: production subprocess/PTY sandboxing is an internal hosted-worker substrate only. There is still no public arbitrary execution API on either local or hosted surfaces: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` route exists.
 
-R21 hosted boundary note:
+R22 hosted boundary note:
 
 - does not ship generic process/pty runtime adapters.
 - does not ship cursor/openclaw/paperclip.
-- does not ship hosted browser/search/github/fetch/repo tools.
+- does not ship hosted browser automation.
+- does not ship hosted `repo` execution.
 - does not ship hosted debate real participants or hosted model judging.
 - does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
 
@@ -138,7 +144,7 @@ Current implementation status:
 - Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), local-daemon real tool invocation routing for configured `fetch`/`web_search`/`github`/`repo`/command-catalog `shell` (deny-by-default, approval-by-default), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex one-shot (`codex.exec_json`), local Codex interactive (`codex.interactive`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
-- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service/signup, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public `/exec`/`/shell`/`/process`/`/command`/`/sandbox`/`/pty`/`/terminal` APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, per-run HTTP base URL overrides, remote artifact URL fetching, hosted/connected-node real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, hosted runtime expansion beyond known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`), real debate participant runtimes, and model-based debate judging.
+- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service/signup, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public `/exec`/`/shell`/`/process`/`/command`/`/sandbox`/`/pty`/`/terminal` APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, per-run HTTP base URL overrides, remote artifact URL fetching, browser automation, hosted `repo` execution, Cursor/OpenClaw/Paperclip adapters, hosted runtime expansion beyond known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`), real debate participant runtimes, and model-based debate judging.
 
 ## Error Contract
 
@@ -212,7 +218,7 @@ All success bodies (`{run, events}`, `{accepted: true}`, etc.) are unchanged.
 - Shipped real tools in R17: `fetch`, `web_search`, `github`, `repo`, command-catalog `shell`.
 - `browser` remains known-but-unshipped and policy-denied.
 - Real tools require approval by default and queue as `{ invocation, approval }` until resolved (`approve`, `reject`, or expire).
-- Hosted real tools and connected-node real tools remain unshipped in R17.
+- R22 ships hosted worker and connected-node real tools for the exact tool set above; browser remains denied and hosted `repo` remains denied.
 - No public arbitrary execution route exists: no `/sandbox`, `/exec`, `/pty`, `/terminal`, `/shell`, `/process`, `/command`, `/browser`, top-level `/search`, or `/tools/search`.
 - Context packets are still persisted under `run.metadata.contextPacket` when `POST /runs` includes `context`.
 

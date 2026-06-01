@@ -37,15 +37,19 @@ R18 adds the shipped API-first enterprise control-plane foundation for hosted/se
 
 R19 ships production hosted deployment readiness for the existing safe hosted boundary: provider-neutral production manifests, explicit `production:preflight` and `production:migrate` gates, rollout/rollback runbook gates, API-key-protected hosted `/metrics`, named readiness/schema failure codes, and a deterministic no-spend `production:canary` flow (`fake.deterministic` only). This is self-hosted/managed-hosting-ready operability work, not a managed hosted platform or public tenant self-service launch.
 
-R21 ships production hosted provider activation only for the known provider set `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
-Production hosted real-provider execution is operator opt-in and fake-only remains default.
-Required production posture: explicit known provider allowlist + provider policy + no-spend smoke + spend-gated canary + rollback-by-config-restart.
+R22 ships hosted/connected-node real-tool execution with policy-first controls for an exact boundary:
 
-R21 boundary non-goals remain explicit:
+- hosted worker tools: `fetch`, `web_search`, `github`, command-catalog `shell`
+- connected-node tools: `fetch`, `web_search`, `github`, `repo`, command-catalog `shell`
+
+Production fake-only/no-spend remains the default posture for tests, smoke, preflight, and default canary.
+
+R22 boundary non-goals remain explicit:
 
 - does not ship generic process/pty runtime adapters.
 - does not ship cursor/openclaw/paperclip.
-- does not ship hosted browser/search/github/fetch/repo tools.
+- does not ship hosted browser automation.
+- does not ship hosted `repo` execution.
 - does not ship hosted debate real participants or hosted model judging.
 - does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
 - no managed SaaS/public signup, no payment-provider integration (invoices/checkout/webhooks), no OAuth/OIDC/SAML/SSO/SCIM, no dashboard, and no TUI.
@@ -192,9 +196,9 @@ Example registry facts:
 ```text
 Claude Code available: yes
 Codex available: yes
-OpenClaw URL configured: not shipped in R21
+OpenClaw URL configured: not shipped in R22
 AgentField URL configured: yes
-Paperclip adapter configured: not shipped in R21
+Paperclip adapter configured: not shipped in R22
 ```
 
 The registry is also used by placement policy to decide where and how work should run.
@@ -211,12 +215,13 @@ Shipped runtime interfaces:
 - AgentField async REST wrapper
 - Generic HTTP async REST wrapper
 
-Not shipped in R21:
+Not shipped in R22:
 
 - Cursor
 - OpenClaw
 - Paperclip
-- Browser/Search hosted tools
+- Hosted browser automation
+- Hosted `repo` tool execution
 
 Switchyard treats them through the same lifecycle:
 

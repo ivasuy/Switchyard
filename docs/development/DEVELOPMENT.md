@@ -68,7 +68,7 @@ SDK quick one-liner:
 node --import tsx -e 'import {SwitchyardClient} from \"@switchyard/sdk\"; const c=new SwitchyardClient({baseUrl:\"http://127.0.0.1:4545\"}); const r=await c.health(); console.log(r.ok);'
 ```
 
-## R21 No-Spend Verification (Copy/Paste)
+## R22 No-Spend Verification (Copy/Paste)
 
 These required checks are deterministic and no-spend. They must not call payment providers, model providers, AWS/R2 live services, live GitHub, external search, hosted browsers, or arbitrary process/PTY execution.
 
@@ -93,7 +93,7 @@ pnpm --filter @switchyard/contracts openapi:generate:hosted
 pnpm --filter @switchyard/contracts openapi:check:hosted
 ```
 
-## R21 Production Operator Commands
+## R22 Production Operator Commands
 
 Preflight (required before deploy):
 
@@ -114,10 +114,10 @@ pnpm production:canary -- --base-url https://replace-with-public-server-url --ap
 ```
 
 Canary supports `SWITCHYARD_CANARY_API_KEY` as an alternative to `--api-key`.
-For provider-runtime activation use the spend-gated canary command with explicit spend confirmation:
+For optional live external-tool probes use the spend-gated canary command with explicit env + flag confirmation:
 
 ```bash
-pnpm production:provider-runtime-canary
+SWITCHYARD_CONFIRM_LIVE_TOOL_CANARY=1 pnpm production:live-tool-canary
 ```
 
 Sandbox smoke (required before enabling worker claims in production posture):
@@ -132,7 +132,7 @@ Safe default sandbox env posture (required unless an operator intentionally enab
 - `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` unset when real execution is disabled.
 - If `SWITCHYARD_SANDBOX_REAL_EXECUTION=enabled`, `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` must be present and valid or readiness fails closed (`sandbox_policy_missing`/`sandbox_policy_invalid`).
 
-## R21 Hosted Rollout / Rollback
+## R22 Hosted Rollout / Rollback
 
 Rollout order (required):
 
@@ -152,17 +152,29 @@ Fail-closed production behavior:
 - `GET /metrics` is protected and requires API key auth with both `metrics:read` and `admin:read`.
 - `SWITCHYARD_PUBLIC_METRICS=1` is forbidden in staging/production.
 - Fake-only remains default (`SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic`, `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`).
+- Real tools remain disabled by default (`SWITCHYARD_HOSTED_REAL_TOOLS=disabled`, `SWITCHYARD_CONNECTED_NODE_REAL_TOOLS=disabled`, `SWITCHYARD_TOOL_ADAPTER_MODE=fake`).
 - Production hosted provider activation is operator opt-in only for known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`) and requires provider policy, credential presence, and spend controls.
+- Production hosted/connected-node tool activation is operator opt-in and requires explicit real-tool policy plus API-key auth, Postgres, Redis, object store, quota/audit readiness, worker claim readiness, and node readiness for connected-node tool placements.
 
-R21 non-goals reminder:
+R22 non-goals reminder:
 
 - No managed SaaS/public signup, payments/webhooks, OAuth/OIDC/SAML/SSO/SCIM, dashboard, or TUI setup is shipped here.
+- does not ship generic process/pty runtime adapters.
+- does not ship cursor/openclaw/paperclip.
+- does not ship hosted browser automation.
+- does not ship hosted `repo` execution.
+- does not ship hosted debate real participants or hosted model judging.
+- does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
+- No public `/exec`/`/sandbox`/`/terminal`/`/pty`/`/shell`/`/process`/`/command` routes are shipped here.
+- R22 shipped real tools are exact-only: hosted worker `fetch/web_search/github/shell` and connected-node `fetch/web_search/github/repo/shell`.
+
+R21 historical non-goal wording (kept for compatibility with previous release checks):
+
 - does not ship generic process/pty runtime adapters.
 - does not ship cursor/openclaw/paperclip.
 - does not ship hosted browser/search/github/fetch/repo tools.
 - does not ship hosted debate real participants or hosted model judging.
 - does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
-- No public `/exec`/`/sandbox`/`/terminal`/`/pty`/`/shell`/`/process`/`/command` routes and no hosted or connected-node real tools are shipped here.
 
 Rollback order:
 
@@ -520,7 +532,9 @@ R17 middleware and tool boundaries:
 - Real tools are approval-by-default (`before_external_web_action` for web actions, `before_local_process_execution` for repo/shell).
 - Shell tool is command-catalog only (`commandId`); raw command strings are rejected.
 - Browser tool is known but unshipped and denied by policy.
-- Hosted real tools, connected-node real tools, public `/sandbox`/`/exec`/`/pty`/`/terminal`/`/process`/`/shell`/`/command`/`/browser` routes, and top-level/tool-search execution routes are not shipped.
+- R22 ships hosted worker real tools (`fetch`, `web_search`, `github`, command-catalog `shell`) and connected-node real tools (`fetch`, `web_search`, `github`, `repo`, command-catalog `shell`) with policy/approval-first controls.
+- Browser automation and hosted `repo` execution remain unshipped and denied (`browser_tool_unshipped`, `repo_hosted_unshipped`).
+- Public `/sandbox`/`/exec`/`/pty`/`/terminal`/`/process`/`/shell`/`/command`/`/browser` routes and top-level tool-search execution routes remain unshipped.
 
 ## R9 Debate Smoke (No Spend)
 

@@ -7,25 +7,20 @@ type CanaryCode =
   | "auth_required"
   | "auth_invalid"
   | "invalid_base_url"
-  | "provider_canary_config_missing"
-  | "provider_canary_runtime_empty"
-  | "provider_canary_create_denied"
-  | "provider_canary_timeout"
-  | "provider_canary_run_failed"
-  | "provider_canary_artifact_missing"
-  | "provider_canary_metrics_failed"
-  | "provider_canary_audit_failed"
   | "ready_denied"
   | "run_create_denied"
   | "worker_timeout"
+  | "unexpected_terminal_status"
   | "artifact_missing"
   | "artifact_content_empty"
   | "artifact_digest_mismatch"
   | "metrics_auth_failed"
   | "audit_lookup_failed"
-  | "unexpected_terminal_status"
   | "malformed_response"
-  | "malformed_sse";
+  | "malformed_sse"
+  | "tool_canary_denied"
+  | "approval_canary_failed"
+  | "tool_live_canary_config_missing";
 
 interface CanaryStep {
   name: string;
@@ -58,20 +53,20 @@ export interface ProductionCanaryResult {
 export interface ProductionCanaryOptions {
   baseUrl: string;
   apiKey?: string;
-  runtimeMode?: string;
-  confirmProviderSpend?: boolean;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   now?: () => number;
+  liveExternalTools?: boolean;
+  confirmLiveToolSpend?: boolean;
 }
 
 interface ParsedCanaryArgs {
   baseUrl?: string;
   apiKey?: string;
-  runtimeMode?: string;
-  confirmProviderSpend: boolean;
   timeoutMs?: number;
   json: boolean;
+  liveExternalTools: boolean;
+  confirmLiveToolSpend: boolean;
 }
 
 interface ParsedSse {
@@ -85,11 +80,6 @@ interface FetchState {
   baseUrl: string;
 }
 
-interface ProviderCanaryMode {
-  kind: "fake" | "provider";
-  runtimeMode?: "codex.exec_json" | "claude_code.sdk" | "opencode.acp";
-}
-
 const TERMINAL_FAILURE_STATUSES = new Set(["failed", "cancelled", "timed_out", "timeout"]);
 const RUNNING_STATUSES = new Set(["queued", "starting", "running", "waiting_for_input", "waiting_for_approval"]);
 const ALLOWED_CANARY_PATHS = new Set([
@@ -98,7 +88,9 @@ const ALLOWED_CANARY_PATHS = new Set([
   "/metrics",
   "/auth/whoami",
   "/entitlements",
-  "/audit/events"
+  "/audit/events",
+  "/tools/invocations",
+  "/approvals"
 ]);
 
 function isAllowedRunPath(pathname: string): boolean {
@@ -117,6 +109,15 @@ function isAllowedRunPath(pathname: string): boolean {
   if (/^\/artifacts\/[^/]+\/content$/.test(pathname)) {
     return true;
   }
+  if (/^\/tools\/invocations\/[^/]+$/.test(pathname)) {
+    return true;
+  }
+  if (/^\/approvals\/[^/]+\/(approve|reject)$/.test(pathname)) {
+    return true;
+  }
+  if (/^\/approvals\/[^/]+$/.test(pathname)) {
+    return true;
+  }
   return false;
 }
 
@@ -125,7 +126,6 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
   const startedAtMs = now();
   const steps: CanaryStep[] = [];
   const apiKey = options.apiKey ?? process.env["SWITCHYARD_CANARY_API_KEY"];
-  const canaryMode = resolveCanaryMode(options.runtimeMode);
   const parsedBase = parseBaseUrl(options.baseUrl);
   const timeoutMs = normalizeTimeoutMs(options.timeoutMs);
 
@@ -138,54 +138,43 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     delayedAuditEvidence: false
   };
 
-  if (!canaryMode.ok) {
-    addStep(steps, now, startedAtMs, "input.runtime", "fail", canaryMode.code);
-    return finalize(false, canaryMode.code, steps, summary, now, startedAtMs);
-  }
-
-  if (canaryMode.mode.kind === "provider" && !options.confirmProviderSpend) {
-    addStep(steps, now, startedAtMs, "input.confirmation", "fail", "provider_canary_config_missing");
-    return finalize(false, "provider_canary_config_missing", steps, summary, now, startedAtMs);
-  }
-
   if (!apiKey || apiKey.trim().length === 0) {
-    if (canaryMode.mode.kind === "provider") {
-      addStep(steps, now, startedAtMs, "input.auth", "fail", "provider_canary_config_missing");
-      return finalize(false, "provider_canary_config_missing", steps, summary, now, startedAtMs);
-    }
     addStep(steps, now, startedAtMs, "input.auth", "fail", "auth_required");
     return finalize(false, "auth_required", steps, summary, now, startedAtMs);
   }
 
   if (!parsedBase.ok) {
-    if (canaryMode.mode.kind === "provider") {
-      addStep(steps, now, startedAtMs, "input.baseUrl", "fail", "provider_canary_config_missing");
-      return finalize(false, "provider_canary_config_missing", steps, summary, now, startedAtMs);
-    }
     addStep(steps, now, startedAtMs, "input.baseUrl", "fail", "invalid_base_url");
     return finalize(false, "invalid_base_url", steps, summary, now, startedAtMs);
   }
 
-    const state: FetchState = {
-      apiKey: apiKey.trim(),
-      fetchImpl: options.fetchImpl ?? fetch,
-      baseUrl: parsedBase.value
+  const confirmLiveToolSpend = options.confirmLiveToolSpend
+    || process.env["SWITCHYARD_CONFIRM_LIVE_TOOL_CANARY"] === "1";
+  if (options.liveExternalTools && !confirmLiveToolSpend) {
+    addStep(steps, now, startedAtMs, "input.liveTools", "fail", "tool_live_canary_config_missing");
+    return finalize(false, "tool_live_canary_config_missing", steps, summary, now, startedAtMs);
+  }
+
+  const state: FetchState = {
+    apiKey: apiKey.trim(),
+    fetchImpl: options.fetchImpl ?? fetch,
+    baseUrl: parsedBase.value
   };
 
   try {
-    const whoami = await fetchJson(state, "GET", "/auth/whoami");
+    const whoami = await requestJson(state, "GET", "/auth/whoami");
     if (!whoami.ok) {
       return failFromHttp("whoami", whoami.status, steps, summary, now, startedAtMs);
     }
     addStep(steps, now, startedAtMs, "whoami", "pass", "auth_validated", { httpStatus: whoami.status });
 
-    const entitlements = await fetchJson(state, "GET", "/entitlements");
+    const entitlements = await requestJson(state, "GET", "/entitlements");
     if (!entitlements.ok) {
       return failFromHttp("entitlements", entitlements.status, steps, summary, now, startedAtMs);
     }
     addStep(steps, now, startedAtMs, "entitlements", "pass", "entitlements_loaded", { httpStatus: entitlements.status });
 
-    const ready = await fetchJson(state, "GET", "/ready");
+    const ready = await requestJson(state, "GET", "/ready");
     if (!ready.ok) {
       if (ready.status === 503) {
         addStep(steps, now, startedAtMs, "ready", "fail", "ready_denied", {
@@ -205,27 +194,26 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     }
     addStep(steps, now, startedAtMs, "ready", "pass", "ready_ok", { httpStatus: ready.status });
 
-    const canaryId = `${canaryMode.mode.kind === "provider" ? "r21-provider" : "r19"}-${randomUUID()}`;
+    const canaryId = `r22-tools-${randomUUID()}`;
     const startedAtIso = new Date(startedAtMs).toISOString();
     const createPayload = {
-      ...buildRunShape(canaryMode.mode),
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      runtimeMode: "fake.deterministic",
       placement: "hosted",
       cwd: "/repo",
-      task: canaryMode.mode.kind === "provider" ? `r21 provider canary ${canaryMode.mode.runtimeMode}` : "r19 production canary",
+      task: "r22 production canary",
       metadata: {
-        switchyardCanary: canaryMode.mode.kind === "provider" ? "r21-provider-production" : "r19-production",
+        switchyardCanary: "r22-tools-production",
         canaryId,
-        startedAt: startedAtIso,
-        ...(canaryMode.mode.kind === "provider" ? { runtimeMode: canaryMode.mode.runtimeMode } : {})
+        startedAt: startedAtIso
       }
     };
 
-    const created = await fetchJson(state, "POST", "/runs", createPayload);
+    const created = await requestJson(state, "POST", "/runs", createPayload);
     if (!created.ok) {
-      if (canaryMode.mode.kind === "provider") {
-        addStep(steps, now, startedAtMs, "run.create", "fail", "provider_canary_create_denied", { httpStatus: created.status });
-        return finalize(false, "provider_canary_create_denied", steps, summary, now, startedAtMs);
-      }
       if (created.status === 403) {
         addStep(steps, now, startedAtMs, "run.create", "fail", "run_create_denied", { httpStatus: created.status });
         return finalize(false, "run_create_denied", steps, summary, now, startedAtMs);
@@ -241,10 +229,15 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     summary.runId = runId;
     addStep(steps, now, startedAtMs, "run.create", "pass", "run_created", { httpStatus: created.status, details: { runId } });
 
+    const toolProbe = await runToolProbes({ state, runId, steps, now, startedAtMs });
+    if (!toolProbe.ok) {
+      return finalize(false, toolProbe.code, steps, summary, now, startedAtMs);
+    }
+
     const runDeadline = startedAtMs + timeoutMs;
     let terminalStatus: string | undefined;
     while (now() <= runDeadline) {
-      const detail = await fetchJson(state, "GET", `/runs/${encodeURIComponent(runId)}`);
+      const detail = await requestJson(state, "GET", `/runs/${encodeURIComponent(runId)}`);
       if (!detail.ok) {
         return failFromHttp("run.poll", detail.status, steps, summary, now, startedAtMs);
       }
@@ -264,31 +257,31 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
       }
       if (TERMINAL_FAILURE_STATUSES.has(status)) {
         summary.terminalStatus = status;
-        addStep(steps, now, startedAtMs, "run.poll", "fail", canaryMode.mode.kind === "provider" ? "provider_canary_run_failed" : "unexpected_terminal_status", {
+        addStep(steps, now, startedAtMs, "run.poll", "fail", "unexpected_terminal_status", {
           httpStatus: detail.status,
           details: { runId, terminalStatus: status }
         });
-        return finalize(false, canaryMode.mode.kind === "provider" ? "provider_canary_run_failed" : "unexpected_terminal_status", steps, summary, now, startedAtMs);
+        return finalize(false, "unexpected_terminal_status", steps, summary, now, startedAtMs);
       }
       if (!RUNNING_STATUSES.has(status)) {
         summary.terminalStatus = status;
-        addStep(steps, now, startedAtMs, "run.poll", "fail", canaryMode.mode.kind === "provider" ? "provider_canary_run_failed" : "unexpected_terminal_status", {
+        addStep(steps, now, startedAtMs, "run.poll", "fail", "unexpected_terminal_status", {
           httpStatus: detail.status,
           details: { runId, terminalStatus: status }
         });
-        return finalize(false, canaryMode.mode.kind === "provider" ? "provider_canary_run_failed" : "unexpected_terminal_status", steps, summary, now, startedAtMs);
+        return finalize(false, "unexpected_terminal_status", steps, summary, now, startedAtMs);
       }
     }
 
     if (summary.terminalStatus !== "completed") {
       summary.terminalStatus = terminalStatus;
-      addStep(steps, now, startedAtMs, "run.poll", "fail", canaryMode.mode.kind === "provider" ? "provider_canary_timeout" : "worker_timeout", {
+      addStep(steps, now, startedAtMs, "run.poll", "fail", "worker_timeout", {
         details: { runId }
       });
-      return finalize(false, canaryMode.mode.kind === "provider" ? "provider_canary_timeout" : "worker_timeout", steps, summary, now, startedAtMs);
+      return finalize(false, "worker_timeout", steps, summary, now, startedAtMs);
     }
 
-    const sseReplay = await fetchText(state, "GET", `/runs/${encodeURIComponent(runId)}/events`);
+    const sseReplay = await requestText(state, "GET", `/runs/${encodeURIComponent(runId)}/events`);
     if (!sseReplay.ok) {
       return failFromHttp("run.events", sseReplay.status, steps, summary, now, startedAtMs);
     }
@@ -303,21 +296,19 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
       details: { runId, eventCount: parsedSse.events.length }
     });
 
-    const artifacts = await fetchJson(state, "GET", `/runs/${encodeURIComponent(runId)}/artifacts`);
+    const artifacts = await requestJson(state, "GET", `/runs/${encodeURIComponent(runId)}/artifacts`);
     if (!artifacts.ok) {
       if (artifacts.status === 404) {
-        const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_missing";
-        addStep(steps, now, startedAtMs, "artifact.list", "fail", code, { httpStatus: artifacts.status, details: { runId } });
-        return finalize(false, code, steps, summary, now, startedAtMs);
+        addStep(steps, now, startedAtMs, "artifact.list", "fail", "artifact_missing", { httpStatus: artifacts.status, details: { runId } });
+        return finalize(false, "artifact_missing", steps, summary, now, startedAtMs);
       }
       return failFromHttp("artifact.list", artifacts.status, steps, summary, now, startedAtMs);
     }
 
     const artifact = readFirstArtifact(artifacts.json);
     if (!artifact) {
-      const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_missing";
-      addStep(steps, now, startedAtMs, "artifact.list", "fail", code, { httpStatus: artifacts.status, details: { runId } });
-      return finalize(false, code, steps, summary, now, startedAtMs);
+      addStep(steps, now, startedAtMs, "artifact.list", "fail", "artifact_missing", { httpStatus: artifacts.status, details: { runId } });
+      return finalize(false, "artifact_missing", steps, summary, now, startedAtMs);
     }
 
     summary.artifactId = artifact.id;
@@ -326,35 +317,32 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
       details: { runId, artifactId: artifact.id }
     });
 
-    const content = await fetchBytes(state, "GET", `/artifacts/${encodeURIComponent(artifact.id)}/content`);
+    const content = await requestBytes(state, "GET", `/artifacts/${encodeURIComponent(artifact.id)}/content`);
     if (!content.ok) {
       if (content.status === 404) {
-        const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_missing";
-        addStep(steps, now, startedAtMs, "artifact.content", "fail", code, {
+        addStep(steps, now, startedAtMs, "artifact.content", "fail", "artifact_missing", {
           httpStatus: content.status,
           details: { artifactId: artifact.id }
         });
-        return finalize(false, code, steps, summary, now, startedAtMs);
+        return finalize(false, "artifact_missing", steps, summary, now, startedAtMs);
       }
       return failFromHttp("artifact.content", content.status, steps, summary, now, startedAtMs);
     }
 
     if (content.bytes.byteLength === 0) {
-      const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_content_empty";
-      addStep(steps, now, startedAtMs, "artifact.content", "fail", code, {
+      addStep(steps, now, startedAtMs, "artifact.content", "fail", "artifact_content_empty", {
         httpStatus: content.status,
         details: { artifactId: artifact.id }
       });
-      return finalize(false, code, steps, summary, now, startedAtMs);
+      return finalize(false, "artifact_content_empty", steps, summary, now, startedAtMs);
     }
 
     if (!artifactDigestAndSizeMatch(artifact, content.bytes)) {
-      const code = canaryMode.mode.kind === "provider" ? "provider_canary_artifact_missing" : "artifact_digest_mismatch";
-      addStep(steps, now, startedAtMs, "artifact.content", "fail", code, {
+      addStep(steps, now, startedAtMs, "artifact.content", "fail", "artifact_digest_mismatch", {
         httpStatus: content.status,
         details: { artifactId: artifact.id }
       });
-      return finalize(false, code, steps, summary, now, startedAtMs);
+      return finalize(false, "artifact_digest_mismatch", steps, summary, now, startedAtMs);
     }
 
     addStep(steps, now, startedAtMs, "artifact.content", "pass", "artifact_content_verified", {
@@ -362,22 +350,15 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
       details: { artifactId: artifact.id, bytes: content.bytes.byteLength }
     });
 
-    const metrics = await fetchJson(state, "GET", "/metrics");
+    const metrics = await requestJson(state, "GET", "/metrics");
     if (!metrics.ok) {
-      if (canaryMode.mode.kind === "provider") {
-        addStep(steps, now, startedAtMs, "metrics", "fail", "provider_canary_metrics_failed", { httpStatus: metrics.status });
-        return finalize(false, "provider_canary_metrics_failed", steps, summary, now, startedAtMs);
-      }
       if (metrics.status === 401 || metrics.status === 403) {
         addStep(steps, now, startedAtMs, "metrics", "fail", "metrics_auth_failed", { httpStatus: metrics.status });
         return finalize(false, "metrics_auth_failed", steps, summary, now, startedAtMs);
       }
       return failFromHttp("metrics", metrics.status, steps, summary, now, startedAtMs);
     }
-    if (canaryMode.mode.kind === "provider" && !hasProviderMetricsEvidence(metrics.json, canaryMode.mode.runtimeMode)) {
-      addStep(steps, now, startedAtMs, "metrics", "fail", "provider_canary_metrics_failed", { httpStatus: metrics.status });
-      return finalize(false, "provider_canary_metrics_failed", steps, summary, now, startedAtMs);
-    }
+
     summary.metricsAuthorized = true;
     addStep(steps, now, startedAtMs, "metrics", "pass", "metrics_ok", { httpStatus: metrics.status });
 
@@ -385,15 +366,11 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     const auditDeadline = Math.min(runDeadline, now() + auditWindowMs);
     let auditAttempts = 0;
     while (now() <= auditDeadline) {
-      const audit = await fetchJson(state, "GET", "/audit/events?limit=50");
+      const audit = await requestJson(state, "GET", "/audit/events?limit=50");
       if (!audit.ok) {
-        if (canaryMode.mode.kind === "provider") {
-          addStep(steps, now, startedAtMs, "audit", "fail", "provider_canary_audit_failed", { httpStatus: audit.status });
-          return finalize(false, "provider_canary_audit_failed", steps, summary, now, startedAtMs);
-        }
         return failFromHttp("audit", audit.status, steps, summary, now, startedAtMs);
       }
-      const matched = hasAuditEvidence(audit.json, runId, canaryId, canaryMode.mode.kind === "provider");
+      const matched = hasAuditEvidence(audit.json, runId, canaryId);
       if (matched) {
         summary.auditEvidence = true;
         if (auditAttempts > 0) {
@@ -415,9 +392,6 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     addStep(steps, now, startedAtMs, "audit", "fail", "audit_lookup_failed", {
       details: { runId }
     });
-    if (canaryMode.mode.kind === "provider") {
-      return finalize(false, "provider_canary_audit_failed", steps, summary, now, startedAtMs);
-    }
     return finalize(false, "audit_lookup_failed", steps, summary, now, startedAtMs);
   } catch {
     addStep(steps, now, startedAtMs, "canary", "fail", "malformed_response");
@@ -425,8 +399,231 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
   }
 }
 
+async function runToolProbes(input: {
+  state: FetchState;
+  runId: string;
+  steps: CanaryStep[];
+  now: () => number;
+  startedAtMs: number;
+}): Promise<{ ok: true } | { ok: false; code: "tool_canary_denied" | "approval_canary_failed" }> {
+  let rejectionCandidate: { approvalId: string; invocationId: string } | undefined;
+
+  const fetchResult = await invokeTool(input.state, {
+    runId: input.runId,
+    type: "fetch",
+    target: { placement: "hosted" },
+    input: { url: "https://example.com/canary.txt", method: "GET", captureContent: true }
+  });
+  if (!fetchResult.ok) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.hosted.fetch", "fail", "tool_canary_denied", {
+      httpStatus: fetchResult.status,
+      details: { reasonCode: fetchResult.code }
+    });
+    return { ok: false, code: "tool_canary_denied" };
+  }
+  rejectionCandidate = fetchResult.approvalId && fetchResult.invocationId
+    ? { approvalId: fetchResult.approvalId, invocationId: fetchResult.invocationId }
+    : rejectionCandidate;
+  addStep(input.steps, input.now, input.startedAtMs, "tools.hosted.fetch", "pass", "tool_fetch_checked", {
+    httpStatus: fetchResult.status,
+    details: { mode: fetchResult.mode }
+  });
+
+  const githubResult = await invokeTool(input.state, {
+    runId: input.runId,
+    type: "github",
+    target: { placement: "hosted" },
+    input: { operation: "get_issue", owner: "switchyard", repo: "switchyard", number: 1 }
+  });
+  if (!githubResult.ok && ![
+    "tool_policy_denied",
+    "tool_hosted_tools_disabled",
+    "tool_real_tools_disabled",
+    "tool_policy_config_invalid"
+  ].includes(githubResult.code ?? "")) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.hosted.github", "fail", "tool_canary_denied", {
+      httpStatus: githubResult.status,
+      details: { reasonCode: githubResult.code }
+    });
+    return { ok: false, code: "tool_canary_denied" };
+  }
+  if (githubResult.approvalId && githubResult.invocationId && !rejectionCandidate) {
+    rejectionCandidate = { approvalId: githubResult.approvalId, invocationId: githubResult.invocationId };
+  }
+  addStep(input.steps, input.now, input.startedAtMs, "tools.hosted.github", "pass", "tool_github_checked", {
+    httpStatus: githubResult.status,
+    details: { mode: githubResult.mode, reasonCode: githubResult.code }
+  });
+
+  const deniedShell = await invokeTool(input.state, {
+    runId: input.runId,
+    type: "shell",
+    target: { placement: "hosted" },
+    input: { commandId: "not.allowlisted", cwd: "/repo" }
+  });
+  if (deniedShell.ok || !["shell_command_denied", "tool_policy_denied", "tool_policy_config_invalid"].includes(deniedShell.code ?? "")) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.hosted.shell_denied", "fail", "tool_canary_denied", {
+      httpStatus: deniedShell.status,
+      details: { reasonCode: deniedShell.code }
+    });
+    return { ok: false, code: "tool_canary_denied" };
+  }
+  addStep(input.steps, input.now, input.startedAtMs, "tools.hosted.shell_denied", "pass", "shell_command_denied", {
+    httpStatus: deniedShell.status,
+    details: { reasonCode: deniedShell.code }
+  });
+
+  const allowlistedShell = await invokeTool(input.state, {
+    runId: input.runId,
+    type: "shell",
+    target: { placement: "hosted" },
+    input: { commandId: "switchyard.fake.echo", args: ["canary"], cwd: "/repo" }
+  });
+  if (!allowlistedShell.ok && ![
+    "tool_policy_denied",
+    "tool_hosted_tools_disabled",
+    "tool_real_tools_disabled",
+    "tool_policy_config_invalid"
+  ].includes(allowlistedShell.code ?? "")) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.hosted.shell_allowlisted", "fail", "tool_canary_denied", {
+      httpStatus: allowlistedShell.status,
+      details: { reasonCode: allowlistedShell.code }
+    });
+    return { ok: false, code: "tool_canary_denied" };
+  }
+  if (allowlistedShell.approvalId && allowlistedShell.invocationId && !rejectionCandidate) {
+    rejectionCandidate = { approvalId: allowlistedShell.approvalId, invocationId: allowlistedShell.invocationId };
+  }
+  addStep(input.steps, input.now, input.startedAtMs, "tools.hosted.shell_allowlisted", "pass", "tool_shell_allowlisted_checked", {
+    httpStatus: allowlistedShell.status,
+    details: { mode: allowlistedShell.mode, reasonCode: allowlistedShell.code }
+  });
+
+  const connectedRepo = await invokeTool(input.state, {
+    runId: input.runId,
+    type: "repo",
+    target: { placement: "connected_local_node" },
+    input: { operation: "status", cwd: "/repo" }
+  });
+  if (!connectedRepo.ok && ![
+    "tool_node_unavailable",
+    "tool_connected_node_tools_disabled",
+    "tool_policy_denied",
+    "tool_policy_config_invalid"
+  ].includes(connectedRepo.code ?? "")) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.connected.repo", "fail", "tool_canary_denied", {
+      httpStatus: connectedRepo.status,
+      details: { reasonCode: connectedRepo.code }
+    });
+    return { ok: false, code: "tool_canary_denied" };
+  }
+  addStep(input.steps, input.now, input.startedAtMs, "tools.connected.repo", "pass", "tool_repo_checked", {
+    httpStatus: connectedRepo.status,
+    details: { mode: connectedRepo.mode, reasonCode: connectedRepo.code }
+  });
+
+  const nodeUnavailable = await invokeTool(input.state, {
+    runId: input.runId,
+    type: "repo",
+    target: { placement: "connected_local_node", nodeId: "node_missing" },
+    input: { operation: "status", cwd: "/repo" }
+  });
+  if (nodeUnavailable.ok || !["tool_node_unavailable", "tool_policy_denied"].includes(nodeUnavailable.code ?? "")) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.connected.unavailable", "fail", "tool_canary_denied", {
+      httpStatus: nodeUnavailable.status,
+      details: { reasonCode: nodeUnavailable.code }
+    });
+    return { ok: false, code: "tool_canary_denied" };
+  }
+  addStep(input.steps, input.now, input.startedAtMs, "tools.connected.unavailable", "pass", "tool_node_unavailable", {
+    httpStatus: nodeUnavailable.status,
+    details: { reasonCode: nodeUnavailable.code }
+  });
+
+  if (!rejectionCandidate) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.approval.reject", "info", "approval_skipped_no_pending");
+    addStep(input.steps, input.now, input.startedAtMs, "tools.approval.expire", "info", "approval_expire_not_observed");
+    return { ok: true };
+  }
+
+  const reject = await requestJson(input.state, "POST", `/approvals/${encodeURIComponent(rejectionCandidate.approvalId)}/reject`, {});
+  if (!reject.ok) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.approval.reject", "fail", "approval_canary_failed", {
+      httpStatus: reject.status
+    });
+    return { ok: false, code: "approval_canary_failed" };
+  }
+
+  const afterReject = await requestJson(input.state, "GET", `/tools/invocations/${encodeURIComponent(rejectionCandidate.invocationId)}`);
+  const rejectCode = readInvocationErrorCode(afterReject.json);
+  if (!afterReject.ok || rejectCode !== "tool_approval_rejected") {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.approval.reject", "fail", "approval_canary_failed", {
+      httpStatus: afterReject.status,
+      details: { reasonCode: rejectCode }
+    });
+    return { ok: false, code: "approval_canary_failed" };
+  }
+  addStep(input.steps, input.now, input.startedAtMs, "tools.approval.reject", "pass", "tool_approval_rejected", {
+    httpStatus: afterReject.status
+  });
+
+  const expired = await requestJson(input.state, "GET", "/approvals?status=expired&limit=1");
+  if (!expired.ok) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.approval.expire", "fail", "approval_canary_failed", {
+      httpStatus: expired.status
+    });
+    return { ok: false, code: "approval_canary_failed" };
+  }
+  const expiredApproval = readFirstApproval(expired.json);
+  if (!expiredApproval?.toolInvocationId) {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.approval.expire", "info", "approval_expire_not_observed", {
+      httpStatus: expired.status
+    });
+    return { ok: true };
+  }
+
+  const expiredInvocation = await requestJson(input.state, "GET", `/tools/invocations/${encodeURIComponent(expiredApproval.toolInvocationId)}`);
+  const expiredCode = readInvocationErrorCode(expiredInvocation.json);
+  if (!expiredInvocation.ok || expiredCode !== "tool_approval_expired") {
+    addStep(input.steps, input.now, input.startedAtMs, "tools.approval.expire", "fail", "approval_canary_failed", {
+      httpStatus: expiredInvocation.status,
+      details: { reasonCode: expiredCode }
+    });
+    return { ok: false, code: "approval_canary_failed" };
+  }
+
+  addStep(input.steps, input.now, input.startedAtMs, "tools.approval.expire", "pass", "tool_approval_expired", {
+    httpStatus: expiredInvocation.status
+  });
+  return { ok: true };
+}
+
+async function invokeTool(
+  state: FetchState,
+  payload: Record<string, unknown>
+): Promise<{ ok: true; status: number; mode: "queued" | "immediate"; invocationId?: string; approvalId?: string } | { ok: false; status: number; code?: string; mode: "denied" }> {
+  const response = await requestJson(state, "POST", "/tools/invocations", payload);
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      mode: "denied",
+      code: readErrorCode(response.json)
+    };
+  }
+  const invocationId = readInvocationId(response.json);
+  const approvalId = readApprovalId(response.json);
+  return {
+    ok: true,
+    status: response.status,
+    mode: approvalId ? "queued" : "immediate",
+    invocationId,
+    approvalId
+  };
+}
+
 function parseCliArgs(argv: string[]): ParsedCanaryArgs {
-  const parsed: ParsedCanaryArgs = { json: false, confirmProviderSpend: false };
+  const parsed: ParsedCanaryArgs = { json: false, liveExternalTools: false, confirmLiveToolSpend: false };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (!token) {
@@ -453,13 +650,12 @@ function parseCliArgs(argv: string[]): ParsedCanaryArgs {
       }
       continue;
     }
-    if (token === "--runtime-mode") {
-      parsed.runtimeMode = argv[index + 1];
-      index += 1;
+    if (token === "--live-external-tools") {
+      parsed.liveExternalTools = true;
       continue;
     }
-    if (token === "--confirm-provider-spend") {
-      parsed.confirmProviderSpend = true;
+    if (token === "--confirm-live-tool-spend") {
+      parsed.confirmLiveToolSpend = true;
       continue;
     }
     if (token === "--json") {
@@ -475,28 +671,6 @@ function normalizeTimeoutMs(input: number | undefined): number {
     return 30_000;
   }
   return Math.floor(input);
-}
-
-function resolveCanaryMode(
-  runtimeMode: string | undefined
-): { ok: true; mode: ProviderCanaryMode } | { ok: false; code: "provider_canary_runtime_empty" } {
-  if (runtimeMode === undefined) {
-    return { ok: true, mode: { kind: "fake" } };
-  }
-  const normalized = runtimeMode.trim();
-  if (normalized.length === 0) {
-    return { ok: false, code: "provider_canary_runtime_empty" };
-  }
-  if (normalized === "codex.exec_json" || normalized === "claude_code.sdk" || normalized === "opencode.acp") {
-    return {
-      ok: true,
-      mode: {
-        kind: "provider",
-        runtimeMode: normalized
-      }
-    };
-  }
-  return { ok: false, code: "provider_canary_runtime_empty" };
 }
 
 function parseBaseUrl(input: string): { ok: true; value: string } | { ok: false } {
@@ -569,51 +743,6 @@ function sanitizeForOutput(value: Record<string, unknown>): Record<string, unkno
   return out;
 }
 
-function buildRunShape(
-  mode: ProviderCanaryMode
-): {
-  runtime: string;
-  provider: string;
-  model: string;
-  adapterType: "process" | "native" | "acpx";
-  runtimeMode: string;
-} {
-  if (mode.kind !== "provider") {
-    return {
-      runtime: "fake",
-      provider: "test",
-      model: "test-model",
-      adapterType: "process",
-      runtimeMode: "fake.deterministic"
-    };
-  }
-  if (mode.runtimeMode === "codex.exec_json") {
-    return {
-      runtime: "codex",
-      provider: "openai",
-      model: "gpt-5",
-      adapterType: "process",
-      runtimeMode: "codex.exec_json"
-    };
-  }
-  if (mode.runtimeMode === "claude_code.sdk") {
-    return {
-      runtime: "claude_code",
-      provider: "anthropic",
-      model: "claude-code",
-      adapterType: "native",
-      runtimeMode: "claude_code.sdk"
-    };
-  }
-  return {
-    runtime: "opencode",
-    provider: "opencode",
-    model: "opencode-default",
-    adapterType: "acpx",
-    runtimeMode: "opencode.acp"
-  };
-}
-
 function authHeaders(apiKey: string): HeadersInit {
   return {
     authorization: `Bearer ${apiKey}`,
@@ -622,40 +751,25 @@ function authHeaders(apiKey: string): HeadersInit {
   };
 }
 
-async function fetchJson(
+async function requestJson(
   state: FetchState,
   method: "GET" | "POST",
   path: string,
   body?: unknown
 ): Promise<{ ok: true; status: number; json: unknown } | { ok: false; status: number; json?: unknown }> {
   const response = await fetchRoute(state, method, path, body);
-  if (response.status === 401) {
-    return { ok: false, status: 401 };
-  }
-  if (response.status === 403 && path === "/metrics") {
-    return { ok: false, status: 403 };
-  }
-  if (!response.ok) {
-    if (response.status === 403 && path === "/runs") {
-      return { ok: false, status: 403 };
-    }
-    return { ok: false, status: response.status };
-  }
-
   const text = await response.text();
-  if (text.trim().length === 0) {
+  const parsed = text.trim().length > 0 ? tryParseJson(text) : undefined;
+  if (!response.ok) {
+    return { ok: false, status: response.status, ...(parsed !== undefined ? { json: parsed } : {}) };
+  }
+  if (parsed === undefined) {
     return { ok: false, status: response.status };
   }
-
-  try {
-    const parsed = JSON.parse(text);
-    return { ok: true, status: response.status, json: parsed };
-  } catch {
-    return { ok: false, status: response.status };
-  }
+  return { ok: true, status: response.status, json: parsed };
 }
 
-async function fetchText(
+async function requestText(
   state: FetchState,
   method: "GET",
   path: string
@@ -671,7 +785,7 @@ async function fetchText(
   };
 }
 
-async function fetchBytes(
+async function requestBytes(
   state: FetchState,
   method: "GET",
   path: string
@@ -686,6 +800,14 @@ async function fetchBytes(
     status: response.status,
     bytes: new Uint8Array(buffer)
   };
+}
+
+function tryParseJson(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
 }
 
 async function fetchRoute(state: FetchState, method: "GET" | "POST", path: string, body?: unknown): Promise<Response> {
@@ -761,6 +883,81 @@ function readRunStatus(value: unknown): string | null {
   }
   const status = (run as Record<string, unknown>)["status"];
   return typeof status === "string" && status.length > 0 ? status : null;
+}
+
+function readInvocationId(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const invocation = (value as Record<string, unknown>)["invocation"];
+  if (!invocation || typeof invocation !== "object" || Array.isArray(invocation)) {
+    return undefined;
+  }
+  const id = (invocation as Record<string, unknown>)["id"];
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function readApprovalId(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const approval = (value as Record<string, unknown>)["approval"];
+  if (!approval || typeof approval !== "object" || Array.isArray(approval)) {
+    return undefined;
+  }
+  const id = (approval as Record<string, unknown>)["id"];
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function readErrorCode(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const error = (value as Record<string, unknown>)["error"];
+  if (!error || typeof error !== "object" || Array.isArray(error)) {
+    return undefined;
+  }
+  const code = (error as Record<string, unknown>)["code"];
+  return typeof code === "string" ? code : undefined;
+}
+
+function readInvocationErrorCode(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const invocation = (value as Record<string, unknown>)["invocation"];
+  if (!invocation || typeof invocation !== "object" || Array.isArray(invocation)) {
+    return undefined;
+  }
+  const error = (invocation as Record<string, unknown>)["error"];
+  if (!error || typeof error !== "object" || Array.isArray(error)) {
+    return undefined;
+  }
+  const code = (error as Record<string, unknown>)["code"];
+  return typeof code === "string" ? code : undefined;
+}
+
+function readFirstApproval(value: unknown): { id: string; toolInvocationId?: string } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const approvals = (value as Record<string, unknown>)["approvals"];
+  if (!Array.isArray(approvals) || approvals.length === 0) {
+    return null;
+  }
+  const first = approvals[0];
+  if (!first || typeof first !== "object" || Array.isArray(first)) {
+    return null;
+  }
+  const id = (first as Record<string, unknown>)["id"];
+  if (typeof id !== "string" || id.length === 0) {
+    return null;
+  }
+  const payload = (first as Record<string, unknown>)["payload"];
+  const toolInvocationId = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (typeof (payload as Record<string, unknown>)["toolInvocationId"] === "string" ? (payload as Record<string, unknown>)["toolInvocationId"] as string : undefined)
+    : undefined;
+  return { id, toolInvocationId };
 }
 
 function parseSseReplay(body: string): ParsedSse | { ok: false } {
@@ -887,7 +1084,7 @@ function asString(value: unknown): string | undefined {
   return undefined;
 }
 
-function hasAuditEvidence(value: unknown, runId: string, canaryId: string, requireCanaryTag = false): boolean {
+function hasAuditEvidence(value: unknown, runId: string, canaryId: string): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
@@ -895,27 +1092,23 @@ function hasAuditEvidence(value: unknown, runId: string, canaryId: string, requi
   if (!Array.isArray(events)) {
     return false;
   }
-  return events.some((event) => eventMatches(event, runId, canaryId, requireCanaryTag));
+  return events.some((event) => eventMatches(event, runId, canaryId));
 }
 
-function eventMatches(value: unknown, runId: string, canaryId: string, requireCanaryTag: boolean): boolean {
+function eventMatches(value: unknown, runId: string, canaryId: string): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
   const event = value as Record<string, unknown>;
-  if (!requireCanaryTag && (event["resourceId"] === runId || event["runId"] === runId)) {
+  if (event["resourceId"] === runId || event["runId"] === runId) {
     return true;
   }
-  if (!requireCanaryTag && event["resourceId"] === canaryId) {
+  if (event["resourceId"] === canaryId) {
     return true;
   }
   const payload = event["payload"];
   if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    if (requireCanaryTag) {
-      return containsAnyString(payload as Record<string, unknown>, [runId, canaryId]) &&
-        containsAnyString(payload as Record<string, unknown>, ["r21-provider-production"]);
-    }
-    return containsAnyString(payload as Record<string, unknown>, [runId, canaryId]);
+    return containsAnyString(payload as Record<string, unknown>, [runId, canaryId, "r22-tools-production"]);
   }
   return false;
 }
@@ -970,21 +1163,14 @@ function extractReadyCodes(value: unknown): Record<string, unknown> | undefined 
   return sanitizeForOutput(out);
 }
 
-function hasProviderMetricsEvidence(value: unknown, runtimeMode: string): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  return containsAnyString(value as Record<string, unknown>, [runtimeMode, "hostedRuntime", "lifecycle", "accepted"]);
-}
-
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
   const result = await runProductionCanary({
     baseUrl: args.baseUrl ?? "",
     apiKey: args.apiKey,
-    runtimeMode: args.runtimeMode,
-    confirmProviderSpend: args.confirmProviderSpend,
-    timeoutMs: args.timeoutMs
+    timeoutMs: args.timeoutMs,
+    liveExternalTools: args.liveExternalTools,
+    confirmLiveToolSpend: args.confirmLiveToolSpend
   });
 
   if (args.json) {

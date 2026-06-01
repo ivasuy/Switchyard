@@ -1,5 +1,6 @@
 import { pathToFileURL } from "node:url";
 import {
+  createDisabledRealToolPolicyConfig,
   checkHostedSandboxReadiness,
   redactSecrets,
   validateHostedRuntimeAllowlist
@@ -256,6 +257,13 @@ export async function runProductionPreflight(options: {
       ...(check.diagnostics ? { diagnostics: redactDiagnostics(check.diagnostics) } : {})
     });
   }
+
+  appendToolsCheck(checks, {
+    serverConfig,
+    workerConfig,
+    includeNode,
+    nodeConfig
+  });
 
   const hostedRuntimeGate = await resolveWithTimeout(
     async () => {
@@ -589,6 +597,211 @@ function buildResult(checks: ProductionPreflightCheck[], manifestPath: string, n
       checkedAt: now().toISOString()
     }
   };
+}
+
+function appendToolsCheck(
+  checks: ProductionPreflightCheck[],
+  input: {
+    serverConfig: ReturnType<typeof loadServerConfig>;
+    workerConfig: ReturnType<typeof loadWorkerConfig>;
+    includeNode: boolean;
+    nodeConfig?: ReturnType<typeof loadNodeConfig>;
+  }
+): void {
+  const serverTools = input.serverConfig.tools ?? {
+    hostedRealTools: "disabled" as const,
+    connectedNodeRealTools: "disabled" as const,
+    policySourceKind: "none" as const,
+    policy: createDisabledRealToolPolicyConfig()
+  };
+  const workerTools = input.workerConfig.tools ?? {
+    hostedRealTools: "disabled" as const,
+    connectedNodeRealTools: "disabled" as const,
+    adapterMode: "fake" as const,
+    policySourceKind: "none" as const,
+    policy: createDisabledRealToolPolicyConfig()
+  };
+  const policy = serverTools.policy;
+  const enabledToolTypes = [
+    ...(policy.fetch.enabled ? ["fetch"] : []),
+    ...(policy.webSearch.enabled ? ["web_search"] : []),
+    ...(policy.github.enabled ? ["github"] : []),
+    ...(policy.repo.enabled ? ["repo"] : []),
+    ...(policy.shell.enabled ? ["shell"] : [])
+  ];
+
+  const diagnostics = redactDiagnostics({
+    hostedRealTools: serverTools.hostedRealTools,
+    connectedNodeRealTools: serverTools.connectedNodeRealTools,
+    policySourceKind: serverTools.policySourceKind,
+    workerPolicySourceKind: workerTools.policySourceKind,
+    adapterMode: workerTools.adapterMode,
+    allowedPlacements: policy.global.allowedPlacements,
+    hostedAllowedToolTypes: policy.hosted.allowedToolTypes,
+    connectedAllowedToolTypes: policy.connectedLocalNode.allowedToolTypes,
+    enabledToolTypes,
+    includeNode: input.includeNode,
+    nodeConfigLoaded: Boolean(input.nodeConfig)
+  });
+
+  const toolsEnabled = serverTools.hostedRealTools === "enabled" || serverTools.connectedNodeRealTools === "enabled";
+  if (!toolsEnabled) {
+    checks.push({
+      name: "tools",
+      status: "pass",
+      code: "tool_checks_disabled",
+      ...(diagnostics ? { diagnostics } : {})
+    });
+    return;
+  }
+
+  const failedDependency = (name: string): boolean => checks.some((check) => check.name === name && check.status === "fail");
+  const fail = (code: string): void => {
+    checks.push({
+      name: "tools",
+      status: "fail",
+      code,
+      ...(diagnostics ? { diagnostics } : {})
+    });
+  };
+
+  if (serverTools.policySourceKind === "none" || workerTools.policySourceKind === "none") {
+    fail("tool_policy_config_invalid");
+    return;
+  }
+  if (input.serverConfig.serverAuthMode !== "api_key") {
+    fail("tool_hosted_auth_required");
+    return;
+  }
+  if (failedDependency("schema") || failedDependency("objectStore") || failedDependency("bootstrap")) {
+    fail("tool_store_unavailable");
+    return;
+  }
+  if (failedDependency("queue")) {
+    fail("tool_dispatch_unavailable");
+    return;
+  }
+  if (failedDependency("quotaStore")) {
+    fail("quota_store_unavailable");
+    return;
+  }
+  if (failedDependency("auditStore")) {
+    fail("audit_store_unavailable");
+    return;
+  }
+  if (!policy.global.enabled || policy.global.allowedPlacements.length === 0) {
+    fail("tool_policy_config_invalid");
+    return;
+  }
+  if (!hasValidBounds(policy)) {
+    fail("tool_policy_config_invalid");
+    return;
+  }
+  if (!areKnownPlacements(policy.global.allowedPlacements)) {
+    fail("tool_policy_config_invalid");
+    return;
+  }
+
+  const hostedAllowed = policy.hosted.allowedToolTypes;
+  const connectedAllowed = policy.connectedLocalNode.allowedToolTypes;
+  if (serverTools.hostedRealTools === "enabled" && hostedAllowed.length === 0) {
+    fail("tool_policy_config_invalid");
+    return;
+  }
+  if (serverTools.connectedNodeRealTools === "enabled" && connectedAllowed.length === 0) {
+    fail("tool_policy_config_invalid");
+    return;
+  }
+  if (!areKnownToolTypes(hostedAllowed) || !areKnownToolTypes(connectedAllowed)) {
+    fail("tool_policy_config_invalid");
+    return;
+  }
+  if (hostedAllowed.includes("repo")) {
+    fail("repo_hosted_unshipped");
+    return;
+  }
+  if (hostedAllowed.includes("browser") || connectedAllowed.includes("browser")) {
+    fail("browser_tool_unshipped");
+    return;
+  }
+  if (!isSafeShellCatalog(policy.shell.catalog)) {
+    fail("shell_command_denied");
+    return;
+  }
+  if (serverTools.connectedNodeRealTools === "enabled" && (!input.includeNode || !input.nodeConfig)) {
+    fail("tool_node_unavailable");
+    return;
+  }
+
+  checks.push({
+    name: "tools",
+    status: "pass",
+    code: "tool_checks_ready",
+    ...(diagnostics ? { diagnostics } : {})
+  });
+}
+
+function hasValidBounds(policy: ReturnType<typeof createDisabledRealToolPolicyConfig>): boolean {
+  const bounds = [
+    policy.global.approvalExpiresMs,
+    policy.global.maxConcurrentRealTools,
+    policy.global.maxInputBytes,
+    policy.global.maxInlineOutputBytes,
+    policy.global.maxArtifactBytes,
+    policy.global.defaultTimeoutMs,
+    policy.fetch.timeoutMs,
+    policy.fetch.maxResponseBytes,
+    policy.webSearch.timeoutMs,
+    policy.webSearch.maxResponseBytes,
+    policy.github.timeoutMs,
+    policy.github.maxResponseBytes,
+    policy.repo.timeoutMs,
+    policy.repo.maxOutputBytes,
+    policy.shell.timeoutMs,
+    policy.shell.maxOutputBytes
+  ];
+  return bounds.every((value) => Number.isFinite(value) && value > 0);
+}
+
+function areKnownPlacements(values: string[]): boolean {
+  const known = new Set(["local", "hosted", "connected_local_node"]);
+  return values.every((value) => known.has(value));
+}
+
+function areKnownToolTypes(values: string[]): boolean {
+  const known = new Set(["web_search", "fetch", "browser", "repo", "shell", "github", "fake_echo"]);
+  return values.every((value) => known.has(value));
+}
+
+function isSafeShellCatalog(catalog: Record<string, unknown>): boolean {
+  const absolutePathPattern = /^([A-Za-z]:[\\/]|\/)/;
+  for (const value of Object.values(catalog)) {
+    if (!isRecord(value)) {
+      return false;
+    }
+    const executablePath = value["executablePath"];
+    if (typeof executablePath !== "string" || !absolutePathPattern.test(executablePath)) {
+      return false;
+    }
+    if ("shell" in value || "command" in value || "pty" in value) {
+      return false;
+    }
+    const env = value["env"];
+    if (env !== undefined) {
+      if (!isRecord(env)) {
+        return false;
+      }
+      for (const [key, entry] of Object.entries(env)) {
+        if (/(token|apikey|secret|password|authorization|cookie|credential)/i.test(key)) {
+          return false;
+        }
+        if (typeof entry !== "string") {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 async function defaultQueueStats(input: { redisUrl?: string; queueName?: string }): Promise<void> {

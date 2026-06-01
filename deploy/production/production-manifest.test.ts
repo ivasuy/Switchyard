@@ -14,6 +14,13 @@ interface ServiceManifest {
 }
 
 interface ProductionManifest {
+  tools: {
+    hostedRealTools: "disabled" | "enabled";
+    connectedNodeRealTools: "disabled" | "enabled";
+    policy: "required_when_enabled";
+    approvalDefault: "required";
+    adapterMode: "fake_for_smoke" | "real_explicit";
+  };
   services: {
     server: ServiceManifest;
     worker: ServiceManifest;
@@ -81,6 +88,13 @@ describe("production manifest pack", () => {
 
     expect(manifest.requiredEnv).toContain("SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST");
     expect(manifest.forbiddenSurfaces.length).toBeGreaterThan(0);
+    expect(manifest.tools).toEqual({
+      hostedRealTools: "disabled",
+      connectedNodeRealTools: "disabled",
+      policy: "required_when_enabled",
+      approvalDefault: "required",
+      adapterMode: "fake_for_smoke"
+    });
     expect(manifest.forbiddenSurfaces).toEqual(expect.arrayContaining([
       "/browser",
       "/search",
@@ -289,5 +303,44 @@ describe("production manifest pack", () => {
     const committedManifest = parseManifestJson(readFileSync(deployPath("manifest.json"), "utf8"));
     expect(committedManifest.services.server.policy?.hostedRealRuntimeExecution).toBe("disabled");
     expect(committedManifest.services.worker.policy?.hostedRealRuntimeExecution).toBe("disabled");
+  });
+
+  it("fails local manifest validation when tool posture is not fail-closed by default", async () => {
+    const { validateProductionManifest } = await import("../../scripts/production-manifest.js");
+    const result = await validateProductionManifest(deployPath("manifest.json"));
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+
+    const broken = structuredClone(result.manifest);
+    broken.tools = {
+      hostedRealTools: "enabled",
+      connectedNodeRealTools: "enabled",
+      policy: "required_when_enabled",
+      approvalDefault: "required",
+      adapterMode: "real_explicit"
+    };
+
+    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-manifest-tools-"));
+    const path = join(dir, "manifest.json");
+    try {
+      await writeFile(path, JSON.stringify(broken), "utf8");
+      const invalid = await validateProductionManifest(path);
+      expect(invalid.ok).toBe(false);
+      if (invalid.ok) {
+        return;
+      }
+      expect(invalid.errors).toEqual(expect.arrayContaining([
+        { code: "manifest_forbidden_surface", service: "tools.hostedRealTools" },
+        { code: "manifest_forbidden_surface", service: "tools.connectedNodeRealTools" },
+        { code: "manifest_forbidden_surface", service: "tools.adapterMode" }
+      ]));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

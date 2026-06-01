@@ -28,6 +28,13 @@ export interface ProductionManifestService {
 
 export interface ProductionManifest {
   version?: string;
+  tools?: {
+    hostedRealTools?: "disabled" | "enabled";
+    connectedNodeRealTools?: "disabled" | "enabled";
+    policy?: "required_when_enabled";
+    approvalDefault?: "required";
+    adapterMode?: "fake_for_smoke" | "real_explicit";
+  };
   services: {
     server: ProductionManifestService;
     worker: ProductionManifestService;
@@ -186,6 +193,7 @@ export async function validateProductionManifest(path: string): Promise<Producti
   validateRequiredEnv(manifest, errors);
   validateReadinessChecks(manifest.services.server, manifest.services.worker, errors);
   validateRuntimePosture(manifest.services, errors);
+  validateToolPosture(manifest.tools, errors);
   validateObjectStoreProbePosture(manifest.services, errors);
 
   if (errors.length > 0) {
@@ -321,6 +329,32 @@ function validateRuntimePosture(
         errors.push({ code: "manifest_forbidden_surface", service: name });
       }
     }
+  }
+}
+
+function validateToolPosture(
+  tools: ProductionManifest["tools"] | undefined,
+  errors: ProductionManifestError[]
+): void {
+  if (!tools || typeof tools !== "object") {
+    errors.push({ code: "manifest_invalid", service: "tools" });
+    return;
+  }
+
+  if (tools.hostedRealTools !== "disabled") {
+    errors.push({ code: "manifest_forbidden_surface", service: "tools.hostedRealTools" });
+  }
+  if (tools.connectedNodeRealTools !== "disabled") {
+    errors.push({ code: "manifest_forbidden_surface", service: "tools.connectedNodeRealTools" });
+  }
+  if (tools.policy !== "required_when_enabled") {
+    errors.push({ code: "manifest_invalid", service: "tools.policy" });
+  }
+  if (tools.approvalDefault !== "required") {
+    errors.push({ code: "manifest_invalid", service: "tools.approvalDefault" });
+  }
+  if (tools.adapterMode !== "fake_for_smoke") {
+    errors.push({ code: "manifest_forbidden_surface", service: "tools.adapterMode" });
   }
 }
 

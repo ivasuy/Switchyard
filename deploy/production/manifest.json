@@ -1,5 +1,12 @@
 {
-  "version": "r21-production-manifest-v1",
+  "version": "r22-production-manifest-v1",
+  "tools": {
+    "hostedRealTools": "disabled",
+    "connectedNodeRealTools": "disabled",
+    "policy": "required_when_enabled",
+    "approvalDefault": "required",
+    "adapterMode": "fake_for_smoke"
+  },
   "services": {
     "server": {
       "deploymentMode": "production",

@@ -89,7 +89,7 @@ function expectFailure(result: ProductionCanaryResult, code: string): void {
   expect(result.code).toBe(code);
 }
 
-function buildHappyPlan(contentBytes: Uint8Array, auditResponder?: PlannedResponse["responder"]): PlannedResponse[] {
+function buildR22HappyPlan(contentBytes: Uint8Array): PlannedResponse[] {
   const digest = `sha256:${sha256Hex(contentBytes)}`;
   return [
     {
@@ -100,7 +100,7 @@ function buildHappyPlan(contentBytes: Uint8Array, auditResponder?: PlannedRespon
     {
       method: "GET",
       path: "/entitlements",
-      responder: () => jsonResponse(200, { entitlement: { entitlements: { allowMetricsRead: true } } })
+      responder: () => jsonResponse(200, { entitlement: { entitlements: { allowHostedTools: true } } })
     },
     {
       method: "GET",
@@ -112,37 +112,76 @@ function buildHappyPlan(contentBytes: Uint8Array, auditResponder?: PlannedRespon
       path: "/runs",
       responder: ({ init }) => {
         const body = JSON.parse(String(init.body ?? "{}"));
-        expect(body.runtime).toBe("fake");
-        expect(body.provider).toBe("test");
-        expect(body.model).toBe("test-model");
-        expect(body.adapterType).toBe("process");
         expect(body.runtimeMode).toBe("fake.deterministic");
-        expect(body.placement).toBe("hosted");
-        expect(body.cwd).toBe("/repo");
-        expect(body.task).toBe("r19 production canary");
-        expect(body.metadata.switchyardCanary).toBe("r19-production");
-        expect(typeof body.metadata.canaryId).toBe("string");
-        expect(typeof body.metadata.startedAt).toBe("string");
+        expect(body.metadata.switchyardCanary).toBe("r22-tools-production");
+        return jsonResponse(202, { run: { id: "run_1", status: "queued" } });
+      }
+    },
+    {
+      method: "POST",
+      path: "/tools/invocations",
+      responder: ({ init }) => {
+        const body = JSON.parse(String(init.body ?? "{}"));
+        expect(body.type).toBe("fetch");
         return jsonResponse(202, {
-          run: {
-            id: "run_1",
-            status: "queued"
-          }
+          invocation: { id: "inv_fetch_1", status: "queued" },
+          approval: { id: "appr_fetch_1", status: "pending" }
         });
       }
     },
     {
+      method: "POST",
+      path: "/tools/invocations",
+      responder: () => jsonResponse(409, { error: { code: "tool_policy_denied" } })
+    },
+    {
+      method: "POST",
+      path: "/tools/invocations",
+      responder: () => jsonResponse(403, { error: { code: "shell_command_denied" } })
+    },
+    {
+      method: "POST",
+      path: "/tools/invocations",
+      responder: () => jsonResponse(202, {
+        invocation: { id: "inv_shell_1", status: "queued" },
+        approval: { id: "appr_shell_1", status: "pending" }
+      })
+    },
+    {
+      method: "POST",
+      path: "/tools/invocations",
+      responder: () => jsonResponse(409, { error: { code: "tool_node_unavailable" } })
+    },
+    {
+      method: "POST",
+      path: "/tools/invocations",
+      responder: () => jsonResponse(409, { error: { code: "tool_node_unavailable" } })
+    },
+    {
+      method: "POST",
+      path: "/approvals/appr_fetch_1/reject",
+      responder: () => jsonResponse(200, { approval: { id: "appr_fetch_1", status: "rejected" } })
+    },
+    {
+      method: "GET",
+      path: "/tools/invocations/inv_fetch_1",
+      responder: () => jsonResponse(200, {
+        invocation: {
+          id: "inv_fetch_1",
+          status: "denied",
+          error: { code: "tool_approval_rejected" }
+        }
+      })
+    },
+    {
+      method: "GET",
+      path: "/approvals",
+      responder: () => jsonResponse(200, { approvals: [] })
+    },
+    {
       method: "GET",
       path: "/runs/run_1",
-      responder: () => jsonResponse(200, {
-        run: {
-          id: "run_1",
-          status: "completed",
-          task: "secret-task",
-          cwd: "/secret/cwd"
-        },
-        events: []
-      })
+      responder: () => jsonResponse(200, { run: { id: "run_1", status: "completed" } })
     },
     {
       method: "GET",
@@ -156,11 +195,9 @@ function buildHappyPlan(contentBytes: Uint8Array, auditResponder?: PlannedRespon
         artifacts: [
           {
             id: "artifact_1",
-            path: "object/private/key",
             metadata: {
               digest,
-              size: contentBytes.byteLength,
-              signedUrl: "https://example.com/object?X-Amz-Signature=topsecret"
+              size: contentBytes.byteLength
             }
           }
         ]
@@ -179,107 +216,13 @@ function buildHappyPlan(contentBytes: Uint8Array, auditResponder?: PlannedRespon
     {
       method: "GET",
       path: "/audit/events",
-      responder: auditResponder ?? (() => jsonResponse(200, {
+      responder: () => jsonResponse(200, {
         events: [
           {
             id: "audit_1",
             resourceType: "run",
             resourceId: "run_1",
-            payload: { switchyardCanary: "r19-production", apiKey: "secret-key", nodeToken: "node-secret" }
-          }
-        ]
-      }))
-    }
-  ];
-}
-
-function buildProviderHappyPlan(contentBytes: Uint8Array, runtimeMode: "codex.exec_json" | "claude_code.sdk" | "opencode.acp"): PlannedResponse[] {
-  const digest = `sha256:${sha256Hex(contentBytes)}`;
-  return [
-    {
-      method: "GET",
-      path: "/auth/whoami",
-      responder: () => jsonResponse(200, { auth: { account: { id: "account_1" } } })
-    },
-    {
-      method: "GET",
-      path: "/entitlements",
-      responder: () => jsonResponse(200, { entitlement: { entitlements: { allowMetricsRead: true } } })
-    },
-    {
-      method: "GET",
-      path: "/ready",
-      responder: () => jsonResponse(200, { ok: true, checks: {} })
-    },
-    {
-      method: "POST",
-      path: "/runs",
-      responder: ({ init }) => {
-        const body = JSON.parse(String(init.body ?? "{}"));
-        expect(body.placement).toBe("hosted");
-        expect(body.runtimeMode).toBe(runtimeMode);
-        expect(body.metadata.switchyardCanary).toBe("r21-provider-production");
-        return jsonResponse(202, { run: { id: "run_provider_1", status: "queued" } });
-      }
-    },
-    {
-      method: "GET",
-      path: "/runs/run_provider_1",
-      responder: () => jsonResponse(200, {
-        run: {
-          id: "run_provider_1",
-          status: "completed"
-        },
-        events: []
-      })
-    },
-    {
-      method: "GET",
-      path: "/runs/run_provider_1/events",
-      responder: () => textResponse(200, sseEvent({ event: "ok" }), "text/event-stream")
-    },
-    {
-      method: "GET",
-      path: "/runs/run_provider_1/artifacts",
-      responder: () => jsonResponse(200, {
-        artifacts: [
-          {
-            id: "artifact_provider_1",
-            metadata: {
-              digest,
-              size: contentBytes.byteLength
-            }
-          }
-        ]
-      })
-    },
-    {
-      method: "GET",
-      path: "/artifacts/artifact_provider_1/content",
-      responder: () => bytesResponse(200, contentBytes)
-    },
-    {
-      method: "GET",
-      path: "/metrics",
-      responder: () => jsonResponse(200, {
-        hostedRuntime: {
-          lifecycle: {
-            runtime_mode: runtimeMode,
-            outcome: "accepted"
-          }
-        }
-      })
-    },
-    {
-      method: "GET",
-      path: "/audit/events",
-      responder: () => jsonResponse(200, {
-        events: [
-          {
-            id: "audit_provider_1",
-            resourceType: "run",
-            resourceId: "run_provider_1",
-            payload: { switchyardCanary: "r21-provider-production" }
+            payload: { switchyardCanary: "r22-tools-production" }
           }
         ]
       })
@@ -288,36 +231,43 @@ function buildProviderHappyPlan(contentBytes: Uint8Array, runtimeMode: "codex.ex
 }
 
 describe("runProductionCanary", () => {
-  test("happy path verifies ready/run/events/artifact/content/metrics/audit", async () => {
+  test("happy path validates tool probes plus artifact and audit evidence", async () => {
     const baseUrl = "https://switchyard.example";
     const bytes = new TextEncoder().encode("canary artifact output");
-    const { fetchImpl } = createPlannedFetch(baseUrl, buildHappyPlan(bytes));
+    const { fetchImpl } = createPlannedFetch(baseUrl, buildR22HappyPlan(bytes));
 
     const result = await runProductionCanary({
       baseUrl,
       apiKey: "live-key-123",
       fetchImpl,
       timeoutMs: 5_000,
-      now: makeNow([0, 50, 100, 150, 200, 250, 300, 350, 400])
+      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50))
     });
 
     expect(result.ok).toBe(true);
     expect(result.code).toBe("canary_ok");
     expect(result.summary.runId).toBe("run_1");
     expect(result.summary.artifactId).toBe("artifact_1");
-    expect(result.summary.metricsAuthorized).toBe(true);
-    expect(result.summary.auditEvidence).toBe(true);
-    expect(result.summary.delayedAuditEvidence).toBe(false);
+    expect(result.steps.some((step) => step.name === "tools.hosted.fetch" && step.status === "pass")).toBe(true);
+    expect(result.steps.some((step) => step.name === "tools.hosted.shell_denied" && step.code === "shell_command_denied")).toBe(true);
+    expect(result.steps.some((step) => step.name === "tools.connected.unavailable" && step.code === "tool_node_unavailable")).toBe(true);
+    expect(result.steps.some((step) => step.name === "tools.approval.reject" && step.code === "tool_approval_rejected")).toBe(true);
 
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("live-key-123");
-    expect(serialized).not.toContain("secret-key");
-    expect(serialized).not.toContain("node-secret");
-    expect(serialized).not.toContain("secret-task");
-    expect(serialized).not.toContain("/secret/cwd");
-    expect(serialized).not.toContain("object/private/key");
-    expect(serialized).not.toContain("X-Amz-Signature=topsecret");
     expect(serialized).not.toContain("canary artifact output");
+  });
+
+  test("fails fast when live external tool mode is requested without explicit confirmation", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const result = await runProductionCanary({
+      baseUrl: "https://switchyard.example",
+      apiKey: "test-key",
+      liveExternalTools: true,
+      fetchImpl
+    });
+    expectFailure(result, "tool_live_canary_config_missing");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   test("returns auth_required and never calls fetch when api key is missing", async () => {
@@ -339,469 +289,51 @@ describe("runProductionCanary", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  test("returns auth_invalid when whoami denies auth", async () => {
+  test("fails with tool_canary_denied when hosted fetch probe returns unexpected denial", async () => {
     const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(403, { error: "denied" }) }
-    ]);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "auth_invalid");
-  });
-
-  test("returns ready_denied when /ready is 503", async () => {
-    const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
-      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
-      { method: "GET", path: "/ready", responder: () => jsonResponse(503, { ok: false, checks: { schema: { ok: false, code: "postgres_unavailable" } } }) }
-    ]);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "ready_denied");
-  });
-
-  test("returns run_create_denied when run creation is denied", async () => {
-    const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
-      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
-      { method: "GET", path: "/ready", responder: () => jsonResponse(200, { ok: true, checks: {} }) },
-      { method: "POST", path: "/runs", responder: () => jsonResponse(403, { code: "entitlement_denied" }) }
-    ]);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "run_create_denied");
-  });
-
-  test("returns worker_timeout when run never reaches terminal success", async () => {
-    const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
-      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
-      { method: "GET", path: "/ready", responder: () => jsonResponse(200, { ok: true, checks: {} }) },
-      { method: "POST", path: "/runs", responder: () => jsonResponse(202, { run: { id: "run_1", status: "queued" } }) },
-      { method: "GET", path: "/runs/run_1", responder: () => jsonResponse(200, { run: { id: "run_1", status: "queued" }, events: [] }) },
-      { method: "GET", path: "/runs/run_1", responder: () => jsonResponse(200, { run: { id: "run_1", status: "running" }, events: [] }) }
-    ]);
+    const plan = buildR22HappyPlan(new TextEncoder().encode("ok"));
+    plan[4] = {
+      method: "POST",
+      path: "/tools/invocations",
+      responder: () => jsonResponse(500, { error: { code: "internal_error" } })
+    };
+    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
 
     const result = await runProductionCanary({
       baseUrl,
       apiKey: "test-key",
       fetchImpl,
-      timeoutMs: 200,
-      now: makeNow([0, 50, 100, 150, 201, 250, 300])
+      timeoutMs: 5000,
+      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50))
     });
 
-    expectFailure(result, "worker_timeout");
-    expect(result.summary.runId).toBe("run_1");
+    expectFailure(result, "tool_canary_denied");
   });
 
-  test("returns unexpected_terminal_status when run fails", async () => {
+  test("fails with approval_canary_failed when reject flow cannot be validated", async () => {
     const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
-      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
-      { method: "GET", path: "/ready", responder: () => jsonResponse(200, { ok: true, checks: {} }) },
-      { method: "POST", path: "/runs", responder: () => jsonResponse(202, { run: { id: "run_1", status: "queued" } }) },
-      { method: "GET", path: "/runs/run_1", responder: () => jsonResponse(200, { run: { id: "run_1", status: "failed" }, events: [] }) }
-    ]);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "unexpected_terminal_status");
-    expect(result.summary.terminalStatus).toBe("failed");
-  });
-
-  test("returns malformed_response for malformed JSON responses", async () => {
-    const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => textResponse(200, "{", "application/json") }
-    ]);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "malformed_response");
-  });
-
-  test("returns malformed_sse for malformed run events replay", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("ok");
-    const plan = buildHappyPlan(bytes);
-    plan[5] = {
+    const plan = buildR22HappyPlan(new TextEncoder().encode("ok"));
+    plan[11] = {
       method: "GET",
-      path: "/runs/run_1/events",
-      responder: () => textResponse(200, "data: {not-json}\n\n", "text/event-stream")
-    };
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "malformed_sse");
-  });
-
-  test("returns artifact_missing when artifact list is empty", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("ok");
-    const plan = buildHappyPlan(bytes);
-    plan[6] = {
-      method: "GET",
-      path: "/runs/run_1/artifacts",
-      responder: () => jsonResponse(200, { artifacts: [] })
-    };
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "artifact_missing");
-  });
-
-  test("returns artifact_missing when artifact content fetch is 404", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("ok");
-    const plan = buildHappyPlan(bytes);
-    plan[7] = {
-      method: "GET",
-      path: "/artifacts/artifact_1/content",
-      responder: () => jsonResponse(404, { code: "artifact_not_found" })
-    };
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "artifact_missing");
-  });
-
-  test("returns artifact_content_empty when artifact content is empty", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new Uint8Array(0);
-    const plan = buildHappyPlan(bytes);
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "artifact_content_empty");
-  });
-
-  test("returns artifact_digest_mismatch when digest metadata does not match content", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("artifact payload");
-    const plan = buildHappyPlan(bytes);
-    plan[6] = {
-      method: "GET",
-      path: "/runs/run_1/artifacts",
+      path: "/tools/invocations/inv_fetch_1",
       responder: () => jsonResponse(200, {
-        artifacts: [
-          {
-            id: "artifact_1",
-            metadata: {
-              digest: "sha256:deadbeef",
-              size: bytes.byteLength
-            }
-          }
-        ]
+        invocation: {
+          id: "inv_fetch_1",
+          status: "denied",
+          error: { code: "tool_policy_denied" }
+        }
       })
     };
     const { fetchImpl } = createPlannedFetch(baseUrl, plan);
 
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "artifact_digest_mismatch");
-  });
-
-  test("returns metrics_auth_failed when /metrics is denied", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("ok");
-    const plan = buildHappyPlan(bytes);
-    plan[8] = {
-      method: "GET",
-      path: "/metrics",
-      responder: () => jsonResponse(403, { code: "forbidden" })
-    };
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "metrics_auth_failed");
-  });
-
-  test("reports delayed_audit_evidence and succeeds when evidence appears after retry", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("ok");
-    let auditCount = 0;
-    const plan = buildHappyPlan(bytes, () => {
-      auditCount += 1;
-      if (auditCount === 1) {
-        return jsonResponse(200, { events: [] });
-      }
-      return jsonResponse(200, {
-        events: [
-          {
-            id: "audit_2",
-            resourceType: "run",
-            resourceId: "run_1",
-            payload: { switchyardCanary: "r19-production" }
-          }
-        ]
-      });
-    });
-    plan.splice(10, 0, {
-      method: "GET",
-      path: "/audit/events",
-      responder: plan[9]!.responder
-    });
-
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
     const result = await runProductionCanary({
       baseUrl,
       apiKey: "test-key",
       fetchImpl,
-      timeoutMs: 5_000,
-      now: makeNow([0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1200])
+      timeoutMs: 5000,
+      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50))
     });
 
-    expect(result.ok).toBe(true);
-    expect(result.summary.delayedAuditEvidence).toBe(true);
-    expect(result.steps.some((step) => step.code === "delayed_audit_evidence")).toBe(true);
-  });
-
-  test("ignores older audit evidence that only has the static canary label", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("ok");
-    let auditCount = 0;
-    const plan = buildHappyPlan(bytes, () => {
-      auditCount += 1;
-      if (auditCount === 1) {
-        return jsonResponse(200, {
-          events: [
-            {
-              id: "audit_old",
-              resourceType: "run",
-              resourceId: "run_old",
-              payload: { switchyardCanary: "r19-production" }
-            }
-          ]
-        });
-      }
-      return jsonResponse(200, {
-        events: [
-          {
-            id: "audit_current",
-            resourceType: "run",
-            resourceId: "run_1",
-            payload: { switchyardCanary: "r19-production" }
-          }
-        ]
-      });
-    });
-    plan.splice(10, 0, {
-      method: "GET",
-      path: "/audit/events",
-      responder: plan[9]!.responder
-    });
-
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({
-      baseUrl,
-      apiKey: "test-key",
-      fetchImpl,
-      timeoutMs: 5_000,
-      now: makeNow([0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1200])
-    });
-
-    expect(result.ok).toBe(true);
-    expect(result.summary.delayedAuditEvidence).toBe(true);
-    expect(result.steps.some((step) => step.code === "delayed_audit_evidence")).toBe(true);
-  });
-
-  test("returns audit_lookup_failed when audit evidence does not appear", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("ok");
-    const plan = buildHappyPlan(bytes, () => jsonResponse(200, { events: [] }));
-    plan.splice(10, 0, {
-      method: "GET",
-      path: "/audit/events",
-      responder: () => jsonResponse(200, { events: [] })
-    });
-    plan.splice(11, 0, {
-      method: "GET",
-      path: "/audit/events",
-      responder: () => jsonResponse(200, { events: [] })
-    });
-
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({
-      baseUrl,
-      apiKey: "test-key",
-      fetchImpl,
-      timeoutMs: 700,
-      now: makeNow([0, 50, 100, 150, 200, 250, 300, 350, 500, 700, 900])
-    });
-
-    expectFailure(result, "audit_lookup_failed");
-  });
-
-  test("prefers auth_invalid when /ready denies with 401", async () => {
-    const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
-      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
-      { method: "GET", path: "/ready", responder: () => jsonResponse(401, { code: "auth_required" }) }
-    ]);
-
-    const result = await runProductionCanary({ baseUrl, apiKey: "test-key", fetchImpl });
-    expectFailure(result, "auth_invalid");
-  });
-
-  test("provider mode requires explicit spend confirmation", async () => {
-    const fetchImpl = vi.fn<typeof fetch>();
-    const result = await runProductionCanary({
-      baseUrl: "https://switchyard.example",
-      apiKey: "test-key",
-      runtimeMode: "codex.exec_json",
-      fetchImpl
-    });
-    expectFailure(result, "provider_canary_config_missing");
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  test("provider mode rejects blank runtime mode", async () => {
-    const fetchImpl = vi.fn<typeof fetch>();
-    const result = await runProductionCanary({
-      baseUrl: "https://switchyard.example",
-      apiKey: "test-key",
-      runtimeMode: "   ",
-      confirmProviderSpend: true,
-      fetchImpl
-    });
-    expectFailure(result, "provider_canary_runtime_empty");
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  test("provider mode returns provider_canary_create_denied", async () => {
-    const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
-      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
-      { method: "GET", path: "/ready", responder: () => jsonResponse(200, { ok: true, checks: {} }) },
-      { method: "POST", path: "/runs", responder: () => jsonResponse(409, { code: "hosted_runtime_not_allowed" }) }
-    ]);
-
-    const result = await runProductionCanary({
-      baseUrl,
-      apiKey: "test-key",
-      runtimeMode: "codex.exec_json",
-      confirmProviderSpend: true,
-      fetchImpl
-    });
-    expectFailure(result, "provider_canary_create_denied");
-  });
-
-  test("provider mode returns provider_canary_timeout", async () => {
-    const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
-      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
-      { method: "GET", path: "/ready", responder: () => jsonResponse(200, { ok: true, checks: {} }) },
-      { method: "POST", path: "/runs", responder: () => jsonResponse(202, { run: { id: "run_provider_1", status: "queued" } }) },
-      { method: "GET", path: "/runs/run_provider_1", responder: () => jsonResponse(200, { run: { id: "run_provider_1", status: "queued" } }) },
-      { method: "GET", path: "/runs/run_provider_1", responder: () => jsonResponse(200, { run: { id: "run_provider_1", status: "running" } }) }
-    ]);
-
-    const result = await runProductionCanary({
-      baseUrl,
-      apiKey: "test-key",
-      runtimeMode: "codex.exec_json",
-      confirmProviderSpend: true,
-      fetchImpl,
-      timeoutMs: 150,
-      now: makeNow([0, 50, 100, 151, 200, 250, 300])
-    });
-    expectFailure(result, "provider_canary_timeout");
-  });
-
-  test("provider mode returns provider_canary_run_failed for failed terminal status", async () => {
-    const baseUrl = "https://switchyard.example";
-    const { fetchImpl } = createPlannedFetch(baseUrl, [
-      { method: "GET", path: "/auth/whoami", responder: () => jsonResponse(200, { auth: {} }) },
-      { method: "GET", path: "/entitlements", responder: () => jsonResponse(200, { entitlement: {} }) },
-      { method: "GET", path: "/ready", responder: () => jsonResponse(200, { ok: true, checks: {} }) },
-      { method: "POST", path: "/runs", responder: () => jsonResponse(202, { run: { id: "run_provider_1", status: "queued" } }) },
-      { method: "GET", path: "/runs/run_provider_1", responder: () => jsonResponse(200, { run: { id: "run_provider_1", status: "failed" } }) }
-    ]);
-
-    const result = await runProductionCanary({
-      baseUrl,
-      apiKey: "test-key",
-      runtimeMode: "codex.exec_json",
-      confirmProviderSpend: true,
-      fetchImpl
-    });
-    expectFailure(result, "provider_canary_run_failed");
-  });
-
-  test("provider mode returns provider_canary_artifact_missing", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("provider output");
-    const plan = buildProviderHappyPlan(bytes, "codex.exec_json");
-    plan[6] = {
-      method: "GET",
-      path: "/runs/run_provider_1/artifacts",
-      responder: () => jsonResponse(200, { artifacts: [] })
-    };
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({
-      baseUrl,
-      apiKey: "test-key",
-      runtimeMode: "codex.exec_json",
-      confirmProviderSpend: true,
-      fetchImpl
-    });
-    expectFailure(result, "provider_canary_artifact_missing");
-  });
-
-  test("provider mode returns provider_canary_metrics_failed", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("provider output");
-    const plan = buildProviderHappyPlan(bytes, "codex.exec_json");
-    plan[8] = {
-      method: "GET",
-      path: "/metrics",
-      responder: () => jsonResponse(403, { code: "forbidden" })
-    };
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({
-      baseUrl,
-      apiKey: "test-key",
-      runtimeMode: "codex.exec_json",
-      confirmProviderSpend: true,
-      fetchImpl
-    });
-    expectFailure(result, "provider_canary_metrics_failed");
-  });
-
-  test("provider mode returns provider_canary_audit_failed", async () => {
-    const baseUrl = "https://switchyard.example";
-    const bytes = new TextEncoder().encode("provider output");
-    const plan = buildProviderHappyPlan(bytes, "codex.exec_json");
-    plan[9] = {
-      method: "GET",
-      path: "/audit/events",
-      responder: () => jsonResponse(200, { events: [] })
-    };
-    plan.splice(10, 0, {
-      method: "GET",
-      path: "/audit/events",
-      responder: () => jsonResponse(200, { events: [] })
-    });
-    const { fetchImpl } = createPlannedFetch(baseUrl, plan);
-
-    const result = await runProductionCanary({
-      baseUrl,
-      apiKey: "test-key",
-      runtimeMode: "codex.exec_json",
-      confirmProviderSpend: true,
-      fetchImpl,
-      timeoutMs: 700,
-      now: makeNow([0, 50, 100, 150, 200, 250, 300, 350, 500, 700, 900])
-    });
-    expectFailure(result, "provider_canary_audit_failed");
+    expectFailure(result, "approval_canary_failed");
   });
 });

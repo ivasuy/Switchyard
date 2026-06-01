@@ -1,4 +1,4 @@
-# Switchyard Production Manifest Pack (R21)
+# Switchyard Production Manifest Pack (R22)
 
 This directory contains a production operator manifest pack for hosted server, hosted worker, and optional connected node. It is API/ops-only and keeps the checked-in default fake-only (`fake.deterministic`) and no-spend.
 
@@ -33,7 +33,7 @@ Generate unique high-entropy values for at least:
 - Object-store credentials
 - Bootstrap API key and node token records
 
-## Runtime Boundary (R21)
+## Runtime + Tool Boundary (R22)
 
 Checked-in production defaults are fake-only:
 
@@ -41,7 +41,7 @@ Checked-in production defaults are fake-only:
 - `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`
 - `SWITCHYARD_SANDBOX_REAL_EXECUTION=disabled` (safe default)
 
-R21 allows explicit provider opt-in for exactly:
+R22 keeps hosted runtime defaults fake-only and allows explicit provider opt-in for exactly:
 - `codex.exec_json`
 - `claude_code.sdk`
 - `opencode.acp`
@@ -52,9 +52,24 @@ Provider activation requires:
 - `SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON` or `SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH`
 - required provider credentials by env var name (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
 - spend controls in provider policy (`maxActiveRuns`, `maxRunsPerHour`, `maxRunTimeoutSeconds`, `maxPromptBytes`)
-- production preflight, readiness, and smoke checks passing
+- production preflight, readiness, smoke, and no-spend canary checks passing
 
-No public arbitrary execution route is shipped (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`, `/browser`, `/search`, `/github`, `/fetch`, `/repo` remain absent).
+R22 hosted/connected-node real-tool execution ships only for:
+
+- hosted worker tools: `fetch`, `web_search`, `github`, command-catalog `shell`
+- connected-node tools: `fetch`, `web_search`, `github`, `repo`, command-catalog `shell`
+
+R22 still does not ship:
+
+- browser automation (`browser_tool_unshipped`)
+- hosted `repo` execution (`repo_hosted_unshipped`)
+- generic `/exec` `/shell` `/process` `/command` `/pty` `/terminal` `/sandbox` public routes
+- dashboard or TUI surfaces
+- generic process/PTY adapters
+- hosted runtime approval/input/terminal bridges
+- Cursor/OpenClaw/Paperclip adapters
+- hosted debate real participants
+- hosted model judging
 
 ## Rollout Order
 
@@ -71,14 +86,14 @@ No public arbitrary execution route is shipped (`/exec`, `/shell`, `/process`, `
 8. Deploy worker.
 9. Optionally deploy node:
    - `docker compose -f deploy/production/docker-compose.yml --profile optional-node up -d node`
-10. Run fake canary (default no-spend):
+10. Run default R22 canary (deterministic/no-spend):
     - `pnpm tsx scripts/production-canary.ts --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key`
 11. Run production sandbox smoke:
     - `pnpm production:sandbox-smoke`
 12. Run production hosted provider smoke (deterministic/no-spend):
     - `pnpm hosted-real-runtime:smoke`
-13. Optional live provider canary (requires explicit spend confirmation and one runtime mode):
-    - `pnpm production:provider-runtime-canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --runtime-mode codex.exec_json --confirm-provider-spend`
+13. Optional live external-tool canary (requires explicit env + flag confirmation):
+    - `SWITCHYARD_CONFIRM_LIVE_TOOL_CANARY=1 pnpm production:live-tool-canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --live-external-tools --confirm-live-tool-spend`
 
 ## Rollback Order
 
@@ -133,4 +148,4 @@ This is an operator-owned example. Do not check live credentials into git.
 
 ## CI/Audit Boundary
 
-CI/audit verification for this pack must remain no-spend and deterministic. Live provider checks are operator-owned and should run only against operator-managed environments.
+CI/audit verification for this pack must remain no-spend and deterministic. Live external-tool checks are operator-owned and should run only against operator-managed environments with explicit confirmation.

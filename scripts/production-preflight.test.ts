@@ -53,6 +53,92 @@ function makeWorkerConfig(overrides: Record<string, unknown> = {}): any {
     queueName: "switchyard-hosted-runs",
     objectStore: { backend: "memory", probe: "write_read_delete", redactedSummary: { backend: "memory" } },
     sandbox: resolveHostedSandboxConfig({ deploymentMode: "production", env: {} }),
+    tools: {
+      hostedRealTools: "disabled",
+      connectedNodeRealTools: "disabled",
+      adapterMode: "fake",
+      policySourceKind: "none",
+      policy: {
+        global: { enabled: false, allowedPlacements: ["local"] },
+        hosted: { enabled: false, allowedToolTypes: [] },
+        connectedLocalNode: { enabled: false, allowedToolTypes: [] },
+        fetch: { enabled: false },
+        webSearch: { enabled: false },
+        github: { enabled: false },
+        repo: { enabled: false },
+        shell: { enabled: false, catalog: {} }
+      }
+    },
+    ...overrides
+  };
+}
+
+function makeToolPolicy(overrides: Record<string, unknown> = {}): any {
+  return {
+    global: {
+      enabled: true,
+      allowedPlacements: ["hosted", "connected_local_node"],
+      approvalDefault: "required",
+      approvalExpiresMs: 300000,
+      maxConcurrentRealTools: 2,
+      maxInputBytes: 65536,
+      maxInlineOutputBytes: 32768,
+      maxArtifactBytes: 1048576,
+      defaultTimeoutMs: 30000
+    },
+    hosted: {
+      enabled: true,
+      allowedToolTypes: ["fetch", "web_search", "github", "shell"]
+    },
+    connectedLocalNode: {
+      enabled: true,
+      allowedToolTypes: ["fetch", "web_search", "github", "repo", "shell"]
+    },
+    fetch: {
+      enabled: true,
+      allowedHosts: ["example.com"],
+      allowedMethods: ["GET", "HEAD"],
+      allowedHeaders: [],
+      allowedContentTypes: ["text/plain", "application/json"],
+      maxRedirects: 3,
+      timeoutMs: 30000,
+      maxResponseBytes: 262144
+    },
+    webSearch: {
+      enabled: true,
+      maxResults: 10,
+      timeoutMs: 20000,
+      maxResponseBytes: 262144
+    },
+    github: {
+      enabled: true,
+      allowedRepos: ["example/repo"],
+      timeoutMs: 30000,
+      maxResponseBytes: 262144
+    },
+    repo: {
+      enabled: true,
+      gitBinary: "git",
+      allowedCwdPrefixes: ["/repo"],
+      maxPaths: 32,
+      timeoutMs: 20000,
+      maxOutputBytes: 262144
+    },
+    shell: {
+      enabled: true,
+      allowedCwdPrefixes: ["/repo"],
+      timeoutMs: 20000,
+      maxOutputBytes: 262144,
+      catalog: {
+        "switchyard.fake.echo": {
+          commandId: "switchyard.fake.echo",
+          executablePath: "/usr/bin/env",
+          argv: ["echo"],
+          env: {},
+          maxArgs: 4
+        }
+      }
+    },
     ...overrides
   };
 }
@@ -1124,5 +1210,159 @@ describe("runProductionPreflight", () => {
       expect(serialized.includes("replace-with-password")).toBe(false);
       expect(serialized.includes("postgres://user")).toBe(false);
     });
+  });
+
+  test("fails tools check when tools are enabled without explicit policy source", async () => {
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          serverAuthMode: "api_key",
+          tools: {
+            hostedRealTools: "enabled",
+            connectedNodeRealTools: "disabled",
+            policySourceKind: "none",
+            policy: makeToolPolicy()
+          }
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          tools: {
+            hostedRealTools: "enabled",
+            connectedNodeRealTools: "disabled",
+            adapterMode: "fake",
+            policySourceKind: "none",
+            policy: makeToolPolicy()
+          }
+        })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "tools",
+      status: "fail",
+      code: "tool_policy_config_invalid"
+    }));
+  });
+
+  test("fails tools check when hosted tools are enabled without api-key auth", async () => {
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          serverAuthMode: "disabled",
+          tools: {
+            hostedRealTools: "enabled",
+            connectedNodeRealTools: "disabled",
+            policySourceKind: "json",
+            policy: makeToolPolicy()
+          }
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          tools: {
+            hostedRealTools: "enabled",
+            connectedNodeRealTools: "disabled",
+            adapterMode: "fake",
+            policySourceKind: "json",
+            policy: makeToolPolicy()
+          }
+        })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "tools",
+      status: "fail",
+      code: "tool_hosted_auth_required"
+    }));
+  });
+
+  test("fails hosted policy when repo or browser are enabled, and fails connected-node when node checks are absent", async () => {
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          serverAuthMode: "api_key",
+          tools: {
+            hostedRealTools: "enabled",
+            connectedNodeRealTools: "enabled",
+            policySourceKind: "json",
+            policy: makeToolPolicy({
+              hosted: { enabled: true, allowedToolTypes: ["fetch", "repo", "browser"] }
+            })
+          }
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          tools: {
+            hostedRealTools: "enabled",
+            connectedNodeRealTools: "enabled",
+            adapterMode: "fake",
+            policySourceKind: "json",
+            policy: makeToolPolicy({
+              hosted: { enabled: true, allowedToolTypes: ["fetch", "repo", "browser"] }
+            })
+          }
+        })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "tools",
+      status: "fail",
+      code: "repo_hosted_unshipped"
+    }));
+  });
+
+  test("fails connected-node tools when includeNode is required but node config is unavailable", async () => {
+    const result = await withTempResult(async (dir) => {
+      const envPath = join(dir, "ok.env");
+      await writeFile(envPath, "SWITCHYARD_DEPLOYMENT_MODE=production\n", "utf8");
+      return runProductionPreflight({
+        envFile: envPath,
+        includeNode: false,
+        deps: {
+          validateManifest: async () => ({ ok: true, manifest: {} as never }),
+          loadServerConfig: () =>
+            makeServerConfig({
+              serverAuthMode: "api_key",
+              tools: {
+                hostedRealTools: "disabled",
+                connectedNodeRealTools: "enabled",
+                policySourceKind: "json",
+                policy: makeToolPolicy()
+              }
+            }),
+          loadWorkerConfig: () =>
+            makeWorkerConfig({
+              tools: {
+                hostedRealTools: "disabled",
+                connectedNodeRealTools: "enabled",
+                adapterMode: "fake",
+                policySourceKind: "json",
+                policy: makeToolPolicy()
+              }
+            }),
+          openPostgresDatabase: () => ({ close: async () => undefined } as never),
+          checkPostgresSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 }),
+          queueStats: async () => undefined,
+          probeObjectStore: async () => undefined,
+          checkControlPlane: async () => ({
+            checks: [
+              { name: "bootstrap", ok: true, code: "control_plane_bootstrap_ready" },
+              { name: "quotaStore", ok: true, code: "quota_store_ready" },
+              { name: "auditStore", ok: true, code: "audit_store_ready" },
+              { name: "unownedResources", ok: true, code: "unowned_resources_absent" }
+            ]
+          }),
+          checkHostedRuntimeGate: async () => ({ ok: true })
+        }
+      });
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "tools",
+      status: "fail",
+      code: "tool_node_unavailable"
+    }));
   });
 });
