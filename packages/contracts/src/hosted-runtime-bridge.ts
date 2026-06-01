@@ -188,4 +188,3 @@ export type HostedRuntimeBridgeReadinessCheckName = z.infer<typeof hostedRuntime
 export type HostedRuntimeBridgeReadinessCheck = z.infer<typeof hostedRuntimeBridgeReadinessCheckSchema>;
 export type HostedRuntimeBridgeReadinessReport = z.infer<typeof hostedRuntimeBridgeReadinessReportSchema>;
 export type AcceptedResponse = z.infer<typeof acceptedResponseSchema>;
-
