@@ -769,6 +769,10 @@ export class RuntimeRunnerService {
       ...session.state,
       ...redactedPatch
     };
+    const hostedBridgePatch = this.normalizeHostedBridgeStatePatch(redactedPatch);
+    if (hostedBridgePatch) {
+      Object.assign(nextState, hostedBridgePatch);
+    }
     const updated: RuntimeSession = {
       ...session,
       state: nextState,
@@ -785,6 +789,26 @@ export class RuntimeRunnerService {
     await this.deps.sessions.update(updated);
     this.log("info", "runtime.session_state.updated", { runId, sessionId: session.id });
     return { session: updated };
+  }
+
+  private normalizeHostedBridgeStatePatch(patch: Record<string, unknown>): Record<string, unknown> | undefined {
+    const hostedState = patch["hostedRuntimeBridge"];
+    if (!isPlainObject(hostedState)) {
+      return undefined;
+    }
+    const normalized: Record<string, unknown> = {};
+    const workerId = hostedState["workerId"];
+    if (typeof workerId === "string" && workerId.trim().length > 0) {
+      normalized["hostedWorkerId"] = workerId.trim();
+    }
+    const runtimeSessionId = hostedState["runtimeSessionId"];
+    if (typeof runtimeSessionId === "string" && runtimeSessionId.trim().length > 0) {
+      normalized["hostedRuntimeSessionId"] = runtimeSessionId.trim();
+    }
+    if (typeof hostedState["bridgeCapable"] === "boolean") {
+      normalized["hostedBridgeCapable"] = hostedState["bridgeCapable"];
+    }
+    return Object.keys(normalized).length > 0 ? normalized : undefined;
   }
 
   private selectExternalSessionKey(patch: Record<string, unknown>): string | undefined {
@@ -839,6 +863,15 @@ export class RuntimeRunnerService {
         runtimeMode: session.runtimeMode,
         runtimeSessionId: session.id,
         externalSessionKey: session.externalSessionKey,
+        ...(typeof session.state["hostedWorkerId"] === "string"
+          ? { hostedWorkerId: session.state["hostedWorkerId"] }
+          : {}),
+        ...(typeof session.state["hostedRuntimeSessionId"] === "string"
+          ? { hostedRuntimeSessionId: session.state["hostedRuntimeSessionId"] }
+          : {}),
+        ...(typeof session.state["hostedBridgeCapable"] === "boolean"
+          ? { hostedBridgeCapable: session.state["hostedBridgeCapable"] }
+          : {}),
         ...(event.payload["expiresAt"] === undefined ? {} : { expiresAt: event.payload["expiresAt"] })
       })
     });
