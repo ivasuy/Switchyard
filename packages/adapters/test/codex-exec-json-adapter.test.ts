@@ -474,9 +474,11 @@ describe("CodexExecJsonAdapter", () => {
 
   it("rejects send because exec-json is not interactive", async () => {
     const adapter = new CodexExecJsonAdapter();
-    await expect(adapter.send({ sessionId: "session_codex" }, { text: "continue" })).rejects.toBeInstanceOf(
-      CodexInputUnsupportedError
-    );
+    await expect(adapter.send({ sessionId: "session_codex" }, { text: "continue" })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "codex_input_unsupported"
+    });
+    await expect(adapter.send({ sessionId: "session_codex" }, { text: "continue" })).rejects.toBeInstanceOf(CodexInputUnsupportedError);
   });
 
   it("captures trailing bytes after turn.completed even when event consumption stops", async () => {

@@ -44,14 +44,20 @@ R22 ships hosted/connected-node real-tool execution with policy-first controls f
 
 Production fake-only/no-spend remains the default posture for tests, smoke, preflight, and default canary.
 
-R22 boundary non-goals remain explicit:
+R23 adds hosted runtime bridge support only for worker-owned `claude_code.sdk` and structured `opencode.acp` through existing `POST /runs/:id/input` and hosted approval resolution routes. `codex.exec_json` remains one-shot with hosted input/approval unsupported. `codex.interactive` remains local-only and unshipped for hosted.
+
+R23 boundary non-goals remain explicit:
 
 - does not ship generic process/pty runtime adapters.
 - does not ship cursor/openclaw/paperclip.
 - does not ship hosted browser automation.
 - does not ship hosted `repo` execution.
 - does not ship hosted debate real participants or hosted model judging.
-- does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
+- does not ship any public arbitrary execution route (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`).
+- does not ship hosted `codex.interactive`.
+- does not ship hosted Codex live-resume guarantees.
+- does not ship hosted AgentField/Generic HTTP input or approval bridges.
+- does not ship hosted terminal bridge, PTY/TUI automation, or dashboard/TUI surfaces.
 - no managed SaaS/public signup, no payment-provider integration (invoices/checkout/webhooks), no OAuth/OIDC/SAML/SSO/SCIM, no dashboard, and no TUI.
 
 Switchyard lets frontends, backends, CLIs, automations, bots, and internal systems treat every agent runtime like a backend service.

@@ -32,6 +32,7 @@ const ACTIVE_COUNTS = {
 function makeServerConfig(overrides: Record<string, unknown> = {}): any {
   return {
     deploymentMode: "production",
+    serverAuthMode: "api_key",
     postgresUrl: "postgres://user:pw@db.example:5432/switchyard",
     redisUrl: "redis://:pw@redis.example:6379/0",
     queueName: "switchyard-hosted-runs",
@@ -631,6 +632,103 @@ describe("runProductionPreflight", () => {
       status: "pass",
       code: "provider_runtime_policy_inactive"
     });
+  });
+
+  test("fails closed when hosted runtime bridge dependencies are missing for Claude/OpenCode modes", async () => {
+    const activation = makeProviderActivation({
+      valid: true,
+      enabledRealModes: ["claude_code.sdk", "opencode.acp"],
+      reasons: [],
+      reasonCodes: []
+    });
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "claude_code.sdk", "opencode.acp"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({
+        ok: true,
+        diagnostics: {
+          bridgeReadiness: {
+            checks: [
+              { name: "command_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" },
+              { name: "command_outbox", ok: false, reasonCode: "hosted_runtime_bridge_queue_unavailable" },
+              { name: "adapter_capability", ok: false, reasonCode: "hosted_runtime_bridge_operation_unsupported" },
+              { name: "session_reconciliation", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
+              { name: "approval_sender", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" }
+            ]
+          }
+        }
+      })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedRuntimeBridge",
+      status: "fail",
+      code: "hosted_runtime_bridge_store_unavailable",
+      diagnostics: expect.objectContaining({
+        bridgeModes: ["claude_code.sdk", "opencode.acp"],
+        failedChecks: expect.arrayContaining(["command_store", "command_outbox", "adapter_capability", "session_reconciliation", "approval_sender"]),
+        checks: expect.objectContaining({
+          route_auth: "pass",
+          command_store: "fail",
+          command_outbox: "fail",
+          adapter_capability: "fail",
+          approval_sender: "fail"
+        })
+      })
+    }));
+  });
+
+  test("passes hosted runtime bridge check when bridge dependencies are ready", async () => {
+    const activation = makeProviderActivation({
+      valid: true,
+      enabledRealModes: ["claude_code.sdk", "opencode.acp"],
+      reasons: [],
+      reasonCodes: []
+    });
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "claude_code.sdk", "opencode.acp"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({
+        ok: true,
+        diagnostics: {
+          bridgeReadiness: {
+            checks: [
+              { name: "command_store", ok: true },
+              { name: "command_outbox", ok: true },
+              { name: "worker_claim", ok: true },
+              { name: "adapter_capability", ok: true },
+              { name: "session_reconciliation", ok: true },
+              { name: "approval_sender", ok: true }
+            ]
+          }
+        }
+      })
+    });
+
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({
+        name: "hostedRuntimeBridge",
+        status: "pass",
+        code: "hosted_runtime_bridge_ready"
+      })
+    );
   });
 
   test("fails with provider_runtime_policy_missing and skips adapter checks when real mode activation is invalid", async () => {

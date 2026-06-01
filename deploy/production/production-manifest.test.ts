@@ -101,6 +101,10 @@ describe("production manifest pack", () => {
       "/github",
       "/fetch",
       "/repo",
+      "/runtime-bridge",
+      "/session",
+      "/input",
+      "/approval",
       "/dashboard",
       "/tui"
     ]));
@@ -190,6 +194,10 @@ describe("production manifest pack", () => {
       "sandbox",
       "pty",
       "terminal",
+      "runtime-bridge",
+      "session",
+      "input",
+      "approval",
       "codex.exec_json",
       "claude_code.sdk",
       "opencode.acp"

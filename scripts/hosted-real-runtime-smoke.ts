@@ -52,14 +52,6 @@ async function main(): Promise<void> {
 
   try {
     await runHappyRuntime(enabled, {
-      runtime: "codex",
-      provider: "openai",
-      model: "gpt-5",
-      adapterType: "process",
-      runtimeMode: "codex.exec_json"
-    });
-
-    await runHappyRuntime(enabled, {
       runtime: "claude_code",
       provider: "anthropic",
       model: "claude-code",
@@ -76,7 +68,7 @@ async function main(): Promise<void> {
     });
 
     await verifyDeniedRequestHasNoSideEffects(disabled);
-    await verifyUnsupportedInteractionFails(enabled);
+    await verifyCodexHostedInputUnsupported(enabled);
     await verifyArtifactContent(enabled);
     await verifyRollbackDriftFailsBeforeAdapter(rollbackDrift);
     await verifyTimeoutAndCancellationMetrics();
@@ -171,31 +163,37 @@ async function verifyDeniedRequestHasNoSideEffects(harness: Awaited<ReturnType<t
   }
 }
 
-async function verifyUnsupportedInteractionFails(harness: Awaited<ReturnType<typeof createHarness>>): Promise<void> {
+async function verifyCodexHostedInputUnsupported(harness: Awaited<ReturnType<typeof createHarness>>): Promise<void> {
   const response = await harness.app.inject({
     method: "POST",
     url: "/runs",
     payload: {
-      runtime: "opencode",
-      provider: "opencode",
-      model: "opencode-default",
-      adapterType: "acpx",
-      runtimeMode: "opencode.acp",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5",
+      adapterType: "process",
+      runtimeMode: "codex.exec_json",
       cwd: "/srv/switchyard/work",
-      task: "permission-request",
+      task: "codex-bridge-unsupported",
       placement: "hosted"
     }
   });
-  assert(response.statusCode === 202, `hosted_real_runtime_smoke_unsupported_create_failed:${response.statusCode}`);
+  assert(response.statusCode === 202, `hosted_real_runtime_smoke_codex_create_failed:${response.statusCode}`);
 
   const runId = response.json().run.id as string;
-  await harness.permissionWorker.processNext();
-
-  const run = await harness.runs.get(runId);
-  if (!run || run.status === "waiting_for_input" || run.status === "waiting_for_approval") {
-    throw new Error("hosted_real_runtime_smoke_waiting_state_leak");
-  }
-  assert(run.status === "failed", `hosted_real_runtime_smoke_unsupported_not_failed:${run.status}`);
+  const input = await harness.app.inject({
+    method: "POST",
+    url: `/runs/${runId}/input`,
+    payload: {
+      text: "continue"
+    }
+  });
+  assert(input.statusCode === 409, `hosted_real_runtime_smoke_codex_input_status:${input.statusCode}`);
+  const reason = input.json().error?.details?.find((entry: { path?: string; issue?: string }) => entry.path === "reasonCode");
+  assert(
+    reason?.issue === "codex_exec_json_input_unsupported" || reason?.issue === "hosted_runtime_bridge_operation_unsupported",
+    `hosted_real_runtime_smoke_codex_reason:${reason?.issue ?? "missing"}`
+  );
 }
 
 async function verifyArtifactContent(harness: Awaited<ReturnType<typeof createHarness>>): Promise<void> {

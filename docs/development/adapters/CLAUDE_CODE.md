@@ -2,7 +2,7 @@
 
 This guide is only for Claude Code-specific local debugging. Use the [Official API Contract](../API.md) for endpoint shapes and [Local Development](../DEVELOPMENT.md) for daemon startup and general smoke commands.
 
-R21 hosted note: `claude_code.sdk` is in the known provider set for production hosted execution, but activation is operator opt-in only. Fake-only remains default, no-spend smoke is required before rollout, spend-gated canary is required before real traffic, and rollback returns to fake-only by config restart.
+R23 hosted note: `claude_code.sdk` hosted bridge support is shipped through existing hosted run input and approval resolution endpoints when runtime-bridge readiness checks pass (command store/outbox, ownership, quota/audit, worker claim, session reconciliation, approval sender, adapter capability). Activation remains operator opt-in. Fake/no-spend remains default.
 
 ## Current Claude Scope
 
@@ -21,9 +21,9 @@ Implemented:
 Not implemented yet:
 
 - PTY or TUI automation.
-- Hosted runtime expansion beyond the R21 known-provider opt-in slice.
-- Hosted approval bridge/input bridge/terminal bridge for provider runtime execution.
+- Hosted terminal bridge, PTY/TUI automation, and server-owned provider execution.
 - Session resume for `claude_code.sdk`.
+- Hosted live-resume guarantees across worker/provider loss.
 - Unbounded live-prompt checks in doctor/smoke/CI.
 
 ## Safety Defaults

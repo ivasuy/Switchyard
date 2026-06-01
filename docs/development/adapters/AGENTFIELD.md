@@ -19,6 +19,8 @@ Not shipped:
 
 - Per-run base URL/API key/target overrides.
 - Post-start input.
+- Hosted post-start input bridge.
+- Hosted runtime approval bridge.
 - Verified upstream cancellation endpoint support.
 - Webhook callbacks.
 - AgentField memory/admin/node lifecycle/permissions/Agentic APIs via Switchyard.

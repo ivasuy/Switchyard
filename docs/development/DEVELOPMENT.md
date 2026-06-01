@@ -93,7 +93,7 @@ pnpm --filter @switchyard/contracts openapi:generate:hosted
 pnpm --filter @switchyard/contracts openapi:check:hosted
 ```
 
-## R22 Production Operator Commands
+## R23 Production Operator Commands
 
 Preflight (required before deploy):
 
@@ -120,6 +120,12 @@ For optional live external-tool probes use the spend-gated canary command with e
 SWITCHYARD_CONFIRM_LIVE_TOOL_CANARY=1 pnpm production:live-tool-canary
 ```
 
+Optional live hosted-provider bridge probes are explicitly spend-gated and skipped by default:
+
+```bash
+SWITCHYARD_CONFIRM_LIVE_PROVIDER_BRIDGE_CANARY=1 pnpm production:canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --live-provider-bridges --confirm-live-provider-spend
+```
+
 Sandbox smoke (required before enabling worker claims in production posture):
 
 ```bash
@@ -132,7 +138,7 @@ Safe default sandbox env posture (required unless an operator intentionally enab
 - `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` unset when real execution is disabled.
 - If `SWITCHYARD_SANDBOX_REAL_EXECUTION=enabled`, `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` must be present and valid or readiness fails closed (`sandbox_policy_missing`/`sandbox_policy_invalid`).
 
-## R22 Hosted Rollout / Rollback
+## R23 Hosted Rollout / Rollback
 
 Rollout order (required):
 
@@ -156,7 +162,7 @@ Fail-closed production behavior:
 - Production hosted provider activation is operator opt-in only for known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`) and requires provider policy, credential presence, and spend controls.
 - Production hosted/connected-node tool activation is operator opt-in and requires explicit real-tool policy plus API-key auth, Postgres, Redis, object store, quota/audit readiness, worker claim readiness, and node readiness for connected-node tool placements.
 
-R22 non-goals reminder:
+R23 non-goals reminder:
 
 - No managed SaaS/public signup, payments/webhooks, OAuth/OIDC/SAML/SSO/SCIM, dashboard, or TUI setup is shipped here.
 - does not ship generic process/pty runtime adapters.
@@ -164,7 +170,10 @@ R22 non-goals reminder:
 - does not ship hosted browser automation.
 - does not ship hosted `repo` execution.
 - does not ship hosted debate real participants or hosted model judging.
-- does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
+- hosted bridges remain unshipped for `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, and `generic_http.async_rest`.
+- hosted `codex.interactive` remains local-only and unshipped.
+- hosted live-resume guarantees are not shipped.
+- does not ship hosted terminal bridge.
 - No public `/exec`/`/sandbox`/`/terminal`/`/pty`/`/shell`/`/process`/`/command` routes are shipped here.
 - R22 shipped real tools are exact-only: hosted worker `fetch/web_search/github/shell` and connected-node `fetch/web_search/github/repo/shell`.
 

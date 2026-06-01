@@ -33,11 +33,11 @@ export interface HostedRuntimeCatalogEntry {
 const SHARED_LIMITATIONS: RuntimeLimitation[] = [
   {
     code: "hosted_worker_owned",
-    message: "Self-hosted/staging hosted execution is worker-owned in R15 and does not run in the server process."
+    message: "Hosted execution is worker-owned and does not run provider sessions in the server process."
   },
   {
     code: "no_public_exec_routes",
-    message: "No public /sandbox, /exec, /pty, or /terminal execution route is available in R15."
+    message: "No public /sandbox, /exec, /pty, or /terminal execution route is shipped."
   }
 ];
 
@@ -112,11 +112,11 @@ export const HOSTED_RUNTIME_CATALOG: Record<HostedRuntimeModeSlug, HostedRuntime
       ...SHARED_LIMITATIONS,
       {
         code: "hosted_real_opt_in",
-        message: "codex.exec_json hosted execution is opt-in for self-hosted/staging operators only."
+        message: "codex.exec_json hosted execution is operator opt-in only."
       },
       {
         code: "codex_read_only_sandbox_required",
-        message: "Hosted Codex runs require read-only sandbox metadata in R15."
+        message: "Hosted Codex runs require read-only sandbox metadata."
       }
     ],
     manifest: {
@@ -143,20 +143,24 @@ export const HOSTED_RUNTIME_CATALOG: Record<HostedRuntimeModeSlug, HostedRuntime
       limitations: [
         {
           code: "hosted_worker_only",
-          message: "Hosted codex.exec_json is worker-owned and not available for server-local execution in R15."
+          message: "Hosted codex.exec_json is worker-owned and not available for server-local execution."
         },
         {
           code: "no_input_bridge",
-          message: "Hosted codex.exec_json does not support post-start input in R15."
+          message: "Hosted codex.exec_json is one-shot and does not support post-start input."
+        },
+        {
+          code: "no_approval_bridge",
+          message: "Hosted codex.exec_json does not support runtime approval resolution."
         },
         {
           code: "production_forbidden",
-          message: "Hosted codex.exec_json production execution is forbidden in R15."
+          message: "Hosted codex.exec_json production execution is forbidden unless explicitly activated by provider policy."
         }
       ],
       placement: {
         local: { support: "supported", reason: "Local Codex CLI execution is supported." },
-        hosted: { support: "conditional", reason: "Self-hosted/staging worker execution requires explicit operator opt-in in R15." },
+        hosted: { support: "conditional", reason: "Worker execution requires explicit operator opt-in and provider activation." },
         connectedLocalNode: { support: "future", reason: "Connected node support remains future scope." }
       },
       check: {
@@ -182,11 +186,11 @@ export const HOSTED_RUNTIME_CATALOG: Record<HostedRuntimeModeSlug, HostedRuntime
       ...SHARED_LIMITATIONS,
       {
         code: "hosted_real_opt_in",
-        message: "claude_code.sdk hosted execution is opt-in for self-hosted/staging operators only."
+        message: "claude_code.sdk hosted execution is operator opt-in only."
       },
       {
-        code: "no_hosted_input_bridge",
-        message: "Hosted post-start input and approval bridging are not supported in R15."
+        code: "hosted_bridge_readiness_required",
+        message: "Hosted Claude bridge support requires command store/outbox, ownership, quota/audit, worker readiness, session reconciliation, approval sender, and adapter capability readiness checks."
       }
     ],
     manifest: {
@@ -200,31 +204,42 @@ export const HOSTED_RUNTIME_CATALOG: Record<HostedRuntimeModeSlug, HostedRuntime
       kind: "sdk",
       capabilities: [
         "run.start",
+        "run.input",
         "run.cancel",
         "run.timeout",
+        "session.state",
         "event.normalized",
         "event.streaming",
+        "approval.bridge",
         "artifact.transcript",
         "artifact.raw_transcript",
         "auth.local"
       ],
       limitations: [
         {
+          code: "hosted_bridge_readiness_required",
+          message: "Hosted Claude bridge paths require bridge dependency readiness before admission."
+        },
+        {
           code: "hosted_worker_only",
-          message: "Hosted claude_code.sdk is worker-owned and not available for server-local execution in R15."
+          message: "Hosted claude_code.sdk is worker-owned and not available for server-local execution."
         },
         {
           code: "no_hosted_cancel_bridge",
-          message: "Hosted active cancellation bridge is not shipped in R15."
+          message: "Hosted active cancellation bridge is not shipped."
+        },
+        {
+          code: "no_hosted_live_resume_guarantee",
+          message: "Hosted Claude does not guarantee live resume continuity after worker or provider session loss."
         },
         {
           code: "production_forbidden",
-          message: "Hosted claude_code.sdk production execution is forbidden in R15."
+          message: "Hosted claude_code.sdk production execution is forbidden unless explicitly activated by provider policy."
         }
       ],
       placement: {
         local: { support: "conditional", reason: "Requires local Claude Code tooling and auth." },
-        hosted: { support: "conditional", reason: "Self-hosted/staging worker execution requires explicit operator opt-in in R15." },
+        hosted: { support: "conditional", reason: "Worker execution requires explicit operator opt-in and provider activation." },
         connectedLocalNode: { support: "future", reason: "Connected node support remains future scope." }
       },
       check: {
@@ -250,11 +265,11 @@ export const HOSTED_RUNTIME_CATALOG: Record<HostedRuntimeModeSlug, HostedRuntime
       ...SHARED_LIMITATIONS,
       {
         code: "hosted_real_opt_in",
-        message: "opencode.acp hosted execution is opt-in for self-hosted/staging operators only."
+        message: "opencode.acp hosted execution is operator opt-in only."
       },
       {
-        code: "acp_permission_unsupported",
-        message: "ACP permission requests fail visibly because hosted approval bridge is not shipped in R15."
+        code: "hosted_bridge_readiness_required",
+        message: "Hosted OpenCode bridge support requires command store/outbox, ownership, quota/audit, worker readiness, session reconciliation, approval sender, and adapter capability readiness checks."
       }
     ],
     manifest: {
@@ -268,31 +283,38 @@ export const HOSTED_RUNTIME_CATALOG: Record<HostedRuntimeModeSlug, HostedRuntime
       kind: "acp",
       capabilities: [
         "run.start",
+        "run.input",
         "run.cancel",
         "run.timeout",
+        "session.state",
         "event.normalized",
         "event.streaming",
+        "approval.bridge",
         "artifact.transcript",
         "artifact.raw_transcript",
         "auth.local"
       ],
       limitations: [
         {
+          code: "hosted_bridge_readiness_required",
+          message: "Hosted OpenCode bridge paths require bridge dependency readiness before admission."
+        },
+        {
           code: "hosted_worker_only",
-          message: "Hosted opencode.acp is worker-owned and not available for server-local execution in R15."
+          message: "Hosted opencode.acp is worker-owned and not available for server-local execution."
         },
         {
           code: "no_terminal_bridge",
-          message: "Hosted terminal and interactive bridges are not shipped in R15."
+          message: "Hosted terminal, PTY, and interactive screen-driving bridges are not shipped."
         },
         {
           code: "production_forbidden",
-          message: "Hosted opencode.acp production execution is forbidden in R15."
+          message: "Hosted opencode.acp production execution is forbidden unless explicitly activated by provider policy."
         }
       ],
       placement: {
         local: { support: "conditional", reason: "Requires local OpenCode tooling and auth." },
-        hosted: { support: "conditional", reason: "Self-hosted/staging worker execution requires explicit operator opt-in in R15." },
+        hosted: { support: "conditional", reason: "Worker execution requires explicit operator opt-in and provider activation." },
         connectedLocalNode: { support: "future", reason: "Connected node support remains future scope." }
       },
       check: {

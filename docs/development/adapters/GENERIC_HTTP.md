@@ -18,6 +18,8 @@ Not shipped:
 
 - Per-run base URL overrides.
 - Post-start input.
+- Hosted post-start input bridge.
+- Hosted runtime approval bridge.
 - Webhook callbacks.
 - Remote artifact URL fetching.
 - ACP, PTY, hosted execution, interactive Codex, debate, memory, tool expansion.

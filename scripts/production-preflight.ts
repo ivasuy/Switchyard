@@ -42,6 +42,18 @@ interface ControlPlaneCheckResult {
   checks: Array<{ name: string; ok: boolean; code: string; diagnostics?: Record<string, unknown> }>;
 }
 
+interface HostedRuntimeBridgeReadinessCheck {
+  name:
+    | "command_store"
+    | "command_outbox"
+    | "worker_claim"
+    | "adapter_capability"
+    | "session_reconciliation"
+    | "approval_sender";
+  ok: boolean;
+  reasonCode?: string;
+}
+
 export interface PreflightDeps {
   parseEnvFile?: typeof parseProductionEnvFile;
   validateManifest?: typeof validateProductionManifest;
@@ -62,7 +74,7 @@ export interface PreflightDeps {
     deploymentMode: string;
     allowlist: string[];
     hostedRealRuntimeExecution: string;
-  }) => Promise<{ ok: true } | { ok: false; code: string; diagnostics?: Record<string, unknown> }>;
+  }) => Promise<{ ok: true; diagnostics?: Record<string, unknown> } | { ok: false; code: string; diagnostics?: Record<string, unknown> }>;
   checkProviderAdapters?: (input: {
     workerConfig: ReturnType<typeof loadWorkerConfig>;
   }) => Promise<{
@@ -286,6 +298,12 @@ export async function runProductionPreflight(options: {
       ...(hostedRuntimeGate.diagnostics ? { diagnostics: redactDiagnostics(hostedRuntimeGate.diagnostics) } : {})
     });
   }
+  appendHostedRuntimeBridgeCheck(checks, {
+    allowlist: serverConfig.hostedRuntimeAllowlist,
+    hostedRealRuntimeExecution: serverConfig.hostedRealRuntimeExecution,
+    serverAuthMode: serverConfig.serverAuthMode,
+    hostedRuntimeGate
+  });
 
   if (postgres) {
     await postgres.close().catch(() => undefined);
@@ -352,6 +370,171 @@ function appendDependencySkipChecks(checks: ProductionPreflightCheck[], code: st
   checks.push({ name: "auditStore", status: "skip", code });
   checks.push({ name: "unownedResources", status: "skip", code });
   checks.push({ name: "hostedRuntimeGate", status: "skip", code });
+  checks.push({ name: "hostedRuntimeBridge", status: "skip", code });
+}
+
+function appendHostedRuntimeBridgeCheck(
+  checks: ProductionPreflightCheck[],
+  input: {
+    allowlist: string[];
+    hostedRealRuntimeExecution: string;
+    serverAuthMode: string;
+    hostedRuntimeGate: { ok: true; diagnostics?: Record<string, unknown> } | { ok: false; code: string; diagnostics?: Record<string, unknown> };
+  }
+): void {
+  const bridgeModes = input.allowlist.filter((mode) => mode === "claude_code.sdk" || mode === "opencode.acp");
+  if (bridgeModes.length === 0) {
+    checks.push({ name: "hostedRuntimeBridge", status: "pass", code: "hosted_runtime_bridge_inactive" });
+    return;
+  }
+  if (input.hostedRealRuntimeExecution !== "enabled") {
+    checks.push({ name: "hostedRuntimeBridge", status: "fail", code: "hosted_real_runtime_disabled" });
+    return;
+  }
+
+  const hasFailure = (name: string): boolean => checks.some((check) => check.name === name && check.status === "fail");
+  const gateChecks = readHostedRuntimeBridgeChecks(input.hostedRuntimeGate.diagnostics);
+  const gateCheckStatus = (name: HostedRuntimeBridgeReadinessCheck["name"]): { ok: boolean; reasonCode: string } => {
+    const found = gateChecks.find((entry) => entry.name === name);
+    if (!found) {
+      return { ok: true, reasonCode: "hosted_runtime_bridge_worker_unavailable" };
+    }
+    return {
+      ok: found.ok,
+      reasonCode: found.reasonCode ?? "hosted_runtime_bridge_worker_unavailable"
+    };
+  };
+
+  const bridgeChecks = [
+    {
+      name: "route_auth",
+      ok: input.serverAuthMode === "api_key",
+      reasonCode: "tool_hosted_auth_required"
+    },
+    {
+      name: "command_store",
+      ok: !hasFailure("schema") && gateCheckStatus("command_store").ok,
+      reasonCode: hasFailure("schema")
+        ? "hosted_runtime_bridge_store_unavailable"
+        : gateCheckStatus("command_store").reasonCode
+    },
+    {
+      name: "payload_store",
+      ok: !hasFailure("schema") && gateCheckStatus("command_store").ok,
+      reasonCode: hasFailure("schema")
+        ? "hosted_runtime_bridge_store_unavailable"
+        : gateCheckStatus("command_store").reasonCode
+    },
+    {
+      name: "command_outbox",
+      ok: !hasFailure("queue") && gateCheckStatus("command_outbox").ok,
+      reasonCode: hasFailure("queue")
+        ? "hosted_runtime_bridge_queue_unavailable"
+        : gateCheckStatus("command_outbox").reasonCode
+    },
+    {
+      name: "approval_ownership",
+      ok: !hasFailure("bootstrap") && !hasFailure("unownedResources"),
+      reasonCode: "unowned_resources_present"
+    },
+    {
+      name: "quota",
+      ok: !hasFailure("quotaStore"),
+      reasonCode: "quota_store_unavailable"
+    },
+    {
+      name: "audit",
+      ok: !hasFailure("auditStore"),
+      reasonCode: "audit_store_unavailable"
+    },
+    {
+      name: "worker_claim",
+      ok: gateCheckStatus("worker_claim").ok,
+      reasonCode: gateCheckStatus("worker_claim").reasonCode
+    },
+    {
+      name: "adapter_capability",
+      ok: !hasFailure("providerAdapterChecks") && gateCheckStatus("adapter_capability").ok,
+      reasonCode: hasFailure("providerAdapterChecks")
+        ? "hosted_runtime_bridge_operation_unsupported"
+        : gateCheckStatus("adapter_capability").reasonCode
+    },
+    {
+      name: "session_reconciliation",
+      ok: gateCheckStatus("session_reconciliation").ok,
+      reasonCode: gateCheckStatus("session_reconciliation").reasonCode
+    },
+    {
+      name: "approval_sender",
+      ok: gateCheckStatus("approval_sender").ok,
+      reasonCode: gateCheckStatus("approval_sender").reasonCode
+    }
+  ] as const;
+
+  const failed = bridgeChecks.filter((entry) => !entry.ok);
+  const diagnostics = redactDiagnostics({
+    bridgeModes,
+    failedChecks: failed.map((entry) => entry.name),
+    checks: Object.fromEntries(bridgeChecks.map((entry) => [entry.name, entry.ok ? "pass" : "fail"]))
+  });
+
+  if (failed.length > 0) {
+    checks.push({
+      name: "hostedRuntimeBridge",
+      status: "fail",
+      code: failed[0]?.reasonCode ?? "hosted_runtime_bridge_worker_unavailable",
+      ...(diagnostics ? { diagnostics } : {})
+    });
+    return;
+  }
+
+  checks.push({
+    name: "hostedRuntimeBridge",
+    status: "pass",
+    code: "hosted_runtime_bridge_ready",
+    ...(diagnostics ? { diagnostics } : {})
+  });
+}
+
+function readHostedRuntimeBridgeChecks(
+  diagnostics: Record<string, unknown> | undefined
+): HostedRuntimeBridgeReadinessCheck[] {
+  if (!diagnostics || !isRecord(diagnostics)) {
+    return [];
+  }
+  const bridgeReadiness = diagnostics["bridgeReadiness"];
+  if (!isRecord(bridgeReadiness)) {
+    return [];
+  }
+  const checks = bridgeReadiness["checks"];
+  if (!Array.isArray(checks)) {
+    return [];
+  }
+  const out: HostedRuntimeBridgeReadinessCheck[] = [];
+  for (const entry of checks) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const name = entry["name"];
+    const ok = entry["ok"];
+    const reasonCode = entry["reasonCode"];
+    if (
+      (name === "command_store" ||
+        name === "command_outbox" ||
+        name === "worker_claim" ||
+        name === "adapter_capability" ||
+        name === "session_reconciliation" ||
+        name === "approval_sender") &&
+      typeof ok === "boolean"
+    ) {
+      out.push({
+        name,
+        ok,
+        ...(typeof reasonCode === "string" ? { reasonCode } : {})
+      });
+    }
+  }
+  return out;
 }
 
 async function appendProviderActivationChecks(

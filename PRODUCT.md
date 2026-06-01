@@ -47,15 +47,15 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/phase-21-r22-hosted-connected-real-tools` (R22 hosted + connected-node real-tool execution baseline).
+Snapshot source: `agent/phase-22-r23-hosted-runtime-bridges` (R23 hosted runtime bridge baseline).
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and real/fake tool invocations; shipped local deterministic Debate V1; shipped hosted worker and connected-node execution foundations; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; shipped S3/R2-compatible object-store client wiring for hosted artifact content; shipped the R18 API-first hosted/server enterprise control-plane foundation; shipped R19 production hosted deployment readiness; shipped R20 internal production subprocess/PTY sandbox foundation plus production ops gates; shipped R21 production hosted provider activation for the known provider set `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; and shipped R22 hosted/connected-node real-tool execution for the exact R22 set with policy-first fail-closed checks. Fake-only remains default and no-spend remains default for tests/smoke/preflight/default canary. Production live external-tool probes are explicit opt-in only.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and real/fake tool invocations; shipped local deterministic Debate V1; shipped hosted worker and connected-node execution foundations; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; shipped S3/R2-compatible object-store client wiring for hosted artifact content; shipped the R18 API-first hosted/server enterprise control-plane foundation; shipped R19 production hosted deployment readiness; shipped R20 internal production subprocess/PTY sandbox foundation plus production ops gates; shipped R21 production hosted provider activation for the known provider set `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped R22 hosted/connected-node real-tool execution for the exact R22 set with policy-first fail-closed checks; and shipped R23 hosted runtime input/approval bridges for worker-owned `claude_code.sdk` and structured `opencode.acp` through existing hosted run input and approval resolution endpoints. Fake-only remains default and no-spend remains default for tests/smoke/preflight/default canary. Production live probes remain explicit opt-in only.
 
 The product is usable locally for one-shot agent runs, bounded Claude Code interaction, fake deterministic debate execution, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, the R12 self-hosted staging deployment foundation, the R18 hosted enterprise auth/tenant/quota/audit control-plane baseline, the R19 production hosted deployment operability workflow (`production:preflight`, `production:migrate`, `production:canary`), the R20 production sandbox operability smoke (`production:sandbox-smoke`), and the R21 no-spend hosted-provider smoke/canary workflow. It is not a managed hosted platform. Hosted real-provider production execution is shipped only for the known provider set and remains gated behind explicit operator activation.
 
 Important runtime wording: `codex.exec_json` remains the default inferred Codex one-shot mode. `codex.interactive` is a separate explicit local-only mode for bounded post-start input and resume/session-state flows.
 
-R22 production hosted + connected-node tool boundary wording:
+R23 production hosted boundary wording:
 
 - Hosted/server APIs require API key auth in staging/production fail-closed mode.
 - Hosted `/metrics` remains global operator/admin telemetry (`metrics:read` plus `admin:read`) and is not tenant-scoped in R20.
@@ -65,7 +65,11 @@ R22 production hosted + connected-node tool boundary wording:
 - Local daemon defaults remain no-auth and backwards compatible for local fake runs, SDK usage, CLI fake runs, and local OpenAPI export.
 - R22 ships hosted worker tools for `fetch`, `web_search`, `github`, and command-catalog `shell`.
 - R22 ships connected-node tools for `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell`.
-- R22 still does not ship generic process/PTY runtime adapters, Cursor/OpenClaw/Paperclip adapters, hosted browser automation, hosted `repo` execution, hosted approval bridge/input bridge/terminal bridge, hosted debate real participants, or hosted model judging.
+- R23 hosted runtime bridge support is shipped only for `claude_code.sdk` and `opencode.acp`.
+- `codex.exec_json` remains one-shot with hosted input and approval bridges explicitly unsupported.
+- `codex.interactive` remains explicit local-only and unshipped for hosted placement.
+- AgentField and Generic HTTP hosted bridges remain unshipped pending durable callback contracts.
+- No dashboard/TUI, no public arbitrary `/exec`/`/shell`/`/process`/`/command`/`/pty`/`/terminal`/`/sandbox` routes, no hosted browser automation, no hosted debate real participants, and no hosted model judging ship in R23.
 - R21 rollback to fake-only is operator-controlled by config change + restart (`SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`, allowlist reset to `fake.deterministic`).
 
 ## What Exists Today
@@ -170,7 +174,7 @@ R16 Codex boundary note:
 
 - `codex.exec_json` remains one-shot with unchanged default inference and unsupported post-start input semantics.
 - `codex.interactive` is explicit local-only runtime mode; `POST /runs?wait=1` is rejected (`interactive_wait_unsupported`) for this mode.
-- No hosted interactive Codex run bridge, no hosted post-start input bridge, no hosted approval bridge, no PTY/TUI automation, and no public `/sandbox`/`/exec`/`/pty`/`/terminal` route are shipped.
+- No hosted interactive Codex run bridge, no PTY/TUI automation, and no public `/sandbox`/`/exec`/`/pty`/`/terminal` route are shipped.
 
 ### REST API
 
@@ -273,7 +277,7 @@ These are planned or designed in docs, but not shipped product:
 - Payment provider integration (invoices, checkout, webhooks, tax, dunning, subscription lifecycle).
 - Public tenant self-service signup/billing/key-management UI.
 - OAuth/OIDC/SAML/SSO/SCIM, session-cookie auth, and browser login flows.
-- Production hosted real-runtime worker deployment for Codex, Claude Code, OpenCode, arbitrary process, or PTY execution.
+- Production hosted arbitrary process/PTY runtime deployment.
 - Public arbitrary subprocess/PTY execution APIs and generic process/PTY product adapters are not shipped.
 - Presigned direct upload/download URLs, bucket provisioning automation, lifecycle policy management, provider-managed encryption setup, and CDN integration.
 - WebSocket protocol package.
@@ -285,7 +289,7 @@ These are planned or designed in docs, but not shipped product:
 - Generic process adapter.
 - PTY adapter.
 - Hosted debate with real participant runtimes and model judging.
-- Hosted/runtime-specific approval bridges for OpenCode, AgentField, Generic HTTP, and hosted Codex are not shipped. R16 ships only local Codex interactive approval terminalization for the local daemon path.
+- Hosted/runtime-specific bridges remain unshipped for `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, and `generic_http.async_rest`.
 - Browser automation is not shipped and remains denied with `browser_tool_unshipped`.
 - Hosted `repo` execution is not shipped and remains denied with `repo_hosted_unshipped`.
 - R22 ships hosted worker real tools (`fetch`, `web_search`, `github`, command-catalog `shell`) and connected-node real tools (`fetch`, `web_search`, `github`, `repo`, command-catalog `shell`) through the same policy/approval contract.
@@ -296,8 +300,8 @@ These are planned or designed in docs, but not shipped product:
 - Hosted interactive Codex sessions.
 - Hosted Codex approval bridging.
 - Codex live-resume success guarantees and hosted session-resume runtime mode.
-- Hosted Codex execution.
-- Hosted Claude Code/OpenCode execution.
+- Hosted Codex execution beyond one-shot `codex.exec_json` admission and fail-closed bridge semantics.
+- Hosted Claude Code/OpenCode execution outside the shipped R23 bridge boundary.
 - Runtime approval/session-resume bridge for interactive Codex.
 
 ## Release Roadmap

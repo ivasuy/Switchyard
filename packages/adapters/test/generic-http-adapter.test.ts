@@ -12,6 +12,13 @@ describe("GenericHttpAsyncRestAdapter", () => {
     expect(adapter.manifest.kind).toBe("async_rest");
     expect(adapter.manifest.capabilities).toContain("auth.api_key");
     expect(adapter.manifest.capabilities).not.toContain("run.input");
+    expect(adapter.manifest.placement.hosted).toMatchObject({
+      support: "future",
+      reason: expect.stringContaining("not shipped")
+    });
+    expect(adapter.manifest.limitations).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "no_post_start_input" })])
+    );
 
     const mode = runtimeModeSchema.parse({
       id: adapter.manifest.runtimeModeId,

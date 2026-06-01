@@ -223,4 +223,40 @@ describe("hosted runtime catalog", () => {
       })
     ).toBe(true);
   });
+
+  it("keeps codex one-shot while advertising hosted bridge capabilities for claude and opencode", () => {
+    const codex = HOSTED_RUNTIME_CATALOG["codex.exec_json"].manifest;
+    const claude = HOSTED_RUNTIME_CATALOG["claude_code.sdk"].manifest;
+    const opencode = HOSTED_RUNTIME_CATALOG["opencode.acp"].manifest;
+
+    expect(codex.capabilities).not.toEqual(
+      expect.arrayContaining(["run.input", "session.state", "approval.bridge"])
+    );
+    expect(codex.limitations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "no_input_bridge" }),
+        expect.objectContaining({ code: "no_approval_bridge" })
+      ])
+    );
+
+    expect(claude.capabilities).toEqual(
+      expect.arrayContaining(["run.input", "session.state", "approval.bridge"])
+    );
+    expect(claude.limitations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "hosted_bridge_readiness_required" }),
+        expect.objectContaining({ code: "no_hosted_live_resume_guarantee" })
+      ])
+    );
+
+    expect(opencode.capabilities).toEqual(
+      expect.arrayContaining(["run.input", "session.state", "approval.bridge"])
+    );
+    expect(opencode.limitations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "hosted_bridge_readiness_required" }),
+        expect.objectContaining({ code: "no_terminal_bridge" })
+      ])
+    );
+  });
 });

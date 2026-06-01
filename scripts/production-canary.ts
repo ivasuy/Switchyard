@@ -20,7 +20,8 @@ type CanaryCode =
   | "malformed_sse"
   | "tool_canary_denied"
   | "approval_canary_failed"
-  | "tool_live_canary_config_missing";
+  | "tool_live_canary_config_missing"
+  | "provider_bridge_live_canary_config_missing";
 
 interface CanaryStep {
   name: string;
@@ -58,6 +59,8 @@ export interface ProductionCanaryOptions {
   now?: () => number;
   liveExternalTools?: boolean;
   confirmLiveToolSpend?: boolean;
+  liveProviderBridges?: boolean;
+  confirmLiveProviderSpend?: boolean;
 }
 
 interface ParsedCanaryArgs {
@@ -67,6 +70,8 @@ interface ParsedCanaryArgs {
   json: boolean;
   liveExternalTools: boolean;
   confirmLiveToolSpend: boolean;
+  liveProviderBridges: boolean;
+  confirmLiveProviderSpend: boolean;
 }
 
 interface ParsedSse {
@@ -153,6 +158,12 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
   if (options.liveExternalTools && !confirmLiveToolSpend) {
     addStep(steps, now, startedAtMs, "input.liveTools", "fail", "tool_live_canary_config_missing");
     return finalize(false, "tool_live_canary_config_missing", steps, summary, now, startedAtMs);
+  }
+  const confirmLiveProviderSpend = options.confirmLiveProviderSpend
+    || process.env["SWITCHYARD_CONFIRM_LIVE_PROVIDER_BRIDGE_CANARY"] === "1";
+  if (options.liveProviderBridges && !confirmLiveProviderSpend) {
+    addStep(steps, now, startedAtMs, "input.liveProviderBridges", "fail", "provider_bridge_live_canary_config_missing");
+    return finalize(false, "provider_bridge_live_canary_config_missing", steps, summary, now, startedAtMs);
   }
 
   const state: FetchState = {
@@ -241,6 +252,16 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
           enableWith: "--live-external-tools --confirm-live-tool-spend"
         }
       });
+    }
+    if (!options.liveProviderBridges) {
+      addStep(steps, now, startedAtMs, "providerBridges", "info", "provider_bridge_skipped_default", {
+        details: {
+          reason: "live_provider_bridges_not_enabled",
+          enableWith: "--live-provider-bridges --confirm-live-provider-spend"
+        }
+      });
+    } else {
+      addStep(steps, now, startedAtMs, "providerBridges", "info", "provider_bridge_live_canary_enabled");
     }
 
     const runDeadline = startedAtMs + timeoutMs;
@@ -632,7 +653,13 @@ async function invokeTool(
 }
 
 function parseCliArgs(argv: string[]): ParsedCanaryArgs {
-  const parsed: ParsedCanaryArgs = { json: false, liveExternalTools: false, confirmLiveToolSpend: false };
+  const parsed: ParsedCanaryArgs = {
+    json: false,
+    liveExternalTools: false,
+    confirmLiveToolSpend: false,
+    liveProviderBridges: false,
+    confirmLiveProviderSpend: false
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (!token) {
@@ -665,6 +692,14 @@ function parseCliArgs(argv: string[]): ParsedCanaryArgs {
     }
     if (token === "--confirm-live-tool-spend") {
       parsed.confirmLiveToolSpend = true;
+      continue;
+    }
+    if (token === "--live-provider-bridges") {
+      parsed.liveProviderBridges = true;
+      continue;
+    }
+    if (token === "--confirm-live-provider-spend") {
+      parsed.confirmLiveProviderSpend = true;
       continue;
     }
     if (token === "--json") {
@@ -1179,7 +1214,9 @@ async function main(): Promise<void> {
     apiKey: args.apiKey,
     timeoutMs: args.timeoutMs,
     liveExternalTools: args.liveExternalTools,
-    confirmLiveToolSpend: args.confirmLiveToolSpend
+    confirmLiveToolSpend: args.confirmLiveToolSpend,
+    liveProviderBridges: args.liveProviderBridges,
+    confirmLiveProviderSpend: args.confirmLiveProviderSpend
   });
 
   if (args.json) {

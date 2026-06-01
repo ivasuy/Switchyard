@@ -371,6 +371,18 @@ describe("runProductionCanary", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  test("fails fast when live provider bridge mode is requested without explicit spend confirmation", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const result = await runProductionCanary({
+      baseUrl: "https://switchyard.example",
+      apiKey: "test-key",
+      liveProviderBridges: true,
+      fetchImpl
+    });
+    expectFailure(result, "provider_bridge_live_canary_config_missing");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   test("returns auth_required and never calls fetch when api key is missing", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
     const result = await runProductionCanary({ baseUrl: "https://switchyard.example", fetchImpl });
@@ -411,6 +423,23 @@ describe("runProductionCanary", () => {
     });
 
     expectFailure(result, "tool_canary_denied");
+  });
+
+  test("default canary reports live provider bridge probes as skipped", async () => {
+    const baseUrl = "https://switchyard.example";
+    const bytes = new TextEncoder().encode("canary artifact output");
+    const { fetchImpl } = createPlannedFetch(baseUrl, buildNoToolHappyPlan(bytes));
+
+    const result = await runProductionCanary({
+      baseUrl,
+      apiKey: "test-key",
+      fetchImpl,
+      timeoutMs: 5_000,
+      now: makeNow(Array.from({ length: 40 }, (_, index) => index * 50))
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.steps.some((step) => step.name === "providerBridges" && step.code === "provider_bridge_skipped_default")).toBe(true);
   });
 
   test("fails with approval_canary_failed when reject flow cannot be validated", async () => {
