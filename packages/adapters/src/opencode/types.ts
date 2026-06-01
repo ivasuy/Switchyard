@@ -21,6 +21,7 @@ export interface OpenCodeAcpAdapterOptions {
       message?: string;
   }>;
   hostedProviderCommand?: ProviderResolvedCommand;
+  hostedBridgeEnabled?: boolean;
 }
 
 export interface OpenCodeAcpSessionState {
@@ -32,6 +33,10 @@ export interface OpenCodeAcpSessionState {
   initialEvents: SwitchyardEvent[];
   terminal?: SwitchyardEvent;
   promptActive: boolean;
+  hostedBridgeEnabled: boolean;
+  sessionReadyForPrompt: boolean;
+  pendingPermissionRequestId: string | undefined;
+  pendingPermissionExpiresAt: string | undefined;
   terminalWaiters: Array<(event: SwitchyardEvent | undefined) => void>;
 }
 

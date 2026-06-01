@@ -338,6 +338,223 @@ describe("OpenCodeAcpAdapter", () => {
     } satisfies Partial<AdapterProtocolError>);
   });
 
+  it("creates approval.requested for hosted permission flow when bridge is enabled", async () => {
+    const stats: FakeAcpRuntimeStats = { prompts: 0, cancels: 0, permissionResponses: 0 };
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "opencode.acp",
+      executablePath: "/opt/provider/bin/opencode",
+      argv: ["acp"],
+      cwd: "/repo",
+      env: {},
+      envKeys: [],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new OpenCodeAcpAdapter({
+      hostedProviderCommand,
+      hostedBridgeEnabled: true,
+      processFactory: createFakeAcpProcessFactory({ scenario: "permission_request", stats }),
+      probeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    const session = await adapter.start({
+      runId: "run_perm_bridge_enabled",
+      runtime: "opencode",
+      runtimeMode: "opencode.acp",
+      provider: "opencode",
+      model: "opencode-default",
+      cwd: "/repo",
+      task: "permission path",
+      metadata: {}
+    });
+
+    const iterator = adapter.events({ ...session, runId: "run_perm_bridge_enabled" })[Symbol.asyncIterator]();
+    let approvalEvent: { payload: Record<string, unknown> } | undefined;
+    for (let i = 0; i < 6; i += 1) {
+      const next = await iterator.next();
+      if (next.done) {
+        break;
+      }
+      if (next.value.type === "approval.requested") {
+        approvalEvent = { payload: next.value.payload };
+        break;
+      }
+    }
+
+    expect(approvalEvent).toBeDefined();
+    expect(approvalEvent?.payload["runtimeApprovalToken"]).toBe("perm_1");
+    expect(typeof approvalEvent?.payload["expiresAt"]).toBe("string");
+
+    await expect(adapter.send({ ...session, runId: "run_perm_bridge_enabled" }, {
+      type: "approval_resolution",
+      runtimeApprovalToken: "perm_1",
+      decision: "approved"
+    })).resolves.toBeUndefined();
+
+    await expect(adapter.send({ ...session, runId: "run_perm_bridge_enabled" }, {
+      type: "approval_resolution",
+      runtimeApprovalToken: "perm_1",
+      decision: "approved"
+    })).rejects.toMatchObject({ reasonCode: "runtime_approval_pause_not_active" });
+
+    expect(stats.permissionResponses).toBe(1);
+  });
+
+  it("rejects concurrent hosted prompt input while prompt is in flight", async () => {
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "opencode.acp",
+      executablePath: "/opt/provider/bin/opencode",
+      argv: ["acp"],
+      cwd: "/repo",
+      env: {},
+      envKeys: [],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new OpenCodeAcpAdapter({
+      hostedProviderCommand,
+      hostedBridgeEnabled: true,
+      processFactory: createFakeAcpProcessFactory({ scenario: "permission_request" }),
+      probeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    const session = await adapter.start({
+      runId: "run_perm_conflict",
+      runtime: "opencode",
+      runtimeMode: "opencode.acp",
+      provider: "opencode",
+      model: "opencode-default",
+      cwd: "/repo",
+      task: "permission path",
+      metadata: {}
+    });
+
+    const iterator = adapter.events({ ...session, runId: "run_perm_conflict" })[Symbol.asyncIterator]();
+    for (let i = 0; i < 6; i += 1) {
+      const next = await iterator.next();
+      if (next.done) {
+        break;
+      }
+      if (next.value.type === "approval.requested") {
+        break;
+      }
+    }
+
+    await expect(
+      adapter.send({ ...session, runId: "run_perm_conflict" }, { text: "continue" })
+    ).rejects.toMatchObject({ reasonCode: "acp_prompt_in_flight" } satisfies Partial<AdapterProtocolError>);
+
+    await expect(adapter.send({ ...session, runId: "run_perm_conflict" }, {
+      type: "approval_resolution",
+      runtimeApprovalToken: "perm_1",
+      decision: "approved"
+    })).resolves.toBeUndefined();
+  });
+
+  it("maps pending permission loss to named ACP bridge error", async () => {
+    let processHandle: ReturnType<typeof startFakeAcpRuntimeProcess> | undefined;
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "opencode.acp",
+      executablePath: "/opt/provider/bin/opencode",
+      argv: ["acp"],
+      cwd: "/repo",
+      env: {},
+      envKeys: [],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new OpenCodeAcpAdapter({
+      hostedProviderCommand,
+      hostedBridgeEnabled: true,
+      processFactory: () => {
+        processHandle = startFakeAcpRuntimeProcess({ scenario: "permission_request" });
+        return processHandle.process;
+      },
+      probeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    const session = await adapter.start({
+      runId: "run_perm_lost",
+      runtime: "opencode",
+      runtimeMode: "opencode.acp",
+      provider: "opencode",
+      model: "opencode-default",
+      cwd: "/repo",
+      task: "permission path",
+      metadata: {}
+    });
+
+    const iterator = adapter.events({ ...session, runId: "run_perm_lost" })[Symbol.asyncIterator]();
+    for (let i = 0; i < 6; i += 1) {
+      const next = await iterator.next();
+      if (next.done) {
+        break;
+      }
+      if (next.value.type === "approval.requested") {
+        break;
+      }
+    }
+    processHandle?.close();
+
+    await expect(adapter.send({ ...session, runId: "run_perm_lost" }, {
+      type: "approval_resolution",
+      runtimeApprovalToken: "perm_1",
+      decision: "approved"
+    })).rejects.toMatchObject({
+      reasonCode: "acp_permission_response_failed"
+    } satisfies Partial<AdapterProtocolError>);
+  });
+
+  it("sends hosted follow-up prompt input only after session is ready", async () => {
+    const captured = { prompts: 0 };
+    const hostedProviderCommand: ProviderResolvedCommand = {
+      runtimeMode: "opencode.acp",
+      executablePath: "/opt/provider/bin/opencode",
+      argv: ["acp"],
+      cwd: "/repo",
+      env: {},
+      envKeys: [],
+      allowUserArgs: false,
+      redactedSummary: {}
+    };
+    const adapter = new OpenCodeAcpAdapter({
+      hostedProviderCommand,
+      hostedBridgeEnabled: true,
+      processFactory: (_args, options) => {
+        const handle = startFakeAcpRuntimeProcess({ scenario: "happy" });
+        const originalWrite = handle.process.stdin.write.bind(handle.process.stdin);
+        handle.process.stdin.write = ((data: string) => {
+          if (data.includes("\"method\":\"session/prompt\"")) {
+            captured.prompts += 1;
+          }
+          return originalWrite(data);
+        }) as typeof handle.process.stdin.write;
+        return handle.process;
+      },
+      probeVersion: async () => ({ status: "ok", version: "1.3.15" })
+    });
+    const session = await adapter.start({
+      runId: "run_follow_up_ready",
+      runtime: "opencode",
+      runtimeMode: "opencode.acp",
+      provider: "opencode",
+      model: "opencode-default",
+      cwd: "/repo",
+      task: "initial prompt",
+      metadata: {}
+    });
+
+    await expect(adapter.send({ ...session, runId: "run_follow_up_ready" }, { text: "too early" })).rejects.toMatchObject({
+      reasonCode: "acp_session_not_ready_for_input"
+    } satisfies Partial<AdapterProtocolError>);
+
+    const events = [];
+    for await (const event of adapter.events({ ...session, runId: "run_follow_up_ready" })) {
+      events.push(event);
+    }
+    expect(events.at(-1)).toMatchObject({ type: "runtime.status", payload: { status: "waiting_for_input" } });
+
+    await expect(adapter.send({ ...session, runId: "run_follow_up_ready" }, { text: "follow-up" })).resolves.toBeUndefined();
+    expect(captured.prompts).toBe(2);
+  });
+
   it("redacts hosted transcript artifacts while retaining hosted-safe diagnostics", async () => {
     const hostedProviderCommand: ProviderResolvedCommand = {
       runtimeMode: "opencode.acp",

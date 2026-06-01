@@ -12,6 +12,7 @@ import {
   AcpProtocolError,
   AcpResponseError,
   AcpStdioClient,
+  type JsonRpcRequestMessage,
   acpInitializeResultSchema,
   acpSessionNewResultSchema
 } from "@switchyard/protocol-acpx";
@@ -78,6 +79,7 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
   private readonly checkCwd: string;
   private readonly probeVersion;
   private readonly hostedProviderCommand: ProviderResolvedCommand | undefined;
+  private readonly hostedBridgeEnabled: boolean;
   private readonly sessions = new Map<string, OpenCodeAcpSessionState>();
 
   constructor(options: OpenCodeAcpAdapterOptions = {}) {
@@ -91,6 +93,7 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
     this.checkCwd = options.checkCwd ?? process.cwd();
     this.probeVersion = options.probeVersion;
     this.hostedProviderCommand = options.hostedProviderCommand;
+    this.hostedBridgeEnabled = options.hostedBridgeEnabled ?? false;
   }
 
   async check(): Promise<RuntimeAdapterCheck> {
@@ -192,6 +195,10 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
       externalSessionKey: acpSessionId,
       initialEvents,
       promptActive: false,
+      hostedBridgeEnabled: Boolean(this.hostedProviderCommand && this.hostedBridgeEnabled),
+      sessionReadyForPrompt: false,
+      pendingPermissionRequestId: undefined,
+      pendingPermissionExpiresAt: undefined,
       terminalWaiters: []
     });
     this.log("info", "opencode.acp.start", { runId, acpSessionId });
@@ -202,12 +209,156 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
     };
   }
 
-  async send(_session: Record<string, unknown>, _input: Record<string, unknown>): Promise<void> {
-    if (this.hostedProviderCommand) {
+  async send(session: Record<string, unknown>, input: Record<string, unknown>): Promise<void> {
+    const stored = this.requireSession(session);
+    if (this.hostedProviderCommand && !stored.hostedBridgeEnabled) {
       throw new AdapterProtocolError("Hosted OpenCode input bridge is unsupported.", {
         reasonCode: "hosted_input_bridge_unsupported"
       });
     }
+
+    const text = input["text"];
+    if (typeof text === "string") {
+      if (stored.terminal) {
+        throw new AdapterProtocolError("OpenCode ACP session is not active.", {
+          reasonCode: "runtime_input_not_active"
+        });
+      }
+      if (!stored.hostedBridgeEnabled) {
+        throw new AdapterProtocolError("OpenCode ACP does not support POST /runs/:id/input in R5.", {
+          reasonCode: "opencode_input_unsupported"
+        });
+      }
+      if (stored.promptActive) {
+        throw new AdapterProtocolError("OpenCode ACP prompt is already active.", {
+          reasonCode: "acp_prompt_in_flight"
+        });
+      }
+      if (!stored.sessionReadyForPrompt) {
+        throw new AdapterProtocolError("OpenCode ACP session is not ready for prompt input.", {
+          reasonCode: "acp_session_not_ready_for_input"
+        });
+      }
+      if (text.trim().length === 0) {
+        throw new AdapterProtocolError("OpenCode input text must be non-empty.", {
+          reasonCode: "runtime_input_empty"
+        });
+      }
+
+      stored.promptActive = true;
+      stored.sessionReadyForPrompt = false;
+      try {
+        const promptResult = await stored.client.request("session/prompt", {
+          sessionId: stored.externalSessionKey,
+          prompt: [{ type: "text", text }]
+        }, { timeoutMs: this.requestTimeoutMs });
+
+        const stopReason = readStopReason(promptResult);
+        if (stopReason === "end_turn" || stopReason === "max_tokens" || stopReason === "max_turn_requests") {
+          stored.sessionReadyForPrompt = true;
+          this.log("info", "opencode.acp.prompt.accepted", {
+            runId: stored.runId,
+            acpSessionId: stored.externalSessionKey
+          });
+          return;
+        }
+
+        stored.terminal = mapPromptStopReason(stored.runId, 0, stopReason);
+        this.resolveWaiters(stored, stored.terminal);
+        return;
+      } catch (error) {
+        if (error instanceof AcpProtocolError) {
+          throw new AdapterProtocolError("OpenCode ACP prompt request failed.", {
+            reasonCode: error.reasonCode
+          });
+        }
+        if (error instanceof AcpResponseError) {
+          throw new AdapterProtocolError("OpenCode ACP prompt request failed.", {
+            reasonCode: "acp_prompt_error"
+          });
+        }
+        throw new AdapterProtocolError("OpenCode ACP prompt request failed.", {
+          reasonCode: "acp_prompt_error"
+        });
+      } finally {
+        stored.promptActive = false;
+      }
+    }
+
+    if (input["type"] === "approval_resolution") {
+      if (!stored.hostedBridgeEnabled) {
+        throw new AdapterProtocolError("OpenCode ACP does not support POST /runs/:id/input in R5.", {
+          reasonCode: "opencode_input_unsupported"
+        });
+      }
+      const runtimeApprovalToken = input["runtimeApprovalToken"];
+      if (typeof runtimeApprovalToken !== "string" || runtimeApprovalToken !== stored.pendingPermissionRequestId) {
+        throw new AdapterProtocolError("Runtime approval pause is not active.", {
+          reasonCode: "runtime_approval_pause_not_active"
+        });
+      }
+      if (stored.terminal) {
+        throw new AdapterProtocolError("Runtime approval pause is not active.", {
+          reasonCode: "runtime_approval_pause_not_active"
+        });
+      }
+      if (stored.pendingPermissionExpiresAt && Date.now() >= Date.parse(stored.pendingPermissionExpiresAt)) {
+        stored.pendingPermissionRequestId = undefined;
+        stored.pendingPermissionExpiresAt = undefined;
+        throw new AdapterProtocolError("ACP permission request already expired.", {
+          reasonCode: "acp_permission_request_expired"
+        });
+      }
+
+      const decision = input["decision"] === "rejected" ? "rejected" : "approved";
+      const message = typeof input["message"] === "string" && input["message"].trim().length > 0
+        ? input["message"].trim()
+        : `${decision} by switchyard`;
+      const answers = readRecord(input["answers"]);
+
+      try {
+        if (decision === "rejected") {
+          await stored.client.rejectRequest(runtimeApprovalToken, {
+            code: -32000,
+            message,
+            ...(answers ? { data: { decision, answers } } : { data: { decision } })
+          });
+        } else {
+          await stored.client.respondToRequest(runtimeApprovalToken, {
+            decision,
+            message,
+            ...(answers ? { answers } : {})
+          });
+        }
+      } catch (error) {
+        if (error instanceof AcpProtocolError) {
+          const mappedReasonCode = error.reasonCode === "acp_permission_request_expired"
+            ? "acp_permission_request_expired"
+            : "acp_permission_response_failed";
+          this.log("warn", "opencode.acp.bridge.failed", { runId: stored.runId, reasonCode: mappedReasonCode });
+          throw new AdapterProtocolError("OpenCode ACP permission response failed.", {
+            reasonCode: mappedReasonCode
+          });
+        }
+        this.log("warn", "opencode.acp.bridge.failed", {
+          runId: stored.runId,
+          reasonCode: "acp_permission_response_failed"
+        });
+        throw new AdapterProtocolError("OpenCode ACP permission response failed.", {
+          reasonCode: "acp_permission_response_failed"
+        });
+      }
+
+      stored.pendingPermissionRequestId = undefined;
+      stored.pendingPermissionExpiresAt = undefined;
+      this.log("info", "opencode.acp.permission.resolved", {
+        runId: stored.runId,
+        requestId: runtimeApprovalToken,
+        decision
+      });
+      return;
+    }
+
     throw new AdapterProtocolError("OpenCode ACP does not support POST /runs/:id/input in R5.", {
       reasonCode: "opencode_input_unsupported"
     });
@@ -291,21 +442,43 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
       }
 
       if (event.type === "permission_request") {
-        const terminal = eventForFailure(
-          runId,
-          sequence++,
-          this.hostedProviderCommand ? "hosted_approval_bridge_unsupported" : "acp_permission_request_unsupported"
-        );
-        stored.terminal = terminal;
-        stored.promptActive = false;
-        this.resolveWaiters(stored, terminal);
-        yield terminal;
-        try {
-          await stored.client.notify("session/cancel", { sessionId: stored.externalSessionKey });
-        } catch {
-          // Best-effort cleanup only.
+        if (!stored.hostedBridgeEnabled) {
+          const terminal = eventForFailure(
+            runId,
+            sequence++,
+            this.hostedProviderCommand ? "hosted_approval_bridge_unsupported" : "acp_permission_request_unsupported"
+          );
+          stored.terminal = terminal;
+          stored.promptActive = false;
+          this.resolveWaiters(stored, terminal);
+          yield terminal;
+          try {
+            await stored.client.notify("session/cancel", { sessionId: stored.externalSessionKey });
+          } catch {
+            // Best-effort cleanup only.
+          }
+          return;
         }
-        return;
+
+        const approvalEvent = this.mapPermissionRequestToApprovalEvent(runId, sequence++, stored, event.message, event.expiresAt);
+        if (!approvalEvent) {
+          const terminal = eventForFailure(runId, sequence++, "acp_permission_request_invalid");
+          stored.terminal = terminal;
+          stored.promptActive = false;
+          this.resolveWaiters(stored, terminal);
+          yield terminal;
+          this.log("warn", "opencode.acp.bridge.failed", { runId: stored.runId, reasonCode: "acp_permission_request_invalid" });
+          return;
+        }
+        stored.pendingPermissionRequestId = String(approvalEvent.payload["runtimeApprovalToken"]);
+        stored.pendingPermissionExpiresAt = String(approvalEvent.payload["expiresAt"]);
+        this.log("info", "opencode.acp.permission.requested", {
+          runId: stored.runId,
+          acpSessionId: stored.externalSessionKey,
+          requestId: stored.pendingPermissionRequestId
+        });
+        yield approvalEvent;
+        continue;
       }
 
       if (event.type === "unsupported_request") {
@@ -327,6 +500,13 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
     }
 
     const stopReason = readStopReason(promptResult);
+    if (stored.hostedBridgeEnabled && (stopReason === "end_turn" || stopReason === "max_tokens" || stopReason === "max_turn_requests")) {
+      stored.sessionReadyForPrompt = true;
+      stored.pendingPermissionRequestId = undefined;
+      stored.pendingPermissionExpiresAt = undefined;
+      yield eventForStatus(runId, sequence++, "waiting_for_input");
+      return;
+    }
     const terminal = mapPromptStopReason(runId, sequence++, stopReason);
     stored.terminal = terminal;
     this.resolveWaiters(stored, terminal);
@@ -398,6 +578,38 @@ export class OpenCodeAcpAdapter implements RuntimeAdapter {
 
   private log(level: keyof RuntimeLogger, eventName: string, payload: Record<string, unknown>): void {
     this.logger?.[level](eventName, payload);
+  }
+
+  private mapPermissionRequestToApprovalEvent(
+    runId: string,
+    sequence: number,
+    session: OpenCodeAcpSessionState,
+    message: JsonRpcRequestMessage,
+    expiresAt: string
+  ): SwitchyardEvent | undefined {
+    const requestId = message["id"];
+    if ((typeof requestId !== "string" && typeof requestId !== "number") || String(requestId).length === 0) {
+      return undefined;
+    }
+    if (message["method"] !== "session/request_permission") {
+      return undefined;
+    }
+    const params = readRecord(message["params"]);
+    const paramsSessionId = typeof params?.["sessionId"] === "string" ? params["sessionId"] : undefined;
+    if (!paramsSessionId || (session.externalSessionKey && session.externalSessionKey !== paramsSessionId)) {
+      return undefined;
+    }
+    if (!Number.isFinite(Date.parse(expiresAt))) {
+      return undefined;
+    }
+
+    const summary = summarizePermissionAction(params);
+    return event(runId, sequence, "approval.requested", {
+      approvalType: "before_external_message",
+      runtimeApprovalToken: String(requestId),
+      expiresAt,
+      ...(summary ? { action: summary } : {})
+    });
   }
 }
 
@@ -606,4 +818,20 @@ function buildHostedSafeTranscript(content: string): string {
   }
 
   return safeLines.join("");
+}
+
+function summarizePermissionAction(params: Record<string, unknown> | undefined): string | undefined {
+  if (!params) {
+    return undefined;
+  }
+  const reason = typeof params["reason"] === "string"
+    ? params["reason"].trim()
+    : typeof params["action"] === "string"
+      ? params["action"].trim()
+      : undefined;
+  if (!reason || reason.length === 0) {
+    return undefined;
+  }
+  const maxLength = 160;
+  return reason.length > maxLength ? `${reason.slice(0, maxLength - 3)}...` : reason;
 }
