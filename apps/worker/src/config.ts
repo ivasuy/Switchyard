@@ -1,13 +1,16 @@
 import { accessSync, constants, readFileSync } from "node:fs";
 import { TextDecoder } from "node:util";
 import {
+  createDisabledRealToolPolicyConfig,
   redactSecrets,
+  resolveRealToolPolicyConfig,
   resolveHostedSandboxConfig,
   validateProductionSecret,
   validateProductionUrlCredential,
   validateHostedRuntimeAllowlist,
   type HostedRealRuntimeExecution,
-  type ResolvedHostedSandboxConfig
+  type ResolvedHostedSandboxConfig,
+  type ResolvedRealToolPolicyConfig
 } from "@switchyard/core";
 import {
   ObjectStoreConfigError,
@@ -22,6 +25,19 @@ import {
 
 export type DeploymentMode = "local" | "test" | "staging" | "production";
 const PROVIDER_POLICY_MAX_BYTES = 65_536;
+const REAL_TOOL_POLICY_MAX_BYTES = 65_536;
+
+export type HostedRealToolsMode = "disabled" | "enabled";
+export type ToolAdapterMode = "fake" | "real";
+
+export interface WorkerToolConfig {
+  hostedRealTools: HostedRealToolsMode;
+  connectedNodeRealTools: HostedRealToolsMode;
+  adapterMode: ToolAdapterMode;
+  allowNoApprovalInTest: boolean;
+  policySourceKind: "none" | "json" | "path";
+  policy: ResolvedRealToolPolicyConfig;
+}
 
 export class ConfigError extends Error {
   constructor(readonly code: string, readonly variable: string, readonly redactedConfig: Record<string, unknown>) {
@@ -54,6 +70,7 @@ export interface WorkerConfig {
     maxMessageBytes: number;
   };
   providerRuntimeActivation: ProviderRuntimeActivationResult;
+  tools: WorkerToolConfig;
   redactedSummary: Record<string, unknown>;
 }
 
@@ -63,6 +80,11 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   const hostedRealRuntimeExecution = parseHostedRealRuntimeExecution(env["SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"]);
   const providerPolicyJson = optional(env["SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON"]);
   const providerPolicyPath = optional(env["SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH"]);
+  const hostedRealTools = parseToolsMode(optional(env["SWITCHYARD_HOSTED_REAL_TOOLS"]));
+  const connectedNodeRealTools = parseToolsMode(optional(env["SWITCHYARD_CONNECTED_NODE_REAL_TOOLS"]));
+  const toolAdapterMode = parseToolAdapterMode(optional(env["SWITCHYARD_TOOL_ADAPTER_MODE"]));
+  const toolPolicyJson = optional(env["SWITCHYARD_REAL_TOOL_POLICY_JSON"]);
+  const toolPolicyPath = optional(env["SWITCHYARD_REAL_TOOL_POLICY_PATH"]);
   const config: WorkerConfig = {
     deploymentMode,
     hostedRuntimeAllowlist: parseCsv(hostedRuntimeAllowlistEnv, "fake.deterministic"),
@@ -98,6 +120,14 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
         modeStatuses: [],
         reasonCodes: []
       }
+    },
+    tools: {
+      hostedRealTools,
+      connectedNodeRealTools,
+      adapterMode: toolAdapterMode,
+      allowNoApprovalInTest: parseBoolean(optional(env["SWITCHYARD_TOOL_ALLOW_WITHOUT_APPROVAL"])) ?? (deploymentMode !== "production"),
+      policySourceKind: "none",
+      policy: createDisabledRealToolPolicyConfig()
     },
     redactedSummary: {}
   };
@@ -148,6 +178,61 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
         variable: "SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY",
         value: optional(env["SWITCHYARD_OBJECT_STORE_SECRET_ACCESS_KEY"])
       }), config);
+    }
+  }
+
+  const toolPolicyPathPayload = loadRealToolPolicyPathPayload(toolPolicyPath);
+  if (toolPolicyJson && toolPolicyPath) {
+    throw new ConfigError(
+      "config_conflict:SWITCHYARD_REAL_TOOL_POLICY_JSON",
+      "SWITCHYARD_REAL_TOOL_POLICY_JSON",
+      buildSummary(config)
+    );
+  }
+  if (toolPolicyJson) {
+    try {
+      config.tools.policy = resolveRealToolPolicyConfig({ source: toolPolicyJson });
+      config.tools.policySourceKind = "json";
+    } catch {
+      throw new ConfigError(
+        "tool_policy_config_invalid",
+        "SWITCHYARD_REAL_TOOL_POLICY_JSON",
+        buildSummary(config)
+      );
+    }
+  } else if (toolPolicyPathPayload?.state === "ok") {
+    try {
+      config.tools.policy = resolveRealToolPolicyConfig({ source: toolPolicyPathPayload.contents });
+      config.tools.policySourceKind = "path";
+    } catch {
+      throw new ConfigError(
+        "tool_policy_config_invalid",
+        "SWITCHYARD_REAL_TOOL_POLICY_PATH",
+        buildSummary(config)
+      );
+    }
+  } else if (toolPolicyPathPayload) {
+    throw new ConfigError(
+      "tool_policy_config_invalid",
+      "SWITCHYARD_REAL_TOOL_POLICY_PATH",
+      buildSummary(config)
+    );
+  }
+
+  if (config.tools.hostedRealTools === "enabled" || config.tools.connectedNodeRealTools === "enabled") {
+    if (config.tools.policySourceKind === "none") {
+      throw new ConfigError(
+        "config_required:SWITCHYARD_REAL_TOOL_POLICY_JSON",
+        "SWITCHYARD_REAL_TOOL_POLICY_JSON",
+        buildSummary(config)
+      );
+    }
+    if (config.tools.policy.shell.enabled && Object.keys(config.tools.policy.shell.catalog).length === 0) {
+      throw new ConfigError(
+        "config_required:SWITCHYARD_SHELL_COMMAND_CATALOG_PATH",
+        "SWITCHYARD_SHELL_COMMAND_CATALOG_PATH",
+        buildSummary(config)
+      );
     }
   }
 
@@ -214,6 +299,34 @@ function parseHostedRealRuntimeExecution(value: string | undefined): HostedRealR
   );
 }
 
+function parseToolsMode(value: string | undefined): HostedRealToolsMode {
+  if (!value || value === "disabled") {
+    return "disabled";
+  }
+  if (value === "enabled") {
+    return "enabled";
+  }
+  throw new ConfigError(
+    "config_invalid:SWITCHYARD_HOSTED_REAL_TOOLS",
+    "SWITCHYARD_HOSTED_REAL_TOOLS",
+    { hostedRealTools: value }
+  );
+}
+
+function parseToolAdapterMode(value: string | undefined): ToolAdapterMode {
+  if (!value || value === "fake") {
+    return "fake";
+  }
+  if (value === "real") {
+    return "real";
+  }
+  throw new ConfigError(
+    "config_invalid:SWITCHYARD_TOOL_ADAPTER_MODE",
+    "SWITCHYARD_TOOL_ADAPTER_MODE",
+    { toolAdapterMode: value }
+  );
+}
+
 function parseCsv(value: string | undefined, fallback: string): string[] {
   const source = optional(value) ?? fallback;
   return source.split(",").map((part) => part.trim()).filter((part) => part.length > 0);
@@ -264,6 +377,39 @@ function loadProviderRuntimePolicyPathPayload(pathValue: string | undefined): st
     return { state: "empty" };
   }
   if (raw.length > PROVIDER_POLICY_MAX_BYTES) {
+    return { state: "too_large" };
+  }
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+  } catch {
+    return { state: "invalid_utf8" };
+  }
+  if (!decoded.trim()) {
+    return { state: "empty" };
+  }
+  try {
+    JSON.parse(decoded);
+  } catch {
+    return { state: "invalid_json" };
+  }
+  return { state: "ok", contents: decoded };
+}
+
+function loadRealToolPolicyPathPayload(pathValue: string | undefined): { state: "ok"; contents: string } | { state: "unreadable" | "empty" | "too_large" | "invalid_utf8" | "invalid_json" } | undefined {
+  if (!pathValue) {
+    return undefined;
+  }
+  let raw: Buffer;
+  try {
+    raw = readFileSync(pathValue);
+  } catch {
+    return { state: "unreadable" };
+  }
+  if (raw.length === 0) {
+    return { state: "empty" };
+  }
+  if (raw.length > REAL_TOOL_POLICY_MAX_BYTES) {
     return { state: "too_large" };
   }
   let decoded: string;
@@ -369,6 +515,26 @@ function buildSummary(config: WorkerConfig): Record<string, unknown> {
       source: config.providerRuntimeActivation.redactedSummary.source.kind,
       enabledRealModeCount: config.providerRuntimeActivation.redactedSummary.enabledRealModeCount,
       reasonCodes: config.providerRuntimeActivation.redactedSummary.reasonCodes
+    },
+    tools: {
+      hostedRealTools: config.tools.hostedRealTools,
+      connectedNodeRealTools: config.tools.connectedNodeRealTools,
+      adapterMode: config.tools.adapterMode,
+      allowNoApprovalInTest: config.tools.allowNoApprovalInTest,
+      policySourceKind: config.tools.policySourceKind,
+      policy: {
+        globalEnabled: config.tools.policy.global.enabled,
+        allowedPlacements: config.tools.policy.global.allowedPlacements,
+        hostedEnabled: config.tools.policy.hosted.enabled,
+        connectedLocalNodeEnabled: config.tools.policy.connectedLocalNode.enabled,
+        enabledToolTypes: [
+          ...(config.tools.policy.fetch.enabled ? ["fetch"] : []),
+          ...(config.tools.policy.webSearch.enabled ? ["web_search"] : []),
+          ...(config.tools.policy.github.enabled ? ["github"] : []),
+          ...(config.tools.policy.repo.enabled ? ["repo"] : []),
+          ...(config.tools.policy.shell.enabled ? ["shell"] : [])
+        ]
+      }
     }
   });
 }

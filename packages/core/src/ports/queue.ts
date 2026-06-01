@@ -6,6 +6,18 @@ export interface RunQueueJobPayload {
   createdAt: string;
 }
 
+export interface ToolJobPayload {
+  jobId: string;
+  approvalId: string;
+  toolInvocationId: string;
+  runId: string;
+  placement: "hosted";
+  toolType: "web_search" | "fetch" | "browser" | "repo" | "shell" | "github" | "fake_echo";
+  executionPlanHash: string;
+  idempotencyKey: string;
+  createdAt: string;
+}
+
 export interface RunQueueClaimedJob {
   id: string;
   payload: RunQueueJobPayload;
@@ -33,6 +45,28 @@ export interface RunQueueJobSnapshot {
   failure?: QueueFailure;
 }
 
+export interface ToolQueueClaimedJob {
+  id: string;
+  payload: ToolJobPayload;
+  attempts: number;
+  maxAttempts: number;
+  claimedAt: string;
+  leaseUntil: string;
+}
+
+export type ToolQueueJobState = "queued" | "claimed" | "failed" | "exhausted";
+
+export interface ToolQueueJobSnapshot {
+  id: string;
+  payload: ToolJobPayload;
+  attempts: number;
+  maxAttempts: number;
+  state: ToolQueueJobState;
+  claimedAt?: string;
+  leaseUntil?: string;
+  failure?: QueueFailure;
+}
+
 export interface RunQueueRecoveryResult {
   recovered: number;
   exhausted: number;
@@ -41,6 +75,20 @@ export interface RunQueueRecoveryResult {
 }
 
 export interface RunQueueStats {
+  queued: number;
+  claimed: number;
+  failed: number;
+  exhausted: number;
+}
+
+export interface ToolQueueRecoveryResult {
+  recovered: number;
+  exhausted: number;
+  invalid: number;
+  exhaustedClaims: Array<{ jobId: string; runId: string; toolInvocationId: string }>;
+}
+
+export interface ToolQueueStats {
   queued: number;
   claimed: number;
   failed: number;
@@ -57,4 +105,19 @@ export interface RunQueuePort {
   getJob(jobId: string): Promise<RunQueueJobSnapshot | undefined>;
   recoverStaleClaims(options?: { now?: string }): Promise<RunQueueRecoveryResult>;
   stats(): Promise<RunQueueStats>;
+}
+
+export interface ToolQueuePort {
+  enqueueTool(
+    payload: Omit<ToolJobPayload, "jobId" | "createdAt">,
+    options?: { maxAttempts?: number }
+  ): Promise<ToolJobPayload>;
+  claimTool(options?: { leaseMs?: number }): Promise<ToolQueueClaimedJob | undefined>;
+  ackTool(jobId: string): Promise<void>;
+  failTool(jobId: string, error: QueueFailure): Promise<void>;
+  retryTool(jobId: string): Promise<void>;
+  discardTool(jobId: string): Promise<void>;
+  getToolJob(jobId: string): Promise<ToolQueueJobSnapshot | undefined>;
+  recoverStaleToolClaims(options?: { now?: string }): Promise<ToolQueueRecoveryResult>;
+  toolStats(): Promise<ToolQueueStats>;
 }

@@ -98,4 +98,74 @@ describe("MemoryRunQueue", () => {
       await queue.close();
     }
   });
+
+  it("rejects tool enqueue when idempotencyKey is missing or empty", async () => {
+    const queue = new MemoryRunQueue();
+    await expect(queue.enqueueTool({
+      approvalId: "approval_1",
+      toolInvocationId: "tool_1",
+      runId: "run_1",
+      placement: "hosted",
+      toolType: "fetch",
+      executionPlanHash: "hash_1",
+      idempotencyKey: ""
+    })).rejects.toThrow("tool_idempotency_key_required");
+  });
+
+  it("tool enqueue dedupes after markDispatched timeout", async () => {
+    const queue = new MemoryRunQueue();
+    const payload = {
+      approvalId: "approval_1",
+      toolInvocationId: "tool_1",
+      runId: "run_1",
+      placement: "hosted" as const,
+      toolType: "fetch" as const,
+      executionPlanHash: "hash_1",
+      idempotencyKey: "dispatch_approval_1_tool_1"
+    };
+    const first = await queue.enqueueTool(payload);
+    const second = await queue.enqueueTool(payload);
+
+    expect(second.jobId).toBe(first.jobId);
+
+    const claimed = await queue.claimTool();
+    expect(claimed?.payload.jobId).toBe(first.jobId);
+    expect(claimed?.payload.idempotencyKey).toBe(payload.idempotencyKey);
+
+    expect(await queue.claimTool()).toBeUndefined();
+  });
+
+  it("tool enqueue dedupe works in BullMQ when SWITCHYARD_TEST_REDIS_URL is configured", async () => {
+    const redisUrl = process.env["SWITCHYARD_TEST_REDIS_URL"];
+    if (!redisUrl) {
+      expect("SKIPPED_SWITCHYARD_TEST_REDIS_URL_UNSET").toContain("SKIPPED");
+      return;
+    }
+
+    const queue = new BullMqRunQueue({
+      redisUrl,
+      queueName: `switchyard-tool-test-${crypto.randomUUID()}`
+    });
+
+    try {
+      const payload = {
+        approvalId: "approval_2",
+        toolInvocationId: "tool_2",
+        runId: "run_2",
+        placement: "hosted" as const,
+        toolType: "github" as const,
+        executionPlanHash: "hash_2",
+        idempotencyKey: "dispatch_approval_2_tool_2"
+      };
+      const first = await queue.enqueueTool(payload);
+      const second = await queue.enqueueTool(payload);
+
+      expect(second.jobId).toBe(first.jobId);
+      const claimed = await queue.claimTool();
+      expect(claimed?.payload.jobId).toBe(first.jobId);
+      expect(await queue.claimTool()).toBeUndefined();
+    } finally {
+      await queue.close();
+    }
+  });
 });
