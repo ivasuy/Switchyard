@@ -700,7 +700,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
         childRuns,
         debateArtifacts,
         debateEvents
-      } as UnownedResourceCounts;
+      };
     }
 
     const ownedKeySet = new Set(this.ownership.keys());
@@ -732,7 +732,7 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
       childRuns: 0,
       debateArtifacts: 0,
       debateEvents: 0
-    } as UnownedResourceCounts;
+    };
   }
 
   async expireStaleReservations(input: ExpireReservationsInput): Promise<number> {

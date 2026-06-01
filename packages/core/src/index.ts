@@ -24,6 +24,7 @@ export * from "./ports/tool-adapter.js";
 export * from "./ports/tool-invocation-store.js";
 export * from "./ports/tool-dispatch-outbox-store.js";
 export * from "./ports/control-plane-store.js";
+export * from "./ports/debate-execution-store.js";
 export * from "./services/event-bus.js";
 export * from "./services/runtime-runner-service.js";
 export * from "./services/run-service.js";

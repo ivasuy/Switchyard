@@ -167,6 +167,13 @@ export interface UnownedResourceCounts {
   assignments: number;
   auditEvents: number;
   quotaReservations: number;
+  debates: number;
+  debateExecutionJobs: number;
+  messages: number;
+  evidence: number;
+  childRuns: number;
+  debateArtifacts: number;
+  debateEvents: number;
 }
 
 export interface ExpireReservationsInput {

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { DebateExecutionStore, UnownedResourceCounts } from "@switchyard/core";
 import { PostgresControlPlaneStore, PostgresDebateExecutionStore, PostgresRunStore } from "../src/index.js";
 
 describe("postgres debate execution store", () => {
   it("enqueues, claims, links pending runs, releases, completes, and exposes stats", async () => {
-    const store = new PostgresDebateExecutionStore();
+    const store: DebateExecutionStore = new PostgresDebateExecutionStore();
 
     const queued = await store.enqueue({
       id: "debate_job_1",
@@ -55,7 +56,7 @@ describe("postgres debate execution store", () => {
   });
 
   it("recovers stale claims and exhausts attempts at max", async () => {
-    const store = new PostgresDebateExecutionStore();
+    const store: DebateExecutionStore = new PostgresDebateExecutionStore();
     await store.enqueue({
       id: "debate_job_2",
       debateId: "debate_2",
@@ -113,13 +114,28 @@ describe("postgres debate execution store", () => {
     expect(found?.id).toBe("run_debate_child_1");
 
     const controlPlane = new PostgresControlPlaneStore();
-    const counts = await controlPlane.countUnownedResources();
-    expect(counts).toHaveProperty("debates");
-    expect(counts).toHaveProperty("debateExecutionJobs");
-    expect(counts).toHaveProperty("messages");
-    expect(counts).toHaveProperty("evidence");
-    expect(counts).toHaveProperty("childRuns");
-    expect(counts).toHaveProperty("debateArtifacts");
-    expect(counts).toHaveProperty("debateEvents");
+    const counts: UnownedResourceCounts = await controlPlane.countUnownedResources();
+    const requiredKeys: Array<keyof UnownedResourceCounts> = [
+      "runs",
+      "runEvents",
+      "artifacts",
+      "toolInvocations",
+      "approvals",
+      "placements",
+      "nodes",
+      "assignments",
+      "auditEvents",
+      "quotaReservations",
+      "debates",
+      "debateExecutionJobs",
+      "messages",
+      "evidence",
+      "childRuns",
+      "debateArtifacts",
+      "debateEvents"
+    ];
+    for (const key of requiredKeys) {
+      expect(counts).toHaveProperty(key);
+    }
   });
 });
