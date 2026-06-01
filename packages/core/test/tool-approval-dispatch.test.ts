@@ -239,6 +239,113 @@ describe("tool approval dispatch", () => {
     expect(dispatchKeys.size).toBe(1);
   });
 
+  it("re-reserves quota before retrying failed no-approval idempotent dispatch", async () => {
+    const runs = new MemoryRunStore();
+    await runs.create(makeRun("run_allow_retry_quota", "hosted"));
+    const outbox = new MemoryOutboxStore();
+    let shouldFailDispatch = true;
+    const reservations: Array<{ invocationId: string; approvalId: string }> = [];
+    const releases: string[] = [];
+    const dispatches: Array<{ idempotencyKey: string; reservationCount: number }> = [];
+
+    const service = new HostedToolService({
+      runs,
+      approvals: new MemoryApprovalStore(),
+      invocations: new MemoryInvocationStore(),
+      events: new MemoryEventStore(),
+      policy: enabledHostedAllowPolicy(),
+      dispatchOutbox: outbox,
+      dispatch: async ({ idempotencyKey }) => {
+        dispatches.push({ idempotencyKey, reservationCount: reservations.length });
+        if (shouldFailDispatch) {
+          shouldFailDispatch = false;
+          throw new Error("queue_down");
+        }
+        return { dispatchId: `job_${idempotencyKey}`, target: "hosted" };
+      },
+      preflight: {
+        reservePostPolicyQuota: async ({ invocationId, approvalId }) => {
+          reservations.push({ invocationId, approvalId });
+          return {
+            hourlyReservationId: `hourly_${reservations.length}`,
+            activeReservationId: `active_${reservations.length}`
+          };
+        },
+        releaseQuotaReservation: async (reservationId) => {
+          releases.push(reservationId);
+        }
+      }
+    });
+
+    const input = {
+      runId: "run_allow_retry_quota",
+      type: "fetch" as const,
+      input: { url: "https://example.com/retry-quota", method: "GET" },
+      target: { placement: "hosted" as const },
+      idempotencyKey: "retry_quota"
+    };
+
+    await expect(service.invoke(input)).rejects.toMatchObject({ code: "tool_dispatch_failed" });
+    const recovered = await service.invoke(input);
+
+    expect(recovered.invocation.id).toBe(reservations[0]?.invocationId);
+    expect(reservations).toHaveLength(2);
+    expect(releases).toEqual(["active_1", "hourly_1"]);
+    expect(dispatches).toEqual([
+      { idempotencyKey: "dispatch_1", reservationCount: 1 },
+      { idempotencyKey: "dispatch_1", reservationCount: 2 }
+    ]);
+  });
+
+  it("rejects changed payload on failed no-approval idempotent retry", async () => {
+    const runs = new MemoryRunStore();
+    await runs.create(makeRun("run_allow_retry_mismatch", "hosted"));
+    const outbox = new MemoryOutboxStore();
+    let shouldFailDispatch = true;
+    const dispatchHashes: string[] = [];
+
+    const service = new HostedToolService({
+      runs,
+      approvals: new MemoryApprovalStore(),
+      invocations: new MemoryInvocationStore(),
+      events: new MemoryEventStore(),
+      policy: enabledHostedAllowPolicy(),
+      dispatchOutbox: outbox,
+      dispatch: async ({ executionPlanHash }) => {
+        dispatchHashes.push(executionPlanHash);
+        if (shouldFailDispatch) {
+          shouldFailDispatch = false;
+          throw new Error("queue_down");
+        }
+        return { dispatchId: "job_changed_payload", target: "hosted" };
+      },
+      preflight: {
+        reservePostPolicyQuota: async () => ({
+          hourlyReservationId: "hourly_changed",
+          activeReservationId: "active_changed"
+        }),
+        releaseQuotaReservation: async () => {}
+      }
+    });
+
+    const firstInput = {
+      runId: "run_allow_retry_mismatch",
+      type: "fetch" as const,
+      input: { url: "https://example.com/first", method: "GET" },
+      target: { placement: "hosted" as const },
+      idempotencyKey: "retry_changed"
+    };
+    const changedInput = {
+      ...firstInput,
+      input: { url: "https://example.com/second", method: "GET" }
+    };
+
+    await expect(service.invoke(firstInput)).rejects.toMatchObject({ code: "tool_dispatch_failed" });
+    await expect(service.invoke(changedInput)).rejects.toMatchObject({ code: "tool_policy_failed" });
+
+    expect(dispatchHashes).toHaveLength(1);
+  });
+
   it("approves exactly once and dispatches once", async () => {
     const runs = new MemoryRunStore();
     await runs.create(makeRun("run_1", "hosted"));

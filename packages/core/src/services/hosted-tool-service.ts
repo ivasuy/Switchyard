@@ -158,7 +158,27 @@ export class HostedToolService {
     if (decision.decision === "allow" && input.idempotencyKey) {
       const existing = await this.deps.invocations.get(invocationId);
       if (existing) {
-        await this.recoverNoApprovalDispatch(existing, executionPlanHash);
+        const approvalIdForDispatch = automaticApprovalIdForInvocation(existing.id);
+        const storedHash = this.extractStoredExecutionPlanHash(existing);
+        if (storedHash && storedHash !== executionPlanHash) {
+          throw new ServiceError("tool_policy_failed", "Idempotency key payload does not match the persisted invocation");
+        }
+        const existingOutbox = await this.deps.dispatchOutbox.getByApprovalAndInvocation(approvalIdForDispatch, existing.id);
+        if (existingOutbox?.dispatchStatus !== "dispatched") {
+          const recoveryQuota = await this.deps.preflight?.reservePostPolicyQuota?.({
+            runId: run.id,
+            placement: this.extractPlacement(existing),
+            type: existing.type,
+            invocationId: existing.id,
+            approvalId: approvalIdForDispatch
+          });
+          try {
+            await this.recoverNoApprovalDispatch(existing, existingOutbox?.executionPlanHash ?? storedHash ?? executionPlanHash);
+          } catch (error) {
+            await this.rollbackAdmissionQuotaReservations(recoveryQuota, "tool_admission_failed");
+            throw error;
+          }
+        }
         return {
           statusCode: 202,
           invocation: existing
@@ -171,7 +191,7 @@ export class HostedToolService {
       placement: targetPlacement,
       type: input.type,
       invocationId,
-      approvalId: approvalId ?? ""
+      approvalId: approvalId ?? automaticApprovalIdForInvocation(invocationId)
     });
 
     try {
@@ -437,6 +457,12 @@ export class HostedToolService {
       return;
     }
     await this.dispatchInvocation({ approvalId, invocation, executionPlanHash });
+  }
+
+  private extractStoredExecutionPlanHash(invocation: ToolInvocation): string | undefined {
+    return typeof invocation.input["executionPlanHash"] === "string"
+      ? invocation.input["executionPlanHash"]
+      : undefined;
   }
 
   private async dispatchInvocation(input: {
