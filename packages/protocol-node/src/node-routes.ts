@@ -6,8 +6,8 @@ import type {
   EventSyncService,
   NodeCoordinatorService
 } from "@switchyard/core";
-import { ControlPlaneError } from "@switchyard/core";
-import type { AuthContext } from "@switchyard/contracts";
+import { ControlPlaneError, redactSecrets } from "@switchyard/core";
+import type { AuthContext, ToolInvocation } from "@switchyard/contracts";
 import {
   assignmentArtifactManifestRequestSchema,
   assignmentClaimRequestSchema,
@@ -42,6 +42,25 @@ export interface NodeRouteDependencies {
   coordinator: NodeCoordinatorService;
   eventSync: EventSyncService;
   artifactSync: ArtifactSyncService;
+  resolveToolInvocation?: (input: {
+    nodeId: string;
+    assignmentId: string;
+    runId: string;
+    toolInvocationId: string;
+  }) => Promise<ToolInvocation | null>;
+  completeToolAssignment?: (input: {
+    nodeId: string;
+    assignmentId: string;
+    status: "completed" | "failed" | "cancelled";
+    error?: string;
+    toolInvocation: {
+      id: string;
+      status: "completed" | "failed" | "cancelled";
+      output?: Record<string, unknown>;
+      error?: { code: string; message: string };
+      completedAt?: string;
+    };
+  }) => Promise<void>;
   sharedToken?: string;
   requireAuth?: boolean;
   jsonBodyLimitBytes?: number;
@@ -94,13 +113,17 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
     const controlPlane = deps.controlPlane;
 
     const body = nodeRegisterRequestSchema.parse(request.body ?? {});
+    const policyCheck = validateNodePolicyForSecrets(body.policy);
+    if (!policyCheck.ok) {
+      return sendHttpError(reply, "invalid_input", "Node policy contains secret-like fields", [policyCheck.detail]);
+    }
     const registerId = body.id ?? `node_${randomUUID()}`;
     const input: Parameters<NodeCoordinatorService["register"]>[0] = {
       id: registerId,
       mode: body.mode,
       capabilities: body.capabilities
     };
-    if (body.policy !== undefined) input.policy = body.policy;
+    if (body.policy !== undefined) input.policy = redactSecrets(body.policy);
     if (body.version !== undefined) input.version = body.version;
 
     let reservationId: string | undefined;
@@ -206,9 +229,13 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
       }
 
       const body = nodeHeartbeatRequestSchema.parse(request.body ?? {});
+      const policyCheck = validateNodePolicyForSecrets(body.policy);
+      if (!policyCheck.ok) {
+        return sendHttpError(reply, "invalid_input", "Node policy contains secret-like fields", [policyCheck.detail]);
+      }
       const input: Parameters<NodeCoordinatorService["heartbeat"]>[1] = {};
       if (body.capabilities !== undefined) input.capabilities = body.capabilities;
-      if (body.policy !== undefined) input.policy = body.policy;
+      if (body.policy !== undefined) input.policy = redactSecrets(body.policy);
       const node = await deps.coordinator.heartbeat(nodeId, input);
 
       if (hosted && controlPlane && auth) {
@@ -338,6 +365,7 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
 
     try {
       const claimed = await deps.coordinator.claim(nodeId, body.assignmentId);
+      const toolClaim = await resolveToolClaimPayload(deps, claimed, nodeId);
       if (hosted && controlPlane && auth && claimed?.assignment) {
         const assignmentScope = await controlPlane.authorizeResource({
           auth,
@@ -384,6 +412,30 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
           return sendHttpError(reply, runScope.code, runScope.reasonCode, [{ path: "reasonCode", issue: runScope.reasonCode }]);
         }
       }
+      if (hosted && controlPlane && auth && toolClaim) {
+        const invocationScope = await controlPlane.authorizeResource({
+          auth,
+          resourceType: "tool_invocation",
+          resourceId: toolClaim.id,
+          notFoundCode: "tool_invocation_not_found"
+        });
+        if (!invocationScope.ok) {
+          if (claimed?.assignment) {
+            await rollbackClaimAssignment(deps.coordinator, nodeId, claimed.assignment.id);
+          }
+          await auditNodeDecision(controlPlane, {
+            auth,
+            eventType: "tenant.access_denied",
+            decision: "deny",
+            reasonCode: invocationScope.reasonCode,
+            resourceType: "tool_invocation",
+            resourceId: toolClaim.id,
+            requestId: request.id,
+            payload: { routeId: "nodes.claim" }
+          });
+          return sendHttpError(reply, invocationScope.code, invocationScope.reasonCode, [{ path: "reasonCode", issue: invocationScope.reasonCode }]);
+        }
+      }
       if (hosted && controlPlane && auth) {
         await auditNodeDecision(controlPlane, {
           auth,
@@ -398,7 +450,8 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
       }
       return reply.send({
         assignment: claimed?.assignment ?? null,
-        run: claimed?.run ?? null
+        run: claimed?.run ?? null,
+        toolInvocation: toolClaim ? redactAssignmentToolInvocation(toolClaim) : null
       });
     } catch (error) {
       if ((error as { code?: string }).code === "assignment_not_found") {
@@ -406,6 +459,9 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
       }
       if ((error as { code?: string }).code === "assignment_claim_conflict") {
         return sendHttpError(reply, "assignment_claim_conflict", "Assignment is already claimed");
+      }
+      if ((error as { code?: string }).code === "tool_invocation_not_found") {
+        return sendHttpError(reply, "tool_invocation_not_found", "Tool invocation not found");
       }
       throw error;
     }
@@ -686,6 +742,22 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
 
     const body = assignmentCompleteRequestSchema.parse(request.body ?? {});
     try {
+      if (body.toolInvocation && deps.completeToolAssignment) {
+        const toolInvocationPayload: Parameters<NonNullable<NodeRouteDependencies["completeToolAssignment"]>>[0]["toolInvocation"] = {
+          id: body.toolInvocation.id,
+          status: body.toolInvocation.status,
+          ...(body.toolInvocation.output ? { output: body.toolInvocation.output } : {}),
+          ...(body.toolInvocation.error ? { error: body.toolInvocation.error } : {}),
+          ...(body.toolInvocation.completedAt ? { completedAt: body.toolInvocation.completedAt } : {})
+        };
+        await deps.completeToolAssignment({
+          nodeId: params.id,
+          assignmentId: params.assignmentId,
+          status: body.status,
+          ...(body.error ? { error: body.error } : {}),
+          toolInvocation: toolInvocationPayload
+        });
+      }
       const assignment = await deps.coordinator.complete(params.id, params.assignmentId, body.status, body.error);
       if (hosted && controlPlane && auth) {
         await auditNodeDecision(controlPlane, {
@@ -701,12 +773,67 @@ export function registerNodeRoutes(app: FastifyInstance, deps: NodeRouteDependen
       }
       return reply.send({ assignment });
     } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code === "tool_assignment_mismatch") {
+        return sendHttpError(reply, "tool_assignment_mismatch", "Tool assignment completion payload mismatch");
+      }
+      if (code === "tool_invocation_not_found") {
+        return sendHttpError(reply, "tool_invocation_not_found", "Tool invocation not found");
+      }
       if ((error as { code?: string }).code === "assignment_not_found") {
         return sendHttpError(reply, "assignment_not_found", "Assignment not found");
       }
       throw error;
     }
   });
+}
+
+async function resolveToolClaimPayload(
+  deps: NodeRouteDependencies,
+  claimed: Awaited<ReturnType<NodeCoordinatorService["claim"]>>,
+  nodeId: string
+): Promise<ToolInvocation | null> {
+  if (!claimed?.assignment || claimed.assignment.kind !== "tool") {
+    return null;
+  }
+  const fromCoordinator = (claimed as unknown as { toolInvocation?: ToolInvocation | null }).toolInvocation;
+  if (fromCoordinator) {
+    return fromCoordinator;
+  }
+  if (!deps.resolveToolInvocation || !claimed.assignment.toolInvocationId) {
+    throw { code: "tool_invocation_not_found" };
+  }
+  const invocation = await deps.resolveToolInvocation({
+    nodeId,
+    assignmentId: claimed.assignment.id,
+    runId: claimed.run.id,
+    toolInvocationId: claimed.assignment.toolInvocationId
+  });
+  if (!invocation) {
+    throw { code: "tool_invocation_not_found" };
+  }
+  return invocation;
+}
+
+function redactAssignmentToolInvocation(invocation: ToolInvocation): ToolInvocation {
+  const redactedInput = redactSecrets(invocation.input ?? {});
+  return {
+    ...invocation,
+    input: stripSensitivePlanFields(redactedInput)
+  };
+}
+
+function stripSensitivePlanFields(input: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...input };
+  const executionPlan = asRecord(next["executionPlan"]);
+  if (executionPlan && executionPlan.type === "shell") {
+    const shellPlan = { ...executionPlan };
+    if ("env" in shellPlan) {
+      delete shellPlan["env"];
+    }
+    next["executionPlan"] = shellPlan;
+  }
+  return next;
 }
 
 function asBuffer(request: FastifyRequest): Buffer {
@@ -1086,6 +1213,49 @@ function controlPlaneDetails(error: ControlPlaneError): HttpErrorDetail[] | unde
     }
   }
   return details;
+}
+
+const SECRET_LIKE_PATTERN = /(token|secret|password|authorization|apikey|cookie|privatekey|accesskey|credential|bearer|ghp_)/i;
+
+function validateNodePolicyForSecrets(policy: unknown): { ok: true } | { ok: false; detail: HttpErrorDetail } {
+  if (!policy || typeof policy !== "object") {
+    return { ok: true };
+  }
+  return walkForSecrets(policy, "policy");
+}
+
+function walkForSecrets(
+  value: unknown,
+  path: string
+): { ok: true } | { ok: false; detail: HttpErrorDetail } {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const nested = walkForSecrets(value[index], `${path}.${index}`);
+      if (!nested.ok) {
+        return nested;
+      }
+    }
+    return { ok: true };
+  }
+  if (typeof value === "string") {
+    if (SECRET_LIKE_PATTERN.test(value) || /(?:^|[?&])(token|secret|password|apikey|authorization)=/i.test(value)) {
+      return { ok: false, detail: { path, issue: "secret_like_value_forbidden" } };
+    }
+    return { ok: true };
+  }
+  if (!value || typeof value !== "object") {
+    return { ok: true };
+  }
+  for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+    if (SECRET_LIKE_PATTERN.test(key)) {
+      return { ok: false, detail: { path: `${path}.${key}`, issue: "secret_like_key_forbidden" } };
+    }
+    const nested = walkForSecrets(nestedValue, `${path}.${key}`);
+    if (!nested.ok) {
+      return nested;
+    }
+  }
+  return { ok: true };
 }
 
 declare module "fastify" {

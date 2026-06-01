@@ -307,6 +307,39 @@ describe("node routes", () => {
     expect(JSON.stringify(controlPlane.recordAudit.mock.calls)).not.toContain("secret-node-token");
   });
 
+  it("rejects secret-like node policy values at registration", async () => {
+    const controlPlane = createControlPlaneStub();
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging",
+      jsonBodyLimitBytes: 4096
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/register",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: {
+        capabilities: ["tool.github"],
+        policy: {
+          allowRuntimeModes: ["fake.deterministic"],
+          denyAdapterTypes: [],
+          allowCwdPrefixes: ["/repo"],
+          allowEventTypes: [],
+          artifactSync: "full",
+          allowToolTypes: ["github"],
+          allowToolCwdPrefixes: ["/repo?token=abc123"],
+          toolArtifactSync: "full",
+          toolApprovalRequired: true
+        }
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("invalid_input");
+    expect(coordinator.register).not.toHaveBeenCalled();
+  });
+
   it("maps auth store failures to 503 before coordinator calls", async () => {
     const controlPlane = createControlPlaneStub();
     controlPlane.authenticateRequest.mockRejectedValue(
@@ -633,6 +666,88 @@ describe("node routes", () => {
     expect(coordinator.reject).toHaveBeenCalledWith("node_1", "assignment_3", "tenant_access_denied");
   });
 
+  it("returns tool invocation payload for claimed tool assignment", async () => {
+    const controlPlane = createControlPlaneStub();
+    const resolveToolInvocation = vi.fn(async () => ({
+      id: "tool_1",
+      runId: "run_3",
+      type: "repo",
+      status: "queued",
+      input: {
+        request: { operation: "status", cwd: "/repo" },
+        executionPlanHash: "hash_1"
+      },
+      createdAt: NOW
+    }));
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging",
+      resolveToolInvocation: resolveToolInvocation as never
+    });
+    coordinator.claim.mockResolvedValueOnce({
+      assignment: {
+        id: "assignment_tool_1",
+        runId: "run_3",
+        nodeId: "node_1",
+        kind: "tool",
+        toolInvocationId: "tool_1",
+        status: "claimed",
+        retryCount: 0,
+        lastEventSequence: 0,
+        createdAt: NOW
+      },
+      run: {
+        id: "run_3",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        cwd: "/repo",
+        task: "x",
+        status: "running",
+        placement: "connected_local_node",
+        approvalPolicy: "default",
+        timeoutSeconds: 60,
+        metadata: {},
+        runtimeMode: "fake.deterministic",
+        createdAt: NOW
+      }
+    });
+    controlPlane.authorizeResource.mockImplementation(async (input: { resourceType: string; resourceId: string }) => {
+      if (input.resourceType === "node") {
+        return { ok: true, ownership: createOwnership({ resourceType: "node", resourceId: "node_1" }) };
+      }
+      if (input.resourceType === "assignment") {
+        return { ok: true, ownership: createOwnership({ resourceType: "assignment", resourceId: input.resourceId }) };
+      }
+      if (input.resourceType === "run") {
+        return { ok: true, ownership: createOwnership({ resourceType: "run", resourceId: input.resourceId }) };
+      }
+      if (input.resourceType === "tool_invocation") {
+        return { ok: true, ownership: createOwnership({ resourceType: "tool_invocation", resourceId: input.resourceId }) };
+      }
+      return { ok: true, ownership: createOwnership({ resourceType: "node", resourceId: input.resourceId }) };
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/node_1/assignments/claim",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: {}
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().assignment.kind).toBe("tool");
+    expect(response.json().toolInvocation?.id).toBe("tool_1");
+    expect(response.json().toolInvocation?.input?.executionPlanHash).toBe("hash_1");
+    expect(resolveToolInvocation).toHaveBeenCalledWith({
+      nodeId: "node_1",
+      assignmentId: "assignment_tool_1",
+      runId: "run_3",
+      toolInvocationId: "tool_1"
+    });
+  });
+
   it("denies heartbeat when node ownership is out-of-scope", async () => {
     const controlPlane = createControlPlaneStub();
     const { app, coordinator } = await buildNodeApp({
@@ -819,6 +934,39 @@ describe("node routes", () => {
 
     expect(response.statusCode).toBe(403);
     expect(response.json().error.code).toBe("tenant_access_denied");
+    expect(coordinator.complete).not.toHaveBeenCalled();
+  });
+
+  it("rejects mismatched tool completion patch before assignment complete", async () => {
+    const controlPlane = createControlPlaneStub();
+    const completeToolAssignment = vi.fn(async () => {
+      throw { code: "tool_assignment_mismatch" };
+    });
+    const { app, coordinator } = await buildNodeApp({
+      controlPlane: controlPlane as never,
+      deploymentMode: "staging",
+      completeToolAssignment: completeToolAssignment as never,
+      jsonBodyLimitBytes: 4096
+    });
+    controlPlane.authorizeResource.mockResolvedValue({ ok: true, ownership: createOwnership() });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/nodes/node_1/assignments/assignment_1/complete",
+      headers: { authorization: "Bearer sk_sw_test_alpha" },
+      payload: {
+        status: "failed",
+        toolInvocation: {
+          id: "tool_2",
+          status: "failed",
+          error: { code: "tool_execution_failed", message: "bad" }
+        }
+      }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("tool_assignment_mismatch");
+    expect(completeToolAssignment).toHaveBeenCalledTimes(1);
     expect(coordinator.complete).not.toHaveBeenCalled();
   });
 

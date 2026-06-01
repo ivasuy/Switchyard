@@ -110,4 +110,20 @@ describe("production node config", () => {
     expect(error.variable).toBe("SWITCHYARD_NODE_ALLOW_RUNTIME_MODES");
     expect(JSON.stringify(error.redactedConfig)).not.toContain("node-shared-token-");
   });
+
+  it("rejects worker-config-only env inputs in node config", () => {
+    expect(() => loadNodeConfig(createProductionEnv({
+      SWITCHYARD_TOOL_ADAPTER_MODE: "real"
+    }))).toThrow("config_invalid:SWITCHYARD_TOOL_ADAPTER_MODE");
+
+    expect(() => loadNodeConfig(createProductionEnv({
+      SWITCHYARD_HOSTED_REAL_TOOLS: "enabled"
+    }))).toThrow("config_invalid:SWITCHYARD_HOSTED_REAL_TOOLS");
+  });
+
+  it("rejects hosted credential env in node config", () => {
+    expect(() => loadNodeConfig(createProductionEnv({
+      SWITCHYARD_GITHUB_TOKEN: "ghp_hosted_not_allowed"
+    }))).toThrow("config_invalid:SWITCHYARD_GITHUB_TOKEN");
+  });
 });

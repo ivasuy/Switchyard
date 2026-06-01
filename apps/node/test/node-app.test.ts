@@ -13,11 +13,35 @@ function createFakeClient() {
   const syncedEvents: any[] = [];
   const syncedManifests: any[] = [];
   const syncedContents: any[] = [];
+  const completedPayloads: any[] = [];
+  let claimPayload: any = {
+    assignment: { id: "assignment_1", runId: "run_1", nodeId: "node_1", lastEventSequence: 0 },
+    run: {
+      id: "run_1",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "node assignment",
+      status: "running",
+      placement: "connected_local_node",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    }
+  };
   return {
     calls,
     syncedEvents,
     syncedManifests,
     syncedContents,
+    completedPayloads,
+    setClaimPayload(next: any) {
+      claimPayload = next;
+    },
     client: {
       register: async () => { calls.push("register"); return { node: { id: "node_1" } }; },
       heartbeat: async () => { calls.push("heartbeat"); return { node: { id: "node_1" } }; },
@@ -25,25 +49,7 @@ function createFakeClient() {
         calls.push("claim");
         if (claimed) return { assignment: null };
         claimed = true;
-        return {
-          assignment: { id: "assignment_1", runId: "run_1", nodeId: "node_1", lastEventSequence: 0 },
-          run: {
-            id: "run_1",
-            runtime: "fake",
-            provider: "test",
-            model: "test-model",
-            adapterType: "process",
-            cwd: "/repo",
-            task: "node assignment",
-            status: "running",
-            placement: "connected_local_node",
-            approvalPolicy: "default",
-            timeoutSeconds: 60,
-            metadata: {},
-            runtimeMode: "fake.deterministic",
-            createdAt: "2026-05-30T00:00:00.000Z"
-          }
-        };
+        return claimPayload;
       },
       reject: async () => { calls.push("reject"); return {}; },
       syncEvents: async (_nodeId: string, _assignmentId: string, payload: any) => {
@@ -61,7 +67,11 @@ function createFakeClient() {
         syncedContents.push({ artifactId, body });
         return {};
       },
-      complete: async () => { calls.push("complete"); return {}; }
+      complete: async (_nodeId: string, _assignmentId: string, payload: any) => {
+        calls.push("complete");
+        completedPayloads.push(payload);
+        return {};
+      }
     }
   };
 }
@@ -79,6 +89,11 @@ describe("node app", () => {
         allowCwdPrefixes: ["/repo"],
         allowEventTypes: [],
         artifactSync: "full"
+      },
+      tools: {
+        githubToken: undefined,
+        gitBinary: "git",
+        shellCatalog: {}
       },
       idleIntervalMs: 1,
       redactedSummary: {}
@@ -110,6 +125,11 @@ describe("node app", () => {
         allowEventTypes: [],
         artifactSync: "full"
       },
+      tools: {
+        githubToken: undefined,
+        gitBinary: "git",
+        shellCatalog: {}
+      },
       idleIntervalMs: 1,
       redactedSummary: {}
     }, { client: fake.client as any });
@@ -118,6 +138,146 @@ describe("node app", () => {
     await app.tick();
 
     expect(fake.calls).toContain("reject");
+  });
+
+  it("executes claimed tool assignment and completes with tool invocation patch", async () => {
+    const fake = createFakeClient();
+    fake.setClaimPayload({
+      assignment: {
+        id: "assignment_tool_1",
+        runId: "run_1",
+        nodeId: "node_1",
+        kind: "tool",
+        toolInvocationId: "tool_1",
+        lastEventSequence: 3
+      },
+      run: {
+        id: "run_1",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        cwd: "/repo",
+        task: "node assignment",
+        status: "running",
+        placement: "connected_local_node",
+        approvalPolicy: "default",
+        timeoutSeconds: 60,
+        metadata: {},
+        runtimeMode: "fake.deterministic",
+        createdAt: "2026-05-30T00:00:00.000Z"
+      },
+      toolInvocation: {
+        id: "tool_1",
+        runId: "run_1",
+        type: "fake_echo",
+        status: "queued",
+        input: {
+          request: { text: "hello-node" }
+        },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }
+    });
+    const app = createNodeApp({
+      deploymentMode: "test",
+      serverUrl: "http://localhost:4646",
+      capabilities: ["runtime.fake.deterministic", "tools.real", "tool.fake_echo"],
+      policy: {
+        allowRuntimeModes: ["fake.deterministic"],
+        denyAdapterTypes: [],
+        allowCwdPrefixes: ["/repo"],
+        allowEventTypes: [],
+        artifactSync: "full",
+        allowToolTypes: ["fake_echo"],
+        allowToolCwdPrefixes: ["/repo"],
+        toolArtifactSync: "full",
+        toolApprovalRequired: true
+      },
+      tools: {
+        githubToken: undefined,
+        gitBinary: "git",
+        shellCatalog: {}
+      },
+      idleIntervalMs: 1,
+      redactedSummary: {}
+    }, { client: fake.client as any });
+
+    await app.start();
+    await app.tick();
+
+    expect(fake.calls).toContain("syncEvents");
+    expect(fake.calls).toContain("complete");
+    expect(fake.completedPayloads[0]?.toolInvocation?.id).toBe("tool_1");
+    expect(fake.completedPayloads[0]?.toolInvocation?.status).toBe("completed");
+    const eventTypes = (fake.syncedEvents[0]?.events ?? []).map((event: { type: string }) => event.type);
+    expect(eventTypes).toEqual(["tool.call", "tool.result"]);
+  });
+
+  it("fails browser tool assignment with browser_tool_unshipped", async () => {
+    const fake = createFakeClient();
+    fake.setClaimPayload({
+      assignment: {
+        id: "assignment_tool_browser_1",
+        runId: "run_1",
+        nodeId: "node_1",
+        kind: "tool",
+        toolInvocationId: "tool_browser_1",
+        lastEventSequence: 0
+      },
+      run: {
+        id: "run_1",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        cwd: "/repo",
+        task: "node assignment",
+        status: "running",
+        placement: "connected_local_node",
+        approvalPolicy: "default",
+        timeoutSeconds: 60,
+        metadata: {},
+        runtimeMode: "fake.deterministic",
+        createdAt: "2026-05-30T00:00:00.000Z"
+      },
+      toolInvocation: {
+        id: "tool_browser_1",
+        runId: "run_1",
+        type: "browser",
+        status: "queued",
+        input: { request: { action: "open", url: "https://example.com" } },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }
+    });
+    const app = createNodeApp({
+      deploymentMode: "test",
+      serverUrl: "http://localhost:4646",
+      capabilities: ["runtime.fake.deterministic", "tools.real"],
+      policy: {
+        allowRuntimeModes: ["fake.deterministic"],
+        denyAdapterTypes: [],
+        allowCwdPrefixes: ["/repo"],
+        allowEventTypes: [],
+        artifactSync: "full",
+        allowToolTypes: ["browser"],
+        allowToolCwdPrefixes: ["/repo"],
+        toolArtifactSync: "full",
+        toolApprovalRequired: true
+      },
+      tools: {
+        githubToken: undefined,
+        gitBinary: "git",
+        shellCatalog: {}
+      },
+      idleIntervalMs: 1,
+      redactedSummary: {}
+    }, { client: fake.client as any });
+
+    await app.start();
+    await app.tick();
+
+    expect(fake.completedPayloads[0]?.status).toBe("failed");
+    expect(fake.completedPayloads[0]?.toolInvocation?.error?.code).toBe("browser_tool_unshipped");
   });
 
   it("fails closed in staging mode without shared token", () => {
