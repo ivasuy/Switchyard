@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { acpPermissionRequestSchema } from "./acp-schemas.js";
 import { AcpTranscriptRecorder } from "./acp-transcript.js";
 import {
   AcpProtocolError,
@@ -33,7 +34,7 @@ export interface AcpClientProcess {
 
 export type AcpClientEvent =
   | { type: "notification"; message: JsonRpcNotificationMessage }
-  | { type: "permission_request"; message: JsonRpcRequestMessage }
+  | { type: "permission_request"; message: JsonRpcRequestMessage; expiresAt: string }
   | { type: "unsupported_request"; message: JsonRpcRequestMessage }
   | { type: "stderr"; text: string }
   | { type: "close"; code: number | null }
@@ -46,12 +47,20 @@ export interface AcpStdioClientOptions {
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
   maxMessageBytes?: number;
+  permissionRequestTtlMs?: number;
+  permissionRequestDeadline?: (message: JsonRpcRequestMessage) => Date | string;
   processFactory?: AcpProcessFactory;
 }
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
+  timeout: NodeJS.Timeout;
+}
+
+interface HeldPermissionRequest {
+  id: JsonRpcId;
+  expiresAtMs: number;
   timeout: NodeJS.Timeout;
 }
 
@@ -62,8 +71,12 @@ export class AcpStdioClient {
   private readonly env: NodeJS.ProcessEnv;
   private readonly requestTimeoutMs: number;
   private readonly maxMessageBytes: number;
+  private readonly permissionRequestTtlMs: number;
+  private readonly permissionRequestDeadline: ((message: JsonRpcRequestMessage) => Date | string) | undefined;
   private readonly processFactory: AcpProcessFactory;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly heldPermissionRequests = new Map<string, HeldPermissionRequest>();
+  private readonly expiredPermissionRequestKeys = new Set<string>();
   private readonly transcriptRecorder = new AcpTranscriptRecorder();
   private readonly eventQueue = new AsyncEventQueue<AcpClientEvent>();
 
@@ -88,8 +101,51 @@ export class AcpStdioClient {
     this.env = options.env ?? process.env;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 5000;
     this.maxMessageBytes = options.maxMessageBytes ?? 1024 * 1024;
+    this.permissionRequestTtlMs = options.permissionRequestTtlMs ?? 60_000;
+    this.permissionRequestDeadline = options.permissionRequestDeadline;
     this.processFactory = options.processFactory ?? ((args, spawnOptions) =>
       spawn(this.command, args, { ...spawnOptions, shell: false }) as unknown as AcpClientProcess);
+  }
+
+  async respondToRequest(id: JsonRpcId, result: unknown): Promise<void> {
+    const held = this.takeHeldPermissionRequest(id);
+    try {
+      await this.writeMessage({
+        jsonrpc: "2.0",
+        id: held.id,
+        result
+      });
+    } catch (error) {
+      if (error instanceof AcpProtocolError) {
+        throw error;
+      }
+      throw new AcpProtocolError("acp_permission_response_failed", "Failed to send ACP permission response.", {
+        id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  async rejectRequest(
+    id: JsonRpcId,
+    error: { code: number | string; message: string; data?: unknown }
+  ): Promise<void> {
+    const held = this.takeHeldPermissionRequest(id);
+    try {
+      await this.writeMessage({
+        jsonrpc: "2.0",
+        id: held.id,
+        error
+      });
+    } catch (writeError) {
+      if (writeError instanceof AcpProtocolError) {
+        throw writeError;
+      }
+      throw new AcpProtocolError("acp_permission_response_failed", "Failed to send ACP permission rejection.", {
+        id,
+        error: writeError instanceof Error ? writeError.message : String(writeError)
+      });
+    }
   }
 
   async start(): Promise<void> {
@@ -180,6 +236,7 @@ export class AcpStdioClient {
     }
     this.closed = true;
     this.process?.kill("SIGTERM");
+    this.clearHeldPermissionRequests();
     this.rejectPending(
       new AcpProtocolError("acp_transport_closed", "ACP transport was closed before a response was received.")
     );
@@ -209,6 +266,7 @@ export class AcpStdioClient {
 
     process.once("exit", (code) => {
       this.closed = true;
+      this.clearHeldPermissionRequests();
       this.rejectPending(
         new AcpProtocolError("acp_transport_closed", "ACP transport exited before all in-flight responses arrived.", {
           code
@@ -276,10 +334,14 @@ export class AcpStdioClient {
 
     if (isRequestMessage(message)) {
       const method = message.method;
-      const eventType = method === "session/request_permission" ? "permission_request" : "unsupported_request";
+      if (method === "session/request_permission") {
+        this.holdPermissionRequest(message);
+        return;
+      }
+
       await this.replyMethodNotFound(message.id);
       this.eventQueue.push({
-        type: eventType,
+        type: "unsupported_request",
         message
       });
       return;
@@ -314,20 +376,121 @@ export class AcpStdioClient {
   private async closeInternal(): Promise<void> {
     if (!this.process || this.closed) {
       this.closed = true;
+      this.clearHeldPermissionRequests();
       this.eventQueue.close();
       return;
     }
     this.closed = true;
     this.process.stdin.end();
+    this.clearHeldPermissionRequests();
     this.rejectPending(new AcpProtocolError("acp_transport_closed", "ACP transport was closed."));
   }
 
   private failClient(error: AcpProtocolError): void {
     this.closed = true;
+    this.clearHeldPermissionRequests();
     this.rejectPending(error);
     this.eventQueue.push({ type: "error", error });
     this.eventQueue.close();
     this.process?.kill("SIGTERM");
+  }
+
+  private holdPermissionRequest(message: JsonRpcRequestMessage): void {
+    const parsed = acpPermissionRequestSchema.safeParse(message);
+    if (!parsed.success) {
+      void this.replyMethodNotFound(message.id);
+      this.eventQueue.push({
+        type: "unsupported_request",
+        message
+      });
+      return;
+    }
+
+    const key = idKey(message.id);
+    const now = Date.now();
+    const expiresAtMs = this.resolvePermissionRequestDeadlineMs(message, now);
+    const timeoutMs = Math.max(0, expiresAtMs - now);
+    const timeout = setTimeout(() => {
+      const held = this.heldPermissionRequests.get(key);
+      if (!held) {
+        return;
+      }
+      this.heldPermissionRequests.delete(key);
+      this.expiredPermissionRequestKeys.add(key);
+    }, timeoutMs);
+    this.heldPermissionRequests.set(key, {
+      id: message.id,
+      expiresAtMs,
+      timeout
+    });
+
+    this.eventQueue.push({
+      type: "permission_request",
+      message,
+      expiresAt: new Date(expiresAtMs).toISOString()
+    });
+  }
+
+  private resolvePermissionRequestDeadlineMs(message: JsonRpcRequestMessage, now: number): number {
+    const configured = this.permissionRequestDeadline?.(message);
+    const fromConfigured = parseDeadlineMs(configured);
+    if (fromConfigured !== undefined) {
+      return fromConfigured;
+    }
+
+    const params = isRecord(message.params) ? message.params : undefined;
+    const fromParams = parseDeadlineMs(params?.["expiresAt"]);
+    if (fromParams !== undefined) {
+      return fromParams;
+    }
+
+    return now + this.permissionRequestTtlMs;
+  }
+
+  private takeHeldPermissionRequest(id: JsonRpcId): HeldPermissionRequest {
+    if (!isValidPermissionRequestId(id)) {
+      throw new AcpProtocolError("acp_permission_response_failed", "Permission response id is invalid.", {
+        id
+      });
+    }
+    if (this.closed || !this.process) {
+      throw new AcpProtocolError("acp_transport_closed", "ACP transport is closed.", {
+        id
+      });
+    }
+
+    const key = idKey(id);
+    const held = this.heldPermissionRequests.get(key);
+    if (!held) {
+      if (this.expiredPermissionRequestKeys.has(key)) {
+        throw new AcpProtocolError("acp_permission_request_expired", "ACP permission request already expired.", {
+          id
+        });
+      }
+      throw new AcpProtocolError("acp_permission_response_failed", "ACP permission request is not pending.", {
+        id
+      });
+    }
+
+    if (Date.now() >= held.expiresAtMs) {
+      clearTimeout(held.timeout);
+      this.heldPermissionRequests.delete(key);
+      this.expiredPermissionRequestKeys.add(key);
+      throw new AcpProtocolError("acp_permission_request_expired", "ACP permission request already expired.", {
+        id
+      });
+    }
+
+    clearTimeout(held.timeout);
+    this.heldPermissionRequests.delete(key);
+    return held;
+  }
+
+  private clearHeldPermissionRequests(): void {
+    for (const held of this.heldPermissionRequests.values()) {
+      clearTimeout(held.timeout);
+    }
+    this.heldPermissionRequests.clear();
   }
 
   private rejectPending(error: AcpProtocolError): void {
@@ -345,6 +508,35 @@ export function createAcpStdioClient(options: AcpStdioClientOptions): AcpStdioCl
 
 function idKey(id: JsonRpcId): string {
   return `${typeof id}:${String(id)}`;
+}
+
+function parseDeadlineMs(value: unknown): number | undefined {
+  if (value instanceof Date) {
+    const timestamp = value.getTime();
+    return Number.isFinite(timestamp) ? timestamp : undefined;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isValidPermissionRequestId(id: unknown): id is JsonRpcId {
+  if (typeof id === "number") {
+    return Number.isFinite(id);
+  }
+  if (typeof id === "string") {
+    return id.length > 0;
+  }
+  return false;
 }
 
 function isRequestMessage(message: JsonRpcMessage): message is JsonRpcRequestMessage {

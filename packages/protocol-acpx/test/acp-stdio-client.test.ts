@@ -71,10 +71,6 @@ describe("AcpStdioClient", () => {
     await expect(second).resolves.toEqual({ ok: "two" });
     await expect(first).resolves.toEqual({ ok: "one" });
 
-    const outbound = harness.process.writes
-      .map((line) => parseJsonRpcLine(line))
-      .filter((message) => "error" in message) as Array<{ id: string | number; error: { code: number } }>;
-    expect(outbound.some((entry) => entry.id === "req-1" && entry.error.code === -32601)).toBe(true);
     while (true) {
       const event = await observed.next();
       if (event.done) {
@@ -87,6 +83,198 @@ describe("AcpStdioClient", () => {
     }
     expect(events).toContain("notification");
     expect(events).toContain("permission_request");
+
+    const outbound = harness.process.writes
+      .map((line) => parseJsonRpcLine(line))
+      .filter((message) => "error" in message) as Array<{ id: string | number; error: { code: number } }>;
+    expect(outbound.some((entry) => entry.id === "req-1" && entry.error.code === -32601)).toBe(false);
+  });
+
+  it("holds permission requests until explicit response while unsupported requests still get method-not-found", async () => {
+    const harness = createHarness((message, process) => {
+      if (isRequest(message) && message.method === "initialize") {
+        process.writeStdout({ jsonrpc: "2.0", id: message.id, result: { ok: true } });
+        process.writeStdout({
+          jsonrpc: "2.0",
+          id: "perm_1",
+          method: "session/request_permission",
+          params: { sessionId: "ses_1" }
+        });
+        process.writeStdout({
+          jsonrpc: "2.0",
+          id: "req_unsupported",
+          method: "workspace/exec",
+          params: { cmd: "ls" }
+        });
+      }
+    });
+
+    await harness.client.start();
+    await harness.client.request("initialize");
+    const events = harness.client.notifications()[Symbol.asyncIterator]();
+    const first = await events.next();
+    const second = await events.next();
+
+    expect(first.value?.type).toBe("permission_request");
+    expect(second.value?.type).toBe("unsupported_request");
+
+    const outbound = harness.process.writes
+      .map((line) => parseJsonRpcLine(line))
+      .filter((message) => "error" in message) as Array<{ id: string | number; error: { code: number } }>;
+    expect(outbound.some((entry) => entry.id === "perm_1" && entry.error.code === -32601)).toBe(false);
+    expect(outbound.some((entry) => entry.id === "req_unsupported" && entry.error.code === -32601)).toBe(true);
+  });
+
+  it("responds to held permission requests exactly once", async () => {
+    const harness = createHarness((message, process) => {
+      if (isRequest(message) && message.method === "initialize") {
+        process.writeStdout({ jsonrpc: "2.0", id: message.id, result: { ok: true } });
+        process.writeStdout({
+          jsonrpc: "2.0",
+          id: "perm_once",
+          method: "session/request_permission",
+          params: { sessionId: "ses_1" }
+        });
+      }
+    });
+    await harness.client.start();
+    await harness.client.request("initialize");
+    const events = harness.client.notifications()[Symbol.asyncIterator]();
+    const event = await events.next();
+    expect(event.value?.type).toBe("permission_request");
+
+    await harness.client.respondToRequest("perm_once", { decision: "approved" });
+    await expect(harness.client.respondToRequest("perm_once", { decision: "approved" })).rejects.toMatchObject({
+      reasonCode: "acp_permission_response_failed"
+    } satisfies Partial<AcpProtocolError>);
+
+    const outbound = harness.process.writes
+      .map((line) => parseJsonRpcLine(line))
+      .filter((message) => "id" in message && message.id === "perm_once");
+    expect(outbound).toHaveLength(1);
+    expect("result" in outbound[0]).toBe(true);
+  });
+
+  it("supports rejecting held permission requests", async () => {
+    const harness = createHarness((message, process) => {
+      if (isRequest(message) && message.method === "initialize") {
+        process.writeStdout({ jsonrpc: "2.0", id: message.id, result: { ok: true } });
+        process.writeStdout({
+          jsonrpc: "2.0",
+          id: "perm_reject",
+          method: "session/request_permission",
+          params: { sessionId: "ses_1" }
+        });
+      }
+    });
+    await harness.client.start();
+    await harness.client.request("initialize");
+    const events = harness.client.notifications()[Symbol.asyncIterator]();
+    await events.next();
+
+    await harness.client.rejectRequest("perm_reject", {
+      code: -32010,
+      message: "denied",
+      data: { reason: "policy" }
+    });
+
+    const outbound = harness.process.writes
+      .map((line) => parseJsonRpcLine(line))
+      .filter((message) => "id" in message && message.id === "perm_reject");
+    expect(outbound).toHaveLength(1);
+    expect("error" in outbound[0]).toBe(true);
+  });
+
+  it("treats numeric and string held permission ids as distinct keys", async () => {
+    const harness = createHarness((message, process) => {
+      if (isRequest(message) && message.method === "initialize") {
+        process.writeStdout({ jsonrpc: "2.0", id: message.id, result: { ok: true } });
+        process.writeStdout({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "session/request_permission",
+          params: { sessionId: "ses_1" }
+        });
+        process.writeStdout({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "session/request_permission",
+          params: { sessionId: "ses_1" }
+        });
+      }
+    });
+    await harness.client.start();
+    await harness.client.request("initialize");
+    const events = harness.client.notifications()[Symbol.asyncIterator]();
+    await events.next();
+    await events.next();
+
+    await harness.client.respondToRequest(1, { value: "numeric" });
+    await harness.client.respondToRequest("1", { value: "string" });
+
+    const outbound = harness.process.writes
+      .map((line) => parseJsonRpcLine(line))
+      .filter((message) => "id" in message && (message.id === 1 || message.id === "1"));
+    expect(outbound).toHaveLength(2);
+    expect(outbound.some((message) => message.id === 1 && "result" in message)).toBe(true);
+    expect(outbound.some((message) => message.id === "1" && "result" in message)).toBe(true);
+  });
+
+  it("fails permission responses for missing, empty, and expired ids", async () => {
+    const expiredAt = new Date(Date.now() - 1000).toISOString();
+    const harness = createHarness((message, process) => {
+      if (isRequest(message) && message.method === "initialize") {
+        process.writeStdout({ jsonrpc: "2.0", id: message.id, result: { ok: true } });
+        process.writeStdout({
+          jsonrpc: "2.0",
+          id: "perm_expired",
+          method: "session/request_permission",
+          params: { sessionId: "ses_1", expiresAt: expiredAt }
+        });
+      }
+    });
+    await harness.client.start();
+    await harness.client.request("initialize");
+    const events = harness.client.notifications()[Symbol.asyncIterator]();
+    await events.next();
+
+    await expect(harness.client.respondToRequest("missing", { decision: "approved" })).rejects.toMatchObject({
+      reasonCode: "acp_permission_response_failed"
+    } satisfies Partial<AcpProtocolError>);
+    await expect(harness.client.respondToRequest("", { decision: "approved" })).rejects.toMatchObject({
+      reasonCode: "acp_permission_response_failed"
+    } satisfies Partial<AcpProtocolError>);
+    await expect(harness.client.respondToRequest("perm_expired", { decision: "approved" })).rejects.toMatchObject({
+      reasonCode: "acp_permission_request_expired"
+    } satisfies Partial<AcpProtocolError>);
+
+    const outbound = harness.process.writes
+      .map((line) => parseJsonRpcLine(line))
+      .filter((message) => "id" in message && message.id === "perm_expired");
+    expect(outbound).toHaveLength(0);
+  });
+
+  it("fails held permission responses after transport close", async () => {
+    const harness = createHarness((message, process) => {
+      if (isRequest(message) && message.method === "initialize") {
+        process.writeStdout({ jsonrpc: "2.0", id: message.id, result: { ok: true } });
+        process.writeStdout({
+          jsonrpc: "2.0",
+          id: "perm_close",
+          method: "session/request_permission",
+          params: { sessionId: "ses_1" }
+        });
+      }
+    });
+    await harness.client.start();
+    await harness.client.request("initialize");
+    const events = harness.client.notifications()[Symbol.asyncIterator]();
+    await events.next();
+    harness.process.emitExit(0);
+
+    await expect(harness.client.respondToRequest("perm_close", { decision: "approved" })).rejects.toMatchObject({
+      reasonCode: "acp_transport_closed"
+    } satisfies Partial<AcpProtocolError>);
   });
 
   it("treats numeric and string ids as distinct correlation keys", async () => {

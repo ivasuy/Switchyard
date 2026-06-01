@@ -123,9 +123,7 @@ class FakeAcpProcess extends EventEmitter implements AcpClientProcess {
     }
 
     if (!("method" in message)) {
-      if (message.id === "perm_1") {
-        this.stats.permissionResponses += 1;
-      }
+      this.handlePermissionResponse(message);
       return;
     }
 
@@ -233,14 +231,10 @@ class FakeAcpProcess extends EventEmitter implements AcpClientProcess {
         method: "session/request_permission",
         params: {
           sessionId: this.sessionId,
-          reason: "Need edit permissions"
+          reason: "Need edit permissions",
+          expiresAt: new Date(Date.now() + 60_000).toISOString()
         }
       });
-      setTimeout(() => {
-        if (this.activePromptId !== undefined) {
-          this.writePromptResponse(this.activePromptId, "refusal");
-        }
-      }, 20);
       return;
     }
 
@@ -268,6 +262,32 @@ class FakeAcpProcess extends EventEmitter implements AcpClientProcess {
     if (this.scenario === "cancelled" && this.activePromptId !== undefined) {
       this.writePromptResponse(this.activePromptId, "cancelled");
     }
+  }
+
+  private handlePermissionResponse(message: JsonRpcMessage): void {
+    if (!("id" in message) || message.id !== "perm_1" || !this.permissionRequestSent) {
+      return;
+    }
+    this.stats.permissionResponses += 1;
+    this.permissionRequestSent = false;
+
+    if (this.activePromptId === undefined) {
+      return;
+    }
+
+    if ("error" in message) {
+      this.writePromptResponse(this.activePromptId, "refusal");
+      return;
+    }
+
+    const decision = readDecision("result" in message ? message.result : undefined);
+    if (decision === "rejected") {
+      this.writePromptResponse(this.activePromptId, "refusal");
+      return;
+    }
+
+    this.writeSessionUpdate("agent_message_chunk", { text: "permission granted" });
+    this.writePromptResponse(this.activePromptId, "end_turn");
   }
 
   private writePromptResponse(id: string | number, stopReason: string): void {
@@ -306,4 +326,12 @@ class FakeAcpProcess extends EventEmitter implements AcpClientProcess {
 
 function isRequestWithId(message: JsonRpcMessage): message is JsonRpcRequestMessage {
   return "id" in message && (typeof message.id === "string" || typeof message.id === "number");
+}
+
+function readDecision(result: unknown): "approved" | "rejected" {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return "approved";
+  }
+  const decision = (result as Record<string, unknown>)["decision"];
+  return decision === "rejected" ? "rejected" : "approved";
 }

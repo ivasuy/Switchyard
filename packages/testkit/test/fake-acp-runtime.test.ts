@@ -5,8 +5,14 @@ import {
   AcpStdioClient,
   acpInitializeResultSchema,
   acpSessionNewResultSchema
-} from "@switchyard/protocol-acpx";
-import { createFakeAcpProcessFactory, type FakeAcpRuntimeScenario } from "../src/fake-acp-runtime.js";
+} from "../../protocol-acpx/src/index.js";
+import {
+  createFakeAcpProcessFactory,
+  startFakeAcpRuntimeProcess,
+  type AcpTestProcessHandle,
+  type FakeAcpRuntimeScenario,
+  type FakeAcpRuntimeStats
+} from "../src/fake-acp-runtime.js";
 
 describe("fake ACP runtime", () => {
   it("supports happy and empty_output scenarios", async () => {
@@ -76,7 +82,16 @@ describe("fake ACP runtime", () => {
   });
 
   it("supports permission_request, stderr_warning, and oversized_message scenarios", async () => {
-    const permissionClient = createClient("permission_request");
+    const permissionStats: FakeAcpRuntimeStats = {
+      prompts: 0,
+      cancels: 0,
+      permissionResponses: 0
+    };
+    const permissionHandle = startFakeAcpRuntimeProcess({
+      scenario: "permission_request",
+      stats: permissionStats
+    });
+    const permissionClient = createClientFromHandle(permissionHandle);
     await permissionClient.start();
     await permissionClient.request("initialize", { protocolVersion: 1 });
     await permissionClient.request("session/new", { cwd: "/repo", mcpServers: [] });
@@ -87,7 +102,35 @@ describe("fake ACP runtime", () => {
     }, { timeoutMs: 200 });
     const first = await events.next();
     expect(first.value?.type).toBe("permission_request");
-    await expect(prompt).resolves.toEqual({ stopReason: "refusal" });
+    writePermissionResult(permissionHandle, "perm_1", { decision: "approved" });
+    await expect(prompt).resolves.toEqual({ stopReason: "end_turn" });
+    expect(permissionStats.permissionResponses).toBe(1);
+
+    const rejectedStats: FakeAcpRuntimeStats = {
+      prompts: 0,
+      cancels: 0,
+      permissionResponses: 0
+    };
+    const rejectedHandle = startFakeAcpRuntimeProcess({
+      scenario: "permission_request",
+      stats: rejectedStats
+    });
+    const rejectedClient = createClientFromHandle(rejectedHandle);
+    await rejectedClient.start();
+    await rejectedClient.request("initialize", { protocolVersion: 1 });
+    await rejectedClient.request("session/new", { cwd: "/repo", mcpServers: [] });
+    const rejectEvents = rejectedClient.notifications()[Symbol.asyncIterator]();
+    const rejectedPrompt = rejectedClient.request("session/prompt", {
+      sessionId: "ses_fake_acp_1",
+      prompt: [{ type: "text", text: "perm-reject" }]
+    }, { timeoutMs: 200 });
+    await rejectEvents.next();
+    writePermissionError(rejectedHandle, "perm_1", {
+      code: -32001,
+      message: "denied"
+    });
+    await expect(rejectedPrompt).resolves.toEqual({ stopReason: "refusal" });
+    expect(rejectedStats.permissionResponses).toBe(1);
 
     const stderrClient = createClient("stderr_warning");
     await stderrClient.start();
@@ -144,14 +187,39 @@ async function runPromptScenario(scenario: FakeAcpRuntimeScenario): Promise<{
   return { initialize, sessionNew, promptResult, notifications };
 }
 
-function createClient(scenario: FakeAcpRuntimeScenario, maxMessageBytes?: number): AcpStdioClient {
+function createClient(
+  scenario: FakeAcpRuntimeScenario,
+  maxMessageBytes?: number,
+  stats?: FakeAcpRuntimeStats
+): AcpStdioClient {
   return new AcpStdioClient({
     cwd: "/repo",
     requestTimeoutMs: 200,
     ...(maxMessageBytes ? { maxMessageBytes } : {}),
     processFactory: createFakeAcpProcessFactory({
       scenario,
+      ...(stats ? { stats } : {}),
       ...(maxMessageBytes ? { maxMessageBytes } : {})
     })
   });
+}
+
+function createClientFromHandle(handle: AcpTestProcessHandle): AcpStdioClient {
+  return new AcpStdioClient({
+    cwd: "/repo",
+    requestTimeoutMs: 200,
+    processFactory: () => handle.process
+  });
+}
+
+function writePermissionResult(handle: AcpTestProcessHandle, id: string, result: Record<string, unknown>): void {
+  handle.process.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+}
+
+function writePermissionError(
+  handle: AcpTestProcessHandle,
+  id: string,
+  error: { code: number; message: string; data?: unknown }
+): void {
+  handle.process.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, error })}\n`);
 }

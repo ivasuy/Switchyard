@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+const ACP_PERMISSION_REQUEST_MAX_PARAMS_BYTES = 64 * 1024;
+
 export const acpInitializeParamsSchema = z.object({
   protocolVersion: z.number().int().positive(),
   clientCapabilities: z.record(z.string(), z.unknown()).optional(),
@@ -86,11 +88,30 @@ export const acpSessionUpdateNotificationSchema = z.object({
 
 export const acpAgentRequestSchema = z.object({
   jsonrpc: z.literal("2.0"),
-  id: z.union([z.string(), z.number()]),
+  id: z.union([z.string().min(1), z.number().finite()]),
   method: z.string().min(1),
   params: z.unknown().optional()
 }).passthrough();
 
+const acpPermissionRequestParamsSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+  expiresAt: z.string().datetime().optional()
+}).passthrough().superRefine((params, context) => {
+  const serialized = JSON.stringify(params);
+  if (!serialized) {
+    return;
+  }
+  const byteLength = Buffer.byteLength(serialized, "utf8");
+  if (byteLength > ACP_PERMISSION_REQUEST_MAX_PARAMS_BYTES) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "permission request params exceed max bytes",
+      path: ["params"]
+    });
+  }
+});
+
 export const acpPermissionRequestSchema = acpAgentRequestSchema.extend({
-  method: z.literal("session/request_permission")
+  method: z.literal("session/request_permission"),
+  params: acpPermissionRequestParamsSchema.optional()
 });

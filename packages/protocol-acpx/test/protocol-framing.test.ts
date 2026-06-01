@@ -90,6 +90,8 @@ describe("protocol ACPX framing and transcript helpers", () => {
       id: "req_1",
       method: "session/request_permission",
       params: {
+        sessionId: "ses_1",
+        expiresAt: "2026-06-01T12:00:00.000Z",
         tool: "bash"
       }
     });
@@ -100,6 +102,30 @@ describe("protocol ACPX framing and transcript helpers", () => {
     expect(cancel.sessionId).toBe("ses_1");
     expect(update.params.update.sessionUpdate).toBe("agent_message_chunk");
     expect(permission.method).toBe("session/request_permission");
+    expect(permission.params?.sessionId).toBe("ses_1");
+  });
+
+  it("rejects empty ids, empty session ids, and oversized permission params", () => {
+    expect(() => acpPermissionRequestSchema.parse({
+      jsonrpc: "2.0",
+      id: "",
+      method: "session/request_permission",
+      params: { tool: "bash" }
+    })).toThrowError();
+
+    expect(() => acpPermissionRequestSchema.parse({
+      jsonrpc: "2.0",
+      id: "req_1",
+      method: "session/request_permission",
+      params: { sessionId: "", tool: "bash" }
+    })).toThrowError();
+
+    expect(() => acpPermissionRequestSchema.parse({
+      jsonrpc: "2.0",
+      id: "req_1",
+      method: "session/request_permission",
+      params: { payload: "x".repeat(70_000) }
+    })).toThrowError();
   });
 
   it("redacts transcript content and never stores pre-redaction secrets", () => {
