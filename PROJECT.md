@@ -283,3 +283,21 @@ The shipped boundary remains explicit: R20 does not ship dashboard, TUI, public 
 
 ### Deferred Concerns
 - None.
+
+## Phase 20: R21 Production Hosted Provider Runtime Activation
+**Date:** 2026-06-01
+**Spec:** docs/superpowers/specs/2026-05-31-phase-20-r21-production-hosted-provider-runtime.md
+**Plan:** docs/superpowers/plans/2026-05-31-phase-20-r21-production-hosted-provider-runtime.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-20-report.md
+**Branch:** agent/phase-20-r21-production-hosted-provider-runtime (audit GREEN; branch retained locally)
+**PR:** not created - native TUI workflow requested; branch retained locally
+
+### What changed
+R21 is now shipped on the phase branch. Switchyard activates production hosted real-runtime execution only for the known provider modes `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`, while keeping fake-only hosted execution as the default production path. Real provider activation requires explicit operator opt-in with a closed allowlist, provider runtime policy, credentials referenced by environment variable name, spend controls, provider binary checks, server and worker readiness, admission and claim-time revalidation, deterministic no-spend smoke coverage, and an explicit spend-confirmed provider canary before routing real traffic.
+
+The audit fixed a `PROJECT.md` ownership redflag before green by removing an implementer-owned phase entry and preserving CEO ownership of this ledger. A non-blocking audit observation remains environment-bound: full `production:preflight` still fails locally because production queue, control-plane, quota, and audit dependencies are absent; the fake-only default path passed/inactive and no deferred product concern was recorded.
+
+The shipped boundary remains explicit: R21 does NOT ship dashboard/TUI, generic process/PTY runtime adapters, public exec/shell/process/command/pty/terminal/sandbox routes, Cursor/OpenClaw/Paperclip, browser/search/GitHub/fetch/repo hosted tools, hosted debate real participants/model judging, hosted approval/input/terminal bridges, managed SaaS/public signup, payment provider integration, OAuth/OIDC/SAML/SSO/SCIM.
+
+### Deferred Concerns
+- None.
