@@ -163,6 +163,17 @@ describe("postgres schema compatibility", () => {
     expect(state.version).toBe(String(POSTGRES_SCHEMA_VERSION));
   });
 
+  it("includes hosted runtime bridge command table migration and indexes", async () => {
+    const { handle, state } = makeFakeHandle({ metadataValue: undefined });
+
+    await migratePostgresSchema(handle);
+
+    const joined = state.queryLog.join("\n");
+    expect(joined).toContain("CREATE TABLE IF NOT EXISTS hosted_runtime_bridge_commands");
+    expect(joined).toContain("hosted_runtime_bridge_commands_idempotency_idx");
+    expect(joined).toContain("hosted_runtime_bridge_commands_claim_idx");
+  });
+
   it("can verify and migrate against real postgres when SWITCHYARD_TEST_POSTGRES_URL is set", async () => {
     const url = process.env["SWITCHYARD_TEST_POSTGRES_URL"];
     if (!url) {

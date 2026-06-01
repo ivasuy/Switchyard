@@ -2,7 +2,7 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema.js";
 
-export const POSTGRES_SCHEMA_VERSION = 20;
+export const POSTGRES_SCHEMA_VERSION = 21;
 
 const SCHEMA_METADATA_KEY = "schema_version";
 
@@ -271,6 +271,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS tool_dispatch_outbox_approval_invocation_idx
   ON tool_dispatch_outbox(approval_id, tool_invocation_id);
 CREATE INDEX IF NOT EXISTS tool_dispatch_outbox_retry_idx
   ON tool_dispatch_outbox(dispatch_status, updated_at, id);
+
+CREATE TABLE IF NOT EXISTS hosted_runtime_bridge_commands (
+  id text PRIMARY KEY,
+  run_id text NOT NULL,
+  approval_id text,
+  runtime_session_id text,
+  runtime_mode text NOT NULL,
+  operation text NOT NULL,
+  status text NOT NULL,
+  idempotency_key text NOT NULL,
+  payload_hash text NOT NULL,
+  payload_bytes integer NOT NULL,
+  redacted_payload jsonb NOT NULL,
+  account_id text NOT NULL,
+  tenant_id text NOT NULL,
+  project_id text NOT NULL,
+  user_id text NOT NULL,
+  api_key_id text NOT NULL,
+  worker_id text,
+  lease_until text,
+  attempts integer NOT NULL,
+  max_attempts integer NOT NULL,
+  reason_code text,
+  adapter_acknowledged_at text,
+  expires_at text NOT NULL,
+  created_at text NOT NULL,
+  updated_at text NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS hosted_runtime_bridge_commands_idempotency_idx
+  ON hosted_runtime_bridge_commands(idempotency_key);
+CREATE INDEX IF NOT EXISTS hosted_runtime_bridge_commands_claim_idx
+  ON hosted_runtime_bridge_commands(status, lease_until, expires_at, created_at, id);
+CREATE INDEX IF NOT EXISTS hosted_runtime_bridge_commands_run_idx
+  ON hosted_runtime_bridge_commands(run_id, created_at, id);
 
 CREATE TABLE IF NOT EXISTS billing_plans (
   id text PRIMARY KEY,

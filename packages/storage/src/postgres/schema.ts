@@ -204,6 +204,38 @@ export const toolDispatchOutbox = pgTable("tool_dispatch_outbox", {
   index("tool_dispatch_outbox_retry_idx").on(table.dispatchStatus, table.updatedAt, table.id)
 ]);
 
+export const hostedRuntimeBridgeCommands = pgTable("hosted_runtime_bridge_commands", {
+  id: text("id").primaryKey(),
+  runId: text("run_id").notNull(),
+  approvalId: text("approval_id"),
+  runtimeSessionId: text("runtime_session_id"),
+  runtimeMode: text("runtime_mode").notNull(),
+  operation: text("operation").notNull(),
+  status: text("status").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  payloadHash: text("payload_hash").notNull(),
+  payloadBytes: integer("payload_bytes").notNull(),
+  redactedPayload: jsonb("redacted_payload").notNull(),
+  accountId: text("account_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  projectId: text("project_id").notNull(),
+  userId: text("user_id").notNull(),
+  apiKeyId: text("api_key_id").notNull(),
+  workerId: text("worker_id"),
+  leaseUntil: text("lease_until"),
+  attempts: integer("attempts").notNull(),
+  maxAttempts: integer("max_attempts").notNull(),
+  reasonCode: text("reason_code"),
+  adapterAcknowledgedAt: text("adapter_acknowledged_at"),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  uniqueIndex("hosted_runtime_bridge_commands_idempotency_idx").on(table.idempotencyKey),
+  index("hosted_runtime_bridge_commands_claim_idx").on(table.status, table.leaseUntil, table.expiresAt, table.createdAt, table.id),
+  index("hosted_runtime_bridge_commands_run_idx").on(table.runId, table.createdAt, table.id)
+]);
+
 export const billingPlans = pgTable("billing_plans", {
   id: text("id").primaryKey(),
   slug: text("slug").notNull(),

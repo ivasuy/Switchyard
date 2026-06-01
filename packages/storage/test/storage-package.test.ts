@@ -14,6 +14,7 @@ import {
   PostgresAssignmentStore,
   PostgresArtifactStore,
   PostgresEventStore,
+  PostgresHostedRuntimeBridgeCommandStore,
   PostgresNodeStore,
   PostgresPlacementStore,
   PostgresRegistryStore,
@@ -108,6 +109,7 @@ describe("storage package", () => {
     expect(typeof PostgresNodeStore).toBe("function");
     expect(typeof PostgresAssignmentStore).toBe("function");
     expect(typeof PostgresControlPlaneStore).toBe("function");
+    expect(typeof PostgresHostedRuntimeBridgeCommandStore).toBe("function");
     expect(typeof MemoryArtifactContentStore).toBe("function");
     expect(typeof ObjectArtifactContentStore).toBe("function");
     expect(typeof LocalObjectArtifactContentStore).toBe("function");
