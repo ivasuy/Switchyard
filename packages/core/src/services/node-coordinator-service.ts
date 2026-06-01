@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ConnectedNode, Assignment, NodePolicy, Run } from "@switchyard/contracts";
 import type { NodeStore } from "../ports/node-store.js";
 import type { NodeAssignmentStore } from "../ports/node-assignment-store.js";
@@ -32,7 +33,6 @@ export interface NodeCoordinatorDependencies {
 
 export class NodeCoordinatorService {
   private readonly now: () => string;
-  private readonly idempotencyToolAssignments = new Map<string, string>();
 
   constructor(private readonly deps: NodeCoordinatorDependencies) {
     this.now = deps.now ?? (() => new Date().toISOString());
@@ -110,12 +110,10 @@ export class NodeCoordinatorService {
     requiredCapability: string;
     idempotencyKey: string;
   }): Promise<Assignment> {
-    const existingId = this.idempotencyToolAssignments.get(input.idempotencyKey);
-    if (existingId) {
-      const existing = await this.deps.assignments.get(existingId);
-      if (existing) {
-        return existing;
-      }
+    const assignmentId = deterministicToolAssignmentId(input.toolInvocationId, input.idempotencyKey);
+    const existing = await this.deps.assignments.get(assignmentId);
+    if (existing) {
+      return existing;
     }
 
     const run = await this.deps.runs.get(input.runId);
@@ -134,7 +132,7 @@ export class NodeCoordinatorService {
     }
 
     const assignment: Assignment = {
-      id: `assignment_${crypto.randomUUID()}`,
+      id: assignmentId,
       runId: run.id,
       nodeId: selected.id,
       kind: "tool",
@@ -146,10 +144,12 @@ export class NodeCoordinatorService {
     };
 
     try {
-      const created = await this.deps.assignments.create(assignment);
-      this.idempotencyToolAssignments.set(input.idempotencyKey, created.id);
-      return created;
+      return await this.deps.assignments.create(assignment);
     } catch (error) {
+      const raced = await this.deps.assignments.get(assignmentId);
+      if (raced) {
+        return raced;
+      }
       throw new NodeCoordinatorError(
         "tool_dispatch_unavailable",
         error instanceof Error ? error.message : "Failed to create tool assignment"
@@ -276,4 +276,12 @@ export class NodeCoordinatorService {
       );
     }
   }
+}
+
+function deterministicToolAssignmentId(toolInvocationId: string, idempotencyKey: string): string {
+  const digest = createHash("sha256")
+    .update(`tool:${toolInvocationId}:${idempotencyKey}`)
+    .digest("hex")
+    .slice(0, 40);
+  return `assignment_${digest}`;
 }

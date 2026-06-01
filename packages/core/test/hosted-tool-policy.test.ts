@@ -177,4 +177,54 @@ describe("hosted tool policy", () => {
     expect(connected.reasonCode).toBe("tool_connected_node_tools_disabled");
     expect(shell.reasonCode).toBe("shell_command_denied");
   });
+
+  it("releases reserved quotas when post-policy admission persistence fails", async () => {
+    class FailingInvocationStore extends MemoryInvocationStore {
+      async create(): Promise<ToolInvocation> {
+        throw new Error("invocation_persist_failed");
+      }
+    }
+
+    const runs = new MemoryRunStore();
+    await runs.create(makeRun("run_quota_rollback", "hosted"));
+    const config = createDisabledRealToolPolicyConfig();
+    const gate = new LocalPolicyGate({
+      ...config,
+      global: { ...config.global, enabled: true },
+      hosted: { enabled: true, allowedToolTypes: ["fetch"] },
+      fetch: { ...config.fetch, enabled: true, allowedHosts: ["example.com"] }
+    });
+
+    const released: Array<{ id: string; reasonCode: string }> = [];
+    const service = new HostedToolService({
+      runs,
+      approvals: new MemoryApprovalStore(),
+      invocations: new FailingInvocationStore(),
+      events: new MemoryEventStore(),
+      policy: gate,
+      dispatchOutbox: new MemoryOutboxStore(),
+      dispatch: async () => ({ dispatchId: "d_rollback", target: "hosted" }),
+      preflight: {
+        reservePostPolicyQuota: async () => ({
+          hourlyReservationId: "quota_hourly_1",
+          activeReservationId: "quota_active_1"
+        }),
+        releaseQuotaReservation: async (reservationId: string, reasonCode: string) => {
+          released.push({ id: reservationId, reasonCode });
+        }
+      }
+    });
+
+    await expect(service.invoke({
+      runId: "run_quota_rollback",
+      type: "fetch",
+      input: { url: "https://example.com/rollback", method: "GET" },
+      target: { placement: "hosted" }
+    })).rejects.toThrow("invocation_persist_failed");
+
+    expect(released).toEqual([
+      { id: "quota_active_1", reasonCode: "tool_admission_failed" },
+      { id: "quota_hourly_1", reasonCode: "tool_admission_failed" }
+    ]);
+  });
 });

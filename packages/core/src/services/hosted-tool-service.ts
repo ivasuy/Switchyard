@@ -51,6 +51,7 @@ export interface HostedToolServiceDependencies {
       invocationId: string;
       approvalId: string;
     }) => Promise<{ hourlyReservationId?: string; activeReservationId?: string }>;
+    releaseQuotaReservation?: (reservationId: string, reasonCode: string) => Promise<void>;
     releaseActiveQuotaReservation?: (reservationId: string, reasonCode: string) => Promise<void>;
     attachOwnership?: (input: {
       resourceType: "tool_invocation" | "approval";
@@ -159,81 +160,86 @@ export class HostedToolService {
       approvalId: approvalId ?? ""
     });
 
-    const invocation: ToolInvocation = {
-      id: invocationId,
-      runId: run.id,
-      type: input.type,
-      status: "queued",
-      ...(approvalId ? { approvalId } : {}),
-      input: redactSecrets(boundRecord({
-        request: redactedInput,
-        reasonCode: decision.reasonCode,
-        policyTrace: decision.policyTrace,
-        executionPlan: decision.executionPlan,
-        executionPlanHash,
-        target: { placement: targetPlacement, ...(input.target?.nodeId ? { nodeId: input.target.nodeId } : {}) }
-      })),
-      createdAt: nowIso
-    };
-
-    await this.deps.invocations.create(invocation);
-    await this.deps.preflight?.attachOwnership?.({ resourceType: "tool_invocation", resourceId: invocation.id, runId: run.id });
-
-    let approval: Approval | undefined;
-    if (decision.decision === "approval_required") {
-      approval = {
-        id: approvalId!,
+    try {
+      const invocation: ToolInvocation = {
+        id: invocationId,
         runId: run.id,
-        status: "pending",
-        approvalType: decision.approvalType,
-        payload: redactSecrets(boundRecord({
-          toolInvocationId: invocation.id,
-          toolType: input.type,
+        type: input.type,
+        status: "queued",
+        ...(approvalId ? { approvalId } : {}),
+        input: redactSecrets(boundRecord({
+          request: redactedInput,
           reasonCode: decision.reasonCode,
-          actionSummary: `${input.type} request requires approval`,
           policyTrace: decision.policyTrace,
           executionPlan: decision.executionPlan,
           executionPlanHash,
-          expiresAt: decision.expiresAt,
-          target: { placement: targetPlacement, ...(input.target?.nodeId ? { nodeId: input.target.nodeId } : {}) },
-          quota
+          target: { placement: targetPlacement, ...(input.target?.nodeId ? { nodeId: input.target.nodeId } : {}) }
         })),
         createdAt: nowIso
       };
-      await this.deps.approvals.create(approval);
-      await this.deps.preflight?.attachOwnership?.({ resourceType: "approval", resourceId: approval.id, runId: run.id });
-    }
 
-    const allowAuditPayload: {
-      runId: string;
-      toolInvocationId?: string;
-      approvalId?: string;
-      eventType: string;
-      reasonCode: string;
-      decision: "allow" | "deny" | "error";
-      payload: Record<string, unknown>;
-    } = {
-      runId: run.id,
-      toolInvocationId: invocation.id,
-      eventType: "tool.invoke_allowed",
-      reasonCode: decision.reasonCode,
-      decision: "allow",
-      payload: boundRecord({
-        toolType: input.type,
-        decision: decision.decision,
-        placement: targetPlacement
-      })
-    };
-    if (approval?.id) {
-      allowAuditPayload.approvalId = approval.id;
-    }
-    await this.deps.preflight?.recordAudit?.(allowAuditPayload);
+      await this.deps.invocations.create(invocation);
+      await this.deps.preflight?.attachOwnership?.({ resourceType: "tool_invocation", resourceId: invocation.id, runId: run.id });
 
-    return {
-      statusCode: 202,
-      invocation,
-      ...(approval ? { approval } : {})
-    };
+      let approval: Approval | undefined;
+      if (decision.decision === "approval_required") {
+        approval = {
+          id: approvalId!,
+          runId: run.id,
+          status: "pending",
+          approvalType: decision.approvalType,
+          payload: redactSecrets(boundRecord({
+            toolInvocationId: invocation.id,
+            toolType: input.type,
+            reasonCode: decision.reasonCode,
+            actionSummary: `${input.type} request requires approval`,
+            policyTrace: decision.policyTrace,
+            executionPlan: decision.executionPlan,
+            executionPlanHash,
+            expiresAt: decision.expiresAt,
+            target: { placement: targetPlacement, ...(input.target?.nodeId ? { nodeId: input.target.nodeId } : {}) },
+            quota
+          })),
+          createdAt: nowIso
+        };
+        await this.deps.approvals.create(approval);
+        await this.deps.preflight?.attachOwnership?.({ resourceType: "approval", resourceId: approval.id, runId: run.id });
+      }
+
+      const allowAuditPayload: {
+        runId: string;
+        toolInvocationId?: string;
+        approvalId?: string;
+        eventType: string;
+        reasonCode: string;
+        decision: "allow" | "deny" | "error";
+        payload: Record<string, unknown>;
+      } = {
+        runId: run.id,
+        toolInvocationId: invocation.id,
+        eventType: "tool.invoke_allowed",
+        reasonCode: decision.reasonCode,
+        decision: "allow",
+        payload: boundRecord({
+          toolType: input.type,
+          decision: decision.decision,
+          placement: targetPlacement
+        })
+      };
+      if (approval?.id) {
+        allowAuditPayload.approvalId = approval.id;
+      }
+      await this.deps.preflight?.recordAudit?.(allowAuditPayload);
+
+      return {
+        statusCode: 202,
+        invocation,
+        ...(approval ? { approval } : {})
+      };
+    } catch (error) {
+      await this.rollbackAdmissionQuotaReservations(quota, "tool_admission_failed");
+      throw error;
+    }
   }
 
   async resolveApproval(
@@ -479,6 +485,25 @@ export class HostedToolService {
       return;
     }
     await this.deps.preflight?.releaseActiveQuotaReservation?.(activeReservationId, reasonCode);
+  }
+
+  private async rollbackAdmissionQuotaReservations(
+    quota: { hourlyReservationId?: string; activeReservationId?: string } | undefined,
+    reasonCode: string
+  ): Promise<void> {
+    if (!quota) {
+      return;
+    }
+    const releaser = this.deps.preflight?.releaseQuotaReservation;
+    if (!releaser) {
+      return;
+    }
+    if (quota.activeReservationId) {
+      await releaser(quota.activeReservationId, reasonCode);
+    }
+    if (quota.hourlyReservationId) {
+      await releaser(quota.hourlyReservationId, reasonCode);
+    }
   }
 
   private isTargetMatchAllowed(run: { placement: string; metadata?: Record<string, unknown> }, targetPlacement: ToolDispatchTargetPlacement): boolean {

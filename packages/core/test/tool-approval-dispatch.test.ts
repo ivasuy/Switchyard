@@ -328,4 +328,70 @@ describe("tool approval dispatch", () => {
     expect(first.kind).toBe("tool");
     expect(first.toolInvocationId).toBe("tool_abc123");
   });
+
+  it("dedupes tool assignment idempotency across fresh service instances", async () => {
+    class MemoryNodeStore implements NodeStore {
+      readonly items = new Map<string, ConnectedNode>();
+      async upsert(node: ConnectedNode): Promise<ConnectedNode> { this.items.set(node.id, node); return node; }
+      async get(id: string): Promise<ConnectedNode | undefined> { return this.items.get(id); }
+      async list() { return [...this.items.values()]; }
+      async markOffline() { return undefined; }
+      async listEligible() { return [...this.items.values()]; }
+    }
+
+    class MemoryAssignments implements NodeAssignmentStore {
+      readonly items = new Map<string, Assignment>();
+      async create(value: Assignment): Promise<Assignment> { this.items.set(value.id, value); return value; }
+      async get(id: string): Promise<Assignment | undefined> { return this.items.get(id); }
+      async update(value: Assignment): Promise<Assignment> { this.items.set(value.id, value); return value; }
+      async listClaimable() { return []; }
+      async claim() { return undefined; }
+      async complete() { return undefined; }
+      async fail() { return undefined; }
+      async cancel() { return undefined; }
+      async expireStale() { return []; }
+    }
+
+    const runs = new MemoryRunStore();
+    await runs.create(makeRun("run_4", "connected_local_node"));
+    const nodes = new MemoryNodeStore();
+    await nodes.upsert({
+      id: "node_2",
+      mode: "hybrid",
+      status: "online",
+      capabilities: ["tool.fetch"],
+      policy: {
+        allowRuntimeModes: [],
+        denyAdapterTypes: [],
+        allowCwdPrefixes: [],
+        allowEventTypes: [],
+        artifactSync: "full",
+        allowToolTypes: ["fetch"],
+        allowToolCwdPrefixes: [],
+        toolArtifactSync: "full",
+        toolApprovalRequired: true
+      },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+
+    const assignments = new MemoryAssignments();
+    const firstService = new NodeCoordinatorService({ nodes, assignments, runs, now: () => "2026-06-01T00:00:00.000Z" });
+    const secondService = new NodeCoordinatorService({ nodes, assignments, runs, now: () => "2026-06-01T00:00:00.000Z" });
+
+    const first = await firstService.createToolAssignment({
+      runId: "run_4",
+      toolInvocationId: "tool_retry_1",
+      requiredCapability: "tool.fetch",
+      idempotencyKey: "idem_shared"
+    });
+    const second = await secondService.createToolAssignment({
+      runId: "run_4",
+      toolInvocationId: "tool_retry_1",
+      requiredCapability: "tool.fetch",
+      idempotencyKey: "idem_shared"
+    });
+
+    expect(first.id).toBe(second.id);
+    expect(assignments.items.size).toBe(1);
+  });
 });
