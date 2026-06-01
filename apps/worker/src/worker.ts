@@ -13,6 +13,7 @@ import {
   type ApprovalStore,
   type ArtifactContentStore,
   type ArtifactStore,
+  type ControlPlaneStore,
   type EventStore,
   type RuntimeLogger,
   type RunQueuePort,
@@ -32,6 +33,7 @@ import {
   POSTGRES_SCHEMA_VERSION,
   PostgresApprovalStore,
   PostgresArtifactStore,
+  PostgresControlPlaneStore,
   type PostgresDatabaseHandle,
   PostgresEventStore,
   type PostgresSchemaCompatibility,
@@ -126,6 +128,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   }) => Promise<void>;
   logger?: RuntimeLogger;
   incrementToolMetric?: (metric: string, labels: Record<string, string>) => void;
+  controlPlaneStore?: ControlPlaneStore;
 }): HostedWorkerApp {
   const tools = config.tools ?? {
     hostedRealTools: "disabled",
@@ -163,8 +166,81 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   const approvals: ApprovalStore = deps?.approvals ?? (postgres ? new PostgresApprovalStore(postgres) : new InMemoryApprovalStore());
   const artifactContent: ArtifactContentStore & { probe: () => Promise<{ ok: true }> } =
     deps?.artifactContent ?? createArtifactContentStoreFromObjectConfig(runtimeConfig.objectStore);
+  const controlPlaneStore = deps?.controlPlaneStore ?? (postgres ? new PostgresControlPlaneStore(postgres) : undefined);
+  const runtimeLogger = deps?.logger ?? createWorkerRuntimeLogger();
+  const incrementToolMetric = deps?.incrementToolMetric ?? createWorkerMetricSink(runtimeLogger);
+  const attachArtifactOwnership = deps?.attachArtifactOwnership ?? (
+    controlPlaneStore
+      ? async (input: {
+        runId: string;
+        toolInvocationId: string;
+        artifactId: string;
+        artifactPath: string;
+        artifactBytes: number;
+        artifactSha256: string;
+      }) => {
+        const runOwnership = await controlPlaneStore.getOwnership({
+          resourceType: "run",
+          resourceId: input.runId
+        });
+        if (!runOwnership) {
+          const ownershipError = new Error("ownership_attach_failed");
+          (ownershipError as Error & { reasonCode: string }).reasonCode = "ownership_attach_failed";
+          throw ownershipError;
+        }
+        await controlPlaneStore.attachOwnership({
+          resourceType: "artifact",
+          resourceId: input.artifactId,
+          accountId: runOwnership.accountId,
+          tenantId: runOwnership.tenantId,
+          projectId: runOwnership.projectId,
+          userId: runOwnership.userId,
+          apiKeyId: runOwnership.apiKeyId,
+          createdAt: new Date().toISOString()
+        });
+      }
+      : undefined
+  );
+  const consumeToolArtifactBytesQuota = deps?.consumeToolArtifactBytesQuota ?? (
+    controlPlaneStore
+      ? async (input: {
+        runId: string;
+        toolInvocationId: string;
+        artifactId: string;
+        bytes: number;
+      }) => {
+        const runOwnership = await controlPlaneStore.getOwnership({
+          resourceType: "run",
+          resourceId: input.runId
+        });
+        if (!runOwnership) {
+          const quotaError = new Error("quota_owner_missing");
+          (quotaError as Error & { reasonCode: string }).reasonCode = "quota_owner_missing";
+          throw quotaError;
+        }
+        const maxAllowed = await resolveToolArtifactQuotaLimit(runOwnership.accountId);
+        await controlPlaneStore.reserveQuota({
+          accountId: runOwnership.accountId,
+          tenantId: runOwnership.tenantId,
+          projectId: runOwnership.projectId,
+          userId: runOwnership.userId,
+          apiKeyId: runOwnership.apiKeyId,
+          quotaKind: "tool_artifact_bytes_per_hour",
+          amount: Math.max(1, Math.ceil(input.bytes)),
+          maxAllowed,
+          windowMs: 60 * 60 * 1000,
+          reservationTtlMs: 60 * 1000,
+          reasonCode: "tool_artifact_store",
+          now: new Date().toISOString()
+        });
+      }
+      : undefined
+  );
 
-  const adapters = buildHostedWorkerAdapters(runtimeConfig, deps?.adapters);
+  const adapters = buildHostedWorkerAdapters(runtimeConfig, {
+    ...(deps?.adapters ?? {}),
+    logger: runtimeLogger
+  });
   const toolAdapters = buildWorkerHostedToolAdapters(runtimeConfig, deps?.toolAdapters);
   const toolPolicy = deps?.toolPolicy ?? new LocalPolicyGate(runtimeConfig.tools.policy);
   const _hostedSandbox = createWorkerHostedSandboxService(config, {
@@ -204,6 +280,44 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
 
   let cachedReadiness: { checkedAtMs: number; status: WorkerReadinessReport } | undefined;
   let reconciledStaleRunningTools = false;
+  const quotaLimitByAccount = new Map<string, number>();
+
+  async function resolveToolArtifactQuotaLimit(accountId: string): Promise<number> {
+    const cached = quotaLimitByAccount.get(accountId);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const fallback = Math.max(
+      1,
+      Math.min(2_000_000_000, runtimeConfig.tools.policy.global.maxArtifactBytes * 256)
+    );
+    if (!postgres) {
+      quotaLimitByAccount.set(accountId, fallback);
+      return fallback;
+    }
+    try {
+      const result = await postgres.pool.query(
+        `SELECT b.quotas AS plan_quotas
+           FROM accounts a
+           JOIN billing_plans b ON b.id = a.billing_plan_id
+          WHERE a.id = $1
+          LIMIT 1`,
+        [accountId]
+      );
+      const row = result.rows[0] as { plan_quotas?: unknown } | undefined;
+      const planQuotas = asRecord(row?.plan_quotas);
+      const max = Number(planQuotas["maxToolArtifactBytesPerHour"]);
+      if (Number.isFinite(max) && max >= 1) {
+        const resolved = Math.min(2_000_000_000, Math.floor(max));
+        quotaLimitByAccount.set(accountId, resolved);
+        return resolved;
+      }
+    } catch {
+      // Fall back to policy-derived bound when quota plan lookup is unavailable.
+    }
+    quotaLimitByAccount.set(accountId, fallback);
+    return fallback;
+  }
 
   return {
     tick: async () => {
@@ -546,7 +660,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         createdAt: new Date().toISOString()
       };
       const created = await artifacts.create(artifact);
-      await deps?.attachArtifactOwnership?.({
+      await attachArtifactOwnership?.({
         runId,
         toolInvocationId,
         artifactId: created.id,
@@ -554,7 +668,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         artifactBytes: stored.sizeBytes,
         artifactSha256: stored.sha256
       });
-      await deps?.consumeToolArtifactBytesQuota?.({
+      await consumeToolArtifactBytesQuota?.({
         runId,
         toolInvocationId,
         artifactId: created.id,
@@ -655,15 +769,15 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   }
 
   function emitToolInfo(event: string, details: Record<string, string>): void {
-    deps?.logger?.info(event, details);
+    runtimeLogger.info(event, details);
   }
 
   function emitToolWarn(event: string, details: Record<string, string>): void {
-    deps?.logger?.warn(event, details);
+    runtimeLogger.warn(event, details);
   }
 
   function emitToolMetric(metric: string, labels: Record<string, string>): void {
-    deps?.incrementToolMetric?.(metric, labels);
+    incrementToolMetric(metric, labels);
   }
 
   async function appendToolEvent(
@@ -986,6 +1100,28 @@ function truncateUtf8Bytes(input: string, maxBytes: number): string {
     .subarray(0, maxBytes)
     .toString("utf8")
     .replace(/\uFFFD+$/g, "");
+}
+
+function createWorkerRuntimeLogger(): RuntimeLogger {
+  return {
+    info(event, details) {
+      console.info(event, details ?? {});
+    },
+    warn(event, details) {
+      console.warn(event, details ?? {});
+    },
+    error(event, details) {
+      console.error(event, details ?? {});
+    }
+  };
+}
+
+function createWorkerMetricSink(
+  logger: RuntimeLogger
+): (metric: string, labels: Record<string, string>) => void {
+  return (metric, labels) => {
+    logger.info("worker.metric", { metric, labels });
+  };
 }
 
 function sandboxReadinessDiagnostics(config: WorkerConfig): Record<string, unknown> {

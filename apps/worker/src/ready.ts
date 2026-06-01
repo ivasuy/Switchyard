@@ -5,9 +5,25 @@ import { loadWorkerConfig } from "./config.js";
 export async function runWorkerReadinessCommand(env: NodeJS.ProcessEnv = process.env): Promise<WorkerReadinessReport> {
   let worker: ReturnType<typeof createHostedWorker> | undefined;
   let report: WorkerReadinessReport | undefined;
+  const logger = {
+    info(event: string, details?: Record<string, unknown>) {
+      console.info(event, details ?? {});
+    },
+    warn(event: string, details?: Record<string, unknown>) {
+      console.warn(event, details ?? {});
+    },
+    error(event: string, details?: Record<string, unknown>) {
+      console.error(event, details ?? {});
+    }
+  };
   try {
     const config = loadWorkerConfig(env);
-    worker = createHostedWorker(config);
+    worker = createHostedWorker(config, {
+      logger,
+      incrementToolMetric(metric, labels) {
+        logger.info("worker.metric", { metric, labels });
+      }
+    });
     report = await worker.ready({ mode: "full" });
     return report;
   } catch (error) {

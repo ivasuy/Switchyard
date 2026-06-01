@@ -10,7 +10,23 @@ process.on("SIGTERM", () => signal.abort());
 try {
   const loadedConfig = loadWorkerConfig();
   config = loadedConfig;
-  worker = createHostedWorker(loadedConfig);
+  const logger = {
+    info(event: string, details?: Record<string, unknown>) {
+      console.info(event, details ?? {});
+    },
+    warn(event: string, details?: Record<string, unknown>) {
+      console.warn(event, details ?? {});
+    },
+    error(event: string, details?: Record<string, unknown>) {
+      console.error(event, details ?? {});
+    }
+  };
+  worker = createHostedWorker(loadedConfig, {
+    logger,
+    incrementToolMetric(metric, labels) {
+      logger.info("worker.metric", { metric, labels });
+    }
+  });
   const readiness = await worker.ready({ mode: "full" });
   if (!readiness.ok) {
     console.error("worker.start_failed", {

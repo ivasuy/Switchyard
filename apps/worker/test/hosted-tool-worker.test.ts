@@ -609,6 +609,155 @@ describe("hosted tool worker", () => {
     }
   });
 
+  it("wires ownership and quota via control-plane defaults when hooks are not injected", async () => {
+    const queue = new MemoryRunQueue({ now: () => "2026-06-01T00:00:00.000Z", leaseMs: 1000 });
+    const runs = new InMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const approvals = new InMemoryApprovalStore();
+    const invocations = new InMemoryToolInvocationStore();
+    const policy = basePolicy();
+    const runId = "run_tool_control_plane_defaults_1";
+    const ownershipCalls: Array<Record<string, unknown>> = [];
+    const quotaCalls: Array<Record<string, unknown>> = [];
+
+    await runs.create({
+      id: runId,
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "do",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic",
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+
+    const gate = new LocalPolicyGate(policy);
+    const request = { url: "https://example.com/health", method: "GET", captureContent: true };
+    const decision = await gate.decideTool({ type: "fetch", input: request, runApprovalPolicy: "default", placement: "hosted" } as never);
+    if (decision.decision === "deny") {
+      throw new Error("expected allow/approval_required decision");
+    }
+    const executionPlanHash = hashExecutionPlan(decision.executionPlan);
+
+    await invocations.create({
+      id: "tool_control_plane_defaults_1",
+      runId,
+      type: "fetch",
+      status: "queued",
+      approvalId: "approval_control_plane_defaults_1",
+      input: {
+        request,
+        executionPlan: decision.executionPlan,
+        executionPlanHash,
+        target: { placement: "hosted" }
+      },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    await approvals.create({
+      id: "approval_control_plane_defaults_1",
+      runId,
+      approvalType: "before_external_web_action",
+      status: "approved",
+      payload: { toolInvocationId: "tool_control_plane_defaults_1", executionPlanHash },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    await queue.enqueueTool({
+      approvalId: "approval_control_plane_defaults_1",
+      toolInvocationId: "tool_control_plane_defaults_1",
+      runId,
+      placement: "hosted",
+      toolType: "fetch",
+      executionPlanHash,
+      idempotencyKey: "dispatch_tool_control_plane_defaults_1"
+    });
+
+    const controlPlaneStore = {
+      getOwnership: async (input: { resourceType: string; resourceId: string }) => {
+        if (input.resourceType === "run" && input.resourceId === runId) {
+          return {
+            resourceType: "run",
+            resourceId: runId,
+            accountId: "account_1",
+            tenantId: "tenant_1",
+            projectId: "project_1",
+            userId: "user_1",
+            apiKeyId: "api_key_1",
+            createdAt: "2026-06-01T00:00:00.000Z"
+          };
+        }
+        return null;
+      },
+      attachOwnership: async (input: Record<string, unknown>) => {
+        ownershipCalls.push(input);
+        return {
+          resourceType: String(input["resourceType"]),
+          resourceId: String(input["resourceId"]),
+          accountId: String(input["accountId"]),
+          tenantId: String(input["tenantId"]),
+          projectId: String(input["projectId"]),
+          userId: String(input["userId"]),
+          apiKeyId: String(input["apiKeyId"]),
+          createdAt: "2026-06-01T00:00:00.000Z"
+        };
+      },
+      reserveQuota: async (input: Record<string, unknown>) => {
+        quotaCalls.push(input);
+        return {
+          id: "quota_reservation_1",
+          accountId: String(input["accountId"]),
+          tenantId: String(input["tenantId"]),
+          projectId: String(input["projectId"]),
+          quotaKind: "tool_artifact_bytes_per_hour",
+          amount: Number(input["amount"]),
+          state: "reserved",
+          reasonCode: "tool_artifact_store",
+          createdAt: "2026-06-01T00:00:00.000Z",
+          expiresAt: "2026-06-01T00:01:00.000Z"
+        };
+      }
+    } as unknown;
+
+    const worker = createHostedWorker(baseConfig(policy), {
+      queue,
+      runs,
+      events,
+      approvals,
+      invocations,
+      artifactContent: {
+        probe: async () => ({ ok: true }),
+        writeText: async (path, text, options) => ({
+          path,
+          storageBackend: "memory",
+          sizeBytes: Buffer.byteLength(text, "utf8"),
+          sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+          contentType: options?.contentType ?? "text/plain"
+        }),
+        writeBytes: async () => {
+          throw new Error("write_bytes_not_expected");
+        },
+        read: async () => ({ body: Buffer.from(""), contentType: "text/plain" })
+      },
+      controlPlaneStore: controlPlaneStore as never
+    });
+
+    try {
+      const worked = await worker.tick();
+      expect(worked).toBe(true);
+      const invocation = await invocations.get("tool_control_plane_defaults_1");
+      expect(invocation?.status).toBe("completed");
+      expect(ownershipCalls).toHaveLength(1);
+      expect(quotaCalls).toHaveLength(1);
+    } finally {
+      await worker.stop();
+    }
+  });
+
   it("emits low-cardinality logs and metrics for tool outcomes", async () => {
     const queue = new MemoryRunQueue({ now: () => "2026-06-01T00:00:00.000Z", leaseMs: 1000 });
     const runs = new InMemoryRunStore();
