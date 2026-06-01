@@ -4,6 +4,7 @@ import {
   approvalTypeSchema,
   createToolInvocationRequestSchema,
   decodeCursor,
+  isHostedRuntimeBridgeSupportedMode,
   LIST_LIMIT_DEFAULT,
   LIST_LIMIT_MAX,
   toolInvocationStatusSchema,
@@ -15,11 +16,12 @@ import type {
   ApprovalStore,
   ControlPlaneService,
   ControlPlaneStore,
+  HostedRuntimeBridgeService,
   HostedToolService,
   RunStore,
   ToolInvocationStore
 } from "@switchyard/core";
-import { ControlPlaneError } from "@switchyard/core";
+import { ControlPlaneError, HostedRuntimeBridgeServiceError } from "@switchyard/core";
 import { getHostedAuthContext } from "./hosted-auth.js";
 import { sendHttpError } from "./http-errors.js";
 
@@ -32,6 +34,7 @@ export interface HostedToolRouteDependencies {
   approvals: Pick<ApprovalStore, "get" | "list">;
   controlPlane?: ControlPlaneService;
   controlPlaneStore?: ControlPlaneStore;
+  hostedRuntimeBridge?: Pick<HostedRuntimeBridgeService, "resolveRuntimeApproval">;
 }
 
 const STATUS_BY_TOOL_CODE: Record<string, number> = {
@@ -65,9 +68,11 @@ const STATUS_BY_TOOL_CODE: Record<string, number> = {
   tool_assignment_expired: 409,
   tool_assignment_mismatch: 409,
   hosted_runtime_approval_bridge_unshipped: 409,
+  hosted_runtime_bridge_non_idempotent_retry_blocked: 409,
   approval_scope_denied: 403,
   repo_hosted_unshipped: 409,
   browser_tool_unshipped: 409,
+  adapter_protocol_failed: 409,
   invalid_input: 400,
   invalid_query: 400,
   run_not_found: 404,
@@ -250,7 +255,7 @@ export function registerHostedToolRoutes(app: FastifyInstance, deps: HostedToolR
       const approvalType = parseOptionalEnum(query["approvalType"], approvalTypeSchema, "approvalType");
       const runId = optionalString(query, "runId");
 
-      const result = await listOwnedToolApprovals({
+      const result = await listOwnedApprovals({
         deps,
         auth,
         limit,
@@ -298,7 +303,10 @@ export function registerHostedToolRoutes(app: FastifyInstance, deps: HostedToolR
 
       const scope = classifyApprovalScope(approval);
       if (scope === "runtime") {
-        return sendToolHttpError(reply, "hosted_runtime_approval_bridge_unshipped", "Runtime approvals are not resolved through hosted tool approval routes");
+        if (!(await isSupportedRuntimeApproval(deps, approval))) {
+          return sendToolHttpError(reply, "hosted_runtime_approval_bridge_unshipped", "Runtime approval bridge is not available for this runtime");
+        }
+        return reply.send({ approval });
       }
       if (scope !== "tool") {
         return sendToolHttpError(reply, "approval_scope_denied", "Hosted tool approval route only resolves tool-scoped approvals");
@@ -352,7 +360,18 @@ async function handleResolveApproval(
 
     const scope = classifyApprovalScope(approval);
     if (scope === "runtime") {
-      return sendToolHttpError(reply, "hosted_runtime_approval_bridge_unshipped", "Runtime approvals are not resolved through hosted tool approval routes");
+      if (!deps.hostedRuntimeBridge) {
+        return sendToolHttpError(reply, "hosted_runtime_approval_bridge_unshipped", "Runtime approvals are not resolved through hosted bridge routes");
+      }
+      const body = resolveApprovalBody(reply.request.body);
+      const resolved = await deps.hostedRuntimeBridge.resolveRuntimeApproval({
+        approvalId: params.id,
+        decision,
+        ...(body ? { body } : {}),
+        ...(auth ? { auth } : {}),
+        requestId: reply.request.id
+      });
+      return reply.send({ approval: resolved.approval, bridgeCommandId: resolved.commandId });
     }
     if (scope !== "tool") {
       return sendToolHttpError(reply, "approval_scope_denied", "Hosted tool approval route only resolves tool-scoped approvals");
@@ -425,7 +444,7 @@ async function listOwnedToolInvocations(input: {
   };
 }
 
-async function listOwnedToolApprovals(input: {
+async function listOwnedApprovals(input: {
   deps: HostedToolRouteDependencies;
   auth: { account: { id: string }; tenant: { id: string }; project: { id: string } };
   runId?: string;
@@ -447,32 +466,36 @@ async function listOwnedToolApprovals(input: {
   });
 
   const records = await Promise.all(ids.map((id) => input.deps.approvals.get(id)));
-  const pageRows = records
-    .filter((entry): entry is Approval => Boolean(entry))
-    .filter((entry) => {
-      if (classifyApprovalScope(entry) !== "tool") {
-        return false;
-      }
-      if (input.runId && entry.runId !== input.runId) {
-        return false;
-      }
-      if (input.status && entry.status !== input.status) {
-        return false;
-      }
-      if (input.approvalType && entry.approvalType !== input.approvalType) {
-        return false;
-      }
-      if (!input.before) {
-        return true;
-      }
-      if (entry.createdAt < input.before.createdAt) {
-        return true;
-      }
+  const filtered: Approval[] = [];
+  for (const entry of records) {
+    if (!entry) {
+      continue;
+    }
+    const scope = classifyApprovalScope(entry);
+    const allowed = scope === "tool" || (scope === "runtime" && await isSupportedRuntimeApproval(input.deps, entry));
+    if (!allowed) {
+      continue;
+    }
+    if (input.runId && entry.runId !== input.runId) {
+      continue;
+    }
+    if (input.status && entry.status !== input.status) {
+      continue;
+    }
+    if (input.approvalType && entry.approvalType !== input.approvalType) {
+      continue;
+    }
+    if (input.before) {
       if (entry.createdAt > input.before.createdAt) {
-        return false;
+        continue;
       }
-      return entry.id < input.before.id;
-    })
+      if (entry.createdAt === input.before.createdAt && entry.id >= input.before.id) {
+        continue;
+      }
+    }
+    filtered.push(entry);
+  }
+  const pageRows = filtered
     .sort((left, right) => (left.createdAt === right.createdAt ? right.id.localeCompare(left.id) : left.createdAt > right.createdAt ? -1 : 1));
 
   const page = pageRows.slice(0, input.limit);
@@ -482,6 +505,30 @@ async function listOwnedToolApprovals(input: {
     approvals: page,
     nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null
   };
+}
+
+async function isSupportedRuntimeApproval(
+  deps: HostedToolRouteDependencies,
+  approval: Approval
+): Promise<boolean> {
+  const runtimeApprovalToken = approval.payload["runtimeApprovalToken"];
+  if (typeof runtimeApprovalToken !== "string" || runtimeApprovalToken.length === 0) {
+    return false;
+  }
+
+  const payloadRuntimeMode = approval.payload["runtimeMode"];
+  if (typeof payloadRuntimeMode === "string" && payloadRuntimeMode.length > 0) {
+    return isHostedRuntimeBridgeSupportedMode(payloadRuntimeMode, "approval_resolution");
+  }
+
+  if (!approval.runId) {
+    return false;
+  }
+  const run = await deps.runs.get(approval.runId);
+  if (!run) {
+    return false;
+  }
+  return isHostedRuntimeBridgeSupportedMode(run.runtimeMode ?? run.runtime, "approval_resolution");
 }
 
 function classifyApprovalScope(approval: Approval): "tool" | "runtime" | "other" {
@@ -652,6 +699,27 @@ function handleRouteError(reply: FastifyReply, error: unknown): FastifyReply {
   if (error instanceof ControlPlaneError) {
     return sendHttpError(reply, error.code, error.reasonCode, [{ path: "reasonCode", issue: error.reasonCode }]);
   }
+  if (error instanceof HostedRuntimeBridgeServiceError) {
+    if (error.code === "invalid_input") {
+      return sendHttpError(reply, "invalid_input", error.message, bridgeDetails(error));
+    }
+    if (error.code === "adapter_protocol_failed") {
+      return sendHttpError(reply, "adapter_protocol_failed", error.message, bridgeDetails(error));
+    }
+    if (error.code === "approval_not_pending") {
+      return sendHttpError(reply, "approval_not_pending", error.message, bridgeDetails(error));
+    }
+    if (error.code === "approval_not_found") {
+      return sendHttpError(reply, "approval_not_found", error.message, bridgeDetails(error));
+    }
+    if (error.code === "run_not_found") {
+      return sendHttpError(reply, "run_not_found", error.message, bridgeDetails(error));
+    }
+    if (error.code === "quota_exceeded") {
+      return sendHttpError(reply, "quota_exceeded", error.message, bridgeDetails(error));
+    }
+    return sendHttpError(reply, "internal_error", error.message, bridgeDetails(error));
+  }
 
   if (!error || typeof error !== "object") {
     throw error;
@@ -693,6 +761,23 @@ function sendToolHttpError(
     payload.error.requestId = requestId;
   }
   return reply.code(status).send(payload);
+}
+
+function bridgeDetails(error: HostedRuntimeBridgeServiceError): Array<{ path: string; issue: string }> | undefined {
+  if (error.details && error.details.length > 0) {
+    return error.details;
+  }
+  if (error.reasonCode) {
+    return [{ path: "reasonCode", issue: error.reasonCode }];
+  }
+  return undefined;
+}
+
+function resolveApprovalBody(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

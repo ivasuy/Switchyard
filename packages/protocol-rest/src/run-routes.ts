@@ -4,6 +4,7 @@ import type {
   ControlPlaneService,
   EventBus,
   EventStore,
+  HostedRuntimeBridgeService,
   PlacementStore,
   RegistryService,
   RegistryStore,
@@ -13,7 +14,7 @@ import type {
   RunService,
   RunStore
 } from "@switchyard/core";
-import { AdapterProtocolError, ControlPlaneError, isRealHostedRuntimeMode } from "@switchyard/core";
+import { AdapterProtocolError, ControlPlaneError, HostedRuntimeBridgeServiceError, isRealHostedRuntimeMode } from "@switchyard/core";
 import {
   adapterTypeSchema,
   decodeCursor,
@@ -47,6 +48,7 @@ export interface RunRouteDependencies {
   placements?: PlacementStore;
   listAssignmentsByRun?: (runId: string) => Promise<readonly { id: string }[]>;
   controlPlane?: ControlPlaneService;
+  hostedRuntimeBridge?: Pick<HostedRuntimeBridgeService, "createInputCommand">;
 }
 
 type OwnershipAttachFailure = {
@@ -465,14 +467,25 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
     }
 
     if (isHostedRealRun(run)) {
-      if (isTerminalStatus(run.status)) {
-        return sendHttpError(reply, "adapter_protocol_failed", "Run is not active", [
-          { path: "reasonCode", issue: "runtime_input_not_active" }
+      if (!deps.hostedRuntimeBridge) {
+        return sendHttpError(reply, "adapter_protocol_failed", "Hosted runtime bridge payload store unavailable", [
+          { path: "reasonCode", issue: "hosted_runtime_bridge_store_unavailable" }
         ]);
       }
-      return sendHttpError(reply, "adapter_protocol_failed", "Hosted input bridge is not supported", [
-        { path: "reasonCode", issue: "hosted_input_bridge_unsupported" }
-      ]);
+
+      try {
+        const idempotencyKey = readIdempotencyKey(request);
+        const admitted = await deps.hostedRuntimeBridge.createInputCommand({
+          runId: id,
+          body: parseHostedInputBody(request.body),
+          ...(auth ? { auth } : {}),
+          requestId: request.id,
+          ...(idempotencyKey ? { idempotencyKey } : {})
+        });
+        return reply.code(202).send({ accepted: true, bridgeCommandId: admitted.commandId });
+      } catch (error) {
+        return sendHostedBridgeHttpError(reply, error);
+      }
     }
 
     try {
@@ -1116,6 +1129,26 @@ function parseInputBody(value: unknown): Record<string, unknown> {
   return { text };
 }
 
+function parseHostedInputBody(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new HttpProblem("invalid_input", "Input body must be an object", [
+      { path: "body", issue: "must be an object" }
+    ]);
+  }
+  const text = value["text"];
+  if (typeof text !== "string") {
+    throw new HttpProblem("invalid_input", "text is required", [
+      { path: "text", issue: "must be a non-empty string" }
+    ]);
+  }
+  if (Buffer.byteLength(text, "utf8") > 64 * 1024) {
+    throw new HttpProblem("invalid_input", "text is too large", [
+      { path: "text", issue: "must be <= 65536 bytes" }
+    ]);
+  }
+  return { text };
+}
+
 function parseRunContext(value: unknown): CreateRunBody["context"] {
   if (value === undefined) {
     return undefined;
@@ -1285,6 +1318,67 @@ function adapterProtocolDetails(error: AdapterProtocolError): Array<{ path: stri
     return undefined;
   }
   return [{ path: "reasonCode", issue: error.reasonCode }];
+}
+
+function hostedBridgeDetails(error: HostedRuntimeBridgeServiceError): Array<{ path: string; issue: string }> | undefined {
+  if (error.details && error.details.length > 0) {
+    return error.details;
+  }
+  if (error.reasonCode) {
+    return [{ path: "reasonCode", issue: error.reasonCode }];
+  }
+  return undefined;
+}
+
+function sendHostedBridgeHttpError(reply: FastifyReply, error: unknown): FastifyReply {
+  if (error instanceof HostedRuntimeBridgeServiceError) {
+    if (error.code === "invalid_input") {
+      return sendHttpError(reply, "invalid_input", error.message, hostedBridgeDetails(error));
+    }
+    if (error.code === "run_not_found") {
+      return sendHttpError(reply, "run_not_found", error.message, hostedBridgeDetails(error));
+    }
+    if (error.code === "adapter_protocol_failed") {
+      return sendHttpError(reply, "adapter_protocol_failed", error.message, hostedBridgeDetails(error));
+    }
+    if (error.code === "quota_exceeded") {
+      return sendHttpError(reply, "quota_exceeded", error.message, hostedBridgeDetails(error));
+    }
+    return sendHttpError(reply, "internal_error", error.message, hostedBridgeDetails(error));
+  }
+  if (error instanceof ControlPlaneError) {
+    return sendHttpError(reply, error.code, error.reasonCode, [{ path: "reasonCode", issue: error.reasonCode }]);
+  }
+  if (error && typeof error === "object") {
+    const serviceError = error as {
+      code?: unknown;
+      message?: unknown;
+      reasonCode?: unknown;
+      details?: Array<{ path: string; issue: string }>;
+    };
+    if (serviceError.code === "adapter_protocol_failed" && typeof serviceError.message === "string") {
+      const details = serviceError.details
+        ?? (typeof serviceError.reasonCode === "string" ? [{ path: "reasonCode", issue: serviceError.reasonCode }] : undefined);
+      return sendHttpError(reply, "adapter_protocol_failed", serviceError.message, details);
+    }
+    if (serviceError.code === "invalid_input" && typeof serviceError.message === "string") {
+      const details = serviceError.details
+        ?? (typeof serviceError.reasonCode === "string" ? [{ path: "reasonCode", issue: serviceError.reasonCode }] : undefined);
+      return sendHttpError(reply, "invalid_input", serviceError.message, details);
+    }
+  }
+  throw error;
+}
+
+function readIdempotencyKey(request: FastifyRequest): string | undefined {
+  const header = request.headers["idempotency-key"];
+  if (typeof header === "string" && header.trim().length > 0) {
+    return header.trim();
+  }
+  if (Array.isArray(header) && typeof header[0] === "string" && header[0].trim().length > 0) {
+    return header[0].trim();
+  }
+  return undefined;
 }
 
 function isHostedRunServiceError(error: unknown): error is { code: "placement_denied" | "queue_unavailable" | "hosted_runtime_not_allowed"; message: string } {

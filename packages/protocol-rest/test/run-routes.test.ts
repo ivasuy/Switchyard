@@ -383,17 +383,77 @@ describe("run routes", () => {
     });
   });
 
-  it("rejects queued hosted real input without dispatching runService.sendInput", async () => {
+  it("admits active hosted claude input through hosted runtime bridge without local dispatch", async () => {
     const harness = createRouteHarness();
     await harness.runs.create({
-      id: "run_hosted_real_input_queued",
+      id: "run_hosted_claude_input",
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      adapterType: "native",
+      cwd: "/repo",
+      task: "active hosted claude",
+      status: "running",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "claude_code.sdk",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    const createInputCommand = vi.fn(async () => ({
+      accepted: true as const,
+      commandId: "bridge_cmd_1",
+      duplicate: false
+    }));
+    const app = Fastify();
+    registerRunRoutes(app, {
+      runService: harness.runService,
+      runs: harness.runs,
+      events: harness.events,
+      registry: harness.registry,
+      registryService: new RegistryService({ registry: harness.registry }),
+      hostedRuntimeBridge: { createInputCommand }
+    });
+    const sendSpy = vi.spyOn(harness.runService, "sendInput");
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/runs/run_hosted_claude_input/input",
+      payload: { text: "continue" }
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ accepted: true, bridgeCommandId: "bridge_cmd_1" });
+    expect(createInputCommand).toHaveBeenCalledTimes(1);
+    expect(createInputCommand).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "run_hosted_claude_input",
+      body: { text: "continue" }
+    }));
+    expect(sendSpy).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("maps hosted codex input to named unsupported reason from bridge service", async () => {
+    const harness = createRouteHarness({
+      hostedRuntimeBridge: {
+        createInputCommand: vi.fn(async () => {
+          throw Object.assign(new Error("codex unsupported"), {
+            code: "adapter_protocol_failed",
+            reasonCode: "codex_exec_json_input_unsupported"
+          });
+        })
+      }
+    });
+    await harness.runs.create({
+      id: "run_hosted_codex_input",
       runtime: "codex",
       provider: "openai",
       model: "gpt-5",
       adapterType: "process",
       cwd: "/repo",
-      task: "queued hosted real",
-      status: "queued",
+      task: "active hosted codex",
+      status: "running",
       placement: "hosted",
       approvalPolicy: "default",
       timeoutSeconds: 60,
@@ -405,13 +465,13 @@ describe("run routes", () => {
 
     const response = await harness.app.inject({
       method: "POST",
-      url: "/runs/run_hosted_real_input_queued/input",
+      url: "/runs/run_hosted_codex_input/input",
       payload: { text: "continue" }
     });
 
     expect(response.statusCode).toBe(409);
     expect(response.json().error.code).toBe("adapter_protocol_failed");
-    expect(response.json().error.details).toEqual([{ path: "reasonCode", issue: "hosted_input_bridge_unsupported" }]);
+    expect(response.json().error.details).toEqual([{ path: "reasonCode", issue: "codex_exec_json_input_unsupported" }]);
     expect(sendSpy).not.toHaveBeenCalled();
   });
 
@@ -846,6 +906,7 @@ interface RouteHarnessOptions {
   withEventBus?: boolean;
   controlPlane?: unknown;
   hostedRuns?: unknown;
+  hostedRuntimeBridge?: { createInputCommand: (input: { runId: string; body: Record<string, unknown> }) => Promise<{ accepted: true; commandId: string; duplicate: boolean }> };
   placements?: unknown;
   listAssignmentsByRun?: (runId: string) => Promise<readonly { id: string }[]>;
 }
@@ -1030,6 +1091,7 @@ function createRouteHarness(options: RouteHarnessOptions = {}): RouteHarness {
     ...(launcher ? { launcher } : {}),
     ...(options.controlPlane ? { controlPlane: options.controlPlane as never } : {}),
     ...(options.hostedRuns ? { hostedRuns: options.hostedRuns as never } : {}),
+    ...(options.hostedRuntimeBridge ? { hostedRuntimeBridge: options.hostedRuntimeBridge as never } : {}),
     ...(options.placements ? { placements: options.placements as never } : {}),
     ...(options.listAssignmentsByRun ? { listAssignmentsByRun: options.listAssignmentsByRun } : {}),
     registry,

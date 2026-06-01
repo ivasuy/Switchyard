@@ -7,6 +7,7 @@ import {
   EventSyncService,
   HOSTED_RUNTIME_CATALOG,
   HostedToolService,
+  HostedRuntimeBridgeService,
   HostedRunService,
   HostedSandboxService,
   LocalPolicyGate,
@@ -51,6 +52,7 @@ import {
   PostgresNodeStore,
   PostgresPlacementStore,
   PostgresToolDispatchOutboxStore,
+  PostgresHostedRuntimeBridgeCommandStore,
   PostgresToolInvocationStore,
   PostgresApprovalStore,
   PostgresRegistryStore,
@@ -192,6 +194,177 @@ export async function createServerApp(config: ServerConfig) {
     artifactContent: {
       writeText: async (path, content) => {
         return artifactContent.writeText(path, content, { contentType: "application/x-ndjson" });
+      }
+    }
+  });
+
+  const hostedRuntimeBridgeCommands = new PostgresHostedRuntimeBridgeCommandStore(postgres);
+  const bridgeCommandPayloads = createInMemoryBridgeCommandPayloadStore();
+  const bridgeReservationScope = new Map<string, { accountId: string; tenantId: string; projectId: string }>();
+  const hostedRuntimeBridge = new HostedRuntimeBridgeService({
+    runs,
+    sessions,
+    approvals,
+    commands: hostedRuntimeBridgeCommands,
+    runtimeRunner: runner,
+    commandPayloads: bridgeCommandPayloads,
+    logger: {
+      info: (event, details) => app.log.info({ event, ...details }),
+      warn: (event, details) => app.log.warn({ event, ...details }),
+      error: (event, details) => app.log.error({ event, ...details })
+    },
+    preflight: {
+      authorizeRun: async ({ runId, auth }) => {
+        if (!controlPlane) {
+          throw new ControlPlaneError("auth_required", "auth_required");
+        }
+        const owned = await controlPlane.authorizeResource({
+          auth,
+          resourceType: "run",
+          resourceId: runId,
+          notFoundCode: "run_not_found"
+        });
+        if (!owned.ok) {
+          throw new ControlPlaneError(owned.code, owned.reasonCode);
+        }
+      },
+      authorizeApproval: async ({ approvalId, auth }) => {
+        if (!controlPlane) {
+          throw new ControlPlaneError("auth_required", "auth_required");
+        }
+        const owned = await controlPlane.authorizeResource({
+          auth,
+          resourceType: "approval",
+          resourceId: approvalId,
+          notFoundCode: "approval_not_found"
+        });
+        if (!owned.ok) {
+          throw new ControlPlaneError(owned.code, owned.reasonCode);
+        }
+      },
+      reserveBridgeQuota: async ({ auth }) => {
+        if (!controlPlaneStoreInstance || !auth) {
+          return {};
+        }
+        const quotas = resolveRuntimeBridgeQuota(auth.entitlement as Record<string, unknown>);
+        const now = new Date().toISOString();
+        const reservations: { hourlyReservationId?: string; activeReservationId?: string } = {};
+
+        if (quotas.maxRuntimeBridgeCommandsPerHour > 0) {
+          const reservation = await controlPlaneStoreInstance.reserveQuota({
+            accountId: auth.account.id,
+            tenantId: auth.tenant.id,
+            projectId: auth.project.id,
+            userId: auth.user.id,
+            apiKeyId: auth.apiKey.id,
+            quotaKind: "runtime_bridge_commands_per_hour",
+            amount: 1,
+            maxAllowed: quotas.maxRuntimeBridgeCommandsPerHour,
+            windowMs: 60 * 60 * 1000,
+            reservationTtlMs: 5 * 60 * 1000,
+            reasonCode: "runtime_bridge_command",
+            now
+          });
+          reservations.hourlyReservationId = reservation.id;
+          bridgeReservationScope.set(reservation.id, {
+            accountId: reservation.accountId,
+            tenantId: reservation.tenantId,
+            projectId: reservation.projectId
+          });
+        }
+        if (quotas.maxActiveRuntimeBridgeCommands > 0) {
+          const reservation = await controlPlaneStoreInstance.reserveQuota({
+            accountId: auth.account.id,
+            tenantId: auth.tenant.id,
+            projectId: auth.project.id,
+            userId: auth.user.id,
+            apiKeyId: auth.apiKey.id,
+            quotaKind: "active_runtime_bridge_commands",
+            amount: 1,
+            maxAllowed: quotas.maxActiveRuntimeBridgeCommands,
+            windowMs: 24 * 60 * 60 * 1000,
+            reservationTtlMs: 5 * 60 * 1000,
+            reasonCode: "runtime_bridge_command",
+            now
+          });
+          reservations.activeReservationId = reservation.id;
+          bridgeReservationScope.set(reservation.id, {
+            accountId: reservation.accountId,
+            tenantId: reservation.tenantId,
+            projectId: reservation.projectId
+          });
+        }
+        return reservations;
+      },
+      finalizeBridgeQuota: async ({ reservationId, outcome, reasonCode }) => {
+        if (!controlPlaneStoreInstance) {
+          return;
+        }
+        const scope = bridgeReservationScope.get(reservationId);
+        if (!scope) {
+          return;
+        }
+        await controlPlaneStoreInstance.transitionQuotaReservation({
+          reservationId,
+          accountId: scope.accountId,
+          tenantId: scope.tenantId,
+          projectId: scope.projectId,
+          nextState: outcome,
+          ...(reasonCode ? { reasonCode } : {}),
+          now: new Date().toISOString()
+        });
+      },
+      attachOwnership: async ({ resourceType, resourceId, runId, auth }) => {
+        if (!controlPlane) {
+          return;
+        }
+        const owned = await controlPlane.ensureOwnedOrAttachFromRun({
+          auth,
+          resourceType,
+          resourceId,
+          runId
+        });
+        if (!owned.ok) {
+          throw new Error(owned.reasonCode);
+        }
+      },
+      attachOwnershipFromRun: async ({ resourceType, resourceId, runId }) => {
+        if (!controlPlaneStoreInstance) {
+          return;
+        }
+        const runOwnership = await controlPlaneStoreInstance.getOwnership({
+          resourceType: "run",
+          resourceId: runId
+        });
+        if (!runOwnership) {
+          throw new Error("approval_ownership_attach_failed");
+        }
+        await controlPlaneStoreInstance.attachOwnership({
+          resourceType,
+          resourceId,
+          accountId: runOwnership.accountId,
+          tenantId: runOwnership.tenantId,
+          projectId: runOwnership.projectId,
+          userId: runOwnership.userId,
+          apiKeyId: runOwnership.apiKeyId,
+          createdAt: new Date().toISOString()
+        });
+      },
+      recordAudit: async (input) => {
+        if (!controlPlane) {
+          return;
+        }
+        const resourceId = input.commandId ?? input.approvalId ?? input.runId;
+        await controlPlane.recordAudit({
+          ...(input.auth ? { auth: input.auth } : {}),
+          eventType: input.eventType,
+          decision: input.decision,
+          reasonCode: input.reasonCode,
+          resourceType: input.commandId ? "runtime_bridge_command" : input.approvalId ? "approval" : "run",
+          ...(resourceId ? { resourceId } : {}),
+          ...(input.requestId ? { requestId: input.requestId } : {}),
+          payload: input.payload ?? {}
+        });
       }
     }
   });
@@ -421,6 +594,9 @@ export async function createServerApp(config: ServerConfig) {
     }
   });
 
+  const runtimeBridgeEnabled = config.hostedRuntimeAllowlist.includes("claude_code.sdk")
+    || config.hostedRuntimeAllowlist.includes("opencode.acp");
+
   app.get("/health", async () => ({ ok: true }));
   app.get("/ready", async (_request, reply) => {
     const readinessControlPlane = controlPlaneStoreInstance
@@ -453,7 +629,22 @@ export async function createServerApp(config: ServerConfig) {
       postgres,
       queue,
       artifactContent,
-      controlPlane: readinessControlPlane
+      controlPlane: readinessControlPlane,
+      runtimeBridge: {
+        enabled: runtimeBridgeEnabled,
+        commandStore: hostedRuntimeBridgeCommands,
+        commandOutbox: hostedRuntimeBridgeCommands,
+        approvalOwnership: controlPlaneStoreInstance,
+        quota: controlPlaneStoreInstance,
+        audit: controlPlaneStoreInstance,
+        routeAuth: controlPlane,
+        workerReadiness: {
+          claim: false,
+          adapterCapability: false,
+          sessionReconciliation: false,
+          approvalSender: false
+        }
+      }
     });
     if (!ready.ok) {
       metrics.inc("dependencies.notReady");
@@ -488,7 +679,10 @@ export async function createServerApp(config: ServerConfig) {
     eventBus,
     registry,
     registryService,
-    ...(controlPlane ? { controlPlane } : {})
+    ...(controlPlane ? { controlPlane } : {}),
+    hostedRuntimeBridge: {
+      createInputCommand: hostedRuntimeBridge.createInputCommand.bind(hostedRuntimeBridge)
+    }
   });
 
   if (controlPlane && controlPlaneStoreInstance) {
@@ -498,7 +692,10 @@ export async function createServerApp(config: ServerConfig) {
       invocations,
       approvals,
       controlPlane,
-      controlPlaneStore: controlPlaneStoreInstance
+      controlPlaneStore: controlPlaneStoreInstance,
+      hostedRuntimeBridge: {
+        resolveRuntimeApproval: hostedRuntimeBridge.resolveRuntimeApproval.bind(hostedRuntimeBridge)
+      }
     });
   }
 
@@ -1114,7 +1311,9 @@ function toAuthContext(
         maxArtifactContentReadBytesPerHour: toNumber(quotas["maxArtifactContentReadBytesPerHour"]),
         maxToolInvocationsPerHour: toNumber(quotas["maxToolInvocationsPerHour"]),
         maxActiveToolInvocations: toNumber(quotas["maxActiveToolInvocations"]),
-        maxToolArtifactBytesPerHour: toNumber(quotas["maxToolArtifactBytesPerHour"])
+        maxToolArtifactBytesPerHour: toNumber(quotas["maxToolArtifactBytesPerHour"]),
+        maxRuntimeBridgeCommandsPerHour: toNumber(quotas["maxRuntimeBridgeCommandsPerHour"]),
+        maxActiveRuntimeBridgeCommands: toNumber(quotas["maxActiveRuntimeBridgeCommands"])
       },
       scopes: scopes as NodeAuthContext["entitlement"]["scopes"],
       capturedAt: now
@@ -1152,4 +1351,44 @@ function toNumber(value: unknown): number {
     return value;
   }
   return 0;
+}
+
+function createInMemoryBridgeCommandPayloadStore(): {
+  put(input: { commandId: string; payload: Record<string, unknown> }): Promise<void>;
+  get(commandId: string): Promise<Record<string, unknown> | undefined>;
+  delete(commandId: string): Promise<void>;
+} {
+  const payloads = new Map<string, Record<string, unknown>>();
+  return {
+    async put(input) {
+      payloads.set(input.commandId, input.payload);
+    },
+    async get(commandId) {
+      return payloads.get(commandId);
+    },
+    async delete(commandId) {
+      payloads.delete(commandId);
+    }
+  };
+}
+
+function resolveRuntimeBridgeQuota(entitlement: Record<string, unknown>): {
+  maxRuntimeBridgeCommandsPerHour: number;
+  maxActiveRuntimeBridgeCommands: number;
+} {
+  const snapshot = asRecord(entitlement["quotas"]) ?? entitlement;
+  return {
+    maxRuntimeBridgeCommandsPerHour: toPositiveNumber(snapshot["maxRuntimeBridgeCommandsPerHour"]),
+    maxActiveRuntimeBridgeCommands: toPositiveNumber(snapshot["maxActiveRuntimeBridgeCommands"])
+  };
+}
+
+function toPositiveNumber(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+  if (value <= 0) {
+    return 0;
+  }
+  return Math.floor(value);
 }

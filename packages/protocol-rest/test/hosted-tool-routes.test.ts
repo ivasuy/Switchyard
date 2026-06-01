@@ -32,7 +32,7 @@ function makeRuntimeApproval(id: string): Approval {
     runId: "run_1",
     approvalType: "before_external_web_action",
     status: "pending",
-    payload: { runtimeApprovalToken: "pause_1" },
+    payload: { runtimeApprovalToken: "pause_1", runtimeMode: "claude_code.sdk" },
     createdAt: "2026-06-01T00:00:00.000Z"
   };
 }
@@ -192,7 +192,7 @@ describe("hosted tool route registration", () => {
 });
 
 describe("hosted tool route ownership and approval filtering", () => {
-  it("filters list to owned tool approvals with cursor pagination", async () => {
+  it("filters list to owned tool/runtime approvals with cursor pagination", async () => {
     const app = Fastify();
     registerErrorEnvelope(app);
     attachHostedAuth(app);
@@ -203,6 +203,12 @@ describe("hosted tool route ownership and approval filtering", () => {
       ["approval_old", { ...makeApproval("approval_old"), createdAt: "2026-06-01T00:00:00.000Z" }],
       ["approval_unowned", { ...makeApproval("approval_unowned"), createdAt: "2026-06-01T03:00:00.000Z" }]
     ]);
+
+    const resolveRuntimeApproval = vi.fn(async () => ({
+      approval: { ...makeRuntimeApproval("approval_runtime"), status: "approved", resolvedAt: "2026-06-01T00:00:03.000Z" },
+      commandId: "bridge_cmd_runtime_1",
+      duplicate: false
+    }));
 
     registerHostedToolRoutes(app, {
       hostedTools: {
@@ -223,7 +229,10 @@ describe("hosted tool route ownership and approval filtering", () => {
       } as any,
       controlPlaneStore: {
         listOwnedResourceIds: async () => ["approval_new", "approval_runtime", "approval_old"]
-      } as any
+      } as any,
+      hostedRuntimeBridge: {
+        resolveRuntimeApproval
+      }
     });
 
     try {
@@ -239,14 +248,23 @@ describe("hosted tool route ownership and approval filtering", () => {
       });
       expect(secondPage.statusCode).toBe(200);
       expect(secondPage.json().approvals).toHaveLength(1);
-      expect(secondPage.json().approvals[0].id).toBe("approval_old");
-      expect(secondPage.json().nextCursor).toBeNull();
+      expect(secondPage.json().approvals[0].id).toBe("approval_runtime");
+      expect(typeof secondPage.json().nextCursor).toBe("string");
+
+      const thirdPage = await app.inject({
+        method: "GET",
+        url: `/approvals?limit=1&before=${encodeURIComponent(secondPage.json().nextCursor)}`
+      });
+      expect(thirdPage.statusCode).toBe(200);
+      expect(thirdPage.json().approvals).toHaveLength(1);
+      expect(thirdPage.json().approvals[0].id).toBe("approval_old");
+      expect(thirdPage.json().nextCursor).toBeNull();
     } finally {
       await app.close();
     }
   });
 
-  it("enforces ownership-first no-leak and denies runtime approval get/resolve", async () => {
+  it("enforces ownership-first no-leak and routes runtime approval resolve through bridge service", async () => {
     const app = Fastify();
     registerErrorEnvelope(app);
     attachHostedAuth(app);
@@ -255,6 +273,11 @@ describe("hosted tool route ownership and approval filtering", () => {
       ? makeRuntimeApproval("approval_runtime")
       : makeApproval(id)));
     const resolveApproval = vi.fn(async () => ({ approval: makeApproval("approval_runtime"), invocation: makeInvocation("tool_1") }));
+    const resolveRuntimeApproval = vi.fn(async () => ({
+      approval: { ...makeRuntimeApproval("approval_runtime"), status: "approved", resolvedAt: "2026-06-01T00:00:01.000Z" },
+      commandId: "bridge_cmd_runtime_2",
+      duplicate: false
+    }));
     const authorizeResource = vi.fn(async ({ resourceId }: { resourceId: string }) => {
       if (resourceId === "approval_hidden") {
         return { ok: false, code: "approval_not_found", reasonCode: "approval_not_found" };
@@ -281,7 +304,8 @@ describe("hosted tool route ownership and approval filtering", () => {
       } as any,
       controlPlaneStore: {
         listOwnedResourceIds: async () => ["approval_1", "approval_runtime"]
-      } as any
+      } as any,
+      hostedRuntimeBridge: { resolveRuntimeApproval }
     });
 
     try {
@@ -291,17 +315,19 @@ describe("hosted tool route ownership and approval filtering", () => {
       expect(getApproval).not.toHaveBeenCalledWith("approval_hidden");
 
       const runtimeGet = await app.inject({ method: "GET", url: "/approvals/approval_runtime" });
-      expect(runtimeGet.statusCode).toBe(409);
-      expect(runtimeGet.json().error.code).toBe("hosted_runtime_approval_bridge_unshipped");
+      expect(runtimeGet.statusCode).toBe(200);
+      expect(runtimeGet.json().approval.id).toBe("approval_runtime");
 
       const runtimeApprove = await app.inject({
         method: "POST",
         url: "/approvals/approval_runtime/approve",
         payload: {}
       });
-      expect(runtimeApprove.statusCode).toBe(409);
-      expect(runtimeApprove.json().error.code).toBe("hosted_runtime_approval_bridge_unshipped");
+      expect(runtimeApprove.statusCode).toBe(200);
+      expect(runtimeApprove.json().approval.id).toBe("approval_runtime");
+      expect(runtimeApprove.json().bridgeCommandId).toBe("bridge_cmd_runtime_2");
       expect(resolveApproval).not.toHaveBeenCalled();
+      expect(resolveRuntimeApproval).toHaveBeenCalledTimes(1);
     } finally {
       await app.close();
     }

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -913,6 +913,61 @@ describe("hosted server", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("does not expose hosted bridge, session, dashboard, or arbitrary execution routes", async () => {
+    const app = await createServerApp({
+      host: "127.0.0.1",
+      port: 0,
+      deploymentMode: "test",
+      hostedRuntimeAllowlist: ["fake.deterministic", "claude_code.sdk", "opencode.acp"],
+      hostedRealRuntimeExecution: "enabled",
+      objectStore: resolveObjectStoreConfig({ deploymentMode: "test", env: {} }),
+      sandbox: defaultSandbox(),
+      redactedSummary: {}
+    });
+
+    try {
+      const forbiddenRoutes = [
+        "/runtime-bridge",
+        "/runtime-bridge/commands",
+        "/runtime-bridge/sessions",
+        "/hosted/runtime-bridge/commands",
+        "/hosted/runtime-bridge/sessions",
+        "/sessions",
+        "/sessions/reconcile",
+        "/dashboard",
+        "/tui",
+        "/execute",
+        "/arbitrary-execution"
+      ];
+
+      for (const route of forbiddenRoutes) {
+        const getResponse = await app.inject({ method: "GET", url: route });
+        expect(getResponse.statusCode).toBe(404);
+
+        const postResponse = await app.inject({ method: "POST", url: route, payload: {} });
+        expect(postResponse.statusCode).toBe(404);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps server app free of real provider adapter imports and instantiation", async () => {
+    const source = await readFile(new URL("../src/app.ts", import.meta.url), "utf8");
+    const importLines = source.split("\n").filter((line) => line.startsWith("import "));
+    const sourceLower = source.toLowerCase();
+
+    expect(importLines.some((line) => line.includes("@switchyard/adapters"))).toBe(false);
+    expect(importLines.some((line) => line.includes("@anthropic-ai"))).toBe(false);
+    expect(importLines.some((line) => line.includes("openai"))).toBe(false);
+    expect(importLines.some((line) => line.includes("opencode"))).toBe(false);
+    expect(sourceLower).not.toContain("new claude");
+    expect(sourceLower).not.toContain("new codex");
+    expect(sourceLower).not.toContain("new opencode");
+    expect(sourceLower).not.toContain("new agentfield");
+    expect(sourceLower).not.toContain("new generichttp");
   });
 
   it("emits hosted admission lifecycle metrics with outcome/runtime_mode/reason labels", async () => {

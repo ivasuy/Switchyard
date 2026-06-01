@@ -55,12 +55,41 @@ interface ControlPlaneReadinessInput {
   unownedResources: UnownedResourceCounts | undefined;
 }
 
+interface RuntimeBridgeReadinessInput {
+  enabled: boolean;
+  commandStore?: unknown;
+  commandOutbox?: unknown;
+  approvalOwnership?: unknown;
+  quota?: unknown;
+  audit?: unknown;
+  routeAuth?: unknown;
+  workerReadiness?: unknown;
+}
+
+type HostedRuntimeBridgeReadinessCheckName =
+  | "command_store"
+  | "command_outbox"
+  | "approval_ownership"
+  | "quota"
+  | "audit"
+  | "route_auth"
+  | "worker_claim"
+  | "adapter_capability"
+  | "session_reconciliation"
+  | "approval_sender";
+
+interface HostedRuntimeBridgeReadinessReport {
+  status: "ready" | "not_ready";
+  checks: Array<{ name: HostedRuntimeBridgeReadinessCheckName; ok: boolean; reasonCode?: string }>;
+}
+
 export async function probeServerReadiness(input: {
   config: ServerConfig;
   postgres: PostgresDatabaseHandle | undefined;
   queue: RunQueuePort;
   artifactContent: ProbeableArtifactContentStore;
   controlPlane?: ControlPlaneReadinessInput;
+  runtimeBridge?: RuntimeBridgeReadinessInput;
   checkSchemaCompatibility?: (handle: PostgresDatabaseHandle) => Promise<PostgresSchemaCompatibility>;
 }): Promise<ReadinessReport> {
   const checks: ReadinessReport["checks"] = {};
@@ -374,8 +403,58 @@ export async function probeServerReadiness(input: {
     checks.tools = readinessCheck(true, undefined, toolDiagnostics);
   }
 
+  if (input.runtimeBridge?.enabled) {
+    const bridgeReadiness = getServerRuntimeBridgeReadiness({
+      commandStore: input.runtimeBridge.commandStore,
+      commandOutbox: input.runtimeBridge.commandOutbox,
+      approvalOwnership: input.runtimeBridge.approvalOwnership,
+      quota: input.runtimeBridge.quota,
+      audit: input.runtimeBridge.audit,
+      routeAuth: input.runtimeBridge.routeAuth,
+      workerReadiness: input.runtimeBridge.workerReadiness
+    });
+    const firstFailure = bridgeReadiness.checks.find((check: { ok: boolean; reasonCode?: string }) => !check.ok)?.reasonCode ?? "hosted_runtime_bridge_worker_unavailable";
+    checks.hostedRuntimeBridge = readinessCheck(
+      bridgeReadiness.status === "ready",
+      bridgeReadiness.status === "ready" ? undefined : firstFailure,
+      { status: bridgeReadiness.status, checks: bridgeReadiness.checks }
+    );
+  }
+
   const ok = Object.values(checks).every((check) => check.ok);
   return { ok, checks };
+}
+
+export function getServerRuntimeBridgeReadiness(deps: {
+  commandStore?: unknown;
+  commandOutbox?: unknown;
+  approvalOwnership?: unknown;
+  quota?: unknown;
+  audit?: unknown;
+  routeAuth?: unknown;
+  workerReadiness?: unknown;
+}): HostedRuntimeBridgeReadinessReport {
+  const worker = asRecord(deps.workerReadiness);
+  const check = (name: HostedRuntimeBridgeReadinessCheckName, ok: boolean, reasonCode: string) =>
+    ok ? { name, ok: true as const } : { name, ok: false as const, reasonCode };
+
+  const checks: HostedRuntimeBridgeReadinessReport["checks"] = [
+    check("command_store", isPresent(deps.commandStore), "hosted_runtime_bridge_store_unavailable"),
+    check("command_outbox", isPresent(deps.commandOutbox), "hosted_runtime_bridge_queue_unavailable"),
+    check("approval_ownership", isPresent(deps.approvalOwnership), "approval_ownership_attach_failed"),
+    check("quota", isPresent(deps.quota), "quota_store_unavailable"),
+    check("audit", isPresent(deps.audit), "audit_log_unavailable"),
+    check("route_auth", isPresent(deps.routeAuth), "auth_required"),
+    check("worker_claim", workerFlag(worker, "claim"), "hosted_runtime_bridge_worker_unavailable"),
+    check("adapter_capability", workerFlag(worker, "adapterCapability"), "hosted_runtime_bridge_operation_unsupported"),
+    check("session_reconciliation", workerFlag(worker, "sessionReconciliation"), "hosted_runtime_bridge_worker_unavailable"),
+    check("approval_sender", workerFlag(worker, "approvalSender"), "hosted_runtime_bridge_worker_unavailable")
+  ];
+
+  return {
+    status: checks.every((entry: { ok: boolean }) => entry.ok) ? "ready" : "not_ready",
+    checks
+  };
 }
 
 function readinessCheck(ok: boolean, code?: string, diagnostics?: Record<string, unknown>): {
@@ -431,4 +510,19 @@ function hasToolQueueSupport(queue: RunQueuePort & Partial<Record<string, unknow
     && typeof (queue as { ackTool?: unknown }).ackTool === "function"
     && typeof (queue as { failTool?: unknown }).failTool === "function"
     && typeof (queue as { recoverStaleToolClaims?: unknown }).recoverStaleToolClaims === "function";
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value as Record<string, unknown>;
+}
+
+function workerFlag(worker: Record<string, unknown>, key: "claim" | "adapterCapability" | "sessionReconciliation" | "approvalSender"): boolean {
+  return worker[key] === true;
+}
+
+function isPresent(value: unknown): boolean {
+  return value !== undefined && value !== null;
 }
