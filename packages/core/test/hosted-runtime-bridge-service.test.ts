@@ -78,7 +78,7 @@ class InMemoryHostedRuntimeBridgeCommandStore implements HostedRuntimeBridgeComm
   async claimNext(input: { workerId: string; leaseMs: number; now?: string }): Promise<HostedRuntimeBridgeCommand | undefined> {
     const now = input.now ?? "2026-06-01T00:00:00.000Z";
     const candidate = [...this.items.values()]
-      .filter((entry) => entry.status === "queued")
+      .filter((entry) => entry.status === "queued" && entry.expiresAt > now)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))[0];
     if (!candidate) {
       return undefined;
@@ -167,6 +167,22 @@ class InMemoryHostedRuntimeBridgeCommandStore implements HostedRuntimeBridgeComm
       failed += 1;
     }
     return { recovered: 0, failed };
+  }
+}
+
+class MemoryCommandPayloadStore {
+  readonly items = new Map<string, Record<string, unknown>>();
+
+  async put(input: { commandId: string; payload: Record<string, unknown> }): Promise<void> {
+    this.items.set(input.commandId, input.payload);
+  }
+
+  async get(commandId: string): Promise<Record<string, unknown> | undefined> {
+    return this.items.get(commandId);
+  }
+
+  async delete(commandId: string): Promise<void> {
+    this.items.delete(commandId);
   }
 }
 
@@ -299,6 +315,38 @@ function makeAuth(): AuthContext {
       capturedAt: "2026-06-01T00:00:00.000Z"
     },
     authenticatedAt: "2026-06-01T00:00:00.000Z"
+  };
+}
+
+function buildPersistedQuotaReconciler(
+  commands: InMemoryHostedRuntimeBridgeCommandStore,
+  finalized: Array<{ reservationId: string; outcome: string; reasonCode?: string }>
+): (input: { now: string; reasonCode: string }) => Promise<void> {
+  const seen = new Set<string>();
+  return async ({ reasonCode }) => {
+    for (const command of commands.items.values()) {
+      if (command.status !== "failed" && command.status !== "expired" && command.status !== "completed" && command.status !== "cancelled") {
+        continue;
+      }
+      const quota = command.redactedPayload["quota"];
+      if (!quota || typeof quota !== "object" || Array.isArray(quota)) {
+        continue;
+      }
+      const activeReservationId = typeof (quota as Record<string, unknown>)["activeReservationId"] === "string"
+        ? String((quota as Record<string, unknown>)["activeReservationId"])
+        : undefined;
+      const hourlyReservationId = typeof (quota as Record<string, unknown>)["hourlyReservationId"] === "string"
+        ? String((quota as Record<string, unknown>)["hourlyReservationId"])
+        : undefined;
+      if (activeReservationId && !seen.has(activeReservationId)) {
+        seen.add(activeReservationId);
+        finalized.push({ reservationId: activeReservationId, outcome: "released", reasonCode });
+      }
+      if (hourlyReservationId && !seen.has(hourlyReservationId)) {
+        seen.add(hourlyReservationId);
+        finalized.push({ reservationId: hourlyReservationId, outcome: "consumed", reasonCode });
+      }
+    }
   };
 }
 
@@ -442,6 +490,53 @@ describe("hosted runtime bridge service", () => {
     expect(first?.redactedPayload).toEqual(second?.redactedPayload);
   });
 
+  it("dispatches original admitted secret-bearing input while persisted command payload remains redacted", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    const payloads = new MemoryCommandPayloadStore();
+    const sent: Array<Record<string, unknown>> = [];
+    await runs.create(makeRun());
+    await sessions.create(makeSession({ state: { hostedWorkerId: "worker_a", hostedBridgeCapable: true } }));
+
+    const serverService = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined }
+    });
+
+    const admitted = await serverService.createInputCommand({
+      runId: "run_1",
+      body: { text: "Authorization: Bearer sk-real-secret" },
+      idempotencyKey: "idem_secret_dispatch",
+      auth: makeAuth()
+    });
+    const persisted = await commands.get(admitted.commandId);
+    expect(persisted?.redactedPayload).toMatchObject({ content: "[redacted]", redacted: true });
+
+    const workerService = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: {
+        sendInput: async (_runId: string, payload: Record<string, unknown>) => {
+          sent.push(payload);
+        }
+      }
+    });
+
+    const applied = await workerService.claimAndApplyNext({ workerId: "worker_a", leaseMs: 10_000 });
+    expect(applied).toBe(true);
+    expect(sent).toEqual([{ text: "Authorization: Bearer sk-real-secret", type: "input" }]);
+    expect(payloads.items.size).toBe(0);
+  });
+
   it("creates exactly one durable approval decision and supports same-key same-decision idempotency", async () => {
     const runs = new MemoryRunStore();
     const sessions = new MemorySessionStore();
@@ -580,6 +675,217 @@ describe("hosted runtime bridge service", () => {
     const command = await commands.getByIdempotencyKey("idem_worker_mismatch");
     expect(command?.status).toBe("failed");
     expect(command?.reasonCode).toBe("hosted_runtime_bridge_session_not_owned");
+  });
+
+  it("finalizes persisted quota reservations across server and worker instances on completion", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    const payloads = new MemoryCommandPayloadStore();
+    const finalized: Array<{ reservationId: string; outcome: string; reasonCode?: string }> = [];
+    await runs.create(makeRun());
+    await sessions.create(makeSession({ state: { hostedWorkerId: "worker_a", hostedBridgeCapable: true } }));
+
+    const server = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined },
+      preflight: {
+        reserveBridgeQuota: async () => ({ hourlyReservationId: "h_complete", activeReservationId: "a_complete" })
+      }
+    });
+    await server.createInputCommand({
+      runId: "run_1",
+      body: { text: "continue" },
+      idempotencyKey: "idem_complete_durable",
+      auth: makeAuth()
+    });
+
+    const worker = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined },
+      preflight: {
+        finalizeBridgeQuota: async (input) => {
+          finalized.push({
+            reservationId: input.reservationId,
+            outcome: input.outcome,
+            reasonCode: input.reasonCode
+          });
+        }
+      }
+    });
+    await worker.claimAndApplyNext({ workerId: "worker_a", leaseMs: 10_000 });
+
+    expect(finalized).toEqual([
+      { reservationId: "a_complete", outcome: "released", reasonCode: "hosted_runtime_bridge_completed" },
+      { reservationId: "h_complete", outcome: "consumed", reasonCode: "hosted_runtime_bridge_completed" }
+    ]);
+  });
+
+  it("finalizes persisted quota reservations on worker-side failure across instances", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    const payloads = new MemoryCommandPayloadStore();
+    const finalized: Array<{ reservationId: string; outcome: string; reasonCode?: string }> = [];
+    await runs.create(makeRun());
+    await sessions.create(makeSession({ state: { hostedWorkerId: "worker_other", hostedBridgeCapable: true } }));
+
+    const server = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined },
+      preflight: {
+        reserveBridgeQuota: async () => ({ hourlyReservationId: "h_fail", activeReservationId: "a_fail" })
+      }
+    });
+    await server.createInputCommand({
+      runId: "run_1",
+      body: { text: "continue" },
+      idempotencyKey: "idem_fail_durable",
+      auth: makeAuth()
+    });
+
+    const worker = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined },
+      preflight: {
+        finalizeBridgeQuota: async (input) => {
+          finalized.push({
+            reservationId: input.reservationId,
+            outcome: input.outcome,
+            reasonCode: input.reasonCode
+          });
+        }
+      }
+    });
+    await worker.claimAndApplyNext({ workerId: "worker_a", leaseMs: 10_000 });
+
+    expect(finalized).toEqual([
+      { reservationId: "a_fail", outcome: "released", reasonCode: "hosted_runtime_bridge_session_not_owned" },
+      { reservationId: "h_fail", outcome: "consumed", reasonCode: "hosted_runtime_bridge_session_not_owned" }
+    ]);
+  });
+
+  it("reconciles persisted quota reservations for expired queued commands across instances", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    const payloads = new MemoryCommandPayloadStore();
+    const finalized: Array<{ reservationId: string; outcome: string; reasonCode?: string }> = [];
+    await runs.create(makeRun());
+    await sessions.create(makeSession({ state: { hostedWorkerId: "worker_a", hostedBridgeCapable: true } }));
+
+    const server = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined },
+      now: () => "2026-06-01T00:00:00.000Z",
+      preflight: {
+        reserveBridgeQuota: async () => ({ hourlyReservationId: "h_expire", activeReservationId: "a_expire" })
+      }
+    });
+    await server.createInputCommand({
+      runId: "run_1",
+      body: { text: "continue" },
+      idempotencyKey: "idem_expire_durable",
+      auth: makeAuth()
+    });
+    const command = await commands.getByIdempotencyKey("idem_expire_durable");
+    commands.items.set(command!.id, { ...command!, expiresAt: "2026-05-31T23:59:00.000Z" });
+
+    const worker = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined },
+      now: () => "2026-06-01T00:00:00.000Z",
+      preflight: {
+        reconcileBridgeQuotaFromPersistedCommands: buildPersistedQuotaReconciler(commands, finalized)
+      }
+    });
+    const processed = await worker.claimAndApplyNext({ workerId: "worker_a", leaseMs: 10_000 });
+    expect(processed).toBe(false);
+    expect(finalized).toEqual([
+      { reservationId: "a_expire", outcome: "released", reasonCode: "hosted_runtime_bridge_command_expired" },
+      { reservationId: "h_expire", outcome: "consumed", reasonCode: "hosted_runtime_bridge_command_expired" }
+    ]);
+  });
+
+  it("reconciles persisted quota reservations for stale claimed commands across instances", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    const payloads = new MemoryCommandPayloadStore();
+    const finalized: Array<{ reservationId: string; outcome: string; reasonCode?: string }> = [];
+    await runs.create(makeRun());
+    await sessions.create(makeSession({ state: { hostedWorkerId: "worker_a", hostedBridgeCapable: true } }));
+
+    const server = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined },
+      preflight: {
+        reserveBridgeQuota: async () => ({ hourlyReservationId: "h_stale", activeReservationId: "a_stale" })
+      }
+    });
+    await server.createInputCommand({
+      runId: "run_1",
+      body: { text: "continue" },
+      idempotencyKey: "idem_stale_durable",
+      auth: makeAuth()
+    });
+    await commands.claimNext({
+      workerId: "worker_a",
+      leaseMs: 1,
+      now: "2026-06-01T00:00:00.000Z"
+    });
+    const claimed = await commands.getByIdempotencyKey("idem_stale_durable");
+    commands.items.set(claimed!.id, { ...claimed!, leaseUntil: "2026-05-31T23:59:00.000Z", status: "claimed" });
+
+    const worker = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined },
+      preflight: {
+        reconcileBridgeQuotaFromPersistedCommands: buildPersistedQuotaReconciler(commands, finalized)
+      }
+    });
+    await worker.reconcileHostedRuntimeSessions({ workerId: "worker_a", now: "2026-06-01T00:00:00.000Z" });
+
+    expect(finalized).toEqual([
+      { reservationId: "a_stale", outcome: "released", reasonCode: "hosted_runtime_bridge_non_idempotent_retry_blocked" },
+      { reservationId: "h_stale", outcome: "consumed", reasonCode: "hosted_runtime_bridge_non_idempotent_retry_blocked" }
+    ]);
   });
 
   it("worker re-reads approval state for approval resolution commands before dispatch", async () => {
@@ -729,6 +1035,46 @@ describe("hosted runtime bridge service", () => {
     expect((run?.metadata as Record<string, unknown>)["reasonCode"]).toBe("hosted_runtime_session_lost");
     const approval = await approvals.get("approval_waiting");
     expect(approval?.status).toBe("rejected");
+  });
+
+  it("fails closed when worker runtime approval ownership attach fails and leaves no pending approval", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    await runs.create(makeRun());
+    await sessions.create(makeSession());
+
+    const service = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      runtimeRunner: { sendInput: async () => undefined },
+      preflight: {
+        attachOwnershipFromRun: async () => {
+          throw new Error("attach_failed");
+        }
+      }
+    });
+
+    await expect(service.createWorkerRuntimeApproval({
+      runId: "run_1",
+      approvalType: "before_external_message",
+      payload: {
+        runtimeApprovalToken: "runtime_token",
+        runtimeSessionId: "session_1",
+        runtimeMode: "claude_code.sdk"
+      },
+      workerId: "worker_a",
+      deadline: "2026-06-02T00:00:00.000Z"
+    })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "approval_ownership_attach_failed"
+    } satisfies Partial<HostedRuntimeBridgeServiceError>);
+
+    const pending = await approvals.list({ status: "pending", limit: 1000 });
+    expect(pending.approvals).toHaveLength(0);
   });
 });
 

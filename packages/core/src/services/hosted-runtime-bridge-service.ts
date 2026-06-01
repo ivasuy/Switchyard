@@ -90,11 +90,20 @@ export interface HostedRuntimeBridgeServiceDependencies {
       outcome: QuotaOutcome;
       reasonCode?: string;
     }) => Promise<void>;
+    reconcileBridgeQuotaFromPersistedCommands?: (input: {
+      now: string;
+      reasonCode: string;
+    }) => Promise<void>;
     attachOwnership?: (input: {
       resourceType: "runtime_bridge_command" | "approval";
       resourceId: string;
       runId: string;
       auth: AuthContext;
+    }) => Promise<void>;
+    attachOwnershipFromRun?: (input: {
+      resourceType: "approval";
+      resourceId: string;
+      runId: string;
     }) => Promise<void>;
     recordAudit?: (input: {
       eventType: string;
@@ -108,6 +117,11 @@ export interface HostedRuntimeBridgeServiceDependencies {
       auth?: AuthContext;
     }) => Promise<void>;
   };
+  commandPayloads?: {
+    put(input: { commandId: string; payload: Record<string, unknown> }): Promise<void>;
+    get(commandId: string): Promise<Record<string, unknown> | undefined>;
+    delete(commandId: string): Promise<void>;
+  };
 }
 
 export class HostedRuntimeBridgeService {
@@ -115,7 +129,6 @@ export class HostedRuntimeBridgeService {
   private readonly defaultCommandTtlMs: number;
   private readonly maxAttempts: number;
   private readonly locks = new HostedRuntimeBridgeAdmissionLock();
-  private readonly commandReservations = new Map<string, { hourlyReservationId?: string; activeReservationId?: string }>();
 
   constructor(private readonly deps: HostedRuntimeBridgeServiceDependencies) {
     this.now = deps.now ?? (() => new Date().toISOString());
@@ -204,7 +217,7 @@ export class HostedRuntimeBridgeService {
         idempotencyKey,
         payloadHash,
         payloadBytes,
-        redactedPayload,
+        redactedPayload: withQuotaMetadata(redactedPayload, reservations),
         ...(input.auth ? { auth: input.auth } : {})
       }));
 
@@ -217,7 +230,7 @@ export class HostedRuntimeBridgeService {
         };
       }
 
-      this.commandReservations.set(created.command.id, reservations ?? {});
+      await this.persistWorkerPayloadOrFail(created.command, rawPayload, reservations);
       await this.recordAudit({
         eventType: "hosted.runtime_bridge.admission",
         decision: "allow",
@@ -349,7 +362,7 @@ export class HostedRuntimeBridgeService {
           idempotencyKey,
           payloadHash,
           payloadBytes,
-          redactedPayload,
+          redactedPayload: withQuotaMetadata(redactedPayload, reservations),
           expiresAt: deadline,
           ...(input.auth ? { auth: input.auth } : {})
         }));
@@ -378,7 +391,7 @@ export class HostedRuntimeBridgeService {
           throw new HostedRuntimeBridgeServiceError("approval_not_pending", `Approval is not pending: ${approval.id}`);
         }
 
-        this.commandReservations.set(created.command.id, reservations ?? {});
+        await this.persistWorkerPayloadOrFail(created.command, rawPayload, reservations);
         await this.recordAudit({
           eventType: "hosted.runtime_bridge.approval_resolved",
           decision: "allow",
@@ -431,12 +444,41 @@ export class HostedRuntimeBridgeService {
       createdAt
     };
     await this.deps.approvals.create(approval);
+    if (this.deps.preflight?.attachOwnershipFromRun) {
+      try {
+        await this.deps.preflight.attachOwnershipFromRun({
+          resourceType: "approval",
+          resourceId: approval.id,
+          runId: input.runId
+        });
+      } catch {
+        const failed: Approval = {
+          ...approval,
+          status: "rejected",
+          resolvedAt: this.now(),
+          payload: sanitizeApprovalPayload({
+            ...approval.payload,
+            resolution: {
+              decision: "rejected",
+              message: "approval ownership attach failed"
+            },
+            reasonCode: "approval_ownership_attach_failed"
+          })
+        };
+        await this.deps.approvals.update(failed);
+        throw this.protocolError("approval_ownership_attach_failed", "Runtime approval ownership attach failed");
+      }
+    }
     return approval;
   }
 
   async claimAndApplyNext(input: { workerId: string; leaseMs?: number }): Promise<boolean> {
     const now = this.now();
     await this.deps.commands.expireStale({ now });
+    await this.deps.preflight?.reconcileBridgeQuotaFromPersistedCommands?.({
+      now,
+      reasonCode: "hosted_runtime_bridge_command_expired"
+    });
     const command = await this.deps.commands.claimNext({
       workerId: input.workerId,
       leaseMs: input.leaseMs ?? DEFAULT_LEASE_MS,
@@ -497,9 +539,9 @@ export class HostedRuntimeBridgeService {
       }
     }
 
-    const dispatchPayload = payloadForWorkerDispatch(command);
+    const dispatchPayload = await this.loadWorkerDispatchPayload(command);
     if (!dispatchPayload) {
-      await this.failClaimedCommand(command, input.workerId, "hosted_runtime_bridge_payload_mismatch");
+      await this.failClaimedCommand(command, input.workerId, "hosted_runtime_bridge_store_unavailable");
       return true;
     }
     const recomputedHash = payloadHashFor(dispatchPayload);
@@ -522,7 +564,8 @@ export class HostedRuntimeBridgeService {
           { reasonCode: "hosted_runtime_bridge_store_unavailable" }
         );
       }
-      await this.finalizeCommandReservations(command.id, "consumed", "hosted_runtime_bridge_completed");
+      await this.finalizeCommandQuotaFromState(command, "consumed", "hosted_runtime_bridge_completed");
+      await this.deps.commandPayloads?.delete(command.id);
       this.log("info", "hosted.runtime_bridge.completed", {
         commandId: command.id,
         runId: run.id,
@@ -549,6 +592,10 @@ export class HostedRuntimeBridgeService {
     const recovered = await this.deps.commands.recoverStaleClaims({
       now,
       nonIdempotentPolicy: "fail"
+    });
+    await this.deps.preflight?.reconcileBridgeQuotaFromPersistedCommands?.({
+      now,
+      reasonCode: "hosted_runtime_bridge_non_idempotent_retry_blocked"
     });
 
     let reconciled = recovered.recovered;
@@ -714,7 +761,8 @@ export class HostedRuntimeBridgeService {
       retryable: false,
       now: this.now()
     });
-    await this.finalizeCommandReservations(command.id, "released", reasonCode);
+    await this.finalizeCommandQuotaFromState(command, "released", reasonCode);
+    await this.deps.commandPayloads?.delete(command.id);
     this.log("warn", "hosted.runtime_bridge.failed", {
       commandId: command.id,
       runId: command.runId,
@@ -774,10 +822,47 @@ export class HostedRuntimeBridgeService {
     }
   }
 
-  private async finalizeCommandReservations(commandId: string, outcome: QuotaOutcome, reasonCode: string): Promise<void> {
-    const reservations = this.commandReservations.get(commandId);
-    this.commandReservations.delete(commandId);
-    await this.releaseReservations(reservations, outcome, reasonCode);
+  private async finalizeCommandQuotaFromState(
+    command: HostedRuntimeBridgeCommand,
+    outcome: QuotaOutcome,
+    reasonCode: string
+  ): Promise<void> {
+    await this.releaseReservations(reservationMetadataFromCommand(command), outcome, reasonCode);
+  }
+
+  private async persistWorkerPayloadOrFail(
+    command: HostedRuntimeBridgeCommand,
+    payload: Record<string, unknown>,
+    reservations: { hourlyReservationId?: string; activeReservationId?: string } | undefined
+  ): Promise<void> {
+    if (!this.deps.commandPayloads) {
+      return;
+    }
+    try {
+      await this.deps.commandPayloads.put({ commandId: command.id, payload });
+    } catch {
+      await this.deps.commands.fail({
+        commandId: command.id,
+        reasonCode: "hosted_runtime_bridge_store_unavailable",
+        retryable: false,
+        now: this.now()
+      });
+      await this.releaseReservations(reservations, "failed", "hosted_runtime_bridge_store_unavailable");
+      throw this.protocolError("hosted_runtime_bridge_store_unavailable", "Hosted runtime bridge payload store unavailable");
+    }
+  }
+
+  private async loadWorkerDispatchPayload(
+    command: HostedRuntimeBridgeCommand
+  ): Promise<Record<string, unknown> | undefined> {
+    if (!this.deps.commandPayloads) {
+      return undefined;
+    }
+    const payload = await this.deps.commandPayloads.get(command.id);
+    if (!payload) {
+      return undefined;
+    }
+    return payload;
   }
 
   private assertSupportedMode(runtimeMode: string, operation: HostedRuntimeBridgeCommand["operation"]): void {
@@ -898,32 +983,41 @@ function redactForStorage(
   });
 }
 
-function payloadForWorkerDispatch(command: HostedRuntimeBridgeCommand): Record<string, unknown> | undefined {
-  if (command.operation === "input") {
-    const content = command.redactedPayload["content"];
-    if (typeof content !== "string") {
-      return undefined;
-    }
-    return { text: content, type: "input" };
+function withQuotaMetadata(
+  payload: HostedRuntimeBridgeCommand["redactedPayload"],
+  reservations: { hourlyReservationId?: string; activeReservationId?: string } | undefined
+): HostedRuntimeBridgeCommand["redactedPayload"] {
+  if (!reservations?.hourlyReservationId && !reservations?.activeReservationId) {
+    return payload;
   }
+  const next: HostedRuntimeBridgeCommand["redactedPayload"] = { ...payload };
+  next["quota"] = {
+    ...(reservations.hourlyReservationId ? { hourlyReservationId: reservations.hourlyReservationId } : {}),
+    ...(reservations.activeReservationId ? { activeReservationId: reservations.activeReservationId } : {})
+  };
+  return next;
+}
 
-  const token = command.redactedPayload["runtimeApprovalToken"];
-  const decision = command.redactedPayload["decision"] === "rejected" ? "rejected" : "approved";
-  const message = command.redactedPayload["message"];
-  if (typeof token !== "string") {
+function reservationMetadataFromCommand(
+  command: HostedRuntimeBridgeCommand
+): { hourlyReservationId?: string; activeReservationId?: string } | undefined {
+  const quota = command.redactedPayload["quota"];
+  if (!isRecord(quota)) {
     return undefined;
   }
-  const payload: Record<string, unknown> = {
-    type: "approval_resolution",
-    runtimeApprovalToken: token,
-    decision,
-    message: typeof message === "string" && message.length > 0 ? message : `${decision} by hosted-api`
-  };
-  const answers = command.redactedPayload["answers"];
-  if (isRecord(answers)) {
-    payload["answers"] = answers;
+  const hourlyReservationId = typeof quota["hourlyReservationId"] === "string" ? quota["hourlyReservationId"] : undefined;
+  const activeReservationId = typeof quota["activeReservationId"] === "string" ? quota["activeReservationId"] : undefined;
+  if (!hourlyReservationId && !activeReservationId) {
+    return undefined;
   }
-  return payload;
+  const reservations: { hourlyReservationId?: string; activeReservationId?: string } = {};
+  if (hourlyReservationId) {
+    reservations.hourlyReservationId = hourlyReservationId;
+  }
+  if (activeReservationId) {
+    reservations.activeReservationId = activeReservationId;
+  }
+  return reservations;
 }
 
 function isPayloadMismatchError(error: unknown): error is { code: "hosted_runtime_bridge_payload_mismatch" } {
