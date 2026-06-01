@@ -2,7 +2,7 @@
 
 This guide is only for OpenCode ACP local debugging. Use the [Official API Contract](../API.md) for endpoint shapes and [Local Development](../DEVELOPMENT.md) for daemon startup and full verification commands.
 
-R23 hosted note: `opencode.acp` hosted bridge support is shipped through existing hosted run input and approval resolution endpoints using structured ACP permission handling. Server-to-worker handoff depends on shared Postgres-backed hosted runtime bridge command and payload stores. Stale claimed provider-input commands fail closed with `hosted_runtime_bridge_non_idempotent_retry_blocked` instead of blindly retrying provider input. Activation remains operator opt-in. Fake/no-spend remains default.
+R23 hosted note: `opencode.acp` hosted bridge support is shipped through existing hosted run input and approval resolution endpoints using structured ACP permission handling. Usable hosted bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker. Missing bridge command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`). Stale claimed non-idempotent provider input after worker crash is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`. Activation remains operator opt-in. Fake/no-spend remains default.
 
 ## Current OpenCode Scope
 
