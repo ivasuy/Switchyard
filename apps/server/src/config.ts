@@ -1,8 +1,10 @@
 import { accessSync, constants, readFileSync } from "node:fs";
 import { TextDecoder } from "node:util";
 import {
+  createDisabledRealToolPolicyConfig,
   hashApiKey,
   redactSecrets,
+  resolveRealToolPolicyConfig,
   resolveProviderRuntimePolicy,
   resolveHostedSandboxConfig,
   validateProductionHostedRuntimeAllowlist,
@@ -13,7 +15,8 @@ import {
   type ProviderRuntimePolicyPathPayload,
   type ControlPlaneBootstrapInput,
   type HostedRealRuntimeExecution,
-  type ResolvedHostedSandboxConfig
+  type ResolvedHostedSandboxConfig,
+  type ResolvedRealToolPolicyConfig
 } from "@switchyard/core";
 import {
   ObjectStoreConfigError,
@@ -25,6 +28,8 @@ export type DeploymentMode = "local" | "test" | "staging" | "production";
 export type ServerAuthMode = "disabled" | "api_key";
 export type ControlPlaneStoreMode = "memory" | "postgres";
 const PROVIDER_POLICY_MAX_BYTES = 65_536;
+const REAL_TOOL_POLICY_MAX_BYTES = 65_536;
+export type HostedRealToolsMode = "disabled" | "enabled";
 
 export interface ControlPlaneNodeTokenBindingConfig {
   token: string;
@@ -76,6 +81,12 @@ export interface ServerConfig {
   objectStore: ResolvedObjectStoreConfig;
   sandbox: ResolvedHostedSandboxConfig;
   providerRuntimeActivation: ProviderRuntimeActivationResult;
+  tools?: {
+    hostedRealTools: HostedRealToolsMode;
+    connectedNodeRealTools: HostedRealToolsMode;
+    policySourceKind: "none" | "json" | "path";
+    policy: ResolvedRealToolPolicyConfig;
+  };
   redactedSummary: Record<string, unknown>;
 }
 
@@ -85,6 +96,10 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
   const hostedRealRuntimeExecution = parseHostedRealRuntimeExecution(env["SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION"]);
   const providerPolicyJson = optional(env["SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON"]);
   const providerPolicyPath = optional(env["SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH"]);
+  const toolPolicyJson = optional(env["SWITCHYARD_REAL_TOOL_POLICY_JSON"]);
+  const toolPolicyPath = optional(env["SWITCHYARD_REAL_TOOL_POLICY_PATH"]);
+  const hostedRealTools = parseToolsMode(optional(env["SWITCHYARD_HOSTED_REAL_TOOLS"]));
+  const connectedNodeRealTools = parseToolsMode(optional(env["SWITCHYARD_CONNECTED_NODE_REAL_TOOLS"]));
   const allowlist = parseCsv(hostedRuntimeAllowlistEnv, "fake.deterministic");
   const serverAuthMode = parseServerAuthMode(env["SWITCHYARD_SERVER_AUTH_MODE"]);
   const controlPlaneStore = parseControlPlaneStoreMode(env["SWITCHYARD_CONTROL_PLANE_STORE"]);
@@ -118,6 +133,12 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
         modeStatuses: [],
         reasonCodes: []
       }
+    },
+    tools: {
+      hostedRealTools,
+      connectedNodeRealTools,
+      policySourceKind: "none",
+      policy: createDisabledRealToolPolicyConfig()
     },
     redactedSummary: {}
   };
@@ -186,6 +207,32 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env): ServerCo
   }
 
   const providerPathPayload = loadProviderRuntimePolicyPathPayload(providerPolicyPath);
+  const toolPolicyPathPayload = loadRealToolPolicyPathPayload(toolPolicyPath);
+  if (toolPolicyJson && toolPolicyPath) {
+    throw new ConfigError(
+      "config_conflict:SWITCHYARD_REAL_TOOL_POLICY_JSON",
+      "SWITCHYARD_REAL_TOOL_POLICY_JSON",
+      buildSummary(config)
+    );
+  }
+  if (toolPolicyJson) {
+    try {
+      config.tools!.policy = resolveRealToolPolicyConfig({ source: toolPolicyJson });
+      config.tools!.policySourceKind = "json";
+    } catch {
+      throw new ConfigError("tool_policy_config_invalid", "SWITCHYARD_REAL_TOOL_POLICY_JSON", buildSummary(config));
+    }
+  } else if (toolPolicyPathPayload?.state === "ok") {
+    try {
+      config.tools!.policy = resolveRealToolPolicyConfig({ source: toolPolicyPathPayload.contents });
+      config.tools!.policySourceKind = "path";
+    } catch {
+      throw new ConfigError("tool_policy_config_invalid", "SWITCHYARD_REAL_TOOL_POLICY_PATH", buildSummary(config));
+    }
+  } else if (toolPolicyPathPayload) {
+    throw new ConfigError("tool_policy_config_invalid", "SWITCHYARD_REAL_TOOL_POLICY_PATH", buildSummary(config));
+  }
+
   const providerPolicy = resolveProviderRuntimePolicy({
     deploymentMode: config.deploymentMode,
     hostedRealRuntimeExecution: config.hostedRealRuntimeExecution,
@@ -379,6 +426,41 @@ function loadProviderRuntimePolicyPathPayload(pathValue: string | undefined): st
     return { state: "empty" };
   }
   if (raw.length > PROVIDER_POLICY_MAX_BYTES) {
+    return { state: "too_large" };
+  }
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+  } catch {
+    return { state: "invalid_utf8" };
+  }
+  if (!decoded.trim()) {
+    return { state: "empty" };
+  }
+  try {
+    JSON.parse(decoded);
+  } catch {
+    return { state: "invalid_json" };
+  }
+  return { state: "ok", contents: decoded };
+}
+
+function loadRealToolPolicyPathPayload(pathValue: string | undefined): { state: "ok"; contents: string } | {
+  state: "unreadable" | "empty" | "too_large" | "invalid_utf8" | "invalid_json";
+} | undefined {
+  if (!pathValue) {
+    return undefined;
+  }
+  let raw: Buffer;
+  try {
+    raw = readFileSync(pathValue);
+  } catch {
+    return { state: "unreadable" };
+  }
+  if (raw.length === 0) {
+    return { state: "empty" };
+  }
+  if (raw.length > REAL_TOOL_POLICY_MAX_BYTES) {
     return { state: "too_large" };
   }
   let decoded: string;
@@ -595,6 +677,16 @@ function parseHostedRealRuntimeExecution(value: string | undefined): HostedRealR
   );
 }
 
+function parseToolsMode(value: string | undefined): HostedRealToolsMode {
+  if (!value || value === "disabled") {
+    return "disabled";
+  }
+  if (value === "enabled") {
+    return "enabled";
+  }
+  throw new ConfigError("config_invalid:SWITCHYARD_HOSTED_REAL_TOOLS", "SWITCHYARD_HOSTED_REAL_TOOLS", { hostedRealTools: value });
+}
+
 function parseCsv(value: string | undefined, fallback: string): string[] {
   const source = optional(value) ?? fallback;
   return source.split(",").map((part) => part.trim()).filter((part) => part.length > 0);
@@ -675,7 +767,38 @@ function buildSummary(config: ServerConfig): Record<string, unknown> {
       enabledRealModeCount: config.providerRuntimeActivation.redactedSummary.enabledRealModeCount,
       reasonCodes: config.providerRuntimeActivation.redactedSummary.reasonCodes,
       policyVersion: config.providerRuntimeActivation.redactedSummary.policyVersion
-    }
+    },
+    tools: config.tools
+      ? {
+          hostedRealTools: config.tools.hostedRealTools,
+          connectedNodeRealTools: config.tools.connectedNodeRealTools,
+          policySourceKind: config.tools.policySourceKind,
+          policy: {
+            globalEnabled: config.tools.policy.global.enabled,
+            allowedPlacements: config.tools.policy.global.allowedPlacements,
+            hostedEnabled: config.tools.policy.hosted.enabled,
+            connectedLocalNodeEnabled: config.tools.policy.connectedLocalNode.enabled,
+            enabledToolTypes: [
+              ...(config.tools.policy.fetch.enabled ? ["fetch"] : []),
+              ...(config.tools.policy.webSearch.enabled ? ["web_search"] : []),
+              ...(config.tools.policy.github.enabled ? ["github"] : []),
+              ...(config.tools.policy.repo.enabled ? ["repo"] : []),
+              ...(config.tools.policy.shell.enabled ? ["shell"] : [])
+            ]
+          }
+        }
+      : {
+          hostedRealTools: "disabled",
+          connectedNodeRealTools: "disabled",
+          policySourceKind: "none",
+          policy: {
+            globalEnabled: false,
+            allowedPlacements: [],
+            hostedEnabled: false,
+            connectedLocalNodeEnabled: false,
+            enabledToolTypes: []
+          }
+        }
   });
 }
 

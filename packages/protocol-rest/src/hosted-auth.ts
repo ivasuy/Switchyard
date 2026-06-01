@@ -56,7 +56,15 @@ const RULES: readonly RouteRule[] = [
 
   { method: "GET", routeId: "auth.whoami", scopes: ["admin:read"], matches: exact("/auth/whoami") },
   { method: "GET", routeId: "entitlements.get", scopes: ["entitlements:read"], matches: exact("/entitlements") },
-  { method: "GET", routeId: "audit.events", scopes: ["audit:read"], matches: exact("/audit/events") }
+  { method: "GET", routeId: "audit.events", scopes: ["audit:read"], matches: exact("/audit/events") },
+
+  { method: "POST", routeId: "tools.invocations.create", scopes: ["tools:write"], matches: exact("/tools/invocations") },
+  { method: "GET", routeId: "tools.invocations.list", scopes: ["tools:read"], matches: exact("/tools/invocations") },
+  { method: "GET", routeId: "tools.invocations.get", scopes: ["tools:read"], matches: param("/tools/invocations/:id") },
+  { method: "GET", routeId: "tools.approvals.list", scopes: ["tools:read"], matches: exact("/approvals") },
+  { method: "GET", routeId: "tools.approvals.get", scopes: ["tools:read"], matches: param("/approvals/:id") },
+  { method: "POST", routeId: "tools.approvals.approve", scopes: ["tools:write"], matches: param("/approvals/:id/approve") },
+  { method: "POST", routeId: "tools.approvals.reject", scopes: ["tools:write"], matches: param("/approvals/:id/reject") }
 ];
 
 export function registerHostedAuthHooks(app: FastifyInstance, deps: HostedAuthDependencies): void {

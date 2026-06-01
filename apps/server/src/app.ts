@@ -6,8 +6,11 @@ import {
   EventBus,
   EventSyncService,
   HOSTED_RUNTIME_CATALOG,
+  HostedToolService,
   HostedRunService,
   HostedSandboxService,
+  LocalPolicyGate,
+  createDisabledRealToolPolicyConfig,
   NodeCoordinatorService,
   PlacementService,
   RegistryService,
@@ -23,13 +26,15 @@ import {
   type RunQueuePort,
   type RunStore,
   type SessionStore,
-  type RuntimeAdapter
+  type RuntimeAdapter,
+  type ToolQueuePort
 } from "@switchyard/core";
 import {
   registerArtifactRoutes,
   registerEnterpriseRoutes,
   registerErrorEnvelope,
   registerHostedAuthHooks,
+  registerHostedToolRoutes,
   registerRegistryRoutes,
   registerRunRoutes,
   sendHttpError
@@ -45,6 +50,9 @@ import {
   PostgresEventStore,
   PostgresNodeStore,
   PostgresPlacementStore,
+  PostgresToolDispatchOutboxStore,
+  PostgresToolInvocationStore,
+  PostgresApprovalStore,
   PostgresRegistryStore,
   PostgresRunStore,
   PostgresSessionStore,
@@ -63,6 +71,12 @@ export async function createServerApp(config: ServerConfig) {
     ? config.publicMetrics
     : (config.deploymentMode === "local" || config.deploymentMode === "test");
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
+  const tools = config.tools ?? {
+    hostedRealTools: "disabled" as const,
+    connectedNodeRealTools: "disabled" as const,
+    policySourceKind: "none" as const,
+    policy: createDisabledRealToolPolicyConfig()
+  };
   registerErrorEnvelope(app);
   const metrics = new HostedMetrics();
 
@@ -142,6 +156,9 @@ export async function createServerApp(config: ServerConfig) {
   const events: EventStore = new PostgresEventStore(postgres);
   const sessions: SessionStore = new PostgresSessionStore(postgres);
   const artifacts: ArtifactStore = new PostgresArtifactStore(postgres);
+  const invocations = new PostgresToolInvocationStore(postgres);
+  const approvals = new PostgresApprovalStore(postgres);
+  const dispatchOutbox = new PostgresToolDispatchOutboxStore(postgres);
   const registry: RegistryStore = new PostgresRegistryStore(postgres);
   const eventBus = new EventBus();
   const placements: PlacementStore = new PostgresPlacementStore(postgres);
@@ -276,6 +293,97 @@ export async function createServerApp(config: ServerConfig) {
     content: artifactContent
   });
 
+  const hostedToolsDeps: ConstructorParameters<typeof HostedToolService>[0] = {
+    runs,
+    events,
+    approvals,
+    invocations,
+    policy: new LocalPolicyGate(tools.policy),
+    dispatchOutbox,
+    dispatch: async (input) => {
+      if (input.target.placement === "hosted") {
+        if (!hasToolQueueSupport(queue as RunQueuePort & Partial<ToolQueuePort>)) {
+          throw new Error("tool_dispatch_unavailable");
+        }
+        const job = await (queue as RunQueuePort & ToolQueuePort).enqueueTool({
+          approvalId: input.approvalId,
+          toolInvocationId: input.invocation.id,
+          runId: input.invocation.runId ?? "",
+          placement: "hosted",
+          toolType: input.invocation.type,
+          executionPlanHash: input.executionPlanHash,
+          idempotencyKey: input.idempotencyKey
+        });
+        return { dispatchId: job.jobId, target: "hosted" as const };
+      }
+
+      const assignment = await coordinator.createToolAssignment({
+        runId: input.invocation.runId ?? "",
+        toolInvocationId: input.invocation.id,
+        requiredCapability: `tool.${input.invocation.type}`,
+        idempotencyKey: input.idempotencyKey,
+        ...(input.target.nodeId ? { nodeId: input.target.nodeId } : {})
+      });
+      return { dispatchId: assignment.id, target: "connected_local_node" as const };
+    },
+    ...(controlPlaneStoreInstance
+      ? {
+          preflight: {
+            attachOwnership: async (input: { resourceType: "tool_invocation" | "approval"; resourceId: string; runId: string }) => {
+              const runOwnership = await controlPlaneStoreInstance.getOwnership({
+                resourceType: "run",
+                resourceId: input.runId
+              });
+              if (!runOwnership) {
+                throw new Error("tool_store_unavailable");
+              }
+              await controlPlaneStoreInstance.attachOwnership({
+                resourceType: input.resourceType,
+                resourceId: input.resourceId,
+                accountId: runOwnership.accountId,
+                tenantId: runOwnership.tenantId,
+                projectId: runOwnership.projectId,
+                userId: runOwnership.userId,
+                apiKeyId: runOwnership.apiKeyId,
+                createdAt: new Date().toISOString()
+              });
+            },
+            recordAudit: async (input: {
+              runId: string;
+              toolInvocationId?: string;
+              approvalId?: string;
+              eventType: string;
+              reasonCode: string;
+              decision: "allow" | "deny" | "error";
+              payload: Record<string, unknown>;
+            }) => {
+              const runOwnership = await controlPlaneStoreInstance.getOwnership({
+                resourceType: "run",
+                resourceId: input.runId
+              });
+              if (!runOwnership) {
+                return;
+              }
+              await controlPlaneStoreInstance.appendAuditEvent({
+                accountId: runOwnership.accountId,
+                tenantId: runOwnership.tenantId,
+                projectId: runOwnership.projectId,
+                actorType: "system",
+                eventType: input.eventType,
+                decision: input.decision,
+                reasonCode: input.reasonCode,
+                resourceType: input.toolInvocationId ? "tool_invocation" : input.approvalId ? "approval" : "run",
+                resourceId: input.toolInvocationId ?? input.approvalId ?? input.runId,
+                payload: input.payload,
+                createdAt: new Date().toISOString()
+              });
+            }
+          }
+        }
+      : {})
+  };
+  const hostedTools = new HostedToolService(hostedToolsDeps);
+
   registerHostedAuthHooks(app, {
     ...(controlPlane ? { controlPlane } : {}),
     authRequired: serverAuthMode === "api_key",
@@ -382,6 +490,17 @@ export async function createServerApp(config: ServerConfig) {
     registryService,
     ...(controlPlane ? { controlPlane } : {})
   });
+
+  if (controlPlane && controlPlaneStoreInstance) {
+    registerHostedToolRoutes(app, {
+      hostedTools,
+      runs,
+      invocations,
+      approvals,
+      controlPlane,
+      controlPlaneStore: controlPlaneStoreInstance
+    });
+  }
 
   registerArtifactRoutes(app, {
     artifacts,
@@ -690,6 +809,14 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+function hasToolQueueSupport(queue: RunQueuePort & Partial<ToolQueuePort>): queue is RunQueuePort & ToolQueuePort {
+  return typeof queue.enqueueTool === "function"
+    && typeof queue.claimTool === "function"
+    && typeof queue.ackTool === "function"
+    && typeof queue.failTool === "function"
+    && typeof queue.recoverStaleToolClaims === "function";
+}
+
 function instrumentControlPlane(controlPlane: ControlPlaneService, metrics: HostedMetrics): ControlPlaneService {
   const proxy = new Proxy(controlPlane, {
     get(target, property, receiver) {
@@ -941,6 +1068,10 @@ function toAuthContext(
         allowedRuntimeModes: arrayStrings(entitlements["allowedRuntimeModes"]),
         allowHostedRealRuntime: Boolean(entitlements["allowHostedRealRuntime"]),
         allowConnectedNodes: Boolean(entitlements["allowConnectedNodes"]),
+        allowHostedTools: Boolean(entitlements["allowHostedTools"]),
+        allowConnectedNodeTools: Boolean(entitlements["allowConnectedNodeTools"]),
+        allowedToolTypes: arrayStrings(entitlements["allowedToolTypes"]) as NodeAuthContext["entitlement"]["entitlements"]["allowedToolTypes"],
+        allowToolArtifactContentRead: Boolean(entitlements["allowToolArtifactContentRead"]),
         allowArtifactContentRead: Boolean(entitlements["allowArtifactContentRead"]),
         allowMetricsRead: Boolean(entitlements["allowMetricsRead"]),
         allowAuditRead: Boolean(entitlements["allowAuditRead"])
@@ -950,7 +1081,10 @@ function toAuthContext(
         maxActiveRuns: toNumber(quotas["maxActiveRuns"]),
         maxRunTimeoutSeconds: toNumber(quotas["maxRunTimeoutSeconds"]),
         maxConnectedNodes: toNumber(quotas["maxConnectedNodes"]),
-        maxArtifactContentReadBytesPerHour: toNumber(quotas["maxArtifactContentReadBytesPerHour"])
+        maxArtifactContentReadBytesPerHour: toNumber(quotas["maxArtifactContentReadBytesPerHour"]),
+        maxToolInvocationsPerHour: toNumber(quotas["maxToolInvocationsPerHour"]),
+        maxActiveToolInvocations: toNumber(quotas["maxActiveToolInvocations"]),
+        maxToolArtifactBytesPerHour: toNumber(quotas["maxToolArtifactBytesPerHour"])
       },
       scopes: scopes as NodeAuthContext["entitlement"]["scopes"],
       capturedAt: now

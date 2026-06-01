@@ -369,4 +369,16 @@ describe("production server config", () => {
     expect(config.redisUrl).toBeUndefined();
     expect(config.nodeSharedToken).toBeUndefined();
   });
+
+  it("parses hosted tool posture defaults and rejects invalid tool mode", () => {
+    const defaults = loadServerConfig({});
+    expect(defaults.tools?.hostedRealTools).toBe("disabled");
+    expect(defaults.tools?.connectedNodeRealTools).toBe("disabled");
+    expect(defaults.tools?.policySourceKind).toBe("none");
+
+    expect(() => loadServerConfig({
+      SWITCHYARD_DEPLOYMENT_MODE: "local",
+      SWITCHYARD_HOSTED_REAL_TOOLS: "maybe"
+    })).toThrow("config_invalid:SWITCHYARD_HOSTED_REAL_TOOLS");
+  });
 });

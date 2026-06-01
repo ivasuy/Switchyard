@@ -188,7 +188,7 @@ describe("production readiness", () => {
 
     expect(report.checks.schema).toBeDefined();
     expect(report.checks.schema).toMatchObject({ ok: true, code: "postgres_schema_ready" });
-    expect(report.checks.schema?.diagnostics).toMatchObject({ expectedVersion: 19, version: 19 });
+    expect(report.checks.schema?.diagnostics).toMatchObject({ expectedVersion: 20, version: 19 });
   });
 
   it("reports migration-required schema readiness code", async () => {
@@ -266,6 +266,37 @@ describe("production readiness", () => {
     expect(serialized).not.toContain("argv");
     expect(serialized).not.toContain("commandPolicy");
     expect(serialized).not.toContain("env");
+  });
+
+  it("includes tools readiness diagnostics with disabled defaults", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(createAuthEnabledTestEnv()),
+      postgres: undefined,
+      queue: {
+        enqueue: async () => "job",
+        claim: async () => null,
+        ack: async () => {},
+        fail: async () => {},
+        retry: async () => {},
+        discard: async () => {},
+        getJob: async () => null,
+        recoverStaleClaims: async () => 0,
+        stats: async () => ({ queued: 0, claimed: 0 })
+      },
+      artifactContent: {
+        writeText: async () => ({ location: "x" }),
+        writeBytes: async () => ({ location: "x" }),
+        read: async () => ({ body: Buffer.from("ok"), contentType: "application/octet-stream" }),
+        probe: async () => {}
+      }
+    });
+
+    expect(report.checks.tools).toBeDefined();
+    expect(report.checks.tools?.ok).toBe(true);
+    expect(report.checks.tools?.diagnostics).toMatchObject({
+      hostedRealTools: "disabled",
+      connectedNodeRealTools: "disabled"
+    });
   });
 
   it("includes redacted provider runtime activation diagnostics", async () => {

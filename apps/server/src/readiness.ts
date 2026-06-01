@@ -1,6 +1,7 @@
 import { access, constants } from "node:fs/promises";
 import {
   checkHostedSandboxReadiness,
+  createDisabledRealToolPolicyConfig,
   isKnownHostedRuntimeMode,
   redactSecrets,
   validateHostedRuntimeAllowlist,
@@ -26,6 +27,8 @@ interface UnownedResourceCounts {
   runs: number;
   runEvents: number;
   artifacts: number;
+  toolInvocations: number;
+  approvals: number;
   placements: number;
   nodes: number;
   assignments: number;
@@ -294,6 +297,8 @@ export async function probeServerReadiness(input: {
     ? unowned.runs +
       unowned.runEvents +
       unowned.artifacts +
+      unowned.toolInvocations +
+      unowned.approvals +
       unowned.placements +
       unowned.nodes +
       unowned.assignments +
@@ -310,6 +315,8 @@ export async function probeServerReadiness(input: {
               runs: unowned?.runs ?? 0,
               runEvents: unowned?.runEvents ?? 0,
               artifacts: unowned?.artifacts ?? 0,
+              toolInvocations: unowned?.toolInvocations ?? 0,
+              approvals: unowned?.approvals ?? 0,
               placements: unowned?.placements ?? 0,
               nodes: unowned?.nodes ?? 0,
               assignments: unowned?.assignments ?? 0,
@@ -318,6 +325,54 @@ export async function probeServerReadiness(input: {
             })
       )
     : readinessCheck(true);
+
+  const toolsConfig = input.config.tools ?? {
+    hostedRealTools: "disabled" as const,
+    connectedNodeRealTools: "disabled" as const,
+    policySourceKind: "none" as const,
+    policy: createDisabledRealToolPolicyConfig()
+  };
+  const enabledToolTypes = [
+    ...(toolsConfig.policy.fetch.enabled ? ["fetch"] : []),
+    ...(toolsConfig.policy.webSearch.enabled ? ["web_search"] : []),
+    ...(toolsConfig.policy.github.enabled ? ["github"] : []),
+    ...(toolsConfig.policy.repo.enabled ? ["repo"] : []),
+    ...(toolsConfig.policy.shell.enabled ? ["shell"] : [])
+  ];
+  const toolDiagnostics = {
+    hostedRealTools: toolsConfig.hostedRealTools,
+    connectedNodeRealTools: toolsConfig.connectedNodeRealTools,
+    policySourceKind: toolsConfig.policySourceKind,
+    allowedPlacements: [...toolsConfig.policy.global.allowedPlacements],
+    enabledToolTypes,
+    storeAvailable: Boolean(input.postgres) || input.config.deploymentMode === "local" || input.config.deploymentMode === "test",
+    queueAvailable: hasToolQueueSupport(input.queue as RunQueuePort & Partial<Record<string, unknown>>),
+    ownershipAvailable: controlPlane.storeReady,
+    quotaAvailable: controlPlane.hasQuotaStore,
+    auditAvailable: controlPlane.hasAuditStore,
+    routeAuthAvailable: controlPlane.mode === "enabled"
+  };
+
+  const toolsEnabled = toolsConfig.hostedRealTools === "enabled" || toolsConfig.connectedNodeRealTools === "enabled";
+  if (!toolsEnabled) {
+    checks.tools = readinessCheck(true, undefined, toolDiagnostics);
+  } else if (toolsConfig.policySourceKind === "none") {
+    checks.tools = readinessCheck(false, "tool_policy_config_invalid", toolDiagnostics);
+  } else if (!toolDiagnostics.routeAuthAvailable) {
+    checks.tools = readinessCheck(false, "tool_hosted_auth_required", toolDiagnostics);
+  } else if (!toolDiagnostics.storeAvailable || !toolDiagnostics.ownershipAvailable) {
+    checks.tools = readinessCheck(false, "tool_store_unavailable", toolDiagnostics);
+  } else if (!toolDiagnostics.queueAvailable) {
+    checks.tools = readinessCheck(false, "tool_dispatch_unavailable", toolDiagnostics);
+  } else if (!toolDiagnostics.quotaAvailable) {
+    checks.tools = readinessCheck(false, "quota_store_unavailable", toolDiagnostics);
+  } else if (!toolDiagnostics.auditAvailable) {
+    checks.tools = readinessCheck(false, "audit_store_unavailable", toolDiagnostics);
+  } else if (enabledToolTypes.length === 0) {
+    checks.tools = readinessCheck(false, "tool_policy_config_invalid", toolDiagnostics);
+  } else {
+    checks.tools = readinessCheck(true, undefined, toolDiagnostics);
+  }
 
   const ok = Object.values(checks).every((check) => check.ok);
   return { ok, checks };
@@ -368,4 +423,12 @@ function normalizeProviderRuntimeActivation(config: ServerConfig): ProviderRunti
       reasonCodes: []
     }
   };
+}
+
+function hasToolQueueSupport(queue: RunQueuePort & Partial<Record<string, unknown>>): boolean {
+  return typeof (queue as { enqueueTool?: unknown }).enqueueTool === "function"
+    && typeof (queue as { claimTool?: unknown }).claimTool === "function"
+    && typeof (queue as { ackTool?: unknown }).ackTool === "function"
+    && typeof (queue as { failTool?: unknown }).failTool === "function"
+    && typeof (queue as { recoverStaleToolClaims?: unknown }).recoverStaleToolClaims === "function";
 }
