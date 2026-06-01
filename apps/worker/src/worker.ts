@@ -106,6 +106,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   ) => Promise<{ ok: boolean; modes: Record<string, { ok: boolean; code?: string }> }>;
   processFactory?: SandboxProcessFactory;
   ptyFactory?: SandboxPtyFactory;
+  artifacts?: ArtifactStore;
   artifactContent?: ArtifactContentStore & { probe: () => Promise<{ ok: true }> };
   invocations?: ToolInvocationStore;
   approvals?: ApprovalStore;
@@ -161,7 +162,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   const runs: RunStore = deps?.runs ?? new PostgresRunStore(postgres);
   const events: EventStore = deps?.events ?? new PostgresEventStore(postgres);
   const sessions: SessionStore = new PostgresSessionStore(postgres);
-  const artifacts: ArtifactStore = new PostgresArtifactStore(postgres);
+  const artifacts: ArtifactStore = deps?.artifacts ?? new PostgresArtifactStore(postgres);
   const invocations: ToolInvocationStore = deps?.invocations ?? (postgres ? new PostgresToolInvocationStore(postgres) : new InMemoryToolInvocationStore());
   const approvals: ApprovalStore = deps?.approvals ?? (postgres ? new PostgresApprovalStore(postgres) : new InMemoryApprovalStore());
   const artifactContent: ArtifactContentStore & { probe: () => Promise<{ ok: true }> } =
@@ -643,8 +644,18 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         (digestError as Error & { reasonCode: string }).reasonCode = "artifact_digest_mismatch";
         throw digestError;
       }
+      const artifactId = `artifact_${crypto.randomUUID()}`;
+      await attachArtifactOwnership?.({
+        runId,
+        toolInvocationId,
+        artifactId,
+        artifactPath: stored.path,
+        artifactBytes: stored.sizeBytes,
+        artifactSha256: stored.sha256
+      });
+
       const artifact: ArtifactRecord = {
-        id: `artifact_${crypto.randomUUID()}`,
+        id: artifactId,
         runId,
         type: artifactType as ArtifactRecord["type"],
         path: stored.path,
@@ -660,14 +671,6 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         createdAt: new Date().toISOString()
       };
       const created = await artifacts.create(artifact);
-      await attachArtifactOwnership?.({
-        runId,
-        toolInvocationId,
-        artifactId: created.id,
-        artifactPath: created.path,
-        artifactBytes: stored.sizeBytes,
-        artifactSha256: stored.sha256
-      });
       await consumeToolArtifactBytesQuota?.({
         runId,
         toolInvocationId,

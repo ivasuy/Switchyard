@@ -10,6 +10,7 @@ import { MemoryRunQueue } from "@switchyard/queue";
 import { resolveObjectStoreConfig } from "@switchyard/storage";
 import {
   InMemoryApprovalStore,
+  InMemoryArtifactStore,
   InMemoryEventStore,
   InMemoryRunStore,
   InMemoryToolInvocationStore
@@ -505,6 +506,7 @@ describe("hosted tool worker", () => {
     const runs = new InMemoryRunStore();
     const events = new InMemoryEventStore();
     const approvals = new InMemoryApprovalStore();
+    const artifacts = new InMemoryArtifactStore();
     const invocations = new InMemoryToolInvocationStore();
     const policy = basePolicy();
     const runId = "run_tool_artifact_ownership_fail_1";
@@ -572,6 +574,7 @@ describe("hosted tool worker", () => {
       runs,
       events,
       approvals,
+      artifacts,
       invocations,
       artifactContent: {
         probe: async () => ({ ok: true }),
@@ -604,6 +607,7 @@ describe("hosted tool worker", () => {
       expect(invocation?.status).toBe("failed");
       expect(invocation?.error?.code).toBe("ownership_attach_failed");
       expect(quotaCalls).toHaveLength(0);
+      expect(await artifacts.listByRun(runId)).toHaveLength(0);
     } finally {
       await worker.stop();
     }
