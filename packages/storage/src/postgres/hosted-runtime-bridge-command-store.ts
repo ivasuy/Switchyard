@@ -316,25 +316,18 @@ export class PostgresHostedRuntimeBridgeCommandStore {
     const nextStatus: HostedRuntimeBridgeCommand["status"] = input.retryable ? "queued" : "failed";
 
     if (this.handle) {
-      const params = [
-        input.commandId,
-        nextStatus,
-        input.reasonCode,
-        input.retryable ? null : now,
-        now,
-        input.workerId ?? null
-      ];
+      const params = [input.commandId, nextStatus, input.reasonCode, now, input.workerId ?? null];
 
       const result = await this.handle.pool.query(
         `UPDATE hosted_runtime_bridge_commands
          SET status = $2,
              reason_code = $3,
              worker_id = CASE WHEN $2 = 'queued' THEN NULL ELSE worker_id END,
-             lease_until = CASE WHEN $2 = 'queued' THEN NULL ELSE lease_until END,
-             updated_at = $5
+             lease_until = NULL,
+             updated_at = $4
          WHERE id = $1
            AND status = 'claimed'
-           AND ($6::text IS NULL OR worker_id = $6)
+           AND ($5::text IS NULL OR worker_id = $5)
          RETURNING *`,
         params
       );

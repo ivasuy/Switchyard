@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PostgresHostedRuntimeBridgeCommandStore, HostedRuntimeBridgeCommandStoreError } from "../src/index.js";
 import type { CreateHostedRuntimeBridgeCommandInput } from "../src/postgres/hosted-runtime-bridge-command-store.js";
+import type { PostgresDatabaseHandle } from "../src/postgres/database.js";
 
 function makeCreateInput(overrides: Partial<CreateHostedRuntimeBridgeCommandInput> = {}): CreateHostedRuntimeBridgeCommandInput {
   return {
@@ -199,6 +200,142 @@ describe("postgres hosted runtime bridge command store", () => {
       now: "2026-06-01T10:00:03.000Z"
     });
     expect(claimAfterComplete).toBeUndefined();
+  });
+
+  it("clears lease semantics for retryable requeue and terminal fail", async () => {
+    const store = new PostgresHostedRuntimeBridgeCommandStore();
+    const created = await store.create(makeCreateInput({ idempotencyKey: "idem_fail_lease" }));
+
+    await store.claimNext({
+      workerId: "worker_1",
+      leaseMs: 10_000,
+      now: "2026-06-01T10:00:00.000Z"
+    });
+
+    const retryable = await store.fail({
+      commandId: created.command.id,
+      workerId: "worker_1",
+      reasonCode: "transient_error",
+      retryable: true,
+      now: "2026-06-01T10:00:01.000Z"
+    });
+    expect(retryable?.status).toBe("queued");
+    expect(retryable?.leaseUntil).toBeUndefined();
+    expect(retryable?.workerId).toBeUndefined();
+
+    await store.claimNext({
+      workerId: "worker_2",
+      leaseMs: 10_000,
+      now: "2026-06-01T10:00:02.000Z"
+    });
+
+    const terminal = await store.fail({
+      commandId: created.command.id,
+      workerId: "worker_2",
+      reasonCode: "fatal_error",
+      retryable: false,
+      now: "2026-06-01T10:00:03.000Z"
+    });
+    expect(terminal?.status).toBe("failed");
+    expect(terminal?.leaseUntil).toBeUndefined();
+  });
+
+  it("postgres fail query clears lease_until for both retryable and terminal transitions", async () => {
+    const queryLog: string[] = [];
+    const statusById = new Map<string, "claimed" | "queued" | "failed">([["command_1", "claimed"]]);
+    const workerById = new Map<string, string | null>([["command_1", "worker_1"]]);
+
+    const handle = {
+      pool: {
+        query: async (sql: string, params?: ReadonlyArray<unknown>) => {
+          queryLog.push(sql);
+          if (!params) {
+            return { rows: [], rowCount: 0 };
+          }
+          const id = String(params[0]);
+          const nextStatus = params[1] as "queued" | "failed";
+          const reasonCode = String(params[2]);
+          const now = String(params[3]);
+          const workerId = params[4] === null || params[4] === undefined ? null : String(params[4]);
+
+          const currentStatus = statusById.get(id);
+          const currentWorker = workerById.get(id) ?? null;
+          if (currentStatus !== "claimed") {
+            return { rows: [], rowCount: 0 };
+          }
+          if (workerId !== null && workerId !== currentWorker) {
+            return { rows: [], rowCount: 0 };
+          }
+
+          statusById.set(id, nextStatus);
+          workerById.set(id, nextStatus === "queued" ? null : currentWorker);
+
+          return {
+            rows: [
+              {
+                id,
+                run_id: "run_1",
+                approval_id: null,
+                runtime_session_id: "session_1",
+                runtime_mode: "claude_code.sdk",
+                operation: "input",
+                status: nextStatus,
+                idempotency_key: "idem_postgres_fail",
+                payload_hash: "hash_postgres_fail",
+                payload_bytes: 128,
+                redacted_payload: { kind: "text", redacted: true },
+                account_id: "account_1",
+                tenant_id: "tenant_1",
+                project_id: "project_1",
+                user_id: "user_1",
+                api_key_id: "api_key_1",
+                worker_id: nextStatus === "queued" ? null : currentWorker,
+                lease_until: null,
+                attempts: 1,
+                max_attempts: 3,
+                reason_code: reasonCode,
+                expires_at: "2026-06-01T10:10:00.000Z",
+                created_at: "2026-06-01T10:00:00.000Z",
+                updated_at: now
+              }
+            ],
+            rowCount: 1
+          };
+        }
+      },
+      db: {} as PostgresDatabaseHandle["db"],
+      real: true as const,
+      close: async () => {}
+    } satisfies PostgresDatabaseHandle;
+
+    const store = new PostgresHostedRuntimeBridgeCommandStore(handle);
+
+    const retryable = await store.fail({
+      commandId: "command_1",
+      workerId: "worker_1",
+      reasonCode: "retryable_error",
+      retryable: true,
+      now: "2026-06-01T10:00:01.000Z"
+    });
+    expect(retryable?.status).toBe("queued");
+    expect(retryable?.leaseUntil).toBeUndefined();
+    expect(retryable?.workerId).toBeUndefined();
+
+    statusById.set("command_1", "claimed");
+    workerById.set("command_1", "worker_2");
+
+    const terminal = await store.fail({
+      commandId: "command_1",
+      workerId: "worker_2",
+      reasonCode: "fatal_error",
+      retryable: false,
+      now: "2026-06-01T10:00:02.000Z"
+    });
+    expect(terminal?.status).toBe("failed");
+    expect(terminal?.leaseUntil).toBeUndefined();
+
+    expect(queryLog[0]).toContain("lease_until = NULL");
+    expect(queryLog[1]).toContain("lease_until = NULL");
   });
 
   it("returns undefined for unknown id and empty listByRun for unknown run", async () => {
