@@ -5,10 +5,23 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { resolveHostedSandboxConfig } from "@switchyard/core";
+import type { AuthContext } from "@switchyard/contracts";
+import { HostedRuntimeBridgeService, resolveHostedSandboxConfig } from "@switchyard/core";
 import { MemoryRunQueue } from "@switchyard/queue";
-import { resolveObjectStoreConfig } from "@switchyard/storage";
-import { createFakeAcpProcessFactory, createFakeClaudeCodeClient, InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
+import {
+  PostgresHostedRuntimeBridgeCommandStore,
+  PostgresHostedRuntimeBridgePayloadStore,
+  resolveObjectStoreConfig,
+  type PostgresDatabaseHandle
+} from "@switchyard/storage";
+import {
+  createFakeAcpProcessFactory,
+  createFakeClaudeCodeClient,
+  InMemoryApprovalStore,
+  InMemoryEventStore,
+  InMemoryRunStore,
+  InMemorySessionStore
+} from "@switchyard/testkit";
 import type { SandboxProcessFactory } from "@switchyard/adapters";
 import { loadWorkerConfig } from "../src/config.js";
 import { buildHostedWorkerAdapters, createHostedSafeLogger } from "../src/hosted-runtime-adapters.js";
@@ -410,6 +423,282 @@ describe("hosted worker app", () => {
     expect(ready.checks.every((entry) => entry.ok)).toBe(true);
   });
 
+  it("does not allow worker B to apply bridge input for worker A owned live session", async () => {
+    const queue = new MemoryRunQueue();
+    const runs = new GuardedInMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const sessions = new InMemorySessionStore();
+    const approvals = new InMemoryApprovalStore();
+    const commands = new PostgresHostedRuntimeBridgeCommandStore();
+    const payloads = createMemoryBridgePayloadStore();
+    const sentByWorkerB: Array<Record<string, unknown>> = [];
+
+    await runs.create({
+      id: "run_worker_bridge_owner_guard",
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      adapterType: "native",
+      cwd: "/repo",
+      task: "active hosted claude",
+      status: "running",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "claude_code.sdk",
+      createdAt: "2026-06-02T00:00:00.000Z"
+    });
+    await sessions.create({
+      id: "session_worker_bridge_owner_guard",
+      runId: "run_worker_bridge_owner_guard",
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      protocol: "native",
+      status: "active",
+      runtimeMode: "claude_code.sdk",
+      state: {
+        hostedWorkerId: "worker_a",
+        hostedBridgeCapable: true,
+        hostedRuntimeSessionId: "session_worker_bridge_owner_guard"
+      },
+      createdAt: "2026-06-02T00:00:00.000Z",
+      updatedAt: "2026-06-02T00:00:00.000Z"
+    });
+
+    const serverBridge = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined }
+    });
+    await serverBridge.createInputCommand({
+      runId: "run_worker_bridge_owner_guard",
+      body: { text: "continue" },
+      idempotencyKey: "owner_guard_idem_1",
+      auth: hostedAuth()
+    });
+
+    const workerBBridge = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: {
+        sendInput: async (_runId, payload) => {
+          sentByWorkerB.push(payload);
+        }
+      }
+    });
+    const workerB = createHostedWorker({
+      ...baseConfig(),
+      hostedRuntimeAllowlist: ["fake.deterministic", "claude_code.sdk"],
+      hostedRealRuntimeExecution: "enabled"
+    }, {
+      queue,
+      runs,
+      events,
+      sessions,
+      approvals,
+      bridgeCommandStore: commands,
+      bridgeCommandPayloads: payloads,
+      bridgeWorkerRuntime: workerBBridge,
+      workerId: "worker_b"
+    });
+
+    try {
+      const worked = await workerB.tick();
+      expect(worked).toBe(true);
+      expect(sentByWorkerB).toHaveLength(0);
+      const command = await commands.getByIdempotencyKey("owner_guard_idem_1");
+      expect(command?.status).toBe("failed");
+      expect(command?.reasonCode).toBe("hosted_runtime_bridge_session_not_owned");
+    } finally {
+      await workerB.stop();
+    }
+  });
+
+  it("does not rewrite another worker's hosted session ownership when starting an unrelated run", async () => {
+    const queue = new MemoryRunQueue();
+    const runs = new GuardedInMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const sessions = new InMemorySessionStore();
+    const approvals = new InMemoryApprovalStore();
+    const commands = new PostgresHostedRuntimeBridgeCommandStore();
+    const payloads = createMemoryBridgePayloadStore();
+
+    await runs.create({
+      id: "run_worker_bridge_owner_preserve",
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      adapterType: "native",
+      cwd: "/repo",
+      task: "active hosted claude",
+      status: "running",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "claude_code.sdk",
+      createdAt: "2026-06-02T00:00:00.000Z"
+    });
+    await sessions.create({
+      id: "session_worker_bridge_owner_preserve",
+      runId: "run_worker_bridge_owner_preserve",
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      protocol: "native",
+      status: "active",
+      runtimeMode: "claude_code.sdk",
+      state: {
+        hostedWorkerId: "worker_a",
+        hostedBridgeCapable: true,
+        hostedRuntimeSessionId: "session_worker_bridge_owner_preserve"
+      },
+      createdAt: "2026-06-02T00:00:00.000Z",
+      updatedAt: "2026-06-02T00:00:00.000Z"
+    });
+
+    await runs.create({
+      id: "run_worker_bridge_unrelated",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "unrelated queued run",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic",
+      createdAt: "2026-06-02T00:00:00.000Z"
+    });
+    await queue.enqueue({
+      runId: "run_worker_bridge_unrelated",
+      placement: "hosted",
+      runtimeMode: "fake.deterministic"
+    });
+
+    const workerB = createHostedWorker({
+      ...baseConfig(),
+      hostedRuntimeAllowlist: ["fake.deterministic", "claude_code.sdk"],
+      hostedRealRuntimeExecution: "enabled"
+    }, {
+      queue,
+      runs,
+      events,
+      sessions,
+      approvals,
+      bridgeCommandStore: commands,
+      bridgeCommandPayloads: payloads,
+      workerId: "worker_b"
+    });
+
+    try {
+      const worked = await workerB.tick();
+      expect(worked).toBe(true);
+      const preserved = await sessions.getByRunId("run_worker_bridge_owner_preserve");
+      expect(preserved?.state).toMatchObject({
+        hostedWorkerId: "worker_a",
+        hostedRuntimeSessionId: "session_worker_bridge_owner_preserve",
+        hostedBridgeCapable: true
+      });
+    } finally {
+      await workerB.stop();
+    }
+  });
+
+  it("admits and applies hosted bridge input across separate server and worker payload-store instances", async () => {
+    const runs = new GuardedInMemoryRunStore();
+    const sessions = new InMemorySessionStore();
+    const approvals = new InMemoryApprovalStore();
+    const commands = new PostgresHostedRuntimeBridgeCommandStore();
+    const payloadRows = new Map<string, { payload: Record<string, unknown> }>();
+    const payloadHandle = createPayloadStoreHandle(payloadRows);
+    const serverPayloads = new PostgresHostedRuntimeBridgePayloadStore(payloadHandle);
+    const workerPayloads = new PostgresHostedRuntimeBridgePayloadStore(payloadHandle);
+    const workerSent: Array<Record<string, unknown>> = [];
+
+    await runs.create({
+      id: "run_bridge_e2e_payload",
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      adapterType: "native",
+      cwd: "/repo",
+      task: "bridge payload handoff",
+      status: "running",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "claude_code.sdk",
+      createdAt: "2026-06-02T00:00:00.000Z"
+    });
+    await sessions.create({
+      id: "session_bridge_e2e_payload",
+      runId: "run_bridge_e2e_payload",
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      protocol: "native",
+      status: "active",
+      runtimeMode: "claude_code.sdk",
+      state: {
+        hostedWorkerId: "worker_a",
+        hostedBridgeCapable: true,
+        hostedRuntimeSessionId: "session_bridge_e2e_payload"
+      },
+      createdAt: "2026-06-02T00:00:00.000Z",
+      updatedAt: "2026-06-02T00:00:00.000Z"
+    });
+
+    const serverBridge = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: serverPayloads,
+      runtimeRunner: { sendInput: async () => undefined }
+    });
+    const admitted = await serverBridge.createInputCommand({
+      runId: "run_bridge_e2e_payload",
+      body: { text: "continue" },
+      idempotencyKey: "bridge_e2e_payload",
+      auth: hostedAuth()
+    });
+    expect(admitted.accepted).toBe(true);
+
+    const workerBridge = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: workerPayloads,
+      runtimeRunner: {
+        sendInput: async (_runId, payload) => {
+          workerSent.push(payload);
+        }
+      }
+    });
+    const processed = await workerBridge.claimAndApplyNext({
+      workerId: "worker_a",
+      leaseMs: 10_000
+    });
+    expect(processed).toBe(true);
+    expect(workerSent).toEqual([{ text: "continue", type: "input" }]);
+    const persisted = await commands.get(admitted.commandId);
+    expect(persisted?.status).toBe("completed");
+  });
+
   it("parses real-runtime worker config and rejects production real allowlist without policy activation", () => {
     const parsed = loadWorkerConfig({
       SWITCHYARD_POSTGRES_URL: "postgres://user:pass@localhost:5432/switchyard",
@@ -653,4 +942,101 @@ class FakeSandboxProcess extends EventEmitter {
     this.emit("close", 0, null);
     return true;
   }
+}
+
+function createMemoryBridgePayloadStore(): {
+  put(input: { commandId: string; payload: Record<string, unknown> }): Promise<void>;
+  get(commandId: string): Promise<Record<string, unknown> | undefined>;
+  delete(commandId: string): Promise<void>;
+} {
+  const map = new Map<string, Record<string, unknown>>();
+  return {
+    async put(input) {
+      map.set(input.commandId, input.payload);
+    },
+    async get(commandId) {
+      return map.get(commandId);
+    },
+    async delete(commandId) {
+      map.delete(commandId);
+    }
+  };
+}
+
+function createPayloadStoreHandle(
+  rows: Map<string, { payload: Record<string, unknown> }>
+): PostgresDatabaseHandle {
+  return {
+    pool: {
+      query: async (sql: string, params?: ReadonlyArray<unknown>) => {
+        if (!params) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (sql.includes("INSERT INTO hosted_runtime_bridge_payloads")) {
+          const commandId = String(params[0]);
+          const payload = params[1] as Record<string, unknown>;
+          rows.set(commandId, { payload });
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.includes("DELETE FROM hosted_runtime_bridge_payloads")) {
+          const commandId = String(params[0]);
+          const existed = rows.delete(commandId);
+          return { rows: [], rowCount: existed ? 1 : 0 };
+        }
+        if (sql.includes("FROM hosted_runtime_bridge_payloads")) {
+          const commandId = String(params[0]);
+          const row = rows.get(commandId);
+          return { rows: row ? [{ payload: row.payload }] : [], rowCount: row ? 1 : 0 };
+        }
+        return { rows: [], rowCount: 0 };
+      }
+    } as PostgresDatabaseHandle["pool"],
+    db: {} as PostgresDatabaseHandle["db"],
+    real: true,
+    close: async () => {}
+  };
+}
+
+function hostedAuth(): AuthContext {
+  return {
+    account: { id: "account_1", slug: "account", displayName: "Account", status: "active", createdAt: "2026-06-02T00:00:00.000Z" },
+    tenant: { id: "tenant_1", accountId: "account_1", slug: "tenant", displayName: "Tenant", status: "active", createdAt: "2026-06-02T00:00:00.000Z" },
+    project: { id: "project_1", tenantId: "tenant_1", slug: "project", displayName: "Project", status: "active", createdAt: "2026-06-02T00:00:00.000Z" },
+    user: { id: "user_1", accountId: "account_1", email: "user@example.com", displayName: "User", status: "active", createdAt: "2026-06-02T00:00:00.000Z" },
+    apiKey: { id: "api_key_1", keyPrefix: "sk_sw", scopes: ["runs:write"], status: "active", createdAt: "2026-06-02T00:00:00.000Z" },
+    entitlement: {
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      planId: "plan_1",
+      planSlug: "plan",
+      planDisplayName: "Plan",
+      planStatus: "active",
+      entitlements: {
+        allowedPlacements: ["local", "hosted", "connected_local_node"],
+        allowedRuntimeModes: ["claude_code.sdk", "opencode.acp"],
+        allowHostedRealRuntime: true,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowAuditRead: true,
+        allowMetricsRead: true,
+        allowToolExecution: true
+      },
+      quotas: {
+        maxRunsPerHour: 1000,
+        maxActiveRuns: 1000,
+        maxRunTimeoutSeconds: 3600,
+        maxConnectedNodes: 100,
+        maxArtifactContentReadBytesPerHour: 10_000_000,
+        maxToolInvocationsPerHour: 1000,
+        maxActiveToolInvocations: 1000,
+        maxToolArtifactBytesPerHour: 10_000_000,
+        maxRuntimeBridgeCommandsPerHour: 1000,
+        maxActiveRuntimeBridgeCommands: 1000
+      },
+      scopes: ["runs:write"],
+      capturedAt: "2026-06-02T00:00:00.000Z"
+    },
+    authenticatedAt: "2026-06-02T00:00:00.000Z"
+  };
 }

@@ -38,6 +38,7 @@ import {
   PostgresArtifactStore,
   PostgresControlPlaneStore,
   PostgresHostedRuntimeBridgeCommandStore,
+  PostgresHostedRuntimeBridgePayloadStore,
   type PostgresDatabaseHandle,
   PostgresEventStore,
   type PostgresSchemaCompatibility,
@@ -123,6 +124,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   queue?: MemoryRunQueue;
   runs?: InMemoryRunStore;
   events?: InMemoryEventStore;
+  sessions?: SessionStore;
   adapters?: HostedWorkerAdapterFactoryDeps;
   toolAdapters?: WorkerHostedToolAdapterFactoryDeps;
   postgres?: PostgresDatabaseHandle;
@@ -194,7 +196,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   const toolQueue = queue as RunQueuePort & Partial<ToolQueuePort>;
   const runs: RunStore = deps?.runs ?? new PostgresRunStore(postgres);
   const events: EventStore = deps?.events ?? new PostgresEventStore(postgres);
-  const sessions: SessionStore = new PostgresSessionStore(postgres);
+  const sessions: SessionStore = deps?.sessions ?? new PostgresSessionStore(postgres);
   const artifacts: ArtifactStore = deps?.artifacts ?? new PostgresArtifactStore(postgres);
   const invocations: ToolInvocationStore = deps?.invocations ?? (postgres ? new PostgresToolInvocationStore(postgres) : new InMemoryToolInvocationStore());
   const approvals: ApprovalStore = deps?.approvals ?? (postgres ? new PostgresApprovalStore(postgres) : new InMemoryApprovalStore());
@@ -275,7 +277,9 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   const requiredBridgeModes = hostedBridgeModesFromAllowlist(runtimeConfig.hostedRuntimeAllowlist);
   const bridgeSupportEnabled = runtimeConfig.hostedRealRuntimeExecution === "enabled" && requiredBridgeModes.length > 0;
   const bridgeCommandStore = deps?.bridgeCommandStore ?? new PostgresHostedRuntimeBridgeCommandStore(postgres);
-  const bridgeCommandPayloads = deps?.bridgeCommandPayloads;
+  const bridgeCommandPayloads = deps?.bridgeCommandPayloads ?? (
+    postgres ? new PostgresHostedRuntimeBridgePayloadStore(postgres) : undefined
+  );
   const bridgeStoreReady = Boolean(bridgeCommandStore && bridgeCommandPayloads);
   const bridgeEnabledModes = bridgeSupportEnabled && bridgeStoreReady
     ? new Set<HostedBridgeSupportedMode>(requiredBridgeModes)
@@ -421,7 +425,11 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     queue,
     runs,
     events,
-    startRun: async (runId: string) => runService.startRun(runId),
+    startRun: async (runId: string) => {
+      const started = await runService.startRun(runId);
+      await stampSessionOwnerForStartedRun(started);
+      return started;
+    },
     hostedRuntimeAllowlist: runtimeConfig.hostedRuntimeAllowlist,
     deploymentMode: runtimeConfig.deploymentMode,
     hostedRealRuntimeExecution: runtimeConfig.hostedRealRuntimeExecution,
@@ -485,7 +493,6 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         }
       }
 
-      await reconcileHostedBridgeSessionOwnership();
       const bridgeWorked = await processHostedRuntimeBridge();
       if (bridgeWorked) {
         return true;
@@ -496,9 +503,6 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         return true;
       }
       const runWorked = await service.processNext();
-      if (runWorked) {
-        await reconcileHostedBridgeSessionOwnership();
-      }
       return runWorked;
     },
     ready: async (options) => {
@@ -545,45 +549,41 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     });
   }
 
-  async function reconcileHostedBridgeSessionOwnership(): Promise<void> {
-    if (!bridgeSupportEnabled || requiredBridgeModes.length === 0) {
+  async function stampSessionOwnerForStartedRun(run: RunRecord): Promise<void> {
+    if (!bridgeSupportEnabled || requiredBridgeModes.length === 0 || !run.runtimeMode || !isBridgeSupportedMode(run.runtimeMode)) {
       return;
     }
-    const active = await runs.list({
-      placement: ["hosted"],
-      status: ["starting", "running", "waiting_for_input", "waiting_for_approval"],
-      limit: 5_000
-    });
-    for (const run of active.runs) {
-      if (!run.runtimeMode || !isBridgeSupportedMode(run.runtimeMode)) {
-        continue;
-      }
-      const session = await sessions.getByRunId(run.id);
-      if (!session || isTerminalSession(session.status)) {
-        continue;
-      }
-      const currentState = asRecord(session.state);
-      const currentWorker = typeof currentState["hostedWorkerId"] === "string"
-        ? currentState["hostedWorkerId"].trim()
-        : "";
-      const bridgeCapable = currentState["hostedBridgeCapable"] === true;
-      const runtimeSessionId = typeof currentState["hostedRuntimeSessionId"] === "string"
-        ? currentState["hostedRuntimeSessionId"].trim()
-        : "";
-      if (currentWorker === workerId && bridgeCapable && runtimeSessionId === session.id) {
-        continue;
-      }
-      await sessions.update({
-        ...session,
-        state: {
-          ...currentState,
-          hostedWorkerId: workerId,
-          hostedRuntimeSessionId: session.id,
-          hostedBridgeCapable: bridgeEnabledModes.has(run.runtimeMode as HostedBridgeSupportedMode)
-        },
-        updatedAt: new Date().toISOString()
-      });
+    const session = await sessions.getByRunId(run.id);
+    if (!session || isTerminalSession(session.status)) {
+      return;
     }
+
+    const currentState = asRecord(session.state);
+    const currentWorker = typeof currentState["hostedWorkerId"] === "string"
+      ? currentState["hostedWorkerId"].trim()
+      : "";
+    if (currentWorker.length > 0 && currentWorker !== workerId) {
+      return;
+    }
+
+    const bridgeCapable = currentState["hostedBridgeCapable"] === true;
+    const runtimeSessionId = typeof currentState["hostedRuntimeSessionId"] === "string"
+      ? currentState["hostedRuntimeSessionId"].trim()
+      : "";
+    if (currentWorker === workerId && bridgeCapable && runtimeSessionId === session.id) {
+      return;
+    }
+
+    await sessions.update({
+      ...session,
+      state: {
+        ...currentState,
+        hostedWorkerId: workerId,
+        hostedRuntimeSessionId: session.id,
+        hostedBridgeCapable: bridgeEnabledModes.has(run.runtimeMode as HostedBridgeSupportedMode)
+      },
+      updatedAt: new Date().toISOString()
+    });
   }
 
   async function processToolJobs(): Promise<boolean> {

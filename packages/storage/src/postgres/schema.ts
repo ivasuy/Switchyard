@@ -236,6 +236,13 @@ export const hostedRuntimeBridgeCommands = pgTable("hosted_runtime_bridge_comman
   index("hosted_runtime_bridge_commands_run_idx").on(table.runId, table.createdAt, table.id)
 ]);
 
+export const hostedRuntimeBridgePayloads = pgTable("hosted_runtime_bridge_payloads", {
+  commandId: text("command_id").primaryKey(),
+  payload: jsonb("payload").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
 export const billingPlans = pgTable("billing_plans", {
   id: text("id").primaryKey(),
   slug: text("slug").notNull(),

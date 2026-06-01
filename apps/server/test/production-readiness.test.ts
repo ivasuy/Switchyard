@@ -188,7 +188,7 @@ describe("production readiness", () => {
 
     expect(report.checks.schema).toBeDefined();
     expect(report.checks.schema).toMatchObject({ ok: true, code: "postgres_schema_ready" });
-    expect(report.checks.schema?.diagnostics).toMatchObject({ expectedVersion: 21, version: 19 });
+    expect(report.checks.schema?.diagnostics).toMatchObject({ expectedVersion: 22, version: 19 });
   });
 
   it("reports migration-required schema readiness code", async () => {

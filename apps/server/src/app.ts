@@ -53,6 +53,7 @@ import {
   PostgresPlacementStore,
   PostgresToolDispatchOutboxStore,
   PostgresHostedRuntimeBridgeCommandStore,
+  PostgresHostedRuntimeBridgePayloadStore,
   PostgresToolInvocationStore,
   PostgresApprovalStore,
   PostgresRegistryStore,
@@ -199,7 +200,9 @@ export async function createServerApp(config: ServerConfig) {
   });
 
   const hostedRuntimeBridgeCommands = new PostgresHostedRuntimeBridgeCommandStore(postgres);
-  const bridgeCommandPayloads = createUnavailableBridgeCommandPayloadStore();
+  const bridgeCommandPayloads = postgres
+    ? new PostgresHostedRuntimeBridgePayloadStore(postgres)
+    : createUnavailableBridgeCommandPayloadStore();
   const bridgeReservationScope = new Map<string, { accountId: string; tenantId: string; projectId: string }>();
   const hostedRuntimeBridge = new HostedRuntimeBridgeService({
     runs,

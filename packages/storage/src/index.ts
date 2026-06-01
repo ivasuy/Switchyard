@@ -31,4 +31,5 @@ export * from "./postgres/tool-invocation-store.js";
 export * from "./postgres/approval-store.js";
 export * from "./postgres/tool-dispatch-outbox-store.js";
 export * from "./postgres/hosted-runtime-bridge-command-store.js";
+export * from "./postgres/hosted-runtime-bridge-payload-store.js";
 export * from "./postgres/control-plane-store.js";

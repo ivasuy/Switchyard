@@ -257,6 +257,8 @@ describe("production worker readiness", () => {
     const worker = createHostedWorker({
       ...baseConfig(),
       deploymentMode: "staging",
+      postgresUrl: undefined,
+      redisUrl: undefined,
       hostedRuntimeAllowlist: ["fake.deterministic", "claude_code.sdk"],
       hostedRealRuntimeExecution: "enabled",
       providerRuntimeActivation: baseConfig().providerRuntimeActivation
@@ -264,7 +266,6 @@ describe("production worker readiness", () => {
       queue: new MemoryRunQueue(),
       runs: new InMemoryRunStore(),
       events: new InMemoryEventStore(),
-      postgres: fakePostgresHandle(),
       ensurePostgresSchema: async () => {},
       probePostgres: async () => {},
       checkSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 })

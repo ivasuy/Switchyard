@@ -2,7 +2,7 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema.js";
 
-export const POSTGRES_SCHEMA_VERSION = 21;
+export const POSTGRES_SCHEMA_VERSION = 22;
 
 const SCHEMA_METADATA_KEY = "schema_version";
 
@@ -305,6 +305,13 @@ CREATE INDEX IF NOT EXISTS hosted_runtime_bridge_commands_claim_idx
   ON hosted_runtime_bridge_commands(status, lease_until, expires_at, created_at, id);
 CREATE INDEX IF NOT EXISTS hosted_runtime_bridge_commands_run_idx
   ON hosted_runtime_bridge_commands(run_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS hosted_runtime_bridge_payloads (
+  command_id text PRIMARY KEY,
+  payload jsonb NOT NULL,
+  created_at text NOT NULL,
+  updated_at text NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS billing_plans (
   id text PRIMARY KEY,
