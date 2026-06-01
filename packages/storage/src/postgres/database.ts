@@ -2,7 +2,7 @@ import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import * as schema from "./schema.js";
 
-export const POSTGRES_SCHEMA_VERSION = 19;
+export const POSTGRES_SCHEMA_VERSION = 20;
 
 const SCHEMA_METADATA_KEY = "schema_version";
 
@@ -203,6 +203,8 @@ CREATE TABLE IF NOT EXISTS assignments (
   id text PRIMARY KEY,
   run_id text NOT NULL,
   node_id text NOT NULL,
+  kind text,
+  tool_invocation_id text,
   status text NOT NULL,
   claimed_at text,
   started_at text,
@@ -215,6 +217,60 @@ CREATE TABLE IF NOT EXISTS assignments (
   created_at text NOT NULL
 );
 CREATE INDEX IF NOT EXISTS assignments_claim_idx ON assignments(node_id, status);
+CREATE INDEX IF NOT EXISTS assignments_kind_idx ON assignments(kind, created_at, id);
+CREATE INDEX IF NOT EXISTS assignments_tool_invocation_idx ON assignments(tool_invocation_id);
+ALTER TABLE assignments ADD COLUMN IF NOT EXISTS kind text;
+ALTER TABLE assignments ADD COLUMN IF NOT EXISTS tool_invocation_id text;
+
+CREATE TABLE IF NOT EXISTS approvals (
+  id text PRIMARY KEY,
+  run_id text,
+  approval_type text NOT NULL,
+  status text NOT NULL,
+  payload jsonb NOT NULL,
+  created_at text NOT NULL,
+  resolved_at text
+);
+CREATE INDEX IF NOT EXISTS approvals_run_idx ON approvals(run_id);
+CREATE INDEX IF NOT EXISTS approvals_status_idx ON approvals(status);
+CREATE INDEX IF NOT EXISTS approvals_type_idx ON approvals(approval_type);
+CREATE INDEX IF NOT EXISTS approvals_created_idx ON approvals(created_at, id);
+
+CREATE TABLE IF NOT EXISTS tool_invocations (
+  id text PRIMARY KEY,
+  run_id text,
+  type text NOT NULL,
+  status text NOT NULL,
+  approval_id text,
+  input jsonb NOT NULL,
+  output jsonb,
+  error jsonb,
+  created_at text NOT NULL,
+  completed_at text
+);
+CREATE INDEX IF NOT EXISTS tool_invocations_run_idx ON tool_invocations(run_id);
+CREATE INDEX IF NOT EXISTS tool_invocations_status_idx ON tool_invocations(status);
+CREATE INDEX IF NOT EXISTS tool_invocations_approval_idx ON tool_invocations(approval_id);
+CREATE INDEX IF NOT EXISTS tool_invocations_created_idx ON tool_invocations(created_at, id);
+
+CREATE TABLE IF NOT EXISTS tool_dispatch_outbox (
+  id text PRIMARY KEY,
+  approval_id text NOT NULL,
+  tool_invocation_id text NOT NULL,
+  run_id text NOT NULL,
+  target_placement text NOT NULL,
+  execution_plan_hash text NOT NULL,
+  dispatch_status text NOT NULL,
+  attempt_count integer NOT NULL,
+  last_error_code text,
+  dispatch_id text,
+  created_at text NOT NULL,
+  updated_at text NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS tool_dispatch_outbox_approval_invocation_idx
+  ON tool_dispatch_outbox(approval_id, tool_invocation_id);
+CREATE INDEX IF NOT EXISTS tool_dispatch_outbox_retry_idx
+  ON tool_dispatch_outbox(dispatch_status, updated_at, id);
 
 CREATE TABLE IF NOT EXISTS billing_plans (
   id text PRIMARY KEY,

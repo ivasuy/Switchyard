@@ -128,12 +128,14 @@ export class PostgresAssignmentStore implements NodeAssignmentStore {
   private async upsert(record: Assignment): Promise<void> {
     await this.handle?.pool.query(
       `INSERT INTO assignments (
-        id, run_id, node_id, status, claimed_at, started_at, completed_at,
+        id, run_id, node_id, kind, tool_invocation_id, status, claimed_at, started_at, completed_at,
         failed_at, retry_count, last_event_sequence, last_artifact_sync_at, error, created_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       ON CONFLICT (id) DO UPDATE SET
         run_id = EXCLUDED.run_id,
         node_id = EXCLUDED.node_id,
+        kind = EXCLUDED.kind,
+        tool_invocation_id = EXCLUDED.tool_invocation_id,
         status = EXCLUDED.status,
         claimed_at = EXCLUDED.claimed_at,
         started_at = EXCLUDED.started_at,
@@ -148,6 +150,8 @@ export class PostgresAssignmentStore implements NodeAssignmentStore {
         record.id,
         record.runId,
         record.nodeId,
+        record.kind ?? "run",
+        record.toolInvocationId ?? null,
         record.status,
         record.claimedAt ?? null,
         record.startedAt ?? null,
@@ -168,11 +172,13 @@ function rowToAssignment(row: Record<string, unknown>): Assignment {
     id: row["id"] as string,
     runId: row["run_id"] as string,
     nodeId: row["node_id"] as string,
+    kind: (row["kind"] as Assignment["kind"] | null | undefined) ?? "run",
     status: row["status"] as Assignment["status"],
     retryCount: row["retry_count"] as number,
     lastEventSequence: row["last_event_sequence"] as number,
     createdAt: row["created_at"] as string
   };
+  if (row["tool_invocation_id"]) assignment.toolInvocationId = row["tool_invocation_id"] as string;
   if (row["claimed_at"]) assignment.claimedAt = row["claimed_at"] as string;
   if (row["started_at"]) assignment.startedAt = row["started_at"] as string;
   if (row["completed_at"]) assignment.completedAt = row["completed_at"] as string;

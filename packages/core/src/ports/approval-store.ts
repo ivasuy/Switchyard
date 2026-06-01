@@ -5,6 +5,7 @@ export interface ListApprovalsFilter {
   runId?: string | undefined;
   status?: Approval["status"] | undefined;
   approvalType?: Approval["approvalType"] | undefined;
+  toolInvocationId?: string | undefined;
   limit: number;
   before?: ListCursor | undefined;
 }

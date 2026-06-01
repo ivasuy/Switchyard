@@ -630,17 +630,30 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
 
   async countUnownedResources(): Promise<UnownedResourceCounts> {
     if (this.handle) {
-      const [runs, runEvents, artifacts, placements, nodes, assignments, auditEvents, quotaReservations] = await Promise.all([
+      const [runs, runEvents, artifacts, toolInvocations, approvals, placements, nodes, assignments, auditEvents, quotaReservations] = await Promise.all([
         this.countUnownedByType("run", "runs"),
         this.countUnownedByType("run_event", "run_events"),
         this.countUnownedByType("artifact", "artifacts"),
+        this.countUnownedByType("tool_invocation", "tool_invocations"),
+        this.countUnownedByType("approval", "approvals"),
         this.countUnownedByType("placement_decision", "placement_decisions"),
         this.countUnownedByType("node", "nodes"),
         this.countUnownedByType("assignment", "assignments"),
         this.countUnownedByType("audit_log_event", "audit_log_events"),
         this.countUnownedByType("quota", "quota_reservations")
       ]);
-      return { runs, runEvents, artifacts, placements, nodes, assignments, auditEvents, quotaReservations };
+      return {
+        runs,
+        runEvents,
+        artifacts,
+        toolInvocations,
+        approvals,
+        placements,
+        nodes,
+        assignments,
+        auditEvents,
+        quotaReservations
+      } as UnownedResourceCounts;
     }
 
     const ownedKeySet = new Set(this.ownership.keys());
@@ -652,12 +665,14 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
       runs: 0,
       runEvents: 0,
       artifacts: 0,
+      toolInvocations: 0,
+      approvals: 0,
       placements: 0,
       nodes: 0,
       assignments: 0,
       auditEvents: unownedAudit,
       quotaReservations: unownedReservations
-    };
+    } as UnownedResourceCounts;
   }
 
   async expireStaleReservations(input: ExpireReservationsInput): Promise<number> {
@@ -1218,12 +1233,15 @@ function normalizeBootstrapPayload(input: ControlPlaneBootstrapInput): Bootstrap
   const raw = input as Record<string, unknown>;
   const container = isRecord(raw["records"]) ? raw["records"] : raw;
   const pepper = typeof raw["apiKeyPepper"] === "string" && raw["apiKeyPepper"].trim().length > 0 ? raw["apiKeyPepper"] : undefined;
+  const strictToolBootstrap = isStrictToolBootstrapMode(raw);
   const accounts = parseEntityArray(container["accounts"], accountSchema.parse);
   const tenants = parseEntityArray(container["tenants"], tenantSchema.parse);
   const projects = parseEntityArray(container["projects"], projectSchema.parse);
   const users = parseEntityArray(container["users"], (value) => normalizeBootstrapUser(value));
-  const billingPlans = parseEntityArray(container["billingPlans"], billingPlanSchema.parse);
+  const billingPlanRows = parseRecordArray(container["billingPlans"]);
+  const billingPlans = billingPlanRows.map((entry) => billingPlanSchema.parse(entry));
   const apiKeys = parseEntityArray(container["apiKeys"], (value) => normalizeBootstrapApiKey(value, pepper));
+  validateToolBootstrapFields({ strictToolBootstrap, billingPlanRows });
 
   if (
     accounts.length === 0 &&
@@ -1362,6 +1380,30 @@ function validateBootstrapPayload(payload: BootstrapPayload): void {
   ensureActiveCounts(summary.active);
 }
 
+function validateToolBootstrapFields(input: {
+  strictToolBootstrap: boolean;
+  billingPlanRows: readonly Record<string, unknown>[];
+}): void {
+  if (!input.strictToolBootstrap) {
+    return;
+  }
+  for (const row of input.billingPlanRows) {
+    const entitlements = isRecord(row["entitlements"]) ? row["entitlements"] : null;
+    const quotas = isRecord(row["quotas"]) ? row["quotas"] : null;
+    if (!entitlements || !quotas) {
+      throw new ControlPlaneStoreError("control_plane_bootstrap_malformed");
+    }
+
+    assertHasOwn(entitlements, "allowHostedTools");
+    assertHasOwn(entitlements, "allowConnectedNodeTools");
+    assertHasOwn(entitlements, "allowedToolTypes");
+    assertHasOwn(entitlements, "allowToolArtifactContentRead");
+    assertHasOwn(quotas, "maxToolInvocationsPerHour");
+    assertHasOwn(quotas, "maxActiveToolInvocations");
+    assertHasOwn(quotas, "maxToolArtifactBytesPerHour");
+  }
+}
+
 function buildBootstrapSummary(payload: BootstrapPayload, accountIds?: readonly string[]): ControlPlaneBootstrapSummary {
   const scope = accountIds && accountIds.length > 0 ? new Set(accountIds) : null;
   const accountInScope = (accountId: string): boolean => (scope ? scope.has(accountId) : true);
@@ -1409,6 +1451,18 @@ function parseEntityArray<T>(value: unknown, parser: (value: unknown) => T): T[]
     return [];
   }
   return value.map((entry) => parser(entry));
+}
+
+function parseRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((entry) => {
+    if (!isRecord(entry)) {
+      throw new ControlPlaneStoreError("control_plane_bootstrap_malformed");
+    }
+    return entry;
+  });
 }
 
 function assertUniqueIds<T extends { id: string }>(
@@ -1482,6 +1536,19 @@ function clampLimit(limit: number | undefined): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function assertHasOwn(value: Record<string, unknown>, field: string): void {
+  if (!Object.prototype.hasOwnProperty.call(value, field)) {
+    throw new ControlPlaneStoreError("control_plane_bootstrap_malformed");
+  }
+}
+
+function isStrictToolBootstrapMode(raw: Record<string, unknown>): boolean {
+  const explicit = typeof raw["deploymentMode"] === "string" ? raw["deploymentMode"] : undefined;
+  const env = process.env["SWITCHYARD_DEPLOYMENT_MODE"];
+  const mode = (explicit ?? env ?? "").toLowerCase();
+  return mode === "staging" || mode === "production";
 }
 
 function ownershipKey(resourceType: ResourceType, resourceId: string): string {

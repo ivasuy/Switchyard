@@ -160,6 +160,8 @@ export interface UnownedResourceCounts {
   runs: number;
   runEvents: number;
   artifacts: number;
+  toolInvocations: number;
+  approvals: number;
   placements: number;
   nodes: number;
   assignments: number;

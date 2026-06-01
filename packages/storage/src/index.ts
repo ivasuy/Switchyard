@@ -27,4 +27,7 @@ export * from "./postgres/registry-store.js";
 export * from "./postgres/placement-store.js";
 export * from "./postgres/node-store.js";
 export * from "./postgres/assignment-store.js";
+export * from "./postgres/tool-invocation-store.js";
+export * from "./postgres/approval-store.js";
+export * from "./postgres/tool-dispatch-outbox-store.js";
 export * from "./postgres/control-plane-store.js";

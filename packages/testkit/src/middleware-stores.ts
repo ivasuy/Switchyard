@@ -182,11 +182,13 @@ export class InMemoryApprovalStore implements ApprovalStore {
   }
 
   async list(filter: ListApprovalsFilter): Promise<ListApprovalsResult> {
+    const toolInvocationId = (filter as { toolInvocationId?: string }).toolInvocationId;
     let items = sortNewest([...this.items.values()]);
     items = items.filter((item) => {
       if (filter.runId && item.runId !== filter.runId) return false;
       if (filter.status && item.status !== filter.status) return false;
       if (filter.approvalType && item.approvalType !== filter.approvalType) return false;
+      if (toolInvocationId && item.payload["toolInvocationId"] !== toolInvocationId) return false;
       return true;
     });
     items = afterCursor(items, filter.before);
@@ -241,5 +243,120 @@ export class InMemoryToolInvocationStore implements ToolInvocationStore {
 
   async listByApproval(approvalId: string): Promise<ToolInvocation[]> {
     return sortNewest([...this.items.values()].filter((item) => item.approvalId === approvalId));
+  }
+}
+
+type ToolDispatchTargetPlacement = "hosted" | "connected_local_node";
+type ToolDispatchOutboxStatus = "pending" | "dispatching" | "dispatched" | "failed_retryable";
+
+export interface InMemoryToolDispatchOutboxRecord {
+  id: string;
+  approvalId: string;
+  toolInvocationId: string;
+  runId: string;
+  targetPlacement: ToolDispatchTargetPlacement;
+  executionPlanHash: string;
+  dispatchStatus: ToolDispatchOutboxStatus;
+  attemptCount: number;
+  lastErrorCode?: string;
+  dispatchId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export class InMemoryToolDispatchOutboxStore {
+  readonly items = new Map<string, InMemoryToolDispatchOutboxRecord>();
+
+  async upsertByApprovalAndInvocation(input: {
+    approvalId: string;
+    toolInvocationId: string;
+    runId: string;
+    targetPlacement: ToolDispatchTargetPlacement;
+    executionPlanHash: string;
+    now?: string;
+  }): Promise<InMemoryToolDispatchOutboxRecord> {
+    const now = input.now ?? new Date().toISOString();
+    const existing = [...this.items.values()].find(
+      (entry) => entry.approvalId === input.approvalId && entry.toolInvocationId === input.toolInvocationId
+    );
+    if (existing) {
+      const next: InMemoryToolDispatchOutboxRecord = { ...existing, updatedAt: now };
+      this.items.set(next.id, next);
+      return next;
+    }
+    const created: InMemoryToolDispatchOutboxRecord = {
+      id: `tool_dispatch_${Math.random().toString(36).slice(2)}`,
+      approvalId: input.approvalId,
+      toolInvocationId: input.toolInvocationId,
+      runId: input.runId,
+      targetPlacement: input.targetPlacement,
+      executionPlanHash: input.executionPlanHash,
+      dispatchStatus: "pending",
+      attemptCount: 0,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.items.set(created.id, created);
+    return created;
+  }
+
+  async getByApprovalAndInvocation(
+    approvalId: string,
+    toolInvocationId: string
+  ): Promise<InMemoryToolDispatchOutboxRecord | undefined> {
+    return [...this.items.values()].find(
+      (entry) => entry.approvalId === approvalId && entry.toolInvocationId === toolInvocationId
+    );
+  }
+
+  async markDispatching(id: string, now?: string): Promise<InMemoryToolDispatchOutboxRecord | undefined> {
+    const current = this.items.get(id);
+    if (!current) return undefined;
+    const next: InMemoryToolDispatchOutboxRecord = {
+      ...current,
+      dispatchStatus: "dispatching",
+      attemptCount: current.attemptCount + 1,
+      updatedAt: now ?? new Date().toISOString()
+    };
+    this.items.set(id, next);
+    return next;
+  }
+
+  async markDispatched(id: string, dispatchId: string, now?: string): Promise<InMemoryToolDispatchOutboxRecord | undefined> {
+    const current = this.items.get(id);
+    if (!current) return undefined;
+    const next: InMemoryToolDispatchOutboxRecord = {
+      ...current,
+      dispatchStatus: "dispatched",
+      dispatchId,
+      updatedAt: now ?? new Date().toISOString()
+    };
+    delete next.lastErrorCode;
+    this.items.set(id, next);
+    return next;
+  }
+
+  async markFailedRetryable(
+    id: string,
+    reasonCode: string,
+    now?: string
+  ): Promise<InMemoryToolDispatchOutboxRecord | undefined> {
+    const current = this.items.get(id);
+    if (!current) return undefined;
+    const next: InMemoryToolDispatchOutboxRecord = {
+      ...current,
+      dispatchStatus: "failed_retryable",
+      lastErrorCode: reasonCode,
+      updatedAt: now ?? new Date().toISOString()
+    };
+    this.items.set(id, next);
+    return next;
+  }
+
+  async listRetryable(limit: number): Promise<InMemoryToolDispatchOutboxRecord[]> {
+    return [...this.items.values()]
+      .filter((entry) => entry.dispatchStatus === "pending" || entry.dispatchStatus === "failed_retryable")
+      .sort((left, right) => (left.updatedAt === right.updatedAt ? left.id.localeCompare(right.id) : left.updatedAt.localeCompare(right.updatedAt)))
+      .slice(0, limit);
   }
 }

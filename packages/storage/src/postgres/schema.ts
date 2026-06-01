@@ -135,6 +135,8 @@ export const assignments = pgTable("assignments", {
   id: text("id").primaryKey(),
   runId: text("run_id").notNull(),
   nodeId: text("node_id").notNull(),
+  kind: text("kind"),
+  toolInvocationId: text("tool_invocation_id"),
   status: text("status").notNull(),
   claimedAt: text("claimed_at"),
   startedAt: text("started_at"),
@@ -145,7 +147,62 @@ export const assignments = pgTable("assignments", {
   lastArtifactSyncAt: text("last_artifact_sync_at"),
   error: text("error"),
   createdAt: text("created_at").notNull()
-}, (table) => [index("assignments_claim_idx").on(table.nodeId, table.status)]);
+}, (table) => [
+  index("assignments_claim_idx").on(table.nodeId, table.status),
+  index("assignments_kind_idx").on(table.kind, table.createdAt, table.id),
+  index("assignments_tool_invocation_idx").on(table.toolInvocationId)
+]);
+
+export const approvals = pgTable("approvals", {
+  id: text("id").primaryKey(),
+  runId: text("run_id"),
+  approvalType: text("approval_type").notNull(),
+  status: text("status").notNull(),
+  payload: jsonb("payload").notNull(),
+  createdAt: text("created_at").notNull(),
+  resolvedAt: text("resolved_at")
+}, (table) => [
+  index("approvals_run_idx").on(table.runId),
+  index("approvals_status_idx").on(table.status),
+  index("approvals_type_idx").on(table.approvalType),
+  index("approvals_created_idx").on(table.createdAt, table.id)
+]);
+
+export const toolInvocations = pgTable("tool_invocations", {
+  id: text("id").primaryKey(),
+  runId: text("run_id"),
+  type: text("type").notNull(),
+  status: text("status").notNull(),
+  approvalId: text("approval_id"),
+  input: jsonb("input").notNull(),
+  output: jsonb("output"),
+  error: jsonb("error"),
+  createdAt: text("created_at").notNull(),
+  completedAt: text("completed_at")
+}, (table) => [
+  index("tool_invocations_run_idx").on(table.runId),
+  index("tool_invocations_status_idx").on(table.status),
+  index("tool_invocations_approval_idx").on(table.approvalId),
+  index("tool_invocations_created_idx").on(table.createdAt, table.id)
+]);
+
+export const toolDispatchOutbox = pgTable("tool_dispatch_outbox", {
+  id: text("id").primaryKey(),
+  approvalId: text("approval_id").notNull(),
+  toolInvocationId: text("tool_invocation_id").notNull(),
+  runId: text("run_id").notNull(),
+  targetPlacement: text("target_placement").notNull(),
+  executionPlanHash: text("execution_plan_hash").notNull(),
+  dispatchStatus: text("dispatch_status").notNull(),
+  attemptCount: integer("attempt_count").notNull(),
+  lastErrorCode: text("last_error_code"),
+  dispatchId: text("dispatch_id"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  uniqueIndex("tool_dispatch_outbox_approval_invocation_idx").on(table.approvalId, table.toolInvocationId),
+  index("tool_dispatch_outbox_retry_idx").on(table.dispatchStatus, table.updatedAt, table.id)
+]);
 
 export const billingPlans = pgTable("billing_plans", {
   id: text("id").primaryKey(),
