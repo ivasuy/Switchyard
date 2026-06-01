@@ -572,55 +572,85 @@ export async function createServerApp(config: ServerConfig) {
 }
 
 function instrumentQueue(
-  queue: RunQueuePort & { close?: () => Promise<void> },
+  queue: RunQueuePort & Partial<ToolQueuePort> & { close?: () => Promise<void> },
   metrics: HostedMetrics
-): RunQueuePort & { close?: () => Promise<void> } {
-  const wrapped: RunQueuePort & { close?: () => Promise<void> } = {
-    ...queue,
-    async enqueue(payload, options) {
-      const out = await queue.enqueue(payload, options);
+): RunQueuePort & Partial<ToolQueuePort> & { close?: () => Promise<void> } {
+  const enqueue = queue.enqueue.bind(queue);
+  const claim = queue.claim.bind(queue);
+  const ack = queue.ack.bind(queue);
+  const fail = queue.fail.bind(queue);
+  const retry = queue.retry.bind(queue);
+  const discard = queue.discard.bind(queue);
+  const getJob = queue.getJob.bind(queue);
+  const recoverStaleClaims = queue.recoverStaleClaims.bind(queue);
+  const stats = queue.stats.bind(queue);
+
+  queue.enqueue = async (payload, options) => {
+    const out = await enqueue(payload, options);
+    metrics.inc("queue.enqueue");
+    return out;
+  };
+  queue.claim = async (options) => {
+    const out = await claim(options);
+    if (out) {
+      metrics.inc("queue.claim");
+    }
+    return out;
+  };
+  queue.ack = async (jobId) => {
+    metrics.inc("queue.ack");
+    return ack(jobId);
+  };
+  queue.fail = async (jobId, error) => {
+    metrics.inc("queue.failed");
+    if (error.reasonCode === "worker_retry_exhausted") {
+      metrics.inc("queue.exhausted");
+    }
+    return fail(jobId, error);
+  };
+  queue.retry = async (jobId) => {
+    metrics.inc("queue.retry");
+    return retry(jobId);
+  };
+  queue.discard = (jobId) => discard(jobId);
+  queue.getJob = (jobId) => getJob(jobId);
+  queue.recoverStaleClaims = (options) => recoverStaleClaims(options);
+  queue.stats = () => stats();
+
+  if (hasToolQueueSupport(queue)) {
+    const enqueueTool = queue.enqueueTool.bind(queue);
+    const claimTool = queue.claimTool.bind(queue);
+    const ackTool = queue.ackTool.bind(queue);
+    const failTool = queue.failTool.bind(queue);
+    const recoverStaleToolClaims = queue.recoverStaleToolClaims.bind(queue);
+
+    queue.enqueueTool = async (payload, options) => {
+      const out = await enqueueTool(payload, options);
       metrics.inc("queue.enqueue");
       return out;
-    },
-    async claim(options) {
-      const out = await queue.claim(options);
+    };
+    queue.claimTool = async (options) => {
+      const out = await claimTool(options);
       if (out) {
         metrics.inc("queue.claim");
       }
       return out;
-    },
-    async ack(jobId) {
+    };
+    queue.ackTool = async (jobId) => {
       metrics.inc("queue.ack");
-      return queue.ack(jobId);
-    },
-    async fail(jobId, error) {
+      return ackTool(jobId);
+    };
+    queue.failTool = async (jobId, error) => {
       metrics.inc("queue.failed");
       if (error.reasonCode === "worker_retry_exhausted") {
         metrics.inc("queue.exhausted");
       }
-      return queue.fail(jobId, error);
-    },
-    async retry(jobId) {
-      metrics.inc("queue.retry");
-      return queue.retry(jobId);
-    },
-    discard(jobId) {
-      return queue.discard(jobId);
-    },
-    getJob(jobId) {
-      return queue.getJob(jobId);
-    },
-    recoverStaleClaims(options) {
-      return queue.recoverStaleClaims(options);
-    },
-    stats() {
-      return queue.stats();
-    },
-  };
-  if (queue.close) {
-    wrapped.close = queue.close.bind(queue);
+      return failTool(jobId, error);
+    };
+    queue.recoverStaleToolClaims = (options) => recoverStaleToolClaims(options);
   }
-  return wrapped;
+
+  return queue;
 }
 
 function instrumentArtifactContent(

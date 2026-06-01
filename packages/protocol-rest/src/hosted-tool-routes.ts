@@ -504,9 +504,9 @@ async function checkToolQuotaAvailability(input: {
     return { ok: false, code: "tool_store_unavailable", reasonCode: "quota_store_unavailable" };
   }
 
-  const quotas = asRecord(asRecord(input.auth.entitlement["quotas"]));
-  const maxActive = asNonNegativeNumber(quotas["maxActiveToolInvocations"]);
-  const maxHourly = asNonNegativeNumber(quotas["maxToolInvocationsPerHour"]);
+  const quotas = resolveQuotaSnapshot(input.auth.entitlement);
+  const maxActive = asOptionalNonNegativeNumber(quotas["maxActiveToolInvocations"]);
+  const maxHourly = asOptionalNonNegativeNumber(quotas["maxToolInvocationsPerHour"]);
 
   const ownedIds = await input.controlPlaneStore.listOwnedResourceIds({
     resourceType: "tool_invocation",
@@ -517,13 +517,13 @@ async function checkToolQuotaAvailability(input: {
 
   const invocations = await Promise.all(ownedIds.map((id) => input.invocations.get(id)));
   const activeCount = invocations.filter((entry) => entry && (entry.status === "queued" || entry.status === "running")).length;
-  if (maxActive >= 0 && activeCount >= maxActive) {
+  if (maxActive !== undefined && activeCount >= maxActive) {
     return { ok: false, code: "quota_exceeded", reasonCode: "active_tool_invocations_exceeded" };
   }
 
   const windowStart = Date.parse(input.nowIso) - 60 * 60 * 1000;
   const hourlyCount = invocations.filter((entry) => entry && Date.parse(entry.createdAt) >= windowStart).length;
-  if (maxHourly >= 0 && hourlyCount >= maxHourly) {
+  if (maxHourly !== undefined && hourlyCount >= maxHourly) {
     return { ok: false, code: "quota_exceeded", reasonCode: "tool_invocations_per_hour_exceeded" };
   }
 
@@ -535,11 +535,18 @@ function checkToolEntitlements(
   placement: "hosted" | "connected_local_node",
   toolType: ToolInvocation["type"]
 ): { ok: true } | { ok: false; reasonCode: string } {
-  const details = asRecord(asRecord(entitlement["entitlements"]));
-  const allowHostedTools = details["allowHostedTools"] === true;
-  const allowConnectedNodes = details["allowConnectedNodes"] === true;
-  const allowConnectedNodeTools = details["allowConnectedNodeTools"] === true;
+  const details = resolveEntitlementDetails(entitlement);
+  const allowedPlacements = asStringArray(details["allowedPlacements"]);
+  const allowHostedTools = details["allowHostedTools"] === true
+    || (details["allowHostedTools"] === undefined && allowedPlacements.includes("hosted"));
+  const allowConnectedNodes = details["allowConnectedNodes"] === true
+    || (details["allowConnectedNodes"] === undefined && allowedPlacements.includes("connected_local_node"));
+  const allowConnectedNodeTools = details["allowConnectedNodeTools"] === true
+    || (details["allowConnectedNodeTools"] === undefined && allowConnectedNodes);
   const allowedToolTypes = asStringArray(details["allowedToolTypes"]);
+  const effectiveAllowedTypes = allowedToolTypes.length > 0
+    ? allowedToolTypes
+    : ["web_search", "fetch", "browser", "repo", "shell", "github", "fake_echo"];
 
   if (placement === "hosted" && !allowHostedTools) {
     return { ok: false, reasonCode: "hosted_tools_disabled" };
@@ -547,17 +554,36 @@ function checkToolEntitlements(
   if (placement === "connected_local_node" && (!allowConnectedNodes || !allowConnectedNodeTools)) {
     return { ok: false, reasonCode: "connected_node_tools_disabled" };
   }
-  if (!allowedToolTypes.includes(toolType)) {
+  if (!effectiveAllowedTypes.includes(toolType)) {
     return { ok: false, reasonCode: "tool_type_not_entitled" };
   }
   return { ok: true };
 }
 
-function asNonNegativeNumber(value: unknown): number {
+function asOptionalNonNegativeNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    return 0;
+    return undefined;
   }
   return Math.floor(value);
+}
+
+function resolveEntitlementDetails(entitlement: Record<string, unknown>): Record<string, unknown> {
+  const nested = asRecord(entitlement["entitlements"]);
+  if (Object.keys(nested).length > 0) {
+    return nested;
+  }
+  return entitlement;
+}
+
+function resolveQuotaSnapshot(entitlement: Record<string, unknown>): Record<string, unknown> {
+  const nested = asRecord(entitlement["quotas"]);
+  if (Object.keys(nested).length > 0) {
+    return nested;
+  }
+  return entitlement;
 }
 
 function parseOptionalEnum<T>(value: unknown, schema: { parse: (value: unknown) => T }, path: string): T | undefined {

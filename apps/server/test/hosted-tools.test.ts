@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { hashApiKey } from "@switchyard/core";
+import { MemoryRunQueue } from "@switchyard/queue";
 import { createServerApp } from "../src/app.js";
 import { loadServerConfig } from "../src/config.js";
 
@@ -8,54 +9,89 @@ const API_KEY_PEPPER = "pepper_for_hosted_tools_tests_123456";
 const ADMIN_RAW_KEY = "sk_sw_tools_admin";
 const READ_ONLY_RAW_KEY = "sk_sw_tools_read";
 const WRITE_ONLY_RAW_KEY = "sk_sw_tools_write";
+const ADMIN_T2_RAW_KEY = "sk_sw_tools_admin_t2";
 
-function createBootstrapJson() {
+function createBootstrapJson(includeSecondTenant = false): string {
+  const accounts: Array<Record<string, unknown>> = [
+    { id: "account_1", name: "Acme", status: "active", billingPlanId: "billing_plan_1", createdAt: NOW }
+  ];
+  const tenants: Array<Record<string, unknown>> = [
+    { id: "tenant_1", accountId: "account_1", slug: "acme", displayName: "Acme", status: "active", createdAt: NOW }
+  ];
+  const projects: Array<Record<string, unknown>> = [
+    { id: "project_1", accountId: "account_1", tenantId: "tenant_1", slug: "proj", displayName: "Project", status: "active", createdAt: NOW }
+  ];
+  const users: Array<Record<string, unknown>> = [
+    { id: "user_1", accountId: "account_1", tenantId: "tenant_1", displayName: "Owner", email: "owner@example.com", status: "active", createdAt: NOW }
+  ];
+  const apiKeys: Array<Record<string, unknown>> = [
+    {
+      id: "api_key_admin",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      name: "admin",
+      keyPrefix: "sk_sw",
+      secretHash: hashApiKey(ADMIN_RAW_KEY, API_KEY_PEPPER),
+      scopes: ["runs:write", "runs:read", "tools:write", "tools:read", "registry:read", "artifacts:read", "nodes:write", "metrics:read", "admin:read"],
+      status: "active",
+      createdAt: NOW
+    },
+    {
+      id: "api_key_read",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      name: "read",
+      keyPrefix: "sk_sw",
+      secretHash: hashApiKey(READ_ONLY_RAW_KEY, API_KEY_PEPPER),
+      scopes: ["tools:read"],
+      status: "active",
+      createdAt: NOW
+    },
+    {
+      id: "api_key_write",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      name: "write",
+      keyPrefix: "sk_sw",
+      secretHash: hashApiKey(WRITE_ONLY_RAW_KEY, API_KEY_PEPPER),
+      scopes: ["tools:write"],
+      status: "active",
+      createdAt: NOW
+    }
+  ];
+
+  if (includeSecondTenant) {
+    accounts.push({ id: "account_2", name: "Globex", status: "active", billingPlanId: "billing_plan_1", createdAt: NOW });
+    tenants.push({ id: "tenant_2", accountId: "account_2", slug: "globex", displayName: "Globex", status: "active", createdAt: NOW });
+    projects.push({ id: "project_2", accountId: "account_2", tenantId: "tenant_2", slug: "proj2", displayName: "Project 2", status: "active", createdAt: NOW });
+    users.push({ id: "user_2", accountId: "account_2", tenantId: "tenant_2", displayName: "Owner2", email: "owner2@example.com", status: "active", createdAt: NOW });
+    apiKeys.push({
+      id: "api_key_admin_t2",
+      accountId: "account_2",
+      tenantId: "tenant_2",
+      projectId: "project_2",
+      userId: "user_2",
+      name: "admin-t2",
+      keyPrefix: "sk_sw",
+      secretHash: hashApiKey(ADMIN_T2_RAW_KEY, API_KEY_PEPPER),
+      scopes: ["runs:write", "runs:read", "tools:write", "tools:read", "registry:read", "artifacts:read", "nodes:write", "metrics:read", "admin:read"],
+      status: "active",
+      createdAt: NOW
+    });
+  }
+
   return JSON.stringify({
-    accounts: [{ id: "account_1", name: "Acme", status: "active", billingPlanId: "billing_plan_1", createdAt: NOW }],
-    tenants: [{ id: "tenant_1", accountId: "account_1", slug: "acme", displayName: "Acme", status: "active", createdAt: NOW }],
-    projects: [{ id: "project_1", accountId: "account_1", tenantId: "tenant_1", slug: "proj", displayName: "Project", status: "active", createdAt: NOW }],
-    users: [{ id: "user_1", accountId: "account_1", tenantId: "tenant_1", displayName: "Owner", email: "owner@example.com", status: "active", createdAt: NOW }],
-    apiKeys: [
-      {
-        id: "api_key_admin",
-        accountId: "account_1",
-        tenantId: "tenant_1",
-        projectId: "project_1",
-        userId: "user_1",
-        name: "admin",
-        keyPrefix: "sk_sw",
-        secretHash: hashApiKey(ADMIN_RAW_KEY, API_KEY_PEPPER),
-        scopes: ["runs:write", "runs:read", "tools:write", "tools:read", "registry:read", "artifacts:read", "nodes:write", "metrics:read", "admin:read"],
-        status: "active",
-        createdAt: NOW
-      },
-      {
-        id: "api_key_read",
-        accountId: "account_1",
-        tenantId: "tenant_1",
-        projectId: "project_1",
-        userId: "user_1",
-        name: "read",
-        keyPrefix: "sk_sw",
-        secretHash: hashApiKey(READ_ONLY_RAW_KEY, API_KEY_PEPPER),
-        scopes: ["tools:read"],
-        status: "active",
-        createdAt: NOW
-      },
-      {
-        id: "api_key_write",
-        accountId: "account_1",
-        tenantId: "tenant_1",
-        projectId: "project_1",
-        userId: "user_1",
-        name: "write",
-        keyPrefix: "sk_sw",
-        secretHash: hashApiKey(WRITE_ONLY_RAW_KEY, API_KEY_PEPPER),
-        scopes: ["tools:write"],
-        status: "active",
-        createdAt: NOW
-      }
-    ],
+    accounts,
+    tenants,
+    projects,
+    users,
+    apiKeys,
     billingPlans: [
       {
         id: "billing_plan_1",
@@ -92,7 +128,28 @@ function createBootstrapJson() {
   });
 }
 
-function createEnv(overrides: Record<string, string> = {}): Record<string, string> {
+function createHostedPolicyJson(): string {
+  return JSON.stringify({
+    global: {
+      enabled: true,
+      allowedPlacements: ["hosted"],
+      approvalDefault: "required",
+      approvalExpiresMs: 300000
+    },
+    hosted: {
+      enabled: true,
+      allowedToolTypes: ["fetch"]
+    },
+    fetch: {
+      enabled: true,
+      allowedHosts: ["example.com"],
+      allowedMethods: ["GET", "HEAD"],
+      allowWithoutApproval: false
+    }
+  });
+}
+
+function createEnv(overrides: Record<string, string> = {}, includeSecondTenant = false): Record<string, string> {
   return {
     SWITCHYARD_DEPLOYMENT_MODE: "test",
     SWITCHYARD_OBJECT_STORE_BACKEND: "memory",
@@ -100,66 +157,146 @@ function createEnv(overrides: Record<string, string> = {}): Record<string, strin
     SWITCHYARD_SERVER_AUTH_MODE: "api_key",
     SWITCHYARD_API_KEY_PEPPER: API_KEY_PEPPER,
     SWITCHYARD_CONTROL_PLANE_STORE: "memory",
-    SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON: createBootstrapJson(),
+    SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON: createBootstrapJson(includeSecondTenant),
     ...overrides
   };
 }
 
+async function createHostedRun(app: Awaited<ReturnType<typeof createServerApp>>, apiKey: string, task: string): Promise<string> {
+  const response = await app.inject({
+    method: "POST",
+    url: "/runs",
+    headers: { authorization: `Bearer ${apiKey}` },
+    payload: {
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task,
+      placement: "hosted"
+    }
+  });
+  expect([201, 202]).toContain(response.statusCode);
+  return response.json().run.id as string;
+}
+
+async function createFetchInvocation(
+  app: Awaited<ReturnType<typeof createServerApp>>,
+  apiKey: string,
+  runId: string,
+  url: string
+): Promise<{ invocationId: string; approvalId: string }> {
+  const response = await app.inject({
+    method: "POST",
+    url: "/tools/invocations",
+    headers: { authorization: `Bearer ${apiKey}` },
+    payload: {
+      runId,
+      type: "fetch",
+      target: { placement: "hosted" },
+      input: { url, method: "GET" }
+    }
+  });
+  expect(response.statusCode).toBe(202);
+  const body = response.json() as {
+    invocation: { id: string };
+    approval?: { id: string };
+  };
+  expect(body.approval?.id).toBeTruthy();
+  return { invocationId: body.invocation.id, approvalId: body.approval!.id };
+}
+
 describe("hosted tools", () => {
-  it("registers hosted tool routes, enforces tools scopes, and does not expose hosted POST /approvals", async () => {
-    const app = await createServerApp(loadServerConfig(createEnv()));
+  it("keeps checks.tools ready when tools are enabled and dispatches approvals into enqueueTool", async () => {
+    const observedEnqueuePayloads: Array<{
+      approvalId: string;
+      toolInvocationId: string;
+      runId: string;
+      idempotencyKey: string;
+      placement: string;
+    }> = [];
+    const originalEnqueueTool = MemoryRunQueue.prototype.enqueueTool;
+    MemoryRunQueue.prototype.enqueueTool = async function patched(payload, options) {
+      observedEnqueuePayloads.push({
+        approvalId: payload.approvalId,
+        toolInvocationId: payload.toolInvocationId,
+        runId: payload.runId,
+        idempotencyKey: payload.idempotencyKey,
+        placement: payload.placement
+      });
+      return originalEnqueueTool.call(this, payload, options);
+    };
+
+    const app = await createServerApp(loadServerConfig(createEnv({
+      SWITCHYARD_HOSTED_REAL_TOOLS: "enabled",
+      SWITCHYARD_REAL_TOOL_POLICY_JSON: createHostedPolicyJson()
+    })));
     try {
-      const run = await app.inject({
-        method: "POST",
-        url: "/runs",
-        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
-        payload: {
-          runtime: "fake",
-          provider: "test",
-          model: "test-model",
-          adapterType: "process",
-          cwd: "/repo",
-          task: "tool route test",
-          placement: "hosted"
-        }
-      });
-      expect([201, 202]).toContain(run.statusCode);
-      const runId = run.json().run.id as string;
+      const ready = await app.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json().checks.tools.ok).toBe(true);
 
-      const invoke = await app.inject({
-        method: "POST",
-        url: "/tools/invocations",
-        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
-        payload: {
-          runId,
-          type: "fetch",
-          target: { placement: "hosted" },
-          input: { url: "https://example.com", method: "GET" }
-        }
-      });
-      expect(invoke.statusCode).not.toBe(404);
+      const runId = await createHostedRun(app, ADMIN_RAW_KEY, "enqueue dispatch");
+      const { approvalId, invocationId } = await createFetchInvocation(app, ADMIN_RAW_KEY, runId, "https://example.com/resource-1");
 
-      const readRequiresScope = await app.inject({
+      const approveFirst = await app.inject({
+        method: "POST",
+        url: `/approvals/${approvalId}/approve`,
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: {}
+      });
+      if (approveFirst.statusCode !== 200) {
+        throw new Error(`expected approve status 200, got ${approveFirst.statusCode}: ${approveFirst.body}`);
+      }
+
+      const approveSecond = await app.inject({
+        method: "POST",
+        url: `/approvals/${approvalId}/approve`,
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: {}
+      });
+      expect(approveSecond.statusCode).toBe(409);
+      expect(approveSecond.json().error.code).toBe("approval_not_pending");
+
+      expect(observedEnqueuePayloads).toHaveLength(1);
+      expect(observedEnqueuePayloads[0]).toMatchObject({
+        approvalId,
+        toolInvocationId: invocationId,
+        runId,
+        placement: "hosted"
+      });
+      expect(observedEnqueuePayloads[0]?.idempotencyKey.length).toBeGreaterThan(0);
+    } finally {
+      MemoryRunQueue.prototype.enqueueTool = originalEnqueueTool;
+      await app.close();
+    }
+  });
+
+  it("enforces tools scopes for approval read routes and does not expose hosted POST /approvals", async () => {
+    const app = await createServerApp(loadServerConfig(createEnv({
+      SWITCHYARD_HOSTED_REAL_TOOLS: "enabled",
+      SWITCHYARD_REAL_TOOL_POLICY_JSON: createHostedPolicyJson()
+    })));
+    try {
+      const runId = await createHostedRun(app, ADMIN_RAW_KEY, "scope enforcement");
+      const { approvalId } = await createFetchInvocation(app, ADMIN_RAW_KEY, runId, "https://example.com/resource-scope");
+
+      const listDenied = await app.inject({
         method: "GET",
         url: "/approvals",
         headers: { authorization: `Bearer ${WRITE_ONLY_RAW_KEY}` }
       });
-      expect(readRequiresScope.statusCode).toBe(403);
-      expect(readRequiresScope.json().error.details?.some((detail: { issue?: string }) => detail.issue === "missing_scope")).toBe(true);
+      expect(listDenied.statusCode).toBe(403);
+      expect(listDenied.json().error.details?.some((detail: { issue?: string }) => detail.issue === "missing_scope")).toBe(true);
 
-      const writeRequiresScope = await app.inject({
-        method: "POST",
-        url: "/tools/invocations",
-        headers: { authorization: `Bearer ${READ_ONLY_RAW_KEY}` },
-        payload: {
-          runId,
-          type: "fetch",
-          target: { placement: "hosted" },
-          input: { url: "https://example.com", method: "GET" }
-        }
+      const getDenied = await app.inject({
+        method: "GET",
+        url: `/approvals/${approvalId}`,
+        headers: { authorization: `Bearer ${WRITE_ONLY_RAW_KEY}` }
       });
-      expect(writeRequiresScope.statusCode).toBe(403);
-      expect(writeRequiresScope.json().error.details?.some((detail: { issue?: string }) => detail.issue === "missing_scope")).toBe(true);
+      expect(getDenied.statusCode).toBe(403);
+      expect(getDenied.json().error.details?.some((detail: { issue?: string }) => detail.issue === "missing_scope")).toBe(true);
 
       const postApprovalsMissing = await app.inject({
         method: "POST",
@@ -173,26 +310,77 @@ describe("hosted tools", () => {
     }
   });
 
-  it("reports readiness checks.tools with disabled-ready and enabled-fail-closed states", async () => {
-    const disabledApp = await createServerApp(loadServerConfig(createEnv()));
+  it("paginates owned approvals, prevents cross-tenant leaks, and terminalizes rejected invocations", async () => {
+    const app = await createServerApp(loadServerConfig(createEnv({
+      SWITCHYARD_HOSTED_REAL_TOOLS: "enabled",
+      SWITCHYARD_REAL_TOOL_POLICY_JSON: createHostedPolicyJson()
+    }, true)));
     try {
-      const ready = await disabledApp.inject({ method: "GET", url: "/ready" });
-      expect(ready.statusCode).toBe(200);
-      expect(ready.json().checks.tools).toBeDefined();
-      expect(ready.json().checks.tools.ok).toBe(true);
-    } finally {
-      await disabledApp.close();
-    }
+      const runA = await createHostedRun(app, ADMIN_RAW_KEY, "tenant-a-run");
+      const a1 = await createFetchInvocation(app, ADMIN_RAW_KEY, runA, "https://example.com/a-1");
+      const a2 = await createFetchInvocation(app, ADMIN_RAW_KEY, runA, "https://example.com/a-2");
 
-    const enabledMissingPolicyApp = await createServerApp(loadServerConfig(createEnv({
-      SWITCHYARD_HOSTED_REAL_TOOLS: "enabled"
-    })));
-    try {
-      const ready = await enabledMissingPolicyApp.inject({ method: "GET", url: "/ready" });
-      expect(ready.statusCode).toBe(503);
-      expect(ready.json().checks.tools.ok).toBe(false);
+      const runB = await createHostedRun(app, ADMIN_T2_RAW_KEY, "tenant-b-run");
+      const b1 = await createFetchInvocation(app, ADMIN_T2_RAW_KEY, runB, "https://example.com/b-1");
+
+      const firstPage = await app.inject({
+        method: "GET",
+        url: "/approvals?limit=1",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` }
+      });
+      expect(firstPage.statusCode).toBe(200);
+      expect(firstPage.json().approvals).toHaveLength(1);
+      expect(typeof firstPage.json().nextCursor).toBe("string");
+      const firstApprovalId = firstPage.json().approvals[0].id as string;
+
+      const secondPage = await app.inject({
+        method: "GET",
+        url: `/approvals?limit=1&before=${encodeURIComponent(firstPage.json().nextCursor)}`,
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` }
+      });
+      expect(secondPage.statusCode).toBe(200);
+      expect(secondPage.json().approvals).toHaveLength(1);
+      const secondApprovalId = secondPage.json().approvals[0].id as string;
+
+      const ownedIds = new Set([a1.approvalId, a2.approvalId]);
+      expect(ownedIds.has(firstApprovalId)).toBe(true);
+      expect(ownedIds.has(secondApprovalId)).toBe(true);
+      expect(firstApprovalId).not.toBe(secondApprovalId);
+
+      const hiddenApproval = await app.inject({
+        method: "GET",
+        url: `/approvals/${b1.approvalId}`,
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` }
+      });
+      expect([403, 404]).toContain(hiddenApproval.statusCode);
+
+      const hiddenInvocation = await app.inject({
+        method: "GET",
+        url: `/tools/invocations/${b1.invocationId}`,
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` }
+      });
+      expect([403, 404]).toContain(hiddenInvocation.statusCode);
+
+      const reject = await app.inject({
+        method: "POST",
+        url: `/approvals/${a1.approvalId}/reject`,
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: {}
+      });
+      expect(reject.statusCode).toBe(200);
+      expect(reject.json().approval.status).toBe("rejected");
+      expect(reject.json().invocation.status).toBe("denied");
+
+      const invocationAfterReject = await app.inject({
+        method: "GET",
+        url: `/tools/invocations/${a1.invocationId}`,
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` }
+      });
+      expect(invocationAfterReject.statusCode).toBe(200);
+      expect(invocationAfterReject.json().invocation.status).toBe("denied");
+      expect(invocationAfterReject.json().invocation.error.code).toBe("tool_approval_rejected");
     } finally {
-      await enabledMissingPolicyApp.close();
+      await app.close();
     }
   });
 });
