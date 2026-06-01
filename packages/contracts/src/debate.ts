@@ -67,7 +67,11 @@ export const debateSchema = z.object({
   finalReportPath: z.string().optional(),
   stopReason: debateStopReasonSchema.optional(),
   judge: debateJudgeSchema.optional(),
-  budget: budgetSchema,
+  budget: budgetSchema.default({
+    status: "within_budget",
+    maxCostUsd: 0,
+    spentCostUsd: 0
+  }),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema.optional(),
   completedAt: isoDateSchema.optional(),

@@ -777,6 +777,40 @@ describe("Switchyard contracts", () => {
     expect(debate.budget.status).toBe("within_budget");
   });
 
+  it("parses legacy debate payloads without budget for backward compatibility", () => {
+    const debate = debateSchema.parse({
+      id: "debate_legacy_123",
+      topic: "Legacy debate payload",
+      mode: "mixed_model_panel",
+      status: "created",
+      participants: [],
+      limits: {
+        maxRounds: 1,
+        maxTurnsPerAgent: 1,
+        maxSearchesPerAgent: 0,
+        maxTotalMessages: 2,
+        maxDurationSeconds: 60,
+        maxCostUsd: 0,
+        requireCitations: false,
+        requireDisagreementSummary: true,
+        stopOnConsensus: false,
+        stopOnLowNewInformation: false,
+        humanStopAllowed: true
+      },
+      evidenceIds: [],
+      messageIds: [],
+      eventIds: [],
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+
+    expect(debate.id).toBe("debate_legacy_123");
+    expect(debate.budget).toEqual({
+      status: "within_budget",
+      maxCostUsd: 0,
+      spentCostUsd: 0
+    });
+  });
+
   it("parses R24 create debate request defaults for fake deterministic participants", () => {
     const request = createDebateRequestSchema.parse({
       topic: "Should Switchyard use ACP first?",
@@ -1681,7 +1715,7 @@ describe("Switchyard contracts", () => {
         },
         createdAt: "2026-05-11T00:00:00.000Z"
       },
-      ["id", "topic", "mode", "status", "participants", "limits", "budget", "createdAt"]
+      ["id", "topic", "mode", "status", "participants", "limits", "createdAt"]
     );
 
     expectRequiredFields(

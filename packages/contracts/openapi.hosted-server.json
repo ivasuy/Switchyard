@@ -1654,6 +1654,11 @@
             "properties": {
               "budget": {
                 "additionalProperties": false,
+                "default": {
+                  "maxCostUsd": 0,
+                  "spentCostUsd": 0,
+                  "status": "within_budget"
+                },
                 "properties": {
                   "maxCostUsd": {
                     "minimum": 0,
@@ -3181,6 +3186,11 @@
             "properties": {
               "budget": {
                 "additionalProperties": false,
+                "default": {
+                  "maxCostUsd": 0,
+                  "spentCostUsd": 0,
+                  "status": "within_budget"
+                },
                 "properties": {
                   "maxCostUsd": {
                     "minimum": 0,

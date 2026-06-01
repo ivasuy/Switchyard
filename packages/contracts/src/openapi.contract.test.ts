@@ -409,7 +409,7 @@ describe("openapi generation", () => {
     }
   });
 
-  it("documents R21 hosted-provider boundary in product docs", () => {
+  it("documents R24 hosted debate boundary in product docs", () => {
     const product = readRootFile("PRODUCT.md");
     const readme = readRootFile("README.md");
     const api = readRootFile("docs/development/API.md");
@@ -424,16 +424,18 @@ describe("openapi generation", () => {
     expect(product).toMatch(/fake-only remains default/i);
     expect(product).toMatch(/operator opt-in/i);
     expect(product).toMatch(/rollback/i);
+    expect(product).toMatch(/POST \/debates|\/debates/i);
 
     expect(developerDocs).toMatch(/known provider/i);
     expect(developerDocs).toMatch(/operator opt-in/i);
     expect(developerDocs).toMatch(/no-spend smoke/i);
     expect(developerDocs).toMatch(/spend-gated canary/i);
     expect(developerDocs).toMatch(/rollback/i);
+    expect(developerDocs).toMatch(/\/debates/i);
+    expect(developerDocs).toMatch(/fake[-/ ]only remains default|fake\/no-spend remains default/i);
     expect(developerDocs).toMatch(/does not ship generic process\/pty runtime adapters/i);
     expect(developerDocs).toMatch(/does not ship cursor\/openclaw\/paperclip/i);
     expect(developerDocs).toMatch(/does not ship hosted browser\/search\/github\/fetch\/repo tools/i);
-    expect(developerDocs).toMatch(/does not ship hosted debate real participants or hosted model judging/i);
     expect(developerDocs).toMatch(/does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge/i);
   });
 
