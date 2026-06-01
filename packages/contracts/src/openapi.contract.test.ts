@@ -494,6 +494,42 @@ describe("openapi generation", () => {
     expect(plan.entitlements.allowHostedTools).toBe(false);
     expect(plan.quotas.maxToolInvocationsPerHour).toBe(200);
 
+    const enabledPlan = billingPlanSchema.parse({
+      id: "billing_plan_tools_enabled",
+      slug: "tools-enabled",
+      displayName: "Tools Enabled",
+      status: "active",
+      entitlements: {
+        allowedPlacements: ["hosted", "connected_local_node"],
+        allowedRuntimeModes: ["codex.exec_json"],
+        allowHostedRealRuntime: true,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowMetricsRead: true,
+        allowAuditRead: true,
+        allowHostedTools: true,
+        allowConnectedNodeTools: true,
+        allowedToolTypes: ["fetch", "github"],
+        allowToolArtifactContentRead: true
+      },
+      quotas: {
+        maxRunsPerHour: 200,
+        maxActiveRuns: 20,
+        maxRunTimeoutSeconds: 3600,
+        maxConnectedNodes: 10,
+        maxArtifactContentReadBytesPerHour: 2_000_000,
+        maxToolInvocationsPerHour: 500,
+        maxActiveToolInvocations: 50,
+        maxToolArtifactBytesPerHour: 10_000_000
+      },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(enabledPlan.entitlements.allowHostedTools).toBe(true);
+    expect(enabledPlan.entitlements.allowConnectedNodeTools).toBe(true);
+    expect(enabledPlan.entitlements.allowedToolTypes).toEqual(["fetch", "github"]);
+    expect(enabledPlan.entitlements.allowToolArtifactContentRead).toBe(true);
+    expect(enabledPlan.quotas.maxToolInvocationsPerHour).toBe(500);
+
     expect(quotaKindSchema.parse("tool_invocations_per_hour")).toBe("tool_invocations_per_hour");
     expect(quotaKindSchema.parse("active_tool_invocations")).toBe("active_tool_invocations");
     expect(quotaKindSchema.parse("tool_artifact_bytes_per_hour")).toBe("tool_artifact_bytes_per_hour");
@@ -598,6 +634,8 @@ describe("openapi generation", () => {
     const expectedSecurity = [{ SwitchyardApiKey: [] }];
 
     expect(hosted.paths["/tools/invocations"]?.post?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/tools/invocations"]?.post?.responses?.["202"]).toBeDefined();
+    expect(hosted.paths["/tools/invocations"]?.post?.responses?.["201"]).toBeUndefined();
     expect(hosted.paths["/tools/invocations"]?.get?.security).toEqual(expectedSecurity);
     expect(hosted.paths["/tools/invocations/{id}"]?.get?.security).toEqual(expectedSecurity);
 

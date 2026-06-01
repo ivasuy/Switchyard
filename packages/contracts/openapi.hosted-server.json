@@ -10440,7 +10440,7 @@
           "required": true
         },
         "responses": {
-          "201": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
@@ -10448,7 +10448,7 @@
                 }
               }
             },
-            "description": "Tool invocation result"
+            "description": "Tool invocation accepted"
           },
           "400": {
             "content": {

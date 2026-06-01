@@ -618,7 +618,6 @@ const HOSTED_SERVER_LOCAL_ROUTE_KEYS = new Set<string>([
   "GET /doctor",
   "GET /artifacts/:id",
   "GET /artifacts/:id/content",
-  "POST /tools/invocations",
   "GET /tools/invocations",
   "GET /tools/invocations/:id",
   "GET /approvals",
@@ -711,6 +710,16 @@ export const HOSTED_SERVER_ROUTE_INVENTORY: readonly RouteInventoryEntry[] = [
     querySchemaRef: "AuditEventsQuery",
     noRequestBody: true,
     success: { status: 200, contentKind: "json", schemaRef: "AuditEventsResponse", description: "Audit events" }
+  }),
+  withHostedServerDefaults({
+    method: "post",
+    path: "/tools/invocations",
+    operationId: "invokeTool",
+    summary: "Invoke tool",
+    tags: ["middleware"],
+    requestBody: { schemaRef: "CreateToolInvocationRequest", required: true },
+    noRequestBody: false,
+    success: { status: 202, contentKind: "json", schemaRef: "ToolInvocationResponse", description: "Tool invocation accepted" }
   }),
   ...HOSTED_SERVER_REUSED_LOCAL_ROUTES,
   ...HOSTED_SERVER_NODE_ROUTES
