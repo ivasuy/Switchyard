@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   approvalStatusSchema,
   approvalTypeSchema,
@@ -364,12 +364,14 @@ async function handleResolveApproval(
         return sendToolHttpError(reply, "hosted_runtime_approval_bridge_unshipped", "Runtime approvals are not resolved through hosted bridge routes");
       }
       const body = resolveApprovalBody(reply.request.body);
+      const idempotencyKey = readIdempotencyKey(reply.request);
       const resolved = await deps.hostedRuntimeBridge.resolveRuntimeApproval({
         approvalId: params.id,
         decision,
         ...(body ? { body } : {}),
         ...(auth ? { auth } : {}),
-        requestId: reply.request.id
+        requestId: reply.request.id,
+        ...(idempotencyKey ? { idempotencyKey } : {})
       });
       return reply.send({ approval: resolved.approval, bridgeCommandId: resolved.commandId });
     }
@@ -778,6 +780,17 @@ function resolveApprovalBody(value: unknown): Record<string, unknown> | undefine
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+function readIdempotencyKey(request: FastifyRequest): string | undefined {
+  const header = request.headers["idempotency-key"];
+  if (typeof header === "string" && header.trim().length > 0) {
+    return header.trim();
+  }
+  if (Array.isArray(header) && typeof header[0] === "string" && header[0].trim().length > 0) {
+    return header[0].trim();
+  }
+  return undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

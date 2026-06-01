@@ -199,7 +199,7 @@ export async function createServerApp(config: ServerConfig) {
   });
 
   const hostedRuntimeBridgeCommands = new PostgresHostedRuntimeBridgeCommandStore(postgres);
-  const bridgeCommandPayloads = createInMemoryBridgeCommandPayloadStore();
+  const bridgeCommandPayloads = createUnavailableBridgeCommandPayloadStore();
   const bridgeReservationScope = new Map<string, { accountId: string; tenantId: string; projectId: string }>();
   const hostedRuntimeBridge = new HostedRuntimeBridgeService({
     runs,
@@ -1353,21 +1353,20 @@ function toNumber(value: unknown): number {
   return 0;
 }
 
-function createInMemoryBridgeCommandPayloadStore(): {
+function createUnavailableBridgeCommandPayloadStore(): {
   put(input: { commandId: string; payload: Record<string, unknown> }): Promise<void>;
   get(commandId: string): Promise<Record<string, unknown> | undefined>;
   delete(commandId: string): Promise<void>;
 } {
-  const payloads = new Map<string, Record<string, unknown>>();
   return {
-    async put(input) {
-      payloads.set(input.commandId, input.payload);
+    async put() {
+      throw new Error("hosted_runtime_bridge_store_unavailable");
     },
-    async get(commandId) {
-      return payloads.get(commandId);
+    async get() {
+      return undefined;
     },
-    async delete(commandId) {
-      payloads.delete(commandId);
+    async delete() {
+      return;
     }
   };
 }

@@ -321,6 +321,9 @@ describe("hosted tool route ownership and approval filtering", () => {
       const runtimeApprove = await app.inject({
         method: "POST",
         url: "/approvals/approval_runtime/approve",
+        headers: {
+          "idempotency-key": "approval-runtime-key-1"
+        },
         payload: {}
       });
       expect(runtimeApprove.statusCode).toBe(200);
@@ -328,6 +331,197 @@ describe("hosted tool route ownership and approval filtering", () => {
       expect(runtimeApprove.json().bridgeCommandId).toBe("bridge_cmd_runtime_2");
       expect(resolveApproval).not.toHaveBeenCalled();
       expect(resolveRuntimeApproval).toHaveBeenCalledTimes(1);
+      expect(resolveRuntimeApproval).toHaveBeenCalledWith(expect.objectContaining({
+        approvalId: "approval_runtime",
+        decision: "approved",
+        idempotencyKey: "approval-runtime-key-1"
+      }));
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("supports same-idempotency same-decision replay for runtime approval resolution", async () => {
+    const app = Fastify();
+    registerErrorEnvelope(app);
+    attachHostedAuth(app);
+
+    const commandByIdempotency = new Map<string, string>();
+    const signatureByIdempotency = new Map<string, string>();
+    const resolveRuntimeApproval = vi.fn(async (input: {
+      approvalId: string;
+      decision: "approved" | "rejected";
+      body?: Record<string, unknown>;
+      idempotencyKey?: string;
+    }) => {
+      const key = input.idempotencyKey ?? "";
+      const signature = JSON.stringify({ decision: input.decision, body: input.body ?? {} });
+      const existingSignature = signatureByIdempotency.get(key);
+      const existingCommand = commandByIdempotency.get(key);
+      if (existingSignature && existingCommand) {
+        if (existingSignature !== signature) {
+          throw {
+            code: "adapter_protocol_failed",
+            message: "Runtime bridge payload mismatch for idempotency key",
+            details: [{ path: "reasonCode", issue: "hosted_runtime_bridge_payload_mismatch" }]
+          };
+        }
+        return {
+          approval: { ...makeRuntimeApproval(input.approvalId), status: input.decision, resolvedAt: "2026-06-01T00:00:01.000Z" },
+          commandId: existingCommand,
+          duplicate: true
+        };
+      }
+      const commandId = `bridge_cmd_${key}`;
+      signatureByIdempotency.set(key, signature);
+      commandByIdempotency.set(key, commandId);
+      return {
+        approval: { ...makeRuntimeApproval(input.approvalId), status: input.decision, resolvedAt: "2026-06-01T00:00:01.000Z" },
+        commandId,
+        duplicate: false
+      };
+    });
+
+    registerHostedToolRoutes(app, {
+      hostedTools: {
+        invoke: async () => ({ statusCode: 202, invocation: makeInvocation("tool_1") }),
+        resolveApproval: async () => ({ approval: makeApproval("approval_runtime"), invocation: makeInvocation("tool_1") })
+      },
+      runs: { get: async () => ({ id: "run_1" } as any) },
+      invocations: {
+        get: async () => makeInvocation("tool_1"),
+        list: async () => ({ invocations: [makeInvocation("tool_1")], nextCursor: null })
+      },
+      approvals: {
+        get: async () => makeRuntimeApproval("approval_runtime"),
+        list: async () => ({ approvals: [makeRuntimeApproval("approval_runtime")], nextCursor: null })
+      },
+      controlPlane: {
+        authorizeResource: async () => ({ ok: true })
+      } as any,
+      controlPlaneStore: {
+        listOwnedResourceIds: async () => ["approval_runtime"]
+      } as any,
+      hostedRuntimeBridge: { resolveRuntimeApproval }
+    });
+
+    try {
+      const first = await app.inject({
+        method: "POST",
+        url: "/approvals/approval_runtime/approve",
+        headers: {
+          "idempotency-key": "runtime-replay-key"
+        },
+        payload: {
+          message: "same decision",
+          answers: { step: 1 }
+        }
+      });
+      expect(first.statusCode).toBe(200);
+
+      const second = await app.inject({
+        method: "POST",
+        url: "/approvals/approval_runtime/approve",
+        headers: {
+          "idempotency-key": "runtime-replay-key"
+        },
+        payload: {
+          message: "same decision",
+          answers: { step: 1 }
+        }
+      });
+      expect(second.statusCode).toBe(200);
+      expect(second.json().bridgeCommandId).toBe(first.json().bridgeCommandId);
+      expect(resolveRuntimeApproval).toHaveBeenCalledTimes(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects same-idempotency runtime approval resolution with different payload", async () => {
+    const app = Fastify();
+    registerErrorEnvelope(app);
+    attachHostedAuth(app);
+
+    const signatureByIdempotency = new Map<string, string>();
+    const resolveRuntimeApproval = vi.fn(async (input: {
+      approvalId: string;
+      decision: "approved" | "rejected";
+      body?: Record<string, unknown>;
+      idempotencyKey?: string;
+    }) => {
+      const key = input.idempotencyKey ?? "";
+      const signature = JSON.stringify({ decision: input.decision, body: input.body ?? {} });
+      const existingSignature = signatureByIdempotency.get(key);
+      if (existingSignature && existingSignature !== signature) {
+        throw {
+          code: "adapter_protocol_failed",
+          message: "Runtime bridge payload mismatch for idempotency key",
+          details: [{ path: "reasonCode", issue: "hosted_runtime_bridge_payload_mismatch" }]
+        };
+      }
+      signatureByIdempotency.set(key, signature);
+      return {
+        approval: { ...makeRuntimeApproval(input.approvalId), status: input.decision, resolvedAt: "2026-06-01T00:00:01.000Z" },
+        commandId: `bridge_cmd_${key}`,
+        duplicate: Boolean(existingSignature)
+      };
+    });
+
+    registerHostedToolRoutes(app, {
+      hostedTools: {
+        invoke: async () => ({ statusCode: 202, invocation: makeInvocation("tool_1") }),
+        resolveApproval: async () => ({ approval: makeApproval("approval_runtime"), invocation: makeInvocation("tool_1") })
+      },
+      runs: { get: async () => ({ id: "run_1" } as any) },
+      invocations: {
+        get: async () => makeInvocation("tool_1"),
+        list: async () => ({ invocations: [makeInvocation("tool_1")], nextCursor: null })
+      },
+      approvals: {
+        get: async () => makeRuntimeApproval("approval_runtime"),
+        list: async () => ({ approvals: [makeRuntimeApproval("approval_runtime")], nextCursor: null })
+      },
+      controlPlane: {
+        authorizeResource: async () => ({ ok: true })
+      } as any,
+      controlPlaneStore: {
+        listOwnedResourceIds: async () => ["approval_runtime"]
+      } as any,
+      hostedRuntimeBridge: { resolveRuntimeApproval }
+    });
+
+    try {
+      const first = await app.inject({
+        method: "POST",
+        url: "/approvals/approval_runtime/reject",
+        headers: {
+          "idempotency-key": "runtime-mismatch-key"
+        },
+        payload: {
+          message: "first payload",
+          answers: { ticket: "A" }
+        }
+      });
+      expect(first.statusCode).toBe(200);
+
+      const second = await app.inject({
+        method: "POST",
+        url: "/approvals/approval_runtime/reject",
+        headers: {
+          "idempotency-key": "runtime-mismatch-key"
+        },
+        payload: {
+          message: "different payload",
+          answers: { ticket: "B" }
+        }
+      });
+      expect(second.statusCode).toBe(409);
+      expect(second.json().error.code).toBe("adapter_protocol_failed");
+      expect(second.json().error.details).toContainEqual({
+        path: "reasonCode",
+        issue: "hosted_runtime_bridge_payload_mismatch"
+      });
     } finally {
       await app.close();
     }
