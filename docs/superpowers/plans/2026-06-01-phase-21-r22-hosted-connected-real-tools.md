@@ -19,7 +19,7 @@ Ship authenticated, tenant-scoped, approval-first hosted and connected-node real
 
 ## Architecture
 
-R22 layers hosted and connected-node tool execution around the R17 tool model. The local daemon keeps its existing `POST /tools/invocations` behavior. Hosted server routes use the same additive request schema, but the server never performs external network, search, GitHub, repo, or shell side effects in the request thread. It authenticates the API key, checks `tools:*` scope, authorizes the owned run, checks tool entitlements and quotas, resolves placement-aware tool policy, persists a redacted invocation, creates a tool-scoped approval when required, attaches ownership, records audit, and dispatches only after approval resolves.
+R22 layers hosted and connected-node tool execution around the R17 tool model. The local daemon keeps its existing `POST /tools/invocations` behavior. Hosted server routes use the same additive request schema, but the server never performs external network, search, GitHub, repo, or shell side effects in the request thread. It authenticates the API key, checks `tools:*` scope, authorizes the owned run, checks tool entitlements and quota-store availability, resolves placement-aware tool policy, persists a redacted invocation, creates a tool-scoped approval when required, attaches ownership, records audit, and dispatches only after approval resolves through a durable idempotent dispatch outbox keyed by `approvalId` and `toolInvocationId`.
 
 The policy boundary is placement-aware and fail-closed. Hosted worker policy can allow `fetch`, `web_search`, `github`, `shell`, and `fake_echo`. Hosted `repo` always denies with `repo_hosted_unshipped`. Connected-node policy can allow `fetch`, `web_search`, `github`, `repo`, `shell`, and `fake_echo` only when both server policy and node policy permit the request. `browser` always denies with `browser_tool_unshipped`. Shell is command-catalog only; request-owned raw command, executable, env, PTY, terminal, process, or shell string fields deny before approval creation or adapter dispatch.
 
@@ -29,21 +29,26 @@ Execution is asynchronous outside the hosted server request. Hosted worker jobs 
 Hosted API
   -> API key auth + tools scope
   -> run ownership + target placement validation
-  -> entitlement + quota preflight
+  -> entitlement + quota availability preflight
   -> placement-aware tool policy
-  -> denied invocation OR queued invocation + tool approval
-  -> approve/reject/expire exactly once
-  -> hosted worker job OR connected-node tool assignment
+  -> denied invocation with no quota reservation OR queued invocation + tool approval with invocation/active quota reservation
+  -> approve/reject/expire exactly once through dispatch outbox
+  -> hosted worker job OR connected-node tool assignment from idempotent dispatch key
   -> tool.call + adapter execution + artifact storage
-  -> tool.result + audit + quota finalize
+  -> artifact-byte quota after successful storage
+  -> tool.result + audit + quota finalize/release
 ```
 
 Side-effect ordering is strict:
 
 ```
-auth -> ownership -> entitlement -> quota reserve -> policy -> invocation row
-  -> ownership rows -> audit -> approval row -> approval ownership -> response
-  -> approval CAS -> policy/hash revalidation -> dispatch -> execution side effect
+auth -> ownership -> entitlement -> quota availability preflight -> policy
+  -> denied invocation/audit with no quota reservation
+  OR invocation row -> ownership rows -> approval row -> approval ownership
+  -> invocation/hourly + active quota reservation -> audit -> response
+  -> approval CAS -> policy/hash revalidation -> dispatch outbox upsert
+  -> hosted enqueue OR connected-node assignment creation -> execution side effect
+  -> artifact storage -> artifact-byte quota consume -> terminal result/audit/quota release
 ```
 
 ## File Structure
@@ -52,11 +57,11 @@ auth -> ownership -> entitlement -> quota reserve -> policy -> invocation row
 - `packages/contracts/src/enterprise.ts` - tool scopes, entitlements, quotas, ownership types, audit event/resource types.
 - `packages/contracts/src/assignment.ts` and `packages/contracts/src/node.ts` - additive tool assignment kind, tool payload, node tool capabilities, and node policy fields.
 - `packages/contracts/src/http-error.ts`, `endpoint-inventory.ts`, `openapi.ts`, generated OpenAPI JSON, and contract tests - named R22 errors and local/hosted OpenAPI boundary.
-- `packages/core/src/ports/*` and `packages/storage/src/postgres/*` - durable Postgres and memory-backed store support for hosted tool invocations, approvals, ownership, quotas, and tool assignments.
-- `packages/core/src/services/local-policy-gate.ts`, `tool-router.ts`, `approval-service.ts`, and a new hosted tool service file - placement-aware policy, redacted immutable execution plans, deferred dispatch, exactly-once approval outcomes, audit/quota hooks, and local backward compatibility.
+- `packages/core/src/ports/*` and `packages/storage/src/postgres/*` - durable Postgres and memory-backed store support for hosted tool invocations, approvals, dispatch outbox records, ownership, quotas, and tool assignments.
+- `packages/core/src/services/local-policy-gate.ts`, `tool-router.ts`, `approval-service.ts`, `node-coordinator-service.ts`, and a new hosted tool service file - placement-aware policy, redacted immutable execution plans, deferred dispatch, idempotent connected-node assignment creation, exactly-once approval outcomes, audit/quota hooks, and local backward compatibility.
 - `packages/protocol-rest/src/hosted-tool-routes.ts`, `hosted-auth.ts`, and server app/config/readiness files - authenticated hosted tool and tool-scoped approval routes.
 - `packages/queue/*`, `apps/worker/*`, and `packages/adapters/src/tools/*` - hosted worker tool job queue, fake/no-spend adapter construction, hosted execution, artifact storage, stale running reconciliation, and worker readiness.
-- `packages/protocol-node/*`, `packages/core/src/services/node-coordinator-service.ts`, `local-node-policy-service.ts`, and `apps/node/*` - connected-node tool assignment claim/sync/complete and node-side tool executor.
+- `packages/protocol-node/*`, `packages/core/src/services/local-node-policy-service.ts`, and `apps/node/*` - connected-node tool assignment claim/sync/complete and node-side tool executor.
 - `scripts/production-preflight.ts`, `production-canary.ts`, `production-manifest.ts`, `deploy/production/*`, `PRODUCT.md`, `README.md`, and development docs - ops checks, deterministic no-spend canary, manifest defaults, and product truth.
 
 ## Existing Context
@@ -173,6 +178,7 @@ export const assignmentClaimResponseSchema = z.object({
     "packages/contracts/src/enterprise.ts",
     "packages/contracts/src/assignment.ts",
     "packages/contracts/src/node.ts",
+    "packages/contracts/src/http-error.ts",
     "packages/contracts/src/endpoint-inventory.ts",
     "packages/contracts/src/openapi.ts"
   ],
@@ -354,17 +360,19 @@ Reviewer pass/fail slices:
 ```json
 {
   "id": "P21-T2-storage-control-plane",
-  "title": "Add durable tool stores, ownership, quotas, and assignment storage",
+  "title": "Add durable tool stores, dispatch outbox, ownership, quotas, and assignment storage",
   "files": [
     "packages/core/src/ports/tool-invocation-store.ts",
     "packages/core/src/ports/approval-store.ts",
     "packages/core/src/ports/control-plane-store.ts",
     "packages/core/src/ports/node-assignment-store.ts",
+    "packages/core/src/ports/tool-dispatch-outbox-store.ts",
     "packages/storage/src/postgres/schema.ts",
     "packages/storage/src/postgres/database.ts",
     "packages/storage/src/postgres/tool-invocation-store.ts",
     "packages/storage/src/postgres/approval-store.ts",
     "packages/storage/src/postgres/assignment-store.ts",
+    "packages/storage/src/postgres/tool-dispatch-outbox-store.ts",
     "packages/storage/src/postgres/control-plane-store.ts",
     "packages/storage/src/index.ts",
     "packages/storage/test/postgres-hosted-tool-store.test.ts",
@@ -384,16 +392,18 @@ Reviewer pass/fail slices:
     "packages/storage/src/postgres/assignment-store.ts",
     "packages/testkit/src/middleware-stores.ts"
   ],
-  "instructions": "Add Postgres-capable storage for hosted tool invocations and approvals following existing memory-fallback store patterns. Add table definitions for tool_invocations and approvals if absent, indexes for runId/status/approvalId/createdAt pagination, and schema compatibility coverage for pre-R22 additive migrations. Extend assignment storage with kind and toolInvocationId while defaulting existing rows to kind run. Extend control-plane ports/store for tool quota reservation helpers or generic quota kind support, resource ownership counts for tool_invocation and approval, and bootstrap validation that tool entitlements/quotas are explicit in staging/production. In memory/testkit stores, add list/get pagination filters needed by hosted routes and connected-node claims. Ownership attach for tool_invocation and approval must happen before list/get can expose rows; where an implementation cannot make resource and ownership fully transactional, it must expose a helper for service-level cleanup/failure handling.",
+  "instructions": "Add Postgres-capable storage for hosted tool invocations and approvals following existing memory-fallback store patterns. Add table definitions for tool_invocations and approvals if absent, indexes for runId/status/approvalId/createdAt pagination, and schema compatibility coverage for pre-R22 additive migrations. Add a durable tool dispatch outbox table/store keyed uniquely by approvalId plus toolInvocationId, with target placement, executionPlanHash, dispatch status, attempt count, last error code, and created/updated timestamps. Extend assignment storage with kind and toolInvocationId while defaulting existing rows to kind run. Extend control-plane ports/store for tool quota availability checks, quota reservation/finalization helpers or generic quota kind support, resource ownership counts for tool_invocation and approval, and bootstrap validation that tool entitlements/quotas are explicit in staging/production. In memory/testkit stores, add list/get pagination filters needed by hosted routes, connected-node claims, and dispatch outbox retry. Ownership attach for tool_invocation and approval must happen before list/get can expose rows; where an implementation cannot make resource and ownership fully transactional, it must expose a helper for service-level cleanup/failure handling. The dispatch outbox must let core recover when approval CAS succeeds but queue enqueue or connected-node assignment creation times out: retry must find the existing outbox row by approvalId/toolInvocationId and continue without duplicate side effects.",
   "acceptance": [
     "PostgresToolInvocationStore supports create, get, update, updateIfStatus, list by runId/type/status/approvalId with stable cursor pagination, and listByApproval.",
     "PostgresApprovalStore supports create, get, update, updateIfStatus, list by runId/status/approvalType with stable cursor pagination, and tool-only filtering can be implemented without scanning unrelated tenants in service code.",
     "Postgres schema adds tool_invocations and approvals additively and preserves existing pre-R22 fixture compatibility.",
+    "Postgres schema adds a durable dispatch outbox additively with a unique approvalId/toolInvocationId key and stable retry query ordering.",
     "Assignment storage persists kind and toolInvocationId and returns run assignment rows correctly when those fields are absent in older rows.",
     "Control-plane ownership supports tool_invocation and approval and countUnownedResources reports unowned tool invocations and approvals.",
     "Control-plane quota reservation accepts the three R22 quota kinds and keeps reserved/consumed/released/failed/expired state transitions unchanged.",
     "Bootstrap validation fails closed in staging/production when tool entitlement or quota fields are missing or legacy-empty.",
     "In-memory testkit stores match the Postgres behavior for list/get/updateIfStatus and pagination.",
+    "In-memory and Postgres dispatch outbox stores support upsert, getByApprovalAndInvocation, markDispatching, markDispatched, markFailedRetryable, and listRetryable without duplicate rows.",
     "Storage tests prove cross-tenant list/get cannot leak existence when service code filters by owned ids first."
   ],
   "checks": [
@@ -432,6 +442,13 @@ Reviewer pass/fail slices:
       "user_sees": "409 assignment_claim_conflict or 404 assignment_not_found."
     },
     {
+      "codepath": "ToolDispatchOutboxStore.upsertByApprovalAndInvocation",
+      "failure": "approval CAS already succeeded but enqueue/assignment creation timed out, then approval resolve is retried",
+      "exception": "unique constraint conflict or retryable store error",
+      "rescue": "Return the existing outbox row for the same approvalId/toolInvocationId and let core continue from the stored dispatch status instead of inserting a duplicate.",
+      "user_sees": "No duplicate worker job or node assignment; approval resolve eventually returns the existing dispatch result or a retryable tool_dispatch_failed state."
+    },
+    {
       "codepath": "Bootstrap validation",
       "failure": "legacy billing plan omits tool entitlements or quotas in staging/production",
       "exception": "ControlPlaneStoreError control_plane_bootstrap_malformed",
@@ -443,6 +460,7 @@ Reviewer pass/fail slices:
     "logs": [
       "storage.tool_invocation.create.failed reason=<low-cardinality>",
       "storage.approval.cas.miss status=<expected>",
+      "storage.tool_dispatch_outbox.retry status=<status> reason=<low-cardinality>",
       "control_plane.ownership.attach_failed resourceType=<type>"
     ],
     "success_metric": "storage.hosted_tool_store.operations.status.pass",
@@ -484,6 +502,12 @@ Reviewer pass/fail slices:
       "lens": "happy",
       "given": "Assignment kind tool with toolInvocationId",
       "expect": "create/get/claim preserve toolInvocationId"
+    },
+    {
+      "name": "dispatch outbox is idempotent",
+      "lens": "error_path",
+      "given": "upsert dispatch outbox twice with the same approvalId and toolInvocationId after a simulated enqueue timeout",
+      "expect": "one durable outbox row, attempt count advances, and retryable listing returns one item"
     },
     {
       "name": "quota kinds reserve and transition",
@@ -536,6 +560,11 @@ Reviewer pass/fail slices:
         "name": "ControlPlaneStore tool ownership/quota support",
         "kind": "interface",
         "signature": "existing quota/ownership methods accept R22 tool quota kinds and resource types"
+      },
+      {
+        "name": "ToolDispatchOutboxStore",
+        "kind": "interface",
+        "signature": "upsertByApprovalAndInvocation(input) / getByApprovalAndInvocation(approvalId, toolInvocationId) / markDispatching(id) / markDispatched(id, dispatchId) / markFailedRetryable(id, reasonCode) / listRetryable(limit) => Promise<ToolDispatchOutboxRecord[]>"
       }
     ],
     "imports_from_other_tasks": [
@@ -553,8 +582,10 @@ Reviewer pass/fail slices:
     "file_paths_consumed_by_other_tasks": [
       "packages/storage/src/postgres/tool-invocation-store.ts",
       "packages/storage/src/postgres/approval-store.ts",
+      "packages/storage/src/postgres/tool-dispatch-outbox-store.ts",
       "packages/core/src/ports/control-plane-store.ts",
       "packages/core/src/ports/node-assignment-store.ts",
+      "packages/core/src/ports/tool-dispatch-outbox-store.ts",
       "packages/testkit/src/middleware-stores.ts"
     ]
   }
@@ -572,12 +603,13 @@ Reviewer pass/fail slices:
 ```json
 {
   "id": "P21-T3-core-tool-policy-approval-dispatch",
-  "title": "Add placement-aware policy and deferred tool dispatch",
+  "title": "Add placement-aware policy, idempotent dispatch, and connected-node assignment creation",
   "files": [
     "packages/core/src/services/local-policy-gate.ts",
     "packages/core/src/services/tool-router.ts",
     "packages/core/src/services/approval-service.ts",
     "packages/core/src/services/hosted-tool-service.ts",
+    "packages/core/src/services/node-coordinator-service.ts",
     "packages/core/src/index.ts",
     "packages/core/test/hosted-tool-policy.test.ts",
     "packages/core/test/tool-approval-dispatch.test.ts",
@@ -592,11 +624,12 @@ Reviewer pass/fail slices:
     "packages/core/src/services/local-policy-gate.ts",
     "packages/core/src/services/tool-router.ts",
     "packages/core/src/services/approval-service.ts",
+    "packages/core/src/services/node-coordinator-service.ts",
     "packages/core/src/services/control-plane-service.ts",
     "packages/core/src/ports/policy.ts",
     "packages/testkit/src/middleware-stores.ts"
   ],
-  "instructions": "Refactor the existing local policy gate into a placement-aware resolver without breaking the local daemon. Keep the current disabled default for global.enabled false and allowedPlacements local. Add hosted and connected_local_node placement config with disabled defaults, hosted repo denial, connected-node default deny, browser always denied, and shell raw-field rejection before execution plans are built. Extend ToolRouter or wrap it through a HostedToolService so local mode keeps synchronous behavior while hosted mode persists queued/denied invocations and approvals, then calls an injected dispatch callback only after a tool-scoped approval is approved and the executionPlanHash revalidates. Hosted invoke must require runId, validate target placement against run placement/offload metadata, reserve tool quotas before queued work, attach ownership for tool_invocation and approval before response, record audit, and return 202 for accepted queued work. Rejection and expiration must mark invocation denied and release active quota. Duplicate approval resolve must return approval_not_pending without duplicate dispatch. Runtime approvals must not be resolved through hosted tool paths.",
+  "instructions": "Refactor the existing local policy gate into a placement-aware resolver without breaking the local daemon. Keep the current disabled default for global.enabled false and allowedPlacements local. Add hosted and connected_local_node placement config with disabled defaults, hosted repo denial, connected-node default deny, browser always denied, and shell raw-field rejection before execution plans are built. Extend ToolRouter or wrap it through a HostedToolService so local mode keeps synchronous behavior while hosted mode persists queued/denied invocations and approvals, then calls an injected dispatch callback only after a tool-scoped approval is approved and the executionPlanHash revalidates. Hosted invoke must require runId, validate target placement against run placement/offload metadata, perform entitlement and quota-store availability preflight before policy, but reserve hourly invocation and active tool quotas only after policy allows approval-required or dispatchable work. Policy-denied invocations must not reserve quota. Artifact-byte quota is not reserved here; it is consumed only by worker/node artifact storage after content is stored. Attach ownership for tool_invocation and approval before response, record audit, and return 202 for accepted queued work. Add a core dispatch outbox use path keyed by approvalId/toolInvocationId so approval CAS success followed by hosted enqueue or connected-node assignment timeout can be retried without duplicate side effects. Move connected-node assignment creation into this task by extending NodeCoordinatorService with createToolAssignment and idempotency-key support; T4 can depend on this export before it wires connected_local_node approval dispatch. Rejection and expiration must mark invocation denied and release active quota. Duplicate approval resolve must return approval_not_pending without duplicate dispatch. Runtime approvals must not be resolved through hosted tool paths.",
   "acceptance": [
     "Local daemon ToolRouter behavior remains backward compatible for existing R17 fake and real-tool tests.",
     "Disabled hosted tools deny with tool_hosted_tools_disabled or tool_policy_denied after successful auth/run ownership and persist a denied invocation when configured to do so.",
@@ -606,8 +639,10 @@ Reviewer pass/fail slices:
     "Shell input containing command, executable, executablePath, shell, pty, terminal, env, or process fields denies with shell_command_denied before approval creation.",
     "Hosted invocation without runId returns tool_run_required before any invocation, quota, approval, queue job, assignment, or adapter side effect.",
     "Target placement mismatch returns tool_target_mismatch before dispatch.",
-    "Tool entitlements, allowedToolTypes, and quotas are enforced before hosted worker or node side effects.",
-    "Approval approve transitions pending to approved exactly once, revalidates execution plan hash, dispatches exactly one job or assignment, and consumes/releases quota correctly.",
+    "Tool entitlements and quota-store availability are checked before policy; hourly invocation and active tool quotas are reserved only for policy-allowed approval-required or dispatchable work; policy-denied invocations reserve no quota.",
+    "Approval approve transitions pending to approved exactly once, revalidates execution plan hash, upserts one dispatch outbox record keyed by approvalId/toolInvocationId, dispatches exactly one job or assignment, and consumes/releases quota correctly.",
+    "Approval CAS success followed by enqueue or assignment creation timeout is recoverable by retrying from the durable dispatch outbox without duplicate worker jobs or node assignments.",
+    "NodeCoordinatorService.createToolAssignment exists before hosted server admission wiring and creates idempotent tool assignments linked to toolInvocationId.",
     "Approval reject and expire mark queued invocation denied with tool_approval_rejected or tool_approval_expired and dispatch nothing.",
     "Runtime approvals with runtimeApprovalToken return hosted_runtime_approval_bridge_unshipped or approval_scope_denied in hosted tool mode.",
     "Audit payloads and invocation/approval payloads are redacted and bounded."
@@ -640,6 +675,20 @@ Reviewer pass/fail slices:
       "user_sees": "Invocation terminal error tool_policy_failed."
     },
     {
+      "codepath": "dispatch outbox after approval CAS",
+      "failure": "approval CAS succeeds but hosted enqueue or connected-node assignment creation times out before the route observes a dispatch result",
+      "exception": "ToolDispatchError retryable timeout or queue/assignment store timeout",
+      "rescue": "Persist or reuse the approvalId/toolInvocationId outbox row, return/retry from the stored dispatch state, and ensure dispatch callback receives the idempotency key.",
+      "user_sees": "At most one worker job or node assignment exists; retry either returns the existing dispatch id or fails visibly with tool_dispatch_failed without duplicate side effects."
+    },
+    {
+      "codepath": "NodeCoordinatorService.createToolAssignment",
+      "failure": "no owned online node, node lacks capability, node policy denies target, duplicate dispatch key, or assignment store unavailable",
+      "exception": "NodeCoordinatorError or store error",
+      "rescue": "Return tool_node_unavailable, node_policy_denied, existing assignment for same idempotency key, or tool_dispatch_unavailable before node exposure.",
+      "user_sees": "tool_node_unavailable, node_policy_denied, existing dispatch id, or tool_dispatch_unavailable."
+    },
+    {
       "codepath": "ApprovalService.resolve hosted tool mode",
       "failure": "duplicate approve/reject, expired approval, runtime approval token, or missing linked invocation",
       "exception": "ServiceError approval_not_pending, approval_scope_denied, hosted_runtime_approval_bridge_unshipped, or tool_invocation_not_found",
@@ -650,7 +699,7 @@ Reviewer pass/fail slices:
       "codepath": "quota reservation/finalization",
       "failure": "quota store unavailable, active tool quota exceeded, hourly invocation quota exceeded, or artifact byte quota exceeded",
       "exception": "ControlPlaneError quota_exceeded or quota_store_unavailable",
-      "rescue": "Fail before dispatch; release or fail reservations on downstream errors.",
+      "rescue": "Fail before dispatch for availability/active/hourly quota errors; reserve active/hourly only after policy allow; consume artifact bytes only after successful content storage; release or fail reservations on downstream errors.",
       "user_sees": "429 quota_exceeded or 503 quota_store_unavailable with reasonCode details."
     },
     {
@@ -665,6 +714,7 @@ Reviewer pass/fail slices:
     "logs": [
       "tool.invoke.admitted routeId=<route> placement=<placement> toolType=<type>",
       "tool.invoke.denied reason=<reasonCode> placement=<placement> toolType=<type>",
+      "tool.dispatch.outbox.upserted status=<status> target=<target>",
       "tool.approval.resolved status=<approved|rejected|expired> placement=<placement>",
       "tool.execution.dispatched target=<hosted|connected_local_node> toolType=<type>"
     ],
@@ -727,6 +777,24 @@ Reviewer pass/fail slices:
       "expect": "one approved result, one approval_not_pending, one dispatch call"
     },
     {
+      "name": "approval CAS enqueue timeout recovers",
+      "lens": "error_path",
+      "given": "Approval CAS succeeds, dispatch outbox row is written, hosted enqueue or node assignment creation times out, then resolve is retried",
+      "expect": "retry reuses the existing approvalId/toolInvocationId outbox row and creates at most one queue job or one tool assignment"
+    },
+    {
+      "name": "connected-node assignment creation is available to dispatch",
+      "lens": "happy",
+      "given": "Approved connected_local_node tool invocation with an owned online node advertising the required capability",
+      "expect": "NodeCoordinatorService.createToolAssignment returns one kind tool assignment linked to toolInvocationId"
+    },
+    {
+      "name": "connected-node no eligible node fails before assignment exposure",
+      "lens": "happy_shadow_empty",
+      "given": "Approved connected_local_node tool invocation with no owned online node advertising the required capability",
+      "expect": "NodeCoordinatorService.createToolAssignment returns tool_node_unavailable and creates no assignment"
+    },
+    {
       "name": "approval reject prevents side effects",
       "lens": "happy",
       "given": "Pending tool approval rejected",
@@ -777,7 +845,12 @@ Reviewer pass/fail slices:
       {
         "name": "ToolDispatchCallback",
         "kind": "function",
-        "signature": "(input: { invocation: ToolInvocation; target: ToolInvocationTarget; executionPlanHash: string }) => Promise<{ dispatchId: string; target: 'hosted' | 'connected_local_node' }>"
+        "signature": "(input: { invocation: ToolInvocation; approvalId: string; target: ToolInvocationTarget; executionPlanHash: string; idempotencyKey: string }) => Promise<{ dispatchId: string; target: 'hosted' | 'connected_local_node' }>"
+      },
+      {
+        "name": "NodeCoordinatorService.createToolAssignment",
+        "kind": "function",
+        "signature": "createToolAssignment(input: { runId: string; toolInvocationId: string; nodeId?: string; requiredCapability: string; idempotencyKey: string }) => Promise<Assignment>"
       }
     ],
     "imports_from_other_tasks": [
@@ -795,11 +868,22 @@ Reviewer pass/fail slices:
         "from_task": "P21-T2-storage-control-plane",
         "name": "ControlPlaneStore tool ownership/quota support",
         "signature": "existing quota/ownership methods accept R22 tool quota kinds and resource types"
+      },
+      {
+        "from_task": "P21-T2-storage-control-plane",
+        "name": "ToolDispatchOutboxStore",
+        "signature": "upsertByApprovalAndInvocation(input) / getByApprovalAndInvocation(approvalId, toolInvocationId) / markDispatching(id) / markDispatched(id, dispatchId) / markFailedRetryable(id, reasonCode) / listRetryable(limit) => Promise<ToolDispatchOutboxRecord[]>"
+      },
+      {
+        "from_task": "P21-T2-storage-control-plane",
+        "name": "NodeAssignmentStore tool fields",
+        "signature": "Assignment rows preserve kind?: 'run' | 'tool' and toolInvocationId?: string"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
       "packages/core/src/services/hosted-tool-service.ts",
       "packages/core/src/services/tool-router.ts",
+      "packages/core/src/services/node-coordinator-service.ts",
       "packages/core/src/services/local-policy-gate.ts",
       "packages/core/src/index.ts"
     ]
@@ -810,8 +894,8 @@ Reviewer pass/fail slices:
 Reviewer pass/fail slices:
 
 - Policy: default deny, hosted allow, connected-node allow, hosted repo deny, browser deny, shell raw-field deny.
-- Approval: approve/reject/expire exactly once, runtime approval bridge denied, plan hash revalidation.
-- Safety: side-effect ordering, quota release/consume, audit/redaction, local compatibility.
+- Approval/dispatch: approve/reject/expire exactly once, runtime approval bridge denied, plan hash revalidation, dispatch outbox recovery, connected-node assignment creation export.
+- Safety: side-effect ordering, quota availability/reservation/consume ordering, audit/redaction, local compatibility.
 
 ### Task P21-T4-hosted-server-admission
 
@@ -838,6 +922,7 @@ Reviewer pass/fail slices:
   ],
   "context_files": [
     "docs/superpowers/specs/2026-06-01-phase-21-r22-hosted-connected-real-tools.md",
+    "packages/contracts/src/http-error.ts",
     "packages/protocol-rest/src/hosted-auth.ts",
     "packages/protocol-rest/src/middleware-routes.ts",
     "apps/server/src/app.ts",
@@ -845,17 +930,18 @@ Reviewer pass/fail slices:
     "apps/server/src/readiness.ts",
     "apps/server/test/hosted-server.test.ts"
   ],
-  "instructions": "Add a hosted-only route module for the R22 tool subset instead of exposing the local middleware module wholesale. Register POST /tools/invocations, GET /tools/invocations, GET /tools/invocations/:id, GET /approvals, GET /approvals/:id, POST /approvals/:id/approve, and POST /approvals/:id/reject only when hosted control plane is available. Do not register hosted POST /approvals. Update hosted-auth route rules so tool write/read routes require tools:write/tools:read during onRequest before body parsing. Server app must construct Postgres tool/approval stores, HostedToolService, and a dispatch callback that enqueues a hosted worker tool job for hosted placement or creates a connected-node tool assignment for connected_local_node placement. Admission must authorize run ownership before existence-sensitive list/get details, apply entitlements/quotas/audit, attach ownership rows before returning, and return 202 for queued/approval-required work. Readiness/config must report checks.tools with redacted enabled flags, policy source kind, allowed placements/tool types, store availability, queue availability, ownership support, quota support, audit support, and route auth support. Default/local tests use fake/no-spend adapters and memory stores.",
+  "instructions": "Add a hosted-only route module for the R22 tool subset instead of exposing the local middleware module wholesale. Register POST /tools/invocations, GET /tools/invocations, GET /tools/invocations/:id, GET /approvals, GET /approvals/:id, POST /approvals/:id/approve, and POST /approvals/:id/reject only when hosted control plane is available. Do not register hosted POST /approvals. Update hosted-auth route rules so tool write/read routes require tools:write/tools:read during onRequest before body parsing. Server app must construct Postgres tool/approval stores, HostedToolService, and a dispatch callback that enqueues a hosted worker tool job for hosted placement or calls the T3 NodeCoordinatorService.createToolAssignment export for connected_local_node placement. The dispatch callback must receive and forward the T3 approvalId/toolInvocationId idempotency key; it must not invent a separate node assignment API in this task. Admission must authorize run ownership before existence-sensitive list/get details, apply entitlements and quota-store availability preflight, then rely on T3 to reserve active/hourly quotas only for policy-allowed queued work, attach ownership rows before returning, and return 202 for queued/approval-required work. Approval list/get must be tool-only, ownership-first, paginated, and must deny or hide runtime approvals without leaking existence. Readiness/config must report checks.tools with redacted enabled flags, policy source kind, allowed placements/tool types, store availability, queue availability, ownership support, quota support, audit support, and route auth support. Default/local tests use fake/no-spend adapters and memory stores.",
   "acceptance": [
     "Hosted server registers the R22 tool routes and does not register hosted POST /approvals.",
     "tools:write is required for POST /tools/invocations and approve/reject of tool-scoped approvals.",
     "tools:read is required for listing/getting tool invocations and tool-scoped approvals.",
+    "Approval list/get tests explicitly cover tools:read, ownership-first scoping, tool-only filtering, runtime approval denial, cursor pagination without existence leak, and cross-tenant approval ids.",
     "Auth failure, missing scope, invalid body, missing runId, run not found, tenant mismatch, entitlement denial, quota exhaustion, and target selection failure occur before dispatch.",
     "List/get tool invocation routes scope by ownership before returning not-found or resource details.",
     "List/get approval routes expose only tool-scoped approvals owned by the tenant and deny runtime approvals.",
     "POST /tools/invocations returns 202 for accepted queued/approval-required work and includes invocation plus approval when approval is required.",
     "Policy denial after auth/run ownership persists a denied invocation, attaches ownership, audits tool.invoke_denied, and returns safe toolInvocationId details.",
-    "Approval approve calls the core exactly-once dispatch path and returns approval plus invocation without blocking for worker/node execution.",
+    "Approval approve calls the T3 core exactly-once dispatch path with the approvalId/toolInvocationId idempotency key and returns approval plus invocation without blocking for worker/node execution.",
     "Approval reject marks invocation denied and returns approval plus invocation.",
     "Readiness reports checks.tools and fails closed in staging/production when tools are enabled but auth, stores, queue, quota, audit, or policy are missing.",
     "Request/audit/log details are redacted and low-cardinality."
@@ -890,10 +976,17 @@ Reviewer pass/fail slices:
       "user_sees": "404 tool_invocation_not_found/approval_not_found or 403 tenant_access_denied according to existing control-plane convention."
     },
     {
+      "codepath": "GET /approvals and GET /approvals/:id hosted tool routes",
+      "failure": "caller lacks tools:read, approval id belongs to another tenant, approval is runtime-scoped, cursor crosses tenant boundary, or filter would include non-tool approvals",
+      "exception": "ControlPlaneError or ServiceError approval_scope_denied",
+      "rescue": "Authenticate and check tools:read first, resolve owned approval ids before loading records, filter to toolInvocationId-bearing approvals only, and return not_found/scope_denied without resource payload.",
+      "user_sees": "403 missing_scope, 404 approval_not_found, approval_scope_denied, or hosted_runtime_approval_bridge_unshipped with no cross-tenant or runtime approval details."
+    },
+    {
       "codepath": "POST /approvals/:id/approve hosted route",
       "failure": "approval is runtime-scoped, already resolved, expired, missing linked invocation, policy hash mismatch, or dispatch create fails",
       "exception": "ServiceError",
-      "rescue": "Return named error; if dispatch fails after approval CAS, mark invocation failed with tool_dispatch_failed and audit.",
+      "rescue": "Return named error; if dispatch fails after approval CAS, rely on T3 dispatch outbox retry/idempotency and mark invocation failed with tool_dispatch_failed only for non-retryable dispatch failure.",
       "user_sees": "approval_scope_denied, hosted_runtime_approval_bridge_unshipped, approval_not_pending, tool_policy_failed, or tool_dispatch_failed."
     },
     {
@@ -928,6 +1021,12 @@ Reviewer pass/fail slices:
       "expect": "tenant_access_denied missing_scope and no side effects"
     },
     {
+      "name": "approval list requires tools read",
+      "lens": "error_path",
+      "given": "API key with tools:write but without tools:read calls GET /approvals",
+      "expect": "missing_scope and no approval records are loaded"
+    },
+    {
       "name": "missing run id rejected",
       "lens": "happy_shadow_nil",
       "given": "Hosted POST /tools/invocations with valid body except runId",
@@ -938,6 +1037,30 @@ Reviewer pass/fail slices:
       "lens": "error_path",
       "given": "Tenant B gets Tenant A tool invocation id",
       "expect": "not found or tenant denied without invocation payload"
+    },
+    {
+      "name": "approval list is ownership first and tool only",
+      "lens": "integration",
+      "given": "Tenant owns one tool approval, another tenant owns one tool approval, and same tenant has one runtime approval",
+      "expect": "GET /approvals returns only the owned tool approval, not the cross-tenant approval or runtime approval"
+    },
+    {
+      "name": "approval get cross tenant id does not leak",
+      "lens": "error_path",
+      "given": "Tenant B calls GET /approvals/:id with Tenant A tool approval id",
+      "expect": "approval_not_found or tenant_access_denied without approval payload, status, run id, or tool invocation id"
+    },
+    {
+      "name": "approval get runtime approval denied",
+      "lens": "error_path",
+      "given": "Tenant calls GET /approvals/:id for an owned runtime approval without toolInvocationId",
+      "expect": "approval_scope_denied or hosted_runtime_approval_bridge_unshipped and no RuntimeRunnerService bridge"
+    },
+    {
+      "name": "approval pagination has no existence leak",
+      "lens": "integration",
+      "given": "Cursor pagination over mixed tenant and mixed scope approvals",
+      "expect": "page boundaries and nextCursor are computed over owned tool approvals only"
     },
     {
       "name": "entitlement denied before dispatch",
@@ -1037,7 +1160,12 @@ Reviewer pass/fail slices:
       {
         "from_task": "P21-T3-core-tool-policy-approval-dispatch",
         "name": "ToolDispatchCallback",
-        "signature": "(input: { invocation: ToolInvocation; target: ToolInvocationTarget; executionPlanHash: string }) => Promise<{ dispatchId: string; target: 'hosted' | 'connected_local_node' }>"
+        "signature": "(input: { invocation: ToolInvocation; approvalId: string; target: ToolInvocationTarget; executionPlanHash: string; idempotencyKey: string }) => Promise<{ dispatchId: string; target: 'hosted' | 'connected_local_node' }>"
+      },
+      {
+        "from_task": "P21-T3-core-tool-policy-approval-dispatch",
+        "name": "NodeCoordinatorService.createToolAssignment",
+        "signature": "createToolAssignment(input: { runId: string; toolInvocationId: string; nodeId?: string; requiredCapability: string; idempotencyKey: string }) => Promise<Assignment>"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
@@ -1051,16 +1179,27 @@ Reviewer pass/fail slices:
 Reviewer pass/fail slices:
 
 - Routes/auth: scope rules, route registration, POST `/approvals` absence.
-- Admission: side-effect ordering, ownership, entitlements, quotas, policy, denied invocation persistence.
-- Approval: approve/reject/expire, runtime approval denial, dispatch exactly once.
+- Admission: side-effect ordering, ownership, entitlements, quota availability/reservation ordering, policy, denied invocation persistence.
+- Approval list/get: `tools:read`, ownership-first scoping, tool-only filtering, runtime approval denial, pagination/no existence leak, cross-tenant ids.
+- Approval resolve: approve/reject/expire, runtime approval denial, dispatch outbox/idempotency key propagation, dispatch exactly once.
 - Readiness: `checks.tools` disabled-ready and enabled-fail-closed states.
+
+Subtask matrix:
+
+| Slice | Files | Must pass |
+| --- | --- | --- |
+| Route registration and auth | `packages/protocol-rest/src/hosted-tool-routes.ts`, `packages/protocol-rest/src/hosted-auth.ts`, `packages/protocol-rest/test/hosted-tool-routes.test.ts` | R22 hosted routes present, hosted `POST /approvals` absent, `tools:write`/`tools:read` enforced before body parsing. |
+| Admission and ownership | `packages/protocol-rest/src/hosted-tool-routes.ts`, `apps/server/test/hosted-tools.test.ts` | run ownership before existence-sensitive details, entitlement/quota availability preflight, policy-denied invocation persistence, no dispatch before approval. |
+| Approval list/get | `packages/protocol-rest/test/hosted-tool-routes.test.ts`, `apps/server/test/hosted-tools.test.ts` | tool-only approval filters, cross-tenant id denial/no leak, runtime approval denial, cursor pagination over owned tool approvals only. |
+| Approval resolve and dispatch | `apps/server/src/app.ts`, `apps/server/test/hosted-tools.test.ts` | dispatch callback forwards T3 idempotency key, hosted enqueue and connected-node assignment use existing T3 contracts, duplicate approval does not duplicate side effects. |
+| Readiness/config | `apps/server/src/config.ts`, `apps/server/src/readiness.ts`, server production tests | disabled tools ready, enabled tools fail closed on missing auth/store/queue/quota/audit/policy. |
 
 ### Task P21-T5-hosted-worker-tool-executor
 
 ```json
 {
   "id": "P21-T5-hosted-worker-tool-executor",
-  "title": "Execute hosted worker tool jobs after approval",
+  "title": "Execute hosted worker tool jobs and export placement-neutral tool adapters",
   "files": [
     "packages/core/src/ports/queue.ts",
     "packages/queue/src/index.ts",
@@ -1097,7 +1236,7 @@ Reviewer pass/fail slices:
     "packages/adapters/src/tools/fetch-tool-adapter.ts",
     "packages/adapters/src/tools/shell-catalog-tool-adapter.ts"
   ],
-  "instructions": "Extend the existing queue abstraction with tool jobs or a typed tool-job channel while preserving run job behavior. Implement hosted worker tool execution that claims tool jobs, reloads invocation/run/approval from durable stores, verifies status queued, verifies approval approved unless an explicit test/local fake no-approval policy allows it, re-runs placement-aware policy with stored request, compares executionPlanHash, and compare-and-set transitions queued to running before adapter invocation. Construct hosted tool adapters from worker-owned config only. Use fake/no-spend clients by default in tests and local smoke. Hosted fetch, web_search, github, shell, and fake_echo may execute when policy/config allow. Hosted repo must fail before adapter dispatch with repo_hosted_unshipped. Browser must fail with browser_tool_unshipped. Hosted shell must be command-catalog process execution only, no PTY, no terminal, no raw command strings, no request-owned executable/env. Store bounded artifacts through existing object artifact content store under runs/<runId>/tools/<toolInvocationId>/<safeName>. Emit tool.call on start and exactly one terminal tool.result. Reconcile stale running hosted tool invocations on startup/retry exhaustion.",
+  "instructions": "Extend the existing queue abstraction with tool jobs or a typed tool-job channel while preserving run job behavior. Implement hosted worker tool execution that claims tool jobs, reloads invocation/run/approval from durable stores, verifies status queued, verifies approval approved unless an explicit test/local fake no-approval policy allows it, re-runs placement-aware policy with stored request, compares executionPlanHash, and compare-and-set transitions queued to running before adapter invocation. Construct hosted tool adapters from worker-owned config only. In packages/adapters/src/tools/index.ts, export a placement-neutral adapter factory contract with separate hosted and connected-node config shapes: buildHostedToolAdapters must accept HostedToolAdapterConfig, not the whole WorkerConfig, and buildNodeToolAdapters must accept NodeToolAdapterConfig that contains only node-owned credentials/config/cwd policy/command catalog. T6 may import buildNodeToolAdapters, but it must never pass WorkerConfig or hosted credentials to connected-node execution. Use fake/no-spend clients by default in tests and local smoke. Hosted fetch, web_search, github, shell, and fake_echo may execute when policy/config allow. Hosted repo must fail before adapter dispatch with repo_hosted_unshipped. Browser must fail with browser_tool_unshipped. Hosted shell must be command-catalog process execution only, no PTY, no terminal, no raw command strings, no request-owned executable/env. Store bounded artifacts through existing object artifact content store under runs/<runId>/tools/<toolInvocationId>/<safeName>. Consume tool_artifact_bytes_per_hour only after content is successfully stored and ownership is attached. Emit tool.call on start and exactly one terminal tool.result. Reconcile stale running hosted tool invocations on startup/retry exhaustion.",
   "acceptance": [
     "Existing run queue tests continue to pass and run job payload compatibility is preserved.",
     "Worker claim readiness fails closed when tools are enabled but policy, stores, queue, object store, fake/real adapter config, or shell catalog is invalid.",
@@ -1107,8 +1246,9 @@ Reviewer pass/fail slices:
     "Hosted web_search fake client covers success, zero results, provider unavailable, and oversized output without live provider calls.",
     "Hosted GitHub fake client covers read-only success, repo denied, missing token, rate limit, and no mutations.",
     "Hosted shell command-catalog executor covers allowlisted fake command, unknown command, raw command denial, non-zero exit, timeout, output flood, and no PTY.",
+    "Adapter exports include a placement-neutral factory plus buildHostedToolAdapters(HostedToolAdapterConfig) and buildNodeToolAdapters(NodeToolAdapterConfig), with tests proving node config cannot be WorkerConfig or hosted credentials.",
     "Hosted repo returns repo_hosted_unshipped and browser returns browser_tool_unshipped before adapter invocation.",
-    "Artifacts are redacted, size-bounded, digest-recorded, owned before content is visible, and stored through the existing object artifact content store.",
+    "Artifacts are redacted, size-bounded, digest-recorded, owned before content is visible, stored through the existing object artifact content store, and charged to artifact-byte quota only after successful storage.",
     "Queue retry exhaustion terminalizes invocation failed with tool_dispatch_retry_exhausted.",
     "Worker restart reconciliation marks stale running hosted tool invocations failed with tool_worker_restarted unless a valid in-flight job is proven.",
     "Logs and metrics use low-cardinality labels only."
@@ -1155,7 +1295,7 @@ Reviewer pass/fail slices:
       "codepath": "artifact storage",
       "failure": "object store unavailable, write timeout, auth failed, bucket missing, digest mismatch, content too large, or redaction failure",
       "exception": "Error with object_store_* or artifact_* code",
-      "rescue": "Mark invocation failed with tool_artifact_write_failed or specific object-store reason and do not report completed output.",
+      "rescue": "Mark invocation failed with tool_artifact_write_failed or specific object-store reason and do not report completed output. Consume artifact-byte quota only after the object-store write, digest verification, and ownership attach succeed.",
       "user_sees": "object_store_unavailable, object_store_timeout, object_store_auth_failed, object_store_bucket_not_found, artifact_digest_mismatch, tool_output_limit_exceeded, or tool_redaction_failed."
     },
     {
@@ -1226,6 +1366,12 @@ Reviewer pass/fail slices:
       "expect": "github_token_missing and no token in logs"
     },
     {
+      "name": "node adapter factory rejects hosted config",
+      "lens": "error_path",
+      "given": "buildNodeToolAdapters is called with a WorkerConfig-shaped object or hosted credential names",
+      "expect": "typecheck or runtime config validation rejects it; node factory accepts only NodeToolAdapterConfig with node-owned cwd policy, command catalog, and credential references"
+    },
+    {
       "name": "hosted shell fake command succeeds",
       "lens": "happy",
       "given": "Command catalog entry for safe fake command and bounded args",
@@ -1277,7 +1423,17 @@ Reviewer pass/fail slices:
       {
         "name": "buildHostedToolAdapters",
         "kind": "function",
-        "signature": "buildHostedToolAdapters(config: WorkerConfig, deps?: HostedToolAdapterDeps) => Map<string, ToolAdapter>"
+        "signature": "buildHostedToolAdapters(config: HostedToolAdapterConfig, deps?: HostedToolAdapterDeps) => Map<string, ToolAdapter>"
+      },
+      {
+        "name": "buildNodeToolAdapters",
+        "kind": "function",
+        "signature": "buildNodeToolAdapters(config: NodeToolAdapterConfig, deps?: NodeToolAdapterDeps) => Map<string, ToolAdapter>"
+      },
+      {
+        "name": "ToolAdapterFactoryConfig",
+        "kind": "type",
+        "signature": "HostedToolAdapterConfig and NodeToolAdapterConfig are placement-specific and exclude WorkerConfig/hosted credentials from node execution"
       },
       {
         "name": "HostedToolWorker execution behavior",
@@ -1311,7 +1467,19 @@ Reviewer pass/fail slices:
 - Queue: run compatibility and tool job semantics.
 - Worker state machine: claim, state reload, approval check, hash check, CAS, retry/restart.
 - Tools: fetch, web_search, github, shell, fake_echo success/error, hosted repo denial, browser denial.
+- Adapter factory: hosted config stays worker-owned; node factory is placement-neutral/node-owned and rejects WorkerConfig or hosted credentials.
 - Artifacts/observability: bounded storage, redaction, low-cardinality logs/metrics.
+
+Subtask matrix:
+
+| Slice | Files | Must pass |
+| --- | --- | --- |
+| Queue compatibility | `packages/core/src/ports/queue.ts`, `packages/queue/src/*`, `packages/queue/test/run-queue.test.ts` | Existing run job semantics unchanged and tool job channel is typed/idempotent. |
+| Hosted worker state machine | `apps/worker/src/worker.ts`, `apps/worker/test/hosted-tool-worker.test.ts` | reload state, approval check, hash check, queued-to-running CAS, retry exhaustion, stale-running reconciliation. |
+| Adapter factory | `packages/adapters/src/tools/index.ts`, adapter tests | `buildHostedToolAdapters(HostedToolAdapterConfig)` and `buildNodeToolAdapters(NodeToolAdapterConfig)` expose separate config shapes; node factory has no `WorkerConfig` or hosted credential dependency. |
+| Hosted tool adapters | tool adapter files and adapter tests | fake/no-spend fetch/search/GitHub/shell/fake_echo success and named failures, hosted repo/browser denial before dispatch. |
+| Artifacts and quota | worker tests plus object-store fakes | content stored through existing object store, ownership attached before visibility, artifact-byte quota consumed only after successful storage. |
+| Worker readiness/config | `apps/worker/src/config.ts`, `apps/worker/src/ready.ts`, production worker tests | enabled tools fail closed on missing policy/store/queue/object-store/adapter/shell catalog config. |
 
 ### Task P21-T6-connected-node-tool-assignments
 
@@ -1320,7 +1488,6 @@ Reviewer pass/fail slices:
   "id": "P21-T6-connected-node-tool-assignments",
   "title": "Add connected-node tool assignment execution",
   "files": [
-    "packages/core/src/services/node-coordinator-service.ts",
     "packages/core/src/services/local-node-policy-service.ts",
     "packages/protocol-node/src/node-client.ts",
     "packages/protocol-node/src/node-routes.ts",
@@ -1346,7 +1513,7 @@ Reviewer pass/fail slices:
     "apps/node/src/app.ts",
     "apps/node/src/config.ts"
   ],
-  "instructions": "Extend the connected-node path additively. Node registration/heartbeat may advertise tools.real, tool.fetch, tool.web_search, tool.github, tool.repo, and tool.shell plus redacted NodePolicy tool fields. NodeCoordinator must create and claim tool assignments linked to toolInvocationId while preserving existing run assignment claim behavior. Claim response includes nullable toolInvocation payload only for kind tool. Server-side node routes must authorize node, assignment, run, and tool invocation ownership before exposing payloads. Assignment completion accepts optional toolInvocation terminal patch for kind tool and rejects mismatched assignment id, run id, node id, or tool invocation id with tool_assignment_mismatch. Node app routes kind run to existing run execution and kind tool to a new node-side tool execution path using node-owned config and adapters from the R22 adapter exports. Connected-node repo is local workspace read-only only; shell is command-catalog only; fetch/search/github use node-owned config; browser denies. Node syncs tool.call/tool.result events and artifacts through existing event/artifact routes. Node offline or assignment expiry terminalizes invocation with tool_assignment_expired or tool_node_unavailable.",
+  "instructions": "Extend the connected-node path additively. Node registration/heartbeat may advertise tools.real, tool.fetch, tool.web_search, tool.github, tool.repo, and tool.shell plus redacted NodePolicy tool fields. T3 owns NodeCoordinatorService.createToolAssignment; this task must not reimplement assignment creation. Instead, extend claim, sync, completion, local-node policy, and node app execution for tool assignments created by that T3 service. Claim response includes nullable toolInvocation payload only for kind tool. Server-side node routes must authorize node, assignment, run, and tool invocation ownership before exposing payloads. Assignment completion accepts optional toolInvocation terminal patch for kind tool and rejects mismatched assignment id, run id, node id, or tool invocation id with tool_assignment_mismatch. Node app routes kind run to existing run execution and kind tool to a new node-side tool execution path using buildNodeToolAdapters(NodeToolAdapterConfig) from T5. NodeToolAdapterConfig must be built only from apps/node config, local node policy, node-owned credentials, node-owned cwd policy, and node-owned command catalog; it must not use WorkerConfig, hosted worker env, hosted credentials, server-sent credentials, or request-owned executable/cwd/env policy. Connected-node repo is local workspace read-only only; shell is command-catalog only; fetch/search/github use node-owned config; browser denies. Node syncs tool.call/tool.result events and artifacts through existing event/artifact routes. Node offline or assignment expiry terminalizes invocation with tool_assignment_expired or tool_node_unavailable.",
   "acceptance": [
     "Existing run assignment clients continue to claim and complete run assignments without toolInvocation payload requirements.",
     "Node registration/heartbeat accepts redacted tool capabilities and tool policy fields and rejects secret-like policy fields.",
@@ -1355,7 +1522,8 @@ Reviewer pass/fail slices:
     "Node revalidates local policy before executing a tool and rejects with node_policy_denied on mismatch.",
     "Connected-node repo executes only read-only local Git inspection under allowed cwd prefixes and fixed argv.",
     "Connected-node shell executes only node-owned command catalog entries with bounded args and no raw command/env/PTY/terminal request fields.",
-    "Connected-node fetch/search/github use node-owned config and deterministic fake clients in tests.",
+    "Connected-node fetch/search/github use node-owned config and deterministic fake clients in tests, never hosted worker config or hosted credentials.",
+    "Node app constructs buildNodeToolAdapters(NodeToolAdapterConfig) from node-owned config/cwd policy/command catalog only, and tests reject WorkerConfig-shaped or hosted-credential inputs.",
     "Browser assignment denies with browser_tool_unshipped.",
     "Event sync accepts tool.call and tool.result with monotonic sequence and rejects gaps with event_sync_gap.",
     "Artifact sync preserves digest, size, metadata-only/full policy, and rejects digest mismatch or oversized content.",
@@ -1372,13 +1540,6 @@ Reviewer pass/fail slices:
   ],
   "error_rescue_map": [
     {
-      "codepath": "NodeCoordinatorService.createToolAssignment",
-      "failure": "no owned online node, node lacks capability, node policy denies target, or assignment store unavailable",
-      "exception": "NodeCoordinatorError or store error",
-      "rescue": "Return tool_node_unavailable or node_policy_denied before assignment exposure; mark invocation failed only after queued invocation exists.",
-      "user_sees": "tool_node_unavailable or node_policy_denied."
-    },
-    {
       "codepath": "POST /nodes/:id/assignments/claim",
       "failure": "node not owned, assignment not owned, run not owned, tool invocation not owned, claim conflict, or tool payload missing",
       "exception": "ControlPlaneError, NodeCoordinatorError, or ZodError",
@@ -1387,9 +1548,9 @@ Reviewer pass/fail slices:
     },
     {
       "codepath": "node-side tool executor",
-      "failure": "local policy denies, adapter missing, repo cwd denied, shell command denied, fake provider unavailable, browser requested, timeout, output flood",
+      "failure": "local policy denies, adapter missing, WorkerConfig or hosted credentials are supplied, repo cwd denied, shell command denied, fake provider unavailable, browser requested, timeout, output flood",
       "exception": "Error carrying reasonCode",
-      "rescue": "Sync tool.result failed with named reason and complete assignment failed; no secret payloads are sent.",
+      "rescue": "Reject invalid adapter config before execution, sync tool.result failed with named reason where assignment is already claimed, and complete assignment failed; no secret payloads are sent.",
       "user_sees": "node_policy_denied, tool_adapter_unavailable, repo_cwd_denied, shell_command_denied, web_search_provider_unconfigured, browser_tool_unshipped, tool_process_timeout, or tool_output_limit_exceeded."
     },
     {
@@ -1416,8 +1577,8 @@ Reviewer pass/fail slices:
   ],
   "observability": {
     "logs": [
-      "node.tool.assignment.created toolType=<type> nodeCapability=<capability>",
       "node.tool.assignment.claimed toolType=<type>",
+      "node.tool.execution.configured source=node-owned",
       "node.tool.execution.rejected reason=<reasonCode>",
       "node.tool.assignment.completed status=<status> reason=<reasonCode>"
     ],
@@ -1460,6 +1621,12 @@ Reviewer pass/fail slices:
       "lens": "error_path",
       "given": "Node advertises tool.repo but allowToolTypes excludes repo at claim time",
       "expect": "node_policy_denied and assignment rejected/failed"
+    },
+    {
+      "name": "node adapter factory uses node-owned config",
+      "lens": "error_path",
+      "given": "Node app tries to build adapters from WorkerConfig, hosted credential names, or server-sent token fields",
+      "expect": "config validation rejects before execution; buildNodeToolAdapters receives only NodeToolAdapterConfig"
     },
     {
       "name": "connected repo happy path",
@@ -1507,11 +1674,6 @@ Reviewer pass/fail slices:
   "integration_contracts": {
     "exports": [
       {
-        "name": "NodeCoordinatorService.createToolAssignment",
-        "kind": "function",
-        "signature": "createToolAssignment(input: { runId: string; toolInvocationId: string; nodeId?: string; requiredCapability: string }) => Promise<Assignment>"
-      },
-      {
         "name": "NodeClient.claim",
         "kind": "function",
         "signature": "claim(nodeId: string, input?: AssignmentClaimRequest) => Promise<AssignmentClaimResponse>"
@@ -1534,14 +1696,18 @@ Reviewer pass/fail slices:
         "signature": "Assignment rows preserve kind?: 'run' | 'tool' and toolInvocationId?: string"
       },
       {
+        "from_task": "P21-T3-core-tool-policy-approval-dispatch",
+        "name": "NodeCoordinatorService.createToolAssignment",
+        "signature": "createToolAssignment(input: { runId: string; toolInvocationId: string; nodeId?: string; requiredCapability: string; idempotencyKey: string }) => Promise<Assignment>"
+      },
+      {
         "from_task": "P21-T5-hosted-worker-tool-executor",
-        "name": "buildHostedToolAdapters",
-        "signature": "buildHostedToolAdapters(config: WorkerConfig, deps?: HostedToolAdapterDeps) => Map<string, ToolAdapter>"
+        "name": "buildNodeToolAdapters",
+        "signature": "buildNodeToolAdapters(config: NodeToolAdapterConfig, deps?: NodeToolAdapterDeps) => Map<string, ToolAdapter>"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
       "packages/protocol-node/src/node-client.ts",
-      "packages/core/src/services/node-coordinator-service.ts",
       "apps/node/src/app.ts"
     ]
   }
@@ -1551,9 +1717,19 @@ Reviewer pass/fail slices:
 Reviewer pass/fail slices:
 
 - Protocol: additive claim/complete contracts and backward-compatible run assignment clients.
-- Node selection/policy: owned online nodes, advertised capabilities, local revalidation.
-- Execution: repo, shell, fetch/search/github fake paths, browser denial, no secret transfer.
+- Node protocol/policy: T3-created tool assignments claim correctly, advertised capabilities are redacted, local policy revalidates before execution.
+- Execution: repo, shell, fetch/search/github fake paths, browser denial, no secret transfer, node adapter factory uses node-owned config only.
 - Sync: events, artifacts, completion mismatch, expiry/offline terminalization.
+
+Subtask matrix:
+
+| Slice | Files | Must pass |
+| --- | --- | --- |
+| Protocol claim/complete | `packages/protocol-node/src/node-routes.ts`, `packages/protocol-node/src/node-client.ts`, protocol-node tests | Existing run assignment clients still work; tool assignments include bounded `toolInvocation`; completion id mismatches fail with `tool_assignment_mismatch`. |
+| Node capability and policy | `packages/core/src/services/local-node-policy-service.ts`, protocol-node tests | capabilities/policy are redacted, secret-like fields rejected, local policy denies mismatched tools/cwd. |
+| Node adapter construction | `apps/node/src/config.ts`, `apps/node/src/app.ts`, node tests | node builds `NodeToolAdapterConfig` from node-owned config only; WorkerConfig, hosted credentials, and server-sent secrets are rejected. |
+| Node tool execution | `apps/node/src/app.ts`, node tests | repo/shell/fetch/search/GitHub fake paths work with node-owned config; browser denied; raw shell fields never spawn. |
+| Sync and terminalization | protocol-node routes and node tests | tool.call/tool.result sequences, artifact digest/size policy, completion mismatch, offline/expiry terminal states. |
 
 ### Task P21-T7-ops-canary-docs-product-truth
 
@@ -1596,12 +1772,12 @@ Reviewer pass/fail slices:
     "README.md",
     "docs/development/API.md"
   ],
-  "instructions": "Extend production ops and documentation for the exact R22 boundary. Production manifest defaults must keep hostedRealTools and connectedNodeRealTools disabled, require explicit policy when enabled, keep approvalDefault required, and use fake adapter mode for smoke/canary by default. Preflight must fail closed if tools are enabled without explicit policy, API-key auth, Postgres, Redis, object store, control-plane bootstrap tool entitlements, quota support, audit support, route auth, worker claim readiness, or node readiness when connected-node tools are enabled. Validate policy JSON/path max 65536 bytes, unknown tool types, unknown placements, empty allowlists, invalid bounds, hosted repo denial, browser denial, shell catalog fields, and fake/no-spend adapter mode. Canary must be deterministic/no-spend by default and cover hosted fetch, hosted github, hosted shell deny/allowlisted fake command, connected-node repo, connected-node unavailable denial, approval reject/expire, and artifact write. Any live external tool canary must require explicit env confirmation and must not run in CI/audit default. Update PRODUCT.md and docs to say R22 ships hosted worker tools for fetch/web_search/github/command-catalog shell and connected-node tools for fetch/web_search/github/repo/command-catalog shell, while browser automation, hosted repo, dashboard/TUI, arbitrary execution routes, generic process/PTY adapters, Cursor/OpenClaw/Paperclip, hosted debate real participants, model judging, and hosted runtime approval/input/terminal bridges remain unshipped.",
+  "instructions": "Extend production ops and documentation for the exact R22 boundary. Production manifest defaults must keep hostedRealTools and connectedNodeRealTools disabled, require explicit policy when enabled, keep approvalDefault required, and use fake adapter mode for smoke/canary by default. Preflight must fail closed if tools are enabled without explicit policy, API-key auth, Postgres, Redis, object store, control-plane bootstrap tool entitlements, quota support, audit support, route auth, worker claim readiness, or node readiness when connected-node tools are enabled. Validate policy JSON/path max 65536 bytes, unknown tool types, unknown placements, empty allowlists, invalid bounds, hosted repo denial, browser denial, shell catalog fields, fake/no-spend adapter mode, and node adapter config separation so connected-node checks cannot source WorkerConfig or hosted credentials. Canary must be deterministic/no-spend by default and cover hosted fetch, hosted github, hosted shell deny/allowlisted fake command, connected-node repo, connected-node unavailable denial, approval reject/expire, and artifact write. Any live external tool canary must require explicit env confirmation and must not run in CI/audit default. Update PRODUCT.md and docs to say R22 ships hosted worker tools for fetch/web_search/github/command-catalog shell and connected-node tools for fetch/web_search/github/repo/command-catalog shell, while browser automation, hosted repo, dashboard/TUI, arbitrary execution routes, generic process/PTY adapters, Cursor/OpenClaw/Paperclip, hosted debate real participants, model judging, and hosted runtime approval/input/terminal bridges remain unshipped.",
   "acceptance": [
     "Production manifest validates with tools disabled by default and forbidden surfaces unchanged.",
     "production:preflight passes disabled-tools default when existing production prerequisites are satisfied or returns existing prerequisite failures without attempting live tools.",
     "production:preflight fails closed with named tool diagnostics when tools are enabled but policy/auth/stores/queue/object store/bootstrap quota/audit/worker/node requirements are missing.",
-    "Preflight validates policy source size, malformed JSON, unknown placement/tool type, empty allowlists, invalid bounds, hosted repo denial, browser denial, shell catalog safety, and fake/no-spend adapter mode.",
+    "Preflight validates policy source size, malformed JSON, unknown placement/tool type, empty allowlists, invalid bounds, hosted repo denial, browser denial, shell catalog safety, fake/no-spend adapter mode, and connected-node adapter config separation from WorkerConfig/hosted credentials.",
     "Default production canary performs no live external network/API/provider calls beyond the configured Switchyard server.",
     "Default production canary covers hosted fetch fake path, hosted github fake/missing token path, hosted shell denial and allowlisted fake command, connected-node repo fake path, connected-node unavailable denial, approval reject/expire, and artifact write.",
     "Live external tool canary mode, if exposed, requires explicit confirmation env/flag and is absent from default CI/audit checks.",
@@ -1772,9 +1948,14 @@ Reviewer pass/fail slices:
         "signature": "enqueueTool(payload: ToolJobPayload) / claimTool() / ackTool(jobId) / failTool(jobId, error) / recoverStaleToolClaims()"
       },
       {
-        "from_task": "P21-T6-connected-node-tool-assignments",
+        "from_task": "P21-T3-core-tool-policy-approval-dispatch",
         "name": "NodeCoordinatorService.createToolAssignment",
-        "signature": "createToolAssignment(input: { runId: string; toolInvocationId: string; nodeId?: string; requiredCapability: string }) => Promise<Assignment>"
+        "signature": "createToolAssignment(input: { runId: string; toolInvocationId: string; nodeId?: string; requiredCapability: string; idempotencyKey: string }) => Promise<Assignment>"
+      },
+      {
+        "from_task": "P21-T6-connected-node-tool-assignments",
+        "name": "Node tool execution path",
+        "signature": "executeToolAssignment(input: { assignment: Assignment; run: Run; toolInvocation: ToolInvocation }) => Promise<NodeExecutionResult>"
       }
     ],
     "file_paths_consumed_by_other_tasks": [
@@ -1793,24 +1974,36 @@ Reviewer pass/fail slices:
 - Canary: hosted fake tool paths, connected-node fake/unavailable paths, approval reject/expire, artifact write.
 - Product truth: exact shipped set and exact unshipped boundary.
 
+## Architect Review Reconciliation
+
+- Accepted: connected-node dispatch ordering is reconciled by moving `NodeCoordinatorService.createToolAssignment` and the idempotent assignment-creation contract into P21-T3, before P21-T4 wires hosted approval dispatch.
+- Accepted: P21-T4 now has explicit approval list/get acceptance and tests for `tools:read`, ownership-first scoping, tool-only filtering, runtime approval denial, pagination without existence leak, and cross-tenant approval ids.
+- Accepted: connected-node adapter construction now imports `buildNodeToolAdapters(NodeToolAdapterConfig)` from the shared adapter factory contract instead of `buildHostedToolAdapters(WorkerConfig)`, and T6 requires node-owned config/credentials/cwd policy/command catalog.
+- Accepted: quota ordering is explicit: entitlement and quota-store availability preflight may happen before policy, hourly/active quota reservation happens only for policy-allowed queued/dispatchable work, and artifact-byte quota is consumed only after successful content storage.
+- Accepted: durable dispatch idempotency uses a dispatch outbox keyed by `approvalId` and `toolInvocationId`, with tests for approval CAS success followed by enqueue or assignment creation timeout and retry recovery without duplicate side effects.
+- Partial: P21-T4, P21-T5, and P21-T6 remain broad because the phase boundary is cross-layer, but each now includes a subtask matrix with reviewer pass/fail slices instead of splitting ownership across overlapping files.
+- Accepted: `packages/contracts/src/http-error.ts` is now listed as a context file for contracts and hosted-route error mapping tasks where R22 named errors are used.
+- Rejected: none.
+
 ## Risks
 
 - **Cross-layer blast radius:** R22 spans contracts, storage, core, server, worker, node, adapters, ops, and docs. Mitigation: schema/storage tasks land first; server, worker, and node import the locked contracts; ops waits for all runtime tasks.
-- **Approval double-dispatch:** Approval resolution races can create duplicate worker jobs or node assignments. Mitigation: store-level `updateIfStatus` CAS, service-level per-approval locks, and tests with concurrent approve/reject/expire.
+- **Approval double-dispatch:** Approval resolution races or post-CAS enqueue/assignment timeouts can create duplicate worker jobs or node assignments. Mitigation: store-level `updateIfStatus` CAS, durable dispatch outbox keyed by approvalId/toolInvocationId, service-level per-approval locks, idempotent queue/assignment dispatch keys, and tests with concurrent approve/reject/expire plus post-CAS dispatch timeout recovery.
 - **Tenant existence leak:** Hosted list/get routes can reveal cross-tenant tool ids if ownership is checked after resource load. Mitigation: route/service tests require ownership-first filtering and not-found/denied behavior without payload leak.
 - **Policy drift after approval:** Operator policy changes between approval and execution can execute a different action. Mitigation: immutable redacted execution plans plus `executionPlanHash` revalidation in hosted worker and connected-node dispatch.
 - **Accidental public execution surface:** Shell work can drift into raw command execution or public `/shell` style routes. Mitigation: command-catalog only, OpenAPI forbidden route tests, manifest forbidden surface tests, raw field denial tests.
+- **Connected-node credential boundary:** Node execution could accidentally reuse hosted worker config or hosted credentials. Mitigation: placement-neutral adapter factory with separate `HostedToolAdapterConfig` and `NodeToolAdapterConfig`, node-owned config/cwd policy/command catalog only, and tests that reject WorkerConfig-shaped node adapter inputs.
 - **No-spend test regression:** Fetch/search/GitHub canary tests may accidentally call live services. Mitigation: fake clients by default, explicit live confirmation gate, and tests that count fetch/provider calls.
 
 ## Integration Points
 
 - T1 exports additive contracts that every later task imports. No later task edits `packages/contracts/*`.
-- T2 exports durable stores, tool ownership/quota support, and assignment persistence. T3, T4, T5, and T6 import these store contracts.
-- T3 exports `HostedToolService`, placement-aware policy resolution, and the `ToolDispatchCallback` contract. T4 wires the callback to queue or node assignment creation; T5/T6 perform actual execution.
-- T4 registers hosted routes and constructs services from T1/T2/T3. It owns hosted admission and readiness only; it does not implement adapters or node execution.
-- T5 owns hosted worker execution and adapter wiring. It imports T3 policy/hash behavior and T2 stores.
-- T6 owns connected-node protocol/app execution. It imports T1 assignment contracts, T2 assignment storage, and T5 adapter factory exports.
-- T7 owns operator and product truth artifacts. It imports readiness/queue/node contracts from T4/T5/T6 and does not change runtime code.
+- T2 exports durable stores, dispatch outbox, tool ownership/quota support, and assignment persistence. T3, T4, T5, and T6 import these store contracts.
+- T3 exports `HostedToolService`, placement-aware policy resolution, the idempotent `ToolDispatchCallback` contract, and `NodeCoordinatorService.createToolAssignment`. T4 wires the callback to hosted queue enqueue or the already-defined T3 node assignment creation surface; T5/T6 perform actual execution.
+- T4 registers hosted routes and constructs services from T1/T2/T3. It owns hosted admission, approval list/get/resolve routes, and readiness only; it does not implement adapters, node assignment creation, or node execution.
+- T5 owns hosted worker execution and shared tool adapter factory exports. It imports T3 policy/hash behavior and T2 stores, and exposes separate hosted and node adapter config contracts.
+- T6 owns connected-node protocol/app execution. It imports T1 assignment contracts, T2 assignment storage, T3-created assignment semantics, and T5 `buildNodeToolAdapters` with node-owned config only.
+- T7 owns operator and product truth artifacts. It imports readiness/queue/node contracts from T3/T4/T5/T6 and does not change runtime code.
 
 ## Phase-Level Acceptance Criteria
 
@@ -1820,7 +2013,7 @@ Reviewer pass/fail slices:
 - [ ] Hosted tool invocation requires `runId` and tenant ownership.
 - [ ] Hosted tool routes enforce `tools:write` and `tools:read` scopes.
 - [ ] Enterprise contracts add tool entitlements, quotas, ownership types, audit event types, and audit resource types.
-- [ ] Tool entitlements and quotas are enforced before hosted or node external side effects.
+- [ ] Tool entitlements and quota availability are enforced before hosted or node external side effects; active/hourly quota is reserved only after policy allows queued/dispatchable work, and artifact-byte quota is consumed only after successful storage.
 - [ ] Hosted real tools are disabled by default and fail closed when policy is missing, empty, malformed, or unsafe.
 - [ ] Connected-node real tools are disabled by default and fail closed when no eligible node is online or node policy denies the tool.
 - [ ] Hosted worker can execute configured `fetch`, `web_search`, `github`, and command-catalog `shell` through stored execution plans after approval.
@@ -1829,7 +2022,7 @@ Reviewer pass/fail slices:
 - [ ] `browser` is denied in hosted and connected-node paths with `browser_tool_unshipped`.
 - [ ] Shell accepts only command-catalog `commandId` and bounded args; raw command/executable/env/PTY/terminal request fields are denied.
 - [ ] No public arbitrary execution routes are added to local or hosted OpenAPI.
-- [ ] Approval approve/reject/expire resolves exactly once and cannot dispatch duplicate worker jobs or node assignments.
+- [ ] Approval approve/reject/expire resolves exactly once, uses durable dispatch outbox idempotency keyed by approvalId/toolInvocationId, and cannot dispatch duplicate worker jobs or node assignments even when enqueue/assignment creation times out after approval CAS.
 - [ ] Worker and node revalidate policy and execution plan hash before execution.
 - [ ] Node assignment schema remains backward compatible for existing run assignments.
 - [ ] Node tool assignment completion updates the durable invocation only when assignment/run/node/tool ids match.
@@ -1843,7 +2036,7 @@ Reviewer pass/fail slices:
 
 - `pnpm --filter @switchyard/contracts test`
 - `pnpm --filter @switchyard/storage test`
-- `pnpm --filter @switchyard/core test -- hosted-tool tool-approval tool-router`
+- `pnpm --filter @switchyard/core test -- hosted-tool tool-approval tool-router dispatch-outbox node-coordinator`
 - `pnpm --filter @switchyard/protocol-rest test -- hosted-tool`
 - `pnpm --filter @switchyard/server test -- hosted-tools production-config production-readiness`
 - `pnpm --filter @switchyard/queue test`
@@ -1867,13 +2060,13 @@ Reviewer pass/fail slices:
 4. Ownership disjoint: no task owns a file owned by another task.
 5. Context files real: all context files are existing repository paths and are verified in the worktree.
 6. Acceptance testable: each acceptance item has observable behavior or a named command/test.
-7. Dependency order sane: contracts and storage precede core, hosted server/worker/node depend on core, ops depends on all runtime tasks.
+7. Dependency order sane: contracts and storage precede core; T3 now owns connected-node assignment creation and dispatch outbox use before T4 wires hosted dispatch; hosted server/worker/node depend on core; ops depends on all runtime tasks.
 8. Checks runnable: commands use existing package scripts and Vitest entry points.
 9. Error/rescue maps present: each task has explicit named failure modes and user-visible results.
 10. Observability present: runtime tasks specify low-cardinality logs and metrics; pure contract/storage tasks specify test/operation metrics.
 11. Test cases enumerate acceptance: happy, nil, empty, error, edge, and integration paths are covered per task.
 12. Integration contracts walk: every import resolves to an export in an earlier or declared dependency task.
-13. Contract types match: `ToolInvocationTarget`, `AssignmentClaimResponse`, `HostedToolService`, `ToolDispatchCallback`, `ToolQueuePort`, and node assignment contracts have matching signatures across tasks.
+13. Contract types match: `ToolInvocationTarget`, `AssignmentClaimResponse`, `HostedToolService`, idempotent `ToolDispatchCallback`, `ToolDispatchOutboxStore`, `NodeCoordinatorService.createToolAssignment`, `ToolQueuePort`, and `buildNodeToolAdapters(NodeToolAdapterConfig)` have matching signatures across tasks.
 
 ## Plan Completeness Self-Test
 
