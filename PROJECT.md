@@ -301,3 +301,21 @@ The shipped boundary remains explicit: R21 does NOT ship dashboard/TUI, generic 
 
 ### Deferred Concerns
 - None.
+
+## Phase 21: R22 Hosted And Connected-Node Real Tool Execution
+**Date:** 2026-06-01
+**Spec:** docs/superpowers/specs/2026-06-01-phase-21-r22-hosted-connected-real-tools.md
+**Plan:** docs/superpowers/plans/2026-06-01-phase-21-r22-hosted-connected-real-tools.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-21-report.md
+**Branch:** agent/phase-21-r22-hosted-connected-real-tools (audit GREEN; branch retained locally)
+**PR:** not created — reason: native TUI/subagent workflow, no merge/PR requested; branch left unmerged per user instruction.
+
+### What changed
+R22 is now shipped on the phase branch. Switchyard can run real tools from hosted workers and connected nodes behind fail-closed policy, approval, quota, ownership, audit, and readiness checks. Defaults remain deterministic and no-spend unless an operator explicitly opts into live execution. Hosted worker tools now cover `fetch`, `web_search`, `github`, and command-catalog `shell`; connected-node tools now cover `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell` using only node-owned configuration.
+
+The phase also updated production preflight, canary, manifest, and product-truth surfaces, then fixed the audit blockers for no-approval hosted dispatch and explicit hosted-to-connected-node offload. Audit pass 2 intentionally re-audited only those two prior `P21-T3` blockers, and both passed.
+
+The shipped boundary remains explicit: R22 does not ship dashboard/TUI, arbitrary public subprocess/PTY execution routes, hosted repo execution, browser automation, generic process/PTY adapters, Cursor/OpenClaw/Paperclip adapters, hosted debate real participant runtimes/model judging, hosted runtime approval/input/terminal bridges, or enterprise auth/billing/tenant SaaS controls beyond the existing control-plane bootstrap.
+
+### Deferred Concerns
+- None.
