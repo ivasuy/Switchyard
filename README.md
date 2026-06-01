@@ -44,7 +44,7 @@ R22 ships hosted/connected-node real-tool execution with policy-first controls f
 
 Production fake-only/no-spend remains the default posture for tests, smoke, preflight, and default canary.
 
-R23 adds hosted runtime bridge support only for worker-owned `claude_code.sdk` and structured `opencode.acp` through existing `POST /runs/:id/input` and hosted approval resolution routes. `codex.exec_json` remains one-shot with hosted input/approval unsupported. `codex.interactive` remains local-only and unshipped for hosted.
+R23 adds hosted runtime bridge support only for worker-owned `claude_code.sdk` and structured `opencode.acp` through existing `POST /runs/:id/input` and hosted approval resolution routes. The server-to-worker handoff requires the shared Postgres-backed hosted runtime bridge command store and payload store. Stale claimed provider-input commands fail closed with `hosted_runtime_bridge_non_idempotent_retry_blocked` instead of blind provider-input retry. `codex.exec_json` remains one-shot with hosted input/approval unsupported. `codex.interactive` remains local-only and unshipped for hosted.
 
 R23 boundary non-goals remain explicit:
 

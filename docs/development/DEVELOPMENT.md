@@ -160,6 +160,8 @@ Fail-closed production behavior:
 - Fake-only remains default (`SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic`, `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`).
 - Real tools remain disabled by default (`SWITCHYARD_HOSTED_REAL_TOOLS=disabled`, `SWITCHYARD_CONNECTED_NODE_REAL_TOOLS=disabled`, `SWITCHYARD_TOOL_ADAPTER_MODE=fake`).
 - Production hosted provider activation is operator opt-in only for known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`) and requires provider policy, credential presence, and spend controls.
+- Hosted runtime input/approval bridges for `claude_code.sdk` and `opencode.acp` require shared Postgres-backed hosted runtime bridge command and payload stores for server-to-worker handoff.
+- Worker crash/stale claimed provider-input commands fail closed with `hosted_runtime_bridge_non_idempotent_retry_blocked` instead of blindly retrying provider input.
 - Production hosted/connected-node tool activation is operator opt-in and requires explicit real-tool policy plus API-key auth, Postgres, Redis, object store, quota/audit readiness, worker claim readiness, and node readiness for connected-node tool placements.
 
 R23 non-goals reminder:
