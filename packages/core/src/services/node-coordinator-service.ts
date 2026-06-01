@@ -7,7 +7,10 @@ export class NodeCoordinatorError extends Error {
   readonly code:
     | "node_not_found"
     | "assignment_not_found"
-    | "assignment_claim_conflict";
+    | "assignment_claim_conflict"
+    | "tool_node_unavailable"
+    | "node_policy_denied"
+    | "tool_dispatch_unavailable";
 
   constructor(code: NodeCoordinatorError["code"], message: string) {
     super(message);
@@ -29,6 +32,7 @@ export interface NodeCoordinatorDependencies {
 
 export class NodeCoordinatorService {
   private readonly now: () => string;
+  private readonly idempotencyToolAssignments = new Map<string, string>();
 
   constructor(private readonly deps: NodeCoordinatorDependencies) {
     this.now = deps.now ?? (() => new Date().toISOString());
@@ -90,12 +94,67 @@ export class NodeCoordinatorService {
       id: `assignment_${crypto.randomUUID()}`,
       runId: run.id,
       nodeId,
+      kind: "run",
       status: "pending",
       retryCount: 0,
       lastEventSequence: 0,
       createdAt: this.now()
     };
     return this.deps.assignments.create(assignment);
+  }
+
+  async createToolAssignment(input: {
+    runId: string;
+    toolInvocationId: string;
+    nodeId?: string;
+    requiredCapability: string;
+    idempotencyKey: string;
+  }): Promise<Assignment> {
+    const existingId = this.idempotencyToolAssignments.get(input.idempotencyKey);
+    if (existingId) {
+      const existing = await this.deps.assignments.get(existingId);
+      if (existing) {
+        return existing;
+      }
+    }
+
+    const run = await this.deps.runs.get(input.runId);
+    if (!run) {
+      throw new NodeCoordinatorError("assignment_not_found", `Run not found: ${input.runId}`);
+    }
+    if (run.placement !== "connected_local_node") {
+      throw new NodeCoordinatorError("node_policy_denied", "Run is not eligible for connected-node tool assignment");
+    }
+
+    const selected = input.nodeId
+      ? await this.resolveNodeById(input.nodeId, input.requiredCapability, input.toolInvocationId)
+      : await this.selectEligibleNode(input.requiredCapability, input.toolInvocationId);
+    if (!selected) {
+      throw new NodeCoordinatorError("tool_node_unavailable", "No eligible node is available for tool assignment");
+    }
+
+    const assignment: Assignment = {
+      id: `assignment_${crypto.randomUUID()}`,
+      runId: run.id,
+      nodeId: selected.id,
+      kind: "tool",
+      toolInvocationId: input.toolInvocationId,
+      status: "pending",
+      retryCount: 0,
+      lastEventSequence: 0,
+      createdAt: this.now()
+    };
+
+    try {
+      const created = await this.deps.assignments.create(assignment);
+      this.idempotencyToolAssignments.set(input.idempotencyKey, created.id);
+      return created;
+    } catch (error) {
+      throw new NodeCoordinatorError(
+        "tool_dispatch_unavailable",
+        error instanceof Error ? error.message : "Failed to create tool assignment"
+      );
+    }
   }
 
   async claim(nodeId: string, assignmentId?: string): Promise<ClaimedNodeAssignment | undefined> {
@@ -176,5 +235,45 @@ export class NodeCoordinatorService {
       throw new NodeCoordinatorError("assignment_not_found", `Run not found for assignment: ${assignment.id}`);
     }
     return { assignment, run };
+  }
+
+  private async resolveNodeById(nodeId: string, requiredCapability: string, toolInvocationId: string): Promise<ConnectedNode | null> {
+    const node = await this.deps.nodes.get(nodeId);
+    if (!node || node.status !== "online") {
+      return null;
+    }
+    this.assertToolCapabilityAllowed(node, requiredCapability, toolInvocationId);
+    return node;
+  }
+
+  private async selectEligibleNode(requiredCapability: string, toolInvocationId: string): Promise<ConnectedNode | null> {
+    const nodes = await this.deps.nodes.list({ status: "online" });
+    for (const node of nodes) {
+      try {
+        this.assertToolCapabilityAllowed(node, requiredCapability, toolInvocationId);
+        return node;
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  private assertToolCapabilityAllowed(node: ConnectedNode, requiredCapability: string, toolInvocationId: string): void {
+    if (!node.capabilities.includes(requiredCapability)) {
+      throw new NodeCoordinatorError(
+        "node_policy_denied",
+        `Node ${node.id} is missing required capability ${requiredCapability}`
+      );
+    }
+    const toolType = requiredCapability.startsWith("tool.")
+      ? requiredCapability.slice("tool.".length)
+      : requiredCapability;
+    if (node.policy && node.policy.allowToolTypes.length > 0 && !node.policy.allowToolTypes.includes(toolType as never)) {
+      throw new NodeCoordinatorError(
+        "node_policy_denied",
+        `Node ${node.id} policy denied ${toolType} for invocation ${toolInvocationId}`
+      );
+    }
   }
 }

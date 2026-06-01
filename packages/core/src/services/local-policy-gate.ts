@@ -69,7 +69,7 @@ export function redactSecrets<T>(value: T): T {
 
 export interface RealToolGlobalPolicyConfig {
   enabled: boolean;
-  allowedPlacements: Array<"local">;
+  allowedPlacements: Array<ToolExecutionPlacement>;
   approvalDefault: "required" | "allow";
   approvalExpiresMs: number;
   maxConcurrentRealTools: number;
@@ -138,8 +138,22 @@ export interface ShellToolPolicyConfig {
   catalog: Record<string, ShellCatalogEntry>;
 }
 
+export type ToolExecutionPlacement = "local" | "hosted" | "connected_local_node";
+
+export interface HostedToolPlacementPolicyConfig {
+  enabled: boolean;
+  allowedToolTypes: ToolInvocation["type"][];
+}
+
+export interface ConnectedLocalNodeToolPlacementPolicyConfig {
+  enabled: boolean;
+  allowedToolTypes: ToolInvocation["type"][];
+}
+
 export interface ResolvedRealToolPolicyConfig {
   global: RealToolGlobalPolicyConfig;
+  hosted: HostedToolPlacementPolicyConfig;
+  connectedLocalNode: ConnectedLocalNodeToolPlacementPolicyConfig;
   fetch: FetchToolPolicyConfig;
   webSearch: WebSearchToolPolicyConfig;
   github: GithubToolPolicyConfig;
@@ -159,6 +173,14 @@ export function createDisabledRealToolPolicyConfig(): ResolvedRealToolPolicyConf
       maxInlineOutputBytes: 32_768,
       maxArtifactBytes: 1_048_576,
       defaultTimeoutMs: 30_000
+    },
+    hosted: {
+      enabled: false,
+      allowedToolTypes: []
+    },
+    connectedLocalNode: {
+      enabled: false,
+      allowedToolTypes: []
     },
     fetch: {
       enabled: false,
@@ -198,6 +220,74 @@ export function createDisabledRealToolPolicyConfig(): ResolvedRealToolPolicyConf
       catalog: {}
     }
   };
+}
+
+function mergePolicyConfig(
+  base: ResolvedRealToolPolicyConfig,
+  override?: Partial<ResolvedRealToolPolicyConfig>
+): ResolvedRealToolPolicyConfig {
+  if (!override) {
+    return base;
+  }
+  return {
+    ...base,
+    ...override,
+    global: {
+      ...base.global,
+      ...(override.global ?? {})
+    },
+    hosted: {
+      ...base.hosted,
+      ...(override.hosted ?? {})
+    },
+    connectedLocalNode: {
+      ...base.connectedLocalNode,
+      ...(override.connectedLocalNode ?? {})
+    },
+    fetch: {
+      ...base.fetch,
+      ...(override.fetch ?? {})
+    },
+    webSearch: {
+      ...base.webSearch,
+      ...(override.webSearch ?? {})
+    },
+    github: {
+      ...base.github,
+      ...(override.github ?? {})
+    },
+    repo: {
+      ...base.repo,
+      ...(override.repo ?? {})
+    },
+    shell: {
+      ...base.shell,
+      ...(override.shell ?? {}),
+      catalog: {
+        ...base.shell.catalog,
+        ...(override.shell?.catalog ?? {})
+      }
+    }
+  };
+}
+
+export function resolveRealToolPolicyConfig(input?: {
+  source?: string | Partial<ResolvedRealToolPolicyConfig>;
+  placement?: ToolExecutionPlacement;
+}): ResolvedRealToolPolicyConfig {
+  const base = createDisabledRealToolPolicyConfig();
+  if (!input?.source) {
+    return base;
+  }
+  if (typeof input.source === "string") {
+    try {
+      const parsed = JSON.parse(input.source) as Partial<ResolvedRealToolPolicyConfig>;
+      return mergePolicyConfig(base, parsed);
+    } catch {
+      throw new Error("tool_policy_config_invalid:json");
+    }
+  }
+  return mergePolicyConfig(base, input.source);
 }
 
 function asRisk(input: Record<string, unknown>): string {
@@ -333,8 +423,13 @@ function validateConfig(config: ResolvedRealToolPolicyConfig): void {
   if (config.global.defaultTimeoutMs > 120_000) {
     throw new Error("tool_policy_config_invalid:global.defaultTimeoutMs");
   }
-  if (config.global.allowedPlacements.length !== 1 || config.global.allowedPlacements[0] !== "local") {
+  if (config.global.allowedPlacements.length === 0) {
     throw new Error("tool_policy_config_invalid:global.allowedPlacements");
+  }
+  for (const placement of config.global.allowedPlacements) {
+    if (placement !== "local" && placement !== "hosted" && placement !== "connected_local_node") {
+      throw new Error("tool_policy_config_invalid:global.allowedPlacements");
+    }
   }
   for (const entry of Object.values(config.shell.catalog)) {
     if (!/^([A-Za-z]:[\\/]|\/)/.test(entry.executablePath)) {
@@ -359,16 +454,34 @@ export class LocalPolicyGate implements ToolPolicyPort {
   }
 
   async decideTool(input: ToolPolicyInput): Promise<ToolPolicyDecision> {
+    const placement = this.resolvePlacement(input);
+
     if (input.type === "browser") {
-      return deny(input, "browser_tool_unshipped", { rule: "browser_tool_unshipped" });
+      return deny(input, "browser_tool_unshipped", { rule: "browser_tool_unshipped", placement });
     }
 
     if (input.type === "fake_echo") {
       return this.decideFakeEcho(input);
     }
 
+    if (placement === "hosted" && !this.config.hosted.enabled) {
+      return deny(input, "tool_hosted_tools_disabled", { rule: "placement_disabled", placement });
+    }
+    if (placement === "connected_local_node" && !this.config.connectedLocalNode.enabled) {
+      return deny(input, "tool_connected_node_tools_disabled", { rule: "placement_disabled", placement });
+    }
+    if (placement === "hosted" && input.type === "repo") {
+      return deny(input, "repo_hosted_unshipped", { rule: "repo_hosted_unshipped" });
+    }
+    if (!this.isPlacementToolAllowed(placement, input.type)) {
+      return deny(input, "tool_policy_denied", { rule: "placement_tool_not_allowed", placement });
+    }
+
     if (!this.config.global.enabled) {
-      return deny(input, "tool_real_tools_disabled", { rule: "real_tools_disabled" });
+      if (placement === "local") {
+        return deny(input, "tool_real_tools_disabled", { rule: "real_tools_disabled", placement });
+      }
+      return deny(input, "tool_policy_denied", { rule: "real_tools_disabled", placement });
     }
 
     switch (input.type) {
@@ -623,7 +736,16 @@ export class LocalPolicyGate implements ToolPolicyPort {
     if (!this.config.shell.enabled) {
       return deny(input, "tool_policy_denied", { rule: "tool_disabled" });
     }
-    if ("command" in input.input || "executable" in input.input || "executablePath" in input.input) {
+    if (
+      "command" in input.input ||
+      "executable" in input.input ||
+      "executablePath" in input.input ||
+      "shell" in input.input ||
+      "pty" in input.input ||
+      "terminal" in input.input ||
+      "env" in input.input ||
+      "process" in input.input
+    ) {
       return deny(input, "shell_command_denied");
     }
     const parsed = shellToolInputSchema.safeParse(input.input);
@@ -669,6 +791,27 @@ export class LocalPolicyGate implements ToolPolicyPort {
       "before_local_process_execution",
       new Date(Date.now() + this.config.global.approvalExpiresMs).toISOString()
     );
+  }
+
+  private resolvePlacement(input: ToolPolicyInput): ToolExecutionPlacement {
+    const raw = (input as ToolPolicyInput & { placement?: unknown }).placement;
+    if (raw === "hosted" || raw === "connected_local_node" || raw === "local") {
+      return raw;
+    }
+    return "local";
+  }
+
+  private isPlacementToolAllowed(placement: ToolExecutionPlacement, toolType: ToolInvocation["type"]): boolean {
+    if (toolType === "fake_echo") {
+      return true;
+    }
+    if (placement === "local") {
+      return true;
+    }
+    const allowed = placement === "hosted"
+      ? this.config.hosted.allowedToolTypes
+      : this.config.connectedLocalNode.allowedToolTypes;
+    return allowed.includes(toolType);
   }
 }
 

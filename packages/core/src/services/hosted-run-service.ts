@@ -125,6 +125,7 @@ export class HostedRunService {
         id: `assignment_${crypto.randomUUID()}`,
         runId: run.id,
         nodeId: decision.targetNode ?? "node_missing",
+        kind: "run",
         status: "pending",
         retryCount: 0,
         lastEventSequence: 0,

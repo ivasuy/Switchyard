@@ -12,6 +12,7 @@ import type {
   ResourceOwnership,
   WhoamiResponse
 } from "@switchyard/contracts";
+import { httpErrorCodeSchema } from "@switchyard/contracts";
 import { isRealHostedRuntimeMode } from "./hosted-runtime-catalog.js";
 import { redactSecrets } from "./local-policy-gate.js";
 import type {
@@ -31,7 +32,9 @@ export const TERMINAL_RUN_STATUSES = ["completed", "failed", "cancelled", "timeo
 const HOUR_MS = 60 * 60 * 1_000;
 const DEFAULT_RESERVATION_TTL_MS = 5 * 60 * 1_000;
 
-const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
+const STATUS_BY_CODE: Record<HttpErrorCode, number> = Object.assign(
+  Object.fromEntries(httpErrorCodeSchema.options.map((code) => [code, 500])) as Record<HttpErrorCode, number>,
+  {
   run_not_found: 404,
   debate_not_found: 404,
   artifact_not_found: 404,
@@ -85,7 +88,8 @@ const STATUS_BY_CODE: Record<HttpErrorCode, number> = {
   entitlement_denied: 403,
   quota_exceeded: 429,
   audit_log_unavailable: 503
-};
+}
+);
 
 const FORBIDDEN_QUERY_CREDENTIAL_KEYS = new Set(["api_key", "token", "authorization"]);
 
