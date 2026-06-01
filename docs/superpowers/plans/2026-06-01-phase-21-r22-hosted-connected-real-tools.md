@@ -641,7 +641,7 @@ Reviewer pass/fail slices:
     "Target placement mismatch returns tool_target_mismatch before dispatch.",
     "Tool entitlements and quota-store availability are checked before policy; hourly invocation and active tool quotas are reserved only for policy-allowed approval-required or dispatchable work; policy-denied invocations reserve no quota.",
     "Approval approve transitions pending to approved exactly once, revalidates execution plan hash, upserts one dispatch outbox record keyed by approvalId/toolInvocationId, dispatches exactly one job or assignment, and consumes/releases quota correctly.",
-    "Approval CAS success followed by enqueue or assignment creation timeout is recoverable by retrying from the durable dispatch outbox without duplicate worker jobs or node assignments.",
+    "Approval CAS success followed by enqueue success plus markDispatched timeout, enqueue timeout, or assignment creation timeout is recoverable by retrying from the durable dispatch outbox with the same idempotency key and without duplicate worker jobs or node assignments.",
     "NodeCoordinatorService.createToolAssignment exists before hosted server admission wiring and creates idempotent tool assignments linked to toolInvocationId.",
     "Approval reject and expire mark queued invocation denied with tool_approval_rejected or tool_approval_expired and dispatch nothing.",
     "Runtime approvals with runtimeApprovalToken return hosted_runtime_approval_bridge_unshipped or approval_scope_denied in hosted tool mode.",
@@ -676,10 +676,10 @@ Reviewer pass/fail slices:
     },
     {
       "codepath": "dispatch outbox after approval CAS",
-      "failure": "approval CAS succeeds but hosted enqueue or connected-node assignment creation times out before the route observes a dispatch result",
+      "failure": "approval CAS succeeds but hosted enqueue succeeds and markDispatched times out, hosted enqueue times out, or connected-node assignment creation times out before the route observes a dispatched outbox state",
       "exception": "ToolDispatchError retryable timeout or queue/assignment store timeout",
-      "rescue": "Persist or reuse the approvalId/toolInvocationId outbox row, return/retry from the stored dispatch state, and ensure dispatch callback receives the idempotency key.",
-      "user_sees": "At most one worker job or node assignment exists; retry either returns the existing dispatch id or fails visibly with tool_dispatch_failed without duplicate side effects."
+      "rescue": "Persist or reuse the approvalId/toolInvocationId outbox row, retry with the same idempotency key until markDispatched succeeds or a non-retryable failure is recorded, and ensure hosted queue enqueue plus connected-node assignment creation both dedupe by that key.",
+      "user_sees": "At most one worker job or node assignment exists; retry either marks the existing dispatch id as dispatched or fails visibly with tool_dispatch_failed without duplicate side effects."
     },
     {
       "codepath": "NodeCoordinatorService.createToolAssignment",
@@ -777,10 +777,16 @@ Reviewer pass/fail slices:
       "expect": "one approved result, one approval_not_pending, one dispatch call"
     },
     {
-      "name": "approval CAS enqueue timeout recovers",
+      "name": "approval CAS enqueue markDispatched timeout recovers",
       "lens": "error_path",
-      "given": "Approval CAS succeeds, dispatch outbox row is written, hosted enqueue or node assignment creation times out, then resolve is retried",
-      "expect": "retry reuses the existing approvalId/toolInvocationId outbox row and creates at most one queue job or one tool assignment"
+      "given": "Approval CAS succeeds, dispatch outbox row is written, hosted enqueue succeeds but markDispatched times out, then resolve is retried with the same idempotency key",
+      "expect": "retry reuses the existing approvalId/toolInvocationId outbox row and queue idempotency key, returns the existing hosted queue job, and leaves exactly one queue job"
+    },
+    {
+      "name": "approval CAS assignment creation timeout recovers",
+      "lens": "error_path",
+      "given": "Approval CAS succeeds, dispatch outbox row is written, connected-node assignment creation times out before markDispatched, then resolve is retried with the same idempotency key",
+      "expect": "retry reuses the existing approvalId/toolInvocationId outbox row and creates at most one tool assignment"
     },
     {
       "name": "connected-node assignment creation is available to dispatch",
@@ -845,7 +851,7 @@ Reviewer pass/fail slices:
       {
         "name": "ToolDispatchCallback",
         "kind": "function",
-        "signature": "(input: { invocation: ToolInvocation; approvalId: string; target: ToolInvocationTarget; executionPlanHash: string; idempotencyKey: string }) => Promise<{ dispatchId: string; target: 'hosted' | 'connected_local_node' }>"
+        "signature": "(input: { invocation: ToolInvocation; approvalId: string; target: ToolInvocationTarget; executionPlanHash: string; idempotencyKey: string }) => Promise<{ dispatchId: string; target: 'hosted' | 'connected_local_node' }> where idempotencyKey is the stable dispatch outbox id or approvalId/toolInvocationId key"
       },
       {
         "name": "NodeCoordinatorService.createToolAssignment",
@@ -918,13 +924,15 @@ Reviewer pass/fail slices:
   "dependencies": [
     "P21-T1-contracts-openapi",
     "P21-T2-storage-control-plane",
-    "P21-T3-core-tool-policy-approval-dispatch"
+    "P21-T3-core-tool-policy-approval-dispatch",
+    "P21-T5-hosted-worker-tool-executor"
   ],
   "context_files": [
     "docs/superpowers/specs/2026-06-01-phase-21-r22-hosted-connected-real-tools.md",
     "packages/contracts/src/http-error.ts",
     "packages/protocol-rest/src/hosted-auth.ts",
     "packages/protocol-rest/src/middleware-routes.ts",
+    "packages/core/src/ports/queue.ts",
     "apps/server/src/app.ts",
     "apps/server/src/config.ts",
     "apps/server/src/readiness.ts",
@@ -942,6 +950,7 @@ Reviewer pass/fail slices:
     "POST /tools/invocations returns 202 for accepted queued/approval-required work and includes invocation plus approval when approval is required.",
     "Policy denial after auth/run ownership persists a denied invocation, attaches ownership, audits tool.invoke_denied, and returns safe toolInvocationId details.",
     "Approval approve calls the T3 core exactly-once dispatch path with the approvalId/toolInvocationId idempotency key and returns approval plus invocation without blocking for worker/node execution.",
+    "For hosted placement, the approval dispatch callback forwards the exact T3 idempotencyKey into ToolJobPayload.idempotencyKey and ToolJobPayload.approvalId before calling enqueueTool, so route retry after markDispatched timeout observes one hosted queue job.",
     "Approval reject marks invocation denied and returns approval plus invocation.",
     "Readiness reports checks.tools and fails closed in staging/production when tools are enabled but auth, stores, queue, quota, audit, or policy are missing.",
     "Request/audit/log details are redacted and low-cardinality."
@@ -984,9 +993,9 @@ Reviewer pass/fail slices:
     },
     {
       "codepath": "POST /approvals/:id/approve hosted route",
-      "failure": "approval is runtime-scoped, already resolved, expired, missing linked invocation, policy hash mismatch, or dispatch create fails",
+      "failure": "approval is runtime-scoped, already resolved, expired, missing linked invocation, policy hash mismatch, dispatch create fails, or hosted enqueue succeeds but markDispatched times out before route completion",
       "exception": "ServiceError",
-      "rescue": "Return named error; if dispatch fails after approval CAS, rely on T3 dispatch outbox retry/idempotency and mark invocation failed with tool_dispatch_failed only for non-retryable dispatch failure.",
+      "rescue": "Return named error; if dispatch fails or markDispatched times out after approval CAS, rely on T3 dispatch outbox retry and T5 queue idempotency, retry with the same idempotency key, and mark invocation failed with tool_dispatch_failed only for non-retryable dispatch failure.",
       "user_sees": "approval_scope_denied, hosted_runtime_approval_bridge_unshipped, approval_not_pending, tool_policy_failed, or tool_dispatch_failed."
     },
     {
@@ -1093,6 +1102,12 @@ Reviewer pass/fail slices:
       "expect": "one dispatch record, one approval_not_pending response"
     },
     {
+      "name": "approve retry after hosted enqueue markDispatched timeout dedupes queue job",
+      "lens": "integration",
+      "given": "Pending hosted tool approval where enqueueTool returns a job but the T3 dispatch outbox markDispatched call times out, followed by a retry using the same approvalId/toolInvocationId idempotency key",
+      "expect": "retry returns or records the existing queue dispatch id; memory queue job count for that idempotency key remains exactly one"
+    },
+    {
       "name": "reject terminalizes invocation",
       "lens": "happy",
       "given": "Pending tool approval rejected",
@@ -1160,7 +1175,17 @@ Reviewer pass/fail slices:
       {
         "from_task": "P21-T3-core-tool-policy-approval-dispatch",
         "name": "ToolDispatchCallback",
-        "signature": "(input: { invocation: ToolInvocation; approvalId: string; target: ToolInvocationTarget; executionPlanHash: string; idempotencyKey: string }) => Promise<{ dispatchId: string; target: 'hosted' | 'connected_local_node' }>"
+        "signature": "(input: { invocation: ToolInvocation; approvalId: string; target: ToolInvocationTarget; executionPlanHash: string; idempotencyKey: string }) => Promise<{ dispatchId: string; target: 'hosted' | 'connected_local_node' }> where hosted placement passes idempotencyKey into ToolJobPayload.idempotencyKey"
+      },
+      {
+        "from_task": "P21-T5-hosted-worker-tool-executor",
+        "name": "ToolQueuePort",
+        "signature": "enqueueTool(payload: ToolJobPayload, options?: { maxAttempts?: number }) => Promise<ToolJobPayload & { jobId: string }>; payload includes approvalId and idempotencyKey and enqueue dedupes by idempotencyKey"
+      },
+      {
+        "from_task": "P21-T5-hosted-worker-tool-executor",
+        "name": "ToolJobPayload",
+        "signature": "{ approvalId: string; toolInvocationId: string; runId: string; placement: 'hosted'; toolType: ToolInvocation['type']; executionPlanHash: string; idempotencyKey: string; createdAt?: string }"
       },
       {
         "from_task": "P21-T3-core-tool-policy-approval-dispatch",
@@ -1191,7 +1216,7 @@ Subtask matrix:
 | Route registration and auth | `packages/protocol-rest/src/hosted-tool-routes.ts`, `packages/protocol-rest/src/hosted-auth.ts`, `packages/protocol-rest/test/hosted-tool-routes.test.ts` | R22 hosted routes present, hosted `POST /approvals` absent, `tools:write`/`tools:read` enforced before body parsing. |
 | Admission and ownership | `packages/protocol-rest/src/hosted-tool-routes.ts`, `apps/server/test/hosted-tools.test.ts` | run ownership before existence-sensitive details, entitlement/quota availability preflight, policy-denied invocation persistence, no dispatch before approval. |
 | Approval list/get | `packages/protocol-rest/test/hosted-tool-routes.test.ts`, `apps/server/test/hosted-tools.test.ts` | tool-only approval filters, cross-tenant id denial/no leak, runtime approval denial, cursor pagination over owned tool approvals only. |
-| Approval resolve and dispatch | `apps/server/src/app.ts`, `apps/server/test/hosted-tools.test.ts` | dispatch callback forwards T3 idempotency key, hosted enqueue and connected-node assignment use existing T3 contracts, duplicate approval does not duplicate side effects. |
+| Approval resolve and dispatch | `apps/server/src/app.ts`, `apps/server/test/hosted-tools.test.ts` | dispatch callback forwards T3 idempotency key into hosted ToolJobPayload and connected-node assignment contracts; duplicate approval and post-enqueue markDispatched timeout retries do not duplicate side effects. |
 | Readiness/config | `apps/server/src/config.ts`, `apps/server/src/readiness.ts`, server production tests | disabled tools ready, enabled tools fail closed on missing auth/store/queue/quota/audit/policy. |
 
 ### Task P21-T5-hosted-worker-tool-executor
@@ -1236,9 +1261,11 @@ Subtask matrix:
     "packages/adapters/src/tools/fetch-tool-adapter.ts",
     "packages/adapters/src/tools/shell-catalog-tool-adapter.ts"
   ],
-  "instructions": "Extend the existing queue abstraction with tool jobs or a typed tool-job channel while preserving run job behavior. Implement hosted worker tool execution that claims tool jobs, reloads invocation/run/approval from durable stores, verifies status queued, verifies approval approved unless an explicit test/local fake no-approval policy allows it, re-runs placement-aware policy with stored request, compares executionPlanHash, and compare-and-set transitions queued to running before adapter invocation. Construct hosted tool adapters from worker-owned config only. In packages/adapters/src/tools/index.ts, export a placement-neutral adapter factory contract with separate hosted and connected-node config shapes: buildHostedToolAdapters must accept HostedToolAdapterConfig, not the whole WorkerConfig, and buildNodeToolAdapters must accept NodeToolAdapterConfig that contains only node-owned credentials/config/cwd policy/command catalog. T6 may import buildNodeToolAdapters, but it must never pass WorkerConfig or hosted credentials to connected-node execution. Use fake/no-spend clients by default in tests and local smoke. Hosted fetch, web_search, github, shell, and fake_echo may execute when policy/config allow. Hosted repo must fail before adapter dispatch with repo_hosted_unshipped. Browser must fail with browser_tool_unshipped. Hosted shell must be command-catalog process execution only, no PTY, no terminal, no raw command strings, no request-owned executable/env. Store bounded artifacts through existing object artifact content store under runs/<runId>/tools/<toolInvocationId>/<safeName>. Consume tool_artifact_bytes_per_hour only after content is successfully stored and ownership is attached. Emit tool.call on start and exactly one terminal tool.result. Reconcile stale running hosted tool invocations on startup/retry exhaustion.",
+  "instructions": "Extend the existing queue abstraction with tool jobs or a typed tool-job channel while preserving run job behavior. Tool queue payloads must carry approvalId and a required idempotencyKey supplied by T3/T4; use the dispatch outbox id when available, otherwise a stable approvalId/toolInvocationId key. Memory and BullMQ queues must dedupe enqueueTool by that key: if enqueue succeeds but the route/core times out before markDispatched, retrying enqueueTool with the same key returns the existing job id/payload and does not append, push, or create another queued job. Implement hosted worker tool execution that claims tool jobs, reloads invocation/run/approval from durable stores, verifies status queued, verifies approval approved unless an explicit test/local fake no-approval policy allows it, re-runs placement-aware policy with stored request, compares executionPlanHash, and compare-and-set transitions queued to running before adapter invocation. Construct hosted tool adapters from worker-owned config only. In packages/adapters/src/tools/index.ts, export a placement-neutral adapter factory contract with separate hosted and connected-node config shapes: buildHostedToolAdapters must accept HostedToolAdapterConfig, not the whole WorkerConfig, and buildNodeToolAdapters must accept NodeToolAdapterConfig that contains only node-owned credentials/config/cwd policy/command catalog. T6 may import buildNodeToolAdapters, but it must never pass WorkerConfig or hosted credentials to connected-node execution. Use fake/no-spend clients by default in tests and local smoke. Hosted fetch, web_search, github, shell, and fake_echo may execute when policy/config allow. Hosted repo must fail before adapter dispatch with repo_hosted_unshipped. Browser must fail with browser_tool_unshipped. Hosted shell must be command-catalog process execution only, no PTY, no terminal, no raw command strings, no request-owned executable/env. Store bounded artifacts through existing object artifact content store under runs/<runId>/tools/<toolInvocationId>/<safeName>. Consume tool_artifact_bytes_per_hour only after content is successfully stored and ownership is attached. Emit tool.call on start and exactly one terminal tool.result. Reconcile stale running hosted tool invocations on startup/retry exhaustion.",
   "acceptance": [
     "Existing run queue tests continue to pass and run job payload compatibility is preserved.",
+    "ToolJobPayload includes approvalId and idempotencyKey, and enqueueTool rejects missing or empty idempotencyKey before storing a tool job.",
+    "MemoryRunQueue and BullMqRunQueue dedupe tool enqueue by idempotencyKey so enqueue success followed by dispatch outbox markDispatched timeout and route retry leaves exactly one queue job.",
     "Worker claim readiness fails closed when tools are enabled but policy, stores, queue, object store, fake/real adapter config, or shell catalog is invalid.",
     "Hosted worker loads invocation and approval from durable stores and rejects missing or non-queued state before adapter dispatch.",
     "Hosted worker compares stored executionPlanHash with re-resolved policy hash before execution.",
@@ -1255,6 +1282,7 @@ Subtask matrix:
   ],
   "checks": [
     "pnpm --filter @switchyard/queue test -- run-queue.test.ts",
+    "pnpm --filter @switchyard/queue test -- run-queue.test.ts -t \"tool enqueue dedupes after markDispatched timeout\"",
     "pnpm --filter @switchyard/adapters test -- hosted-real-tool-adapters.test.ts",
     "pnpm --filter @switchyard/worker test -- hosted-tool-worker.test.ts production-config.test.ts production-worker-readiness.test.ts",
     "pnpm --filter @switchyard/queue typecheck",
@@ -1263,6 +1291,13 @@ Subtask matrix:
     "git diff --check"
   ],
   "error_rescue_map": [
+    {
+      "codepath": "enqueueTool idempotency",
+      "failure": "enqueue succeeds but dispatch outbox markDispatched times out, then hosted approval dispatch retries with the same approvalId/toolInvocationId idempotency key",
+      "exception": "no exception for duplicate idempotency key; validation error for missing key",
+      "rescue": "Return the existing tool job payload/jobId for duplicate idempotencyKey and do not append or push another job to the memory or BullMQ queue.",
+      "user_sees": "One hosted worker job exists for the approval/invocation; retry can mark the existing dispatch id as dispatched without a duplicate tool side effect."
+    },
     {
       "codepath": "worker tool job claim",
       "failure": "missing invocation, missing run, missing approval, non-queued invocation, unapproved approval, or CAS conflict",
@@ -1322,6 +1357,12 @@ Subtask matrix:
       "lens": "integration",
       "given": "Existing run enqueue/claim/ack/fail/retry tests",
       "expect": "unchanged behavior"
+    },
+    {
+      "name": "tool enqueue dedupes after markDispatched timeout",
+      "lens": "integration",
+      "given": "enqueueTool receives ToolJobPayload with approvalId approval_1, toolInvocationId tool_1, and idempotencyKey dispatch_approval_1_tool_1, then T3 markDispatched times out and enqueueTool is retried with the same payload/key",
+      "expect": "memory queue and BullMQ-backed queue return the same job id or payload and expose exactly one queued/claimed job for that idempotencyKey"
     },
     {
       "name": "claim missing invocation fails",
@@ -1413,12 +1454,12 @@ Subtask matrix:
       {
         "name": "ToolQueuePort",
         "kind": "interface",
-        "signature": "enqueueTool(payload: ToolJobPayload) / claimTool() / ackTool(jobId) / failTool(jobId, error) / recoverStaleToolClaims()"
+        "signature": "enqueueTool(payload: ToolJobPayload, options?: { maxAttempts?: number }) => Promise<ToolJobPayload & { jobId: string }> / claimTool() / ackTool(jobId) / failTool(jobId, error) / recoverStaleToolClaims(); enqueueTool dedupes by payload.idempotencyKey"
       },
       {
         "name": "ToolJobPayload",
         "kind": "type",
-        "signature": "{ toolInvocationId: string; runId: string; placement: 'hosted'; toolType: ToolInvocation['type']; executionPlanHash: string; createdAt?: string }"
+        "signature": "{ approvalId: string; toolInvocationId: string; runId: string; placement: 'hosted'; toolType: ToolInvocation['type']; executionPlanHash: string; idempotencyKey: string; createdAt?: string }"
       },
       {
         "name": "buildHostedToolAdapters",
@@ -1474,7 +1515,7 @@ Subtask matrix:
 
 | Slice | Files | Must pass |
 | --- | --- | --- |
-| Queue compatibility | `packages/core/src/ports/queue.ts`, `packages/queue/src/*`, `packages/queue/test/run-queue.test.ts` | Existing run job semantics unchanged and tool job channel is typed/idempotent. |
+| Queue compatibility | `packages/core/src/ports/queue.ts`, `packages/queue/src/*`, `packages/queue/test/run-queue.test.ts` | Existing run job semantics unchanged and tool job channel is typed/idempotent by ToolJobPayload.idempotencyKey for memory and BullMQ queues. |
 | Hosted worker state machine | `apps/worker/src/worker.ts`, `apps/worker/test/hosted-tool-worker.test.ts` | reload state, approval check, hash check, queued-to-running CAS, retry exhaustion, stale-running reconciliation. |
 | Adapter factory | `packages/adapters/src/tools/index.ts`, adapter tests | `buildHostedToolAdapters(HostedToolAdapterConfig)` and `buildNodeToolAdapters(NodeToolAdapterConfig)` expose separate config shapes; node factory has no `WorkerConfig` or hosted credential dependency. |
 | Hosted tool adapters | tool adapter files and adapter tests | fake/no-spend fetch/search/GitHub/shell/fake_echo success and named failures, hosted repo/browser denial before dispatch. |
@@ -1945,7 +1986,7 @@ Subtask matrix:
       {
         "from_task": "P21-T5-hosted-worker-tool-executor",
         "name": "ToolQueuePort",
-        "signature": "enqueueTool(payload: ToolJobPayload) / claimTool() / ackTool(jobId) / failTool(jobId, error) / recoverStaleToolClaims()"
+        "signature": "enqueueTool(payload: ToolJobPayload, options?: { maxAttempts?: number }) => Promise<ToolJobPayload & { jobId: string }> / claimTool() / ackTool(jobId) / failTool(jobId, error) / recoverStaleToolClaims(); enqueueTool dedupes by payload.idempotencyKey"
       },
       {
         "from_task": "P21-T3-core-tool-policy-approval-dispatch",
@@ -1981,6 +2022,7 @@ Reviewer pass/fail slices:
 - Accepted: connected-node adapter construction now imports `buildNodeToolAdapters(NodeToolAdapterConfig)` from the shared adapter factory contract instead of `buildHostedToolAdapters(WorkerConfig)`, and T6 requires node-owned config/credentials/cwd policy/command catalog.
 - Accepted: quota ordering is explicit: entitlement and quota-store availability preflight may happen before policy, hourly/active quota reservation happens only for policy-allowed queued/dispatchable work, and artifact-byte quota is consumed only after successful content storage.
 - Accepted: durable dispatch idempotency uses a dispatch outbox keyed by `approvalId` and `toolInvocationId`, with tests for approval CAS success followed by enqueue or assignment creation timeout and retry recovery without duplicate side effects.
+- Accepted: hosted queue idempotency is now explicit in P21-T5: `ToolJobPayload` carries `approvalId` and `idempotencyKey`, memory and BullMQ queues dedupe `enqueueTool` by that key, and P21-T3/P21-T4 require the same key to flow from dispatch outbox through hosted enqueue so enqueue success plus `markDispatched` timeout retries leave one queue job.
 - Partial: P21-T4, P21-T5, and P21-T6 remain broad because the phase boundary is cross-layer, but each now includes a subtask matrix with reviewer pass/fail slices instead of splitting ownership across overlapping files.
 - Accepted: `packages/contracts/src/http-error.ts` is now listed as a context file for contracts and hosted-route error mapping tasks where R22 named errors are used.
 - Rejected: none.
@@ -1988,7 +2030,7 @@ Reviewer pass/fail slices:
 ## Risks
 
 - **Cross-layer blast radius:** R22 spans contracts, storage, core, server, worker, node, adapters, ops, and docs. Mitigation: schema/storage tasks land first; server, worker, and node import the locked contracts; ops waits for all runtime tasks.
-- **Approval double-dispatch:** Approval resolution races or post-CAS enqueue/assignment timeouts can create duplicate worker jobs or node assignments. Mitigation: store-level `updateIfStatus` CAS, durable dispatch outbox keyed by approvalId/toolInvocationId, service-level per-approval locks, idempotent queue/assignment dispatch keys, and tests with concurrent approve/reject/expire plus post-CAS dispatch timeout recovery.
+- **Approval double-dispatch:** Approval resolution races or post-CAS enqueue/assignment timeouts can create duplicate worker jobs or node assignments. Mitigation: store-level `updateIfStatus` CAS, durable dispatch outbox keyed by approvalId/toolInvocationId, service-level per-approval locks, explicit `ToolJobPayload.idempotencyKey`, memory/BullMQ queue dedupe by that key, idempotent assignment dispatch keys, and tests with concurrent approve/reject/expire plus enqueue success followed by `markDispatched` timeout recovery.
 - **Tenant existence leak:** Hosted list/get routes can reveal cross-tenant tool ids if ownership is checked after resource load. Mitigation: route/service tests require ownership-first filtering and not-found/denied behavior without payload leak.
 - **Policy drift after approval:** Operator policy changes between approval and execution can execute a different action. Mitigation: immutable redacted execution plans plus `executionPlanHash` revalidation in hosted worker and connected-node dispatch.
 - **Accidental public execution surface:** Shell work can drift into raw command execution or public `/shell` style routes. Mitigation: command-catalog only, OpenAPI forbidden route tests, manifest forbidden surface tests, raw field denial tests.
@@ -2000,8 +2042,8 @@ Reviewer pass/fail slices:
 - T1 exports additive contracts that every later task imports. No later task edits `packages/contracts/*`.
 - T2 exports durable stores, dispatch outbox, tool ownership/quota support, and assignment persistence. T3, T4, T5, and T6 import these store contracts.
 - T3 exports `HostedToolService`, placement-aware policy resolution, the idempotent `ToolDispatchCallback` contract, and `NodeCoordinatorService.createToolAssignment`. T4 wires the callback to hosted queue enqueue or the already-defined T3 node assignment creation surface; T5/T6 perform actual execution.
-- T4 registers hosted routes and constructs services from T1/T2/T3. It owns hosted admission, approval list/get/resolve routes, and readiness only; it does not implement adapters, node assignment creation, or node execution.
-- T5 owns hosted worker execution and shared tool adapter factory exports. It imports T3 policy/hash behavior and T2 stores, and exposes separate hosted and node adapter config contracts.
+- T5 owns hosted queue idempotency, hosted worker execution, and shared tool adapter factory exports. It imports T3 policy/hash behavior and T2 stores, exposes `ToolQueuePort.enqueueTool(payload)` with required `ToolJobPayload.approvalId` and `ToolJobPayload.idempotencyKey`, dedupes memory/BullMQ tool jobs by that key, and exposes separate hosted and node adapter config contracts.
+- T4 registers hosted routes and constructs services from T1/T2/T3/T5. It owns hosted admission, approval list/get/resolve routes, and readiness only; its dispatch callback passes the exact T3 idempotency key into T5 hosted queue payloads and does not implement adapters, node assignment creation, or node execution.
 - T6 owns connected-node protocol/app execution. It imports T1 assignment contracts, T2 assignment storage, T3-created assignment semantics, and T5 `buildNodeToolAdapters` with node-owned config only.
 - T7 owns operator and product truth artifacts. It imports readiness/queue/node contracts from T3/T4/T5/T6 and does not change runtime code.
 
@@ -2022,7 +2064,7 @@ Reviewer pass/fail slices:
 - [ ] `browser` is denied in hosted and connected-node paths with `browser_tool_unshipped`.
 - [ ] Shell accepts only command-catalog `commandId` and bounded args; raw command/executable/env/PTY/terminal request fields are denied.
 - [ ] No public arbitrary execution routes are added to local or hosted OpenAPI.
-- [ ] Approval approve/reject/expire resolves exactly once, uses durable dispatch outbox idempotency keyed by approvalId/toolInvocationId, and cannot dispatch duplicate worker jobs or node assignments even when enqueue/assignment creation times out after approval CAS.
+- [ ] Approval approve/reject/expire resolves exactly once, uses durable dispatch outbox idempotency keyed by approvalId/toolInvocationId, threads that key into hosted queue payloads, and cannot dispatch duplicate worker jobs or node assignments even when enqueue succeeds but markDispatched times out or assignment creation times out after approval CAS.
 - [ ] Worker and node revalidate policy and execution plan hash before execution.
 - [ ] Node assignment schema remains backward compatible for existing run assignments.
 - [ ] Node tool assignment completion updates the durable invocation only when assignment/run/node/tool ids match.
@@ -2040,6 +2082,7 @@ Reviewer pass/fail slices:
 - `pnpm --filter @switchyard/protocol-rest test -- hosted-tool`
 - `pnpm --filter @switchyard/server test -- hosted-tools production-config production-readiness`
 - `pnpm --filter @switchyard/queue test`
+- `pnpm --filter @switchyard/queue test -- run-queue.test.ts -t "tool enqueue dedupes after markDispatched timeout"`
 - `pnpm --filter @switchyard/adapters test -- hosted-real-tool`
 - `pnpm --filter @switchyard/worker test -- hosted-tool-worker production`
 - `pnpm --filter @switchyard/protocol-node test`
@@ -2060,13 +2103,13 @@ Reviewer pass/fail slices:
 4. Ownership disjoint: no task owns a file owned by another task.
 5. Context files real: all context files are existing repository paths and are verified in the worktree.
 6. Acceptance testable: each acceptance item has observable behavior or a named command/test.
-7. Dependency order sane: contracts and storage precede core; T3 now owns connected-node assignment creation and dispatch outbox use before T4 wires hosted dispatch; hosted server/worker/node depend on core; ops depends on all runtime tasks.
+7. Dependency order sane: contracts and storage precede core; T3 owns connected-node assignment creation and dispatch outbox use; T5 owns hosted queue idempotency before T4 wires hosted dispatch into the queue; node depends on core and adapter exports; ops depends on all runtime tasks.
 8. Checks runnable: commands use existing package scripts and Vitest entry points.
 9. Error/rescue maps present: each task has explicit named failure modes and user-visible results.
 10. Observability present: runtime tasks specify low-cardinality logs and metrics; pure contract/storage tasks specify test/operation metrics.
 11. Test cases enumerate acceptance: happy, nil, empty, error, edge, and integration paths are covered per task.
 12. Integration contracts walk: every import resolves to an export in an earlier or declared dependency task.
-13. Contract types match: `ToolInvocationTarget`, `AssignmentClaimResponse`, `HostedToolService`, idempotent `ToolDispatchCallback`, `ToolDispatchOutboxStore`, `NodeCoordinatorService.createToolAssignment`, `ToolQueuePort`, and `buildNodeToolAdapters(NodeToolAdapterConfig)` have matching signatures across tasks.
+13. Contract types match: `ToolInvocationTarget`, `AssignmentClaimResponse`, `HostedToolService`, idempotent `ToolDispatchCallback`, `ToolDispatchOutboxStore`, `NodeCoordinatorService.createToolAssignment`, `ToolQueuePort.enqueueTool`, `ToolJobPayload.approvalId`, `ToolJobPayload.idempotencyKey`, and `buildNodeToolAdapters(NodeToolAdapterConfig)` have matching signatures across tasks.
 
 ## Plan Completeness Self-Test
 
