@@ -49,6 +49,7 @@ import {
   type ResponseContentKind,
   type RouteInventoryEntry
 } from "./endpoint-inventory.js";
+import { acceptedResponseSchema } from "./hosted-runtime-bridge.js";
 
 interface SchemaObject {
   [key: string]: unknown;
@@ -154,7 +155,7 @@ const SCHEMA_BY_REF: Record<string, z.ZodTypeAny> = {
     reason: z.string().min(1).optional(),
     answers: z.array(z.record(z.string(), z.unknown())).optional()
   }),
-  AcceptedResponse: z.object({ accepted: z.boolean() }),
+  AcceptedResponse: acceptedResponseSchema,
   CancelRunResponse: z.object({ run: runSchema }),
 
   ListProvidersQuery: listProvidersQuerySchema,

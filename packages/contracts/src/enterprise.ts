@@ -125,7 +125,9 @@ export const billingPlanQuotasSchema = z
     maxArtifactContentReadBytesPerHour: z.number().int().nonnegative(),
     maxToolInvocationsPerHour: z.number().int().nonnegative().default(0),
     maxActiveToolInvocations: z.number().int().nonnegative().default(0),
-    maxToolArtifactBytesPerHour: z.number().int().nonnegative().default(0)
+    maxToolArtifactBytesPerHour: z.number().int().nonnegative().default(0),
+    maxRuntimeBridgeCommandsPerHour: z.number().int().nonnegative().default(0),
+    maxActiveRuntimeBridgeCommands: z.number().int().nonnegative().default(0)
   })
   .strict();
 
@@ -149,7 +151,9 @@ export const quotaKindSchema = z.enum([
   "connected_nodes",
   "tool_invocations_per_hour",
   "active_tool_invocations",
-  "tool_artifact_bytes_per_hour"
+  "tool_artifact_bytes_per_hour",
+  "runtime_bridge_commands_per_hour",
+  "active_runtime_bridge_commands"
 ]);
 
 export const entitlementSnapshotSchema = z
@@ -205,6 +209,7 @@ export const resourceOwnershipTypeSchema = z.enum([
   "artifact",
   "tool_invocation",
   "approval",
+  "runtime_bridge_command",
   "placement_decision",
   "node",
   "assignment",

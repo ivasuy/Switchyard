@@ -24,6 +24,11 @@ import {
   assignmentSchema
 } from "./assignment.js";
 import { nodePolicySchema } from "./node.js";
+import {
+  acceptedResponseSchema,
+  hostedRuntimeBridgeReadinessReportSchema,
+  isHostedRuntimeBridgeSupportedMode
+} from "./hosted-runtime-bridge.js";
 
 const FORBIDDEN_PUBLIC_ROUTE_PREFIX =
   /^\/(exec|shell|process|command|pty|terminal|sandbox|browser|search|github|fetch|repo|dashboard|tui)(\/|$)/;
@@ -252,6 +257,15 @@ describe("openapi generation", () => {
         compatible: expect.any(Boolean)
       })
     );
+
+    const readiness = hostedRuntimeBridgeReadinessReportSchema.parse({
+      status: "not_ready",
+      checks: [
+        { name: "session_reconciliation", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
+        { name: "approval_sender", ok: true }
+      ]
+    });
+    expect(readiness.checks.map((entry) => entry.name)).toEqual(["session_reconciliation", "approval_sender"]);
   });
 
   it("protects hosted runs and node routes with SwitchyardApiKey", () => {
@@ -533,9 +547,12 @@ describe("openapi generation", () => {
     expect(quotaKindSchema.parse("tool_invocations_per_hour")).toBe("tool_invocations_per_hour");
     expect(quotaKindSchema.parse("active_tool_invocations")).toBe("active_tool_invocations");
     expect(quotaKindSchema.parse("tool_artifact_bytes_per_hour")).toBe("tool_artifact_bytes_per_hour");
+    expect(quotaKindSchema.parse("runtime_bridge_commands_per_hour")).toBe("runtime_bridge_commands_per_hour");
+    expect(quotaKindSchema.parse("active_runtime_bridge_commands")).toBe("active_runtime_bridge_commands");
 
     expect(resourceOwnershipTypeSchema.parse("tool_invocation")).toBe("tool_invocation");
     expect(resourceOwnershipTypeSchema.parse("approval")).toBe("approval");
+    expect(resourceOwnershipTypeSchema.parse("runtime_bridge_command")).toBe("runtime_bridge_command");
 
     expect(auditEventTypeSchema.parse("tool.execution_completed")).toBe("tool.execution_completed");
     expect(auditResourceTypeSchema.parse("tool_invocation")).toBe("tool_invocation");
@@ -644,5 +661,22 @@ describe("openapi generation", () => {
     expect(hosted.paths["/approvals/{id}"]?.get?.security).toEqual(expectedSecurity);
     expect(hosted.paths["/approvals/{id}/approve"]?.post?.security).toEqual(expectedSecurity);
     expect(hosted.paths["/approvals/{id}/reject"]?.post?.security).toEqual(expectedSecurity);
+  });
+
+  it("keeps AcceptedResponse backward compatible with optional bridgeCommandId", () => {
+    const legacy = acceptedResponseSchema.parse({ accepted: true });
+    const extended = acceptedResponseSchema.parse({
+      accepted: true,
+      bridgeCommandId: "bridge_cmd_123"
+    });
+    expect(legacy.accepted).toBe(true);
+    expect(extended.bridgeCommandId).toBe("bridge_cmd_123");
+  });
+
+  it("supports only hosted runtime bridge modes claude_code.sdk and opencode.acp", () => {
+    expect(isHostedRuntimeBridgeSupportedMode("claude_code.sdk", "input")).toBe(true);
+    expect(isHostedRuntimeBridgeSupportedMode("opencode.acp", "approval_resolution")).toBe(true);
+    expect(isHostedRuntimeBridgeSupportedMode("codex.exec_json", "input")).toBe(false);
+    expect(isHostedRuntimeBridgeSupportedMode("generic_http.async_rest", "approval_resolution")).toBe(false);
   });
 });

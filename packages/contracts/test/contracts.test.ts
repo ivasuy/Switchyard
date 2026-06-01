@@ -59,6 +59,12 @@ import {
   assignmentClaimResponseSchema,
   assignmentEventSyncRequestSchema,
   assignmentArtifactManifestRequestSchema,
+  hostedRuntimeBridgeCommandSchema,
+  hostedRuntimeBridgeReadinessReportSchema,
+  HOSTED_RUNTIME_BRIDGE_REASON_CODES,
+  ACP_RUNTIME_BRIDGE_REASON_CODES,
+  acceptedResponseSchema,
+  isHostedRuntimeBridgeSupportedMode,
   generateOpenApiDocument,
   HOSTED_NODE_ROUTE_INVENTORY
 } from "../src/index.js";
@@ -1725,5 +1731,183 @@ describe("Switchyard contracts", () => {
       }
     });
     expect(envelope.error.code).toBe("payload_too_large");
+  });
+
+  it("parses hosted runtime bridge command fixtures and readiness report", () => {
+    const command = hostedRuntimeBridgeCommandSchema.parse({
+      id: "bridge_cmd_123",
+      runId: "run_123",
+      runtimeSessionId: "session_123",
+      runtimeMode: "claude_code.sdk",
+      operation: "input",
+      status: "queued",
+      idempotencyKey: "idem_123",
+      payloadHash: "sha256:abc123",
+      redactedPayload: {
+        kind: "input_summary",
+        hasAnswers: false
+      },
+      payloadBytes: 128,
+      accountId: "account_123",
+      tenantId: "tenant_123",
+      projectId: "project_123",
+      userId: "user_123",
+      apiKeyId: "api_key_123",
+      attempts: 0,
+      maxAttempts: 3,
+      expiresAt: "2026-06-01T00:05:00.000Z",
+      createdAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(command.operation).toBe("input");
+
+    const readiness = hostedRuntimeBridgeReadinessReportSchema.parse({
+      status: "ready",
+      checks: [
+        { name: "session_reconciliation", ok: true },
+        { name: "approval_sender", ok: true }
+      ]
+    });
+    expect(readiness.status).toBe("ready");
+  });
+
+  it("rejects malformed hosted runtime bridge command fixtures", () => {
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runtimeSessionId: "session_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "input",
+        status: "queued",
+        idempotencyKey: "idem_123",
+        payloadHash: "sha256:abc123",
+        redactedPayload: { summary: true },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runId: "run_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "shell",
+        status: "queued",
+        idempotencyKey: "idem_123",
+        payloadHash: "sha256:abc123",
+        redactedPayload: { summary: true },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runId: "run_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "input",
+        status: "retrying",
+        idempotencyKey: "idem_123",
+        payloadHash: "sha256:abc123",
+        redactedPayload: { summary: true },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runId: "run_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "input",
+        status: "queued",
+        idempotencyKey: "idem_123",
+        payloadHash: "sha256:abc123",
+        redactedPayload: {
+          prompt: "raw prompt is forbidden"
+        },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runId: "run_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "input",
+        status: "queued",
+        idempotencyKey: "",
+        payloadHash: "sha256:abc123",
+        redactedPayload: { summary: true },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+  });
+
+  it("exports hosted runtime bridge reason code constants and supported mode checks", () => {
+    expect(HOSTED_RUNTIME_BRIDGE_REASON_CODES).toContain("hosted_runtime_bridge_non_idempotent_retry_blocked");
+    expect(ACP_RUNTIME_BRIDGE_REASON_CODES).toContain("acp_permission_request_expired");
+
+    expect(isHostedRuntimeBridgeSupportedMode("claude_code.sdk")).toBe(true);
+    expect(isHostedRuntimeBridgeSupportedMode("opencode.acp", "approval_resolution")).toBe(true);
+    expect(isHostedRuntimeBridgeSupportedMode("codex.exec_json")).toBe(false);
+  });
+
+  it("keeps AcceptedResponse compatible with and without bridgeCommandId", () => {
+    const legacy = acceptedResponseSchema.parse({ accepted: true });
+    const withBridge = acceptedResponseSchema.parse({ accepted: true, bridgeCommandId: "bridge_cmd_123" });
+    expect(legacy.accepted).toBe(true);
+    expect(withBridge.bridgeCommandId).toBe("bridge_cmd_123");
   });
 });

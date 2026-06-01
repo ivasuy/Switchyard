@@ -3,6 +3,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { R18_HTTP_ERROR_CODES, httpErrorCodeSchema, httpErrorEnvelopeSchema } from "./http-error.js";
+import {
+  ACP_RUNTIME_BRIDGE_REASON_CODES,
+  HOSTED_RUNTIME_BRIDGE_REASON_CODES
+} from "./hosted-runtime-bridge.js";
 
 const R22_TOOL_ERROR_CODES = [
   "tool_run_required",
@@ -98,5 +102,21 @@ describe("http error contract", () => {
     for (const code of R22_TOOL_ERROR_CODES) {
       expect(httpErrorCodeSchema.parse(code)).toBe(code);
     }
+  });
+
+  it("includes all named R23 hosted runtime bridge and ACP reason codes", () => {
+    for (const code of HOSTED_RUNTIME_BRIDGE_REASON_CODES) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+    }
+    for (const code of ACP_RUNTIME_BRIDGE_REASON_CODES) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+    }
+  });
+
+  it("maps hosted_runtime_bridge_non_idempotent_retry_blocked through adapter_protocol_failed conflict status", () => {
+    expect(httpErrorCodeSchema.parse("hosted_runtime_bridge_non_idempotent_retry_blocked")).toBe(
+      "hosted_runtime_bridge_non_idempotent_retry_blocked"
+    );
+    expect(protocolStatusFor("adapter_protocol_failed")).toBe(409);
   });
 });

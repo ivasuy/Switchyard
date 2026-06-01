@@ -3,6 +3,8 @@ import { HOSTED_SERVER_ROUTE_INVENTORY, LOCAL_DAEMON_ROUTE_INVENTORY } from "./e
 
 const FORBIDDEN_PUBLIC_ROUTE_PREFIX =
   /^\/(exec|shell|process|command|pty|terminal|sandbox|browser|search|github|fetch|repo|dashboard|tui)(\/|$)/;
+const FORBIDDEN_ROUTE_CONTAINS = ["/runtime-bridge", "/session"];
+const FORBIDDEN_TOP_LEVEL_PATHS = [/^\/input(\/|$)/, /^\/approval(\/|$)/];
 const FORBIDDEN_OPERATION_TOKENS = [
   "sandbox",
   "terminal",
@@ -88,6 +90,12 @@ describe("local daemon route inventory", () => {
     for (const entry of [...LOCAL_DAEMON_ROUTE_INVENTORY, ...HOSTED_SERVER_ROUTE_INVENTORY]) {
       const lowerPath = entry.path.toLowerCase();
       expect(FORBIDDEN_PUBLIC_ROUTE_PREFIX.test(lowerPath)).toBe(false);
+      for (const token of FORBIDDEN_ROUTE_CONTAINS) {
+        expect(lowerPath.includes(token)).toBe(false);
+      }
+      for (const pattern of FORBIDDEN_TOP_LEVEL_PATHS) {
+        expect(pattern.test(lowerPath)).toBe(false);
+      }
       expect(entry.path).not.toMatch(/^\/(dashboard|tui)(\/|$)/i);
       if (entry.path === "/memory/search" && entry.operationId === "searchMemory") {
         continue;

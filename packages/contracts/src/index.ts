@@ -11,6 +11,7 @@ export * from "./endpoint-inventory.js";
 export * from "./event.js";
 export * from "./evidence.js";
 export * from "./http-error.js";
+export * from "./hosted-runtime-bridge.js";
 export * from "./ids.js";
 export * from "./list-queries.js";
 export * from "./memory.js";

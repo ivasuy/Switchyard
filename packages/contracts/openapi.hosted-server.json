@@ -7,6 +7,10 @@
         "properties": {
           "accepted": {
             "type": "boolean"
+          },
+          "bridgeCommandId": {
+            "minLength": 1,
+            "type": "string"
           }
         },
         "required": [
@@ -2467,6 +2471,12 @@
                     "minimum": 0,
                     "type": "integer"
                   },
+                  "maxActiveRuntimeBridgeCommands": {
+                    "default": 0,
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
                   "maxActiveToolInvocations": {
                     "default": 0,
                     "maximum": 9007199254740991,
@@ -2484,6 +2494,12 @@
                     "type": "integer"
                   },
                   "maxRunsPerHour": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "maxRuntimeBridgeCommandsPerHour": {
+                    "default": 0,
                     "maximum": 9007199254740991,
                     "minimum": 0,
                     "type": "integer"
@@ -2514,7 +2530,9 @@
                   "maxArtifactContentReadBytesPerHour",
                   "maxToolInvocationsPerHour",
                   "maxActiveToolInvocations",
-                  "maxToolArtifactBytesPerHour"
+                  "maxToolArtifactBytesPerHour",
+                  "maxRuntimeBridgeCommandsPerHour",
+                  "maxActiveRuntimeBridgeCommands"
                 ],
                 "type": "object"
               },
@@ -3162,6 +3180,29 @@
                   "tool_assignment_expired",
                   "tool_assignment_mismatch",
                   "hosted_runtime_approval_bridge_unshipped",
+                  "hosted_runtime_bridge_store_unavailable",
+                  "hosted_runtime_bridge_queue_unavailable",
+                  "hosted_runtime_bridge_worker_unavailable",
+                  "hosted_runtime_bridge_operation_unsupported",
+                  "hosted_runtime_bridge_session_missing",
+                  "hosted_runtime_bridge_session_not_owned",
+                  "hosted_runtime_session_missing",
+                  "hosted_runtime_session_lost",
+                  "hosted_runtime_session_state_incomplete",
+                  "hosted_runtime_bridge_payload_mismatch",
+                  "hosted_runtime_bridge_command_expired",
+                  "hosted_runtime_bridge_non_idempotent_retry_blocked",
+                  "hosted_runtime_bridge_quota_exceeded",
+                  "hosted_codex_interactive_unshipped",
+                  "codex_exec_json_input_unsupported",
+                  "codex_exec_json_approval_bridge_unsupported",
+                  "acp_permission_request_invalid",
+                  "acp_permission_response_failed",
+                  "acp_permission_request_expired",
+                  "acp_prompt_in_flight",
+                  "acp_session_not_ready_for_input",
+                  "agentfield_bridge_unshipped",
+                  "generic_http_bridge_unshipped",
                   "approval_scope_denied",
                   "repo_hosted_unshipped",
                   "browser_tool_unshipped",
@@ -6736,6 +6777,12 @@
                         "minimum": 0,
                         "type": "integer"
                       },
+                      "maxActiveRuntimeBridgeCommands": {
+                        "default": 0,
+                        "maximum": 9007199254740991,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
                       "maxActiveToolInvocations": {
                         "default": 0,
                         "maximum": 9007199254740991,
@@ -6753,6 +6800,12 @@
                         "type": "integer"
                       },
                       "maxRunsPerHour": {
+                        "maximum": 9007199254740991,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "maxRuntimeBridgeCommandsPerHour": {
+                        "default": 0,
                         "maximum": 9007199254740991,
                         "minimum": 0,
                         "type": "integer"
@@ -6783,7 +6836,9 @@
                       "maxArtifactContentReadBytesPerHour",
                       "maxToolInvocationsPerHour",
                       "maxActiveToolInvocations",
-                      "maxToolArtifactBytesPerHour"
+                      "maxToolArtifactBytesPerHour",
+                      "maxRuntimeBridgeCommandsPerHour",
+                      "maxActiveRuntimeBridgeCommands"
                     ],
                     "type": "object"
                   },
