@@ -411,6 +411,30 @@ export class BullMqRunQueue implements RunQueuePort, ToolQueuePort {
     return snapshot;
   }
 
+  async hasLiveToolClaim(toolInvocationId: string, options?: { now?: string }): Promise<boolean> {
+    const nowMs = Date.parse(options?.now ?? new Date().toISOString());
+    const entries = await this.connection.hvals(this.toolClaimedKey);
+    for (const raw of entries) {
+      let claimed: StoredToolJob;
+      try {
+        claimed = JSON.parse(raw) as StoredToolJob;
+      } catch {
+        continue;
+      }
+      if (claimed.payload.toolInvocationId !== toolInvocationId) {
+        continue;
+      }
+      if (!claimed.leaseUntil) {
+        continue;
+      }
+      if (Date.parse(claimed.leaseUntil) <= nowMs) {
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
   async recoverStaleToolClaims(options?: { now?: string }): Promise<ToolQueueRecoveryResult> {
     const nowMs = Date.parse(options?.now ?? new Date().toISOString());
     const entries = await this.connection.hgetall(this.toolClaimedKey);

@@ -290,6 +290,26 @@ export class MemoryRunQueue implements RunQueuePort, ToolQueuePort {
     return snapshot;
   }
 
+  async hasLiveToolClaim(toolInvocationId: string, options?: { now?: string }): Promise<boolean> {
+    const nowMs = Date.parse(options?.now ?? this.now());
+    for (const job of this.toolJobs.values()) {
+      if (job.state !== "claimed") {
+        continue;
+      }
+      if (job.payload.toolInvocationId !== toolInvocationId) {
+        continue;
+      }
+      if (!job.leaseUntil) {
+        continue;
+      }
+      if (Date.parse(job.leaseUntil) <= nowMs) {
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
   async recoverStaleToolClaims(options?: { now?: string }): Promise<ToolQueueRecoveryResult> {
     const nowIso = options?.now ?? this.now();
     const now = Date.parse(nowIso);

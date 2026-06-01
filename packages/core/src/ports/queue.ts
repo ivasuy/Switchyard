@@ -118,6 +118,7 @@ export interface ToolQueuePort {
   retryTool(jobId: string): Promise<void>;
   discardTool(jobId: string): Promise<void>;
   getToolJob(jobId: string): Promise<ToolQueueJobSnapshot | undefined>;
+  hasLiveToolClaim(toolInvocationId: string, options?: { now?: string }): Promise<boolean>;
   recoverStaleToolClaims(options?: { now?: string }): Promise<ToolQueueRecoveryResult>;
   toolStats(): Promise<ToolQueueStats>;
 }

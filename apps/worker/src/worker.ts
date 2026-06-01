@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { createHash } from "node:crypto";
 import {
   HostedWorkerService,
   checkHostedSandboxReadiness,
@@ -13,6 +14,7 @@ import {
   type ArtifactContentStore,
   type ArtifactStore,
   type EventStore,
+  type RuntimeLogger,
   type RunQueuePort,
   type RunStore,
   type SessionStore,
@@ -108,6 +110,22 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   toolPolicy?: ToolPolicyPort;
   now?: () => number;
   readinessTtlMs?: number;
+  attachArtifactOwnership?: (input: {
+    runId: string;
+    toolInvocationId: string;
+    artifactId: string;
+    artifactPath: string;
+    artifactBytes: number;
+    artifactSha256: string;
+  }) => Promise<void>;
+  consumeToolArtifactBytesQuota?: (input: {
+    runId: string;
+    toolInvocationId: string;
+    artifactId: string;
+    bytes: number;
+  }) => Promise<void>;
+  logger?: RuntimeLogger;
+  incrementToolMetric?: (metric: string, labels: Record<string, string>) => void;
 }): HostedWorkerApp {
   const tools = config.tools ?? {
     hostedRealTools: "disabled",
@@ -245,9 +263,23 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     if (!claimed) {
       return false;
     }
+    emitToolInfo("tool.job.claimed", {
+      toolType: normalizeToolTypeLabel(claimed.payload.toolType)
+    });
+    emitToolMetric("tool_job_claimed_total", {
+      toolType: normalizeToolTypeLabel(claimed.payload.toolType)
+    });
 
     const invocation = await invocations.get(claimed.payload.toolInvocationId);
     if (!invocation) {
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(claimed.payload.toolType),
+        reason: normalizeReasonLabel("tool_invocation_not_found")
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(claimed.payload.toolType),
+        reason: normalizeReasonLabel("tool_invocation_not_found")
+      });
       await toolQueue.failTool(claimed.id, { reasonCode: "tool_invocation_not_found", message: "tool_invocation_not_found" });
       return true;
     }
@@ -263,6 +295,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         code: "hosted_run_state_invalid",
         message: "run_not_found"
       });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("hosted_run_state_invalid")
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("hosted_run_state_invalid")
+      });
       await toolQueue.failTool(claimed.id, { reasonCode: "hosted_run_state_invalid", message: "run_not_found" });
       return true;
     }
@@ -273,6 +313,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         code: "approval_not_found",
         message: "approval_not_found"
       });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("approval_not_found")
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("approval_not_found")
+      });
       await toolQueue.failTool(claimed.id, { reasonCode: "approval_not_found", message: "approval_not_found" });
       return true;
     }
@@ -281,6 +329,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       await transitionToolInvocation(invocation, "failed", {
         code: "approval_not_pending",
         message: "approval_not_approved"
+      });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("approval_not_pending")
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("approval_not_pending")
       });
       await toolQueue.failTool(claimed.id, { reasonCode: "approval_not_pending", message: "approval_not_approved" });
       return true;
@@ -300,6 +356,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         code: denyCode,
         message: "Tool invocation denied by policy revalidation"
       });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel(denyCode)
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel(denyCode)
+      });
       await toolQueue.failTool(claimed.id, { reasonCode: denyCode, message: denyCode });
       return true;
     }
@@ -313,6 +377,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         code: "tool_policy_failed",
         message: "Tool execution plan changed after approval"
       });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("tool_policy_failed")
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("tool_policy_failed")
+      });
       await toolQueue.failTool(claimed.id, { reasonCode: "tool_policy_failed", message: "tool_policy_failed" });
       return true;
     }
@@ -322,6 +394,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         code: CODE_REPO_UNSHIPPED,
         message: "Hosted source-control inspection execution is not shipped"
       });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel(CODE_REPO_UNSHIPPED)
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel(CODE_REPO_UNSHIPPED)
+      });
       await toolQueue.failTool(claimed.id, { reasonCode: CODE_REPO_UNSHIPPED, message: CODE_REPO_UNSHIPPED });
       return true;
     }
@@ -330,6 +410,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       await transitionToolInvocation(invocation, "denied", {
         code: CODE_BROWSER_UNSHIPPED,
         message: "Interactive page control execution is not shipped"
+      });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel(CODE_BROWSER_UNSHIPPED)
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel(CODE_BROWSER_UNSHIPPED)
       });
       await toolQueue.failTool(claimed.id, { reasonCode: CODE_BROWSER_UNSHIPPED, message: CODE_BROWSER_UNSHIPPED });
       return true;
@@ -344,6 +432,12 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       await toolQueue.ackTool(claimed.id);
       return true;
     }
+    emitToolInfo("tool.job.revalidated", {
+      toolType: normalizeToolTypeLabel(persistedRunning.type)
+    });
+    emitToolMetric("tool_job_revalidated_total", {
+      toolType: normalizeToolTypeLabel(persistedRunning.type)
+    });
 
     await appendToolEvent(run.id, "tool.call", {
       toolInvocationId: persistedRunning.id,
@@ -356,6 +450,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         code: "tool_adapter_unavailable",
         message: `Tool adapter not configured for ${persistedRunning.type}`
       });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(persistedRunning.type),
+        reason: normalizeReasonLabel("tool_adapter_unavailable")
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(persistedRunning.type),
+        reason: normalizeReasonLabel("tool_adapter_unavailable")
+      });
       await toolQueue.failTool(claimed.id, { reasonCode: "tool_adapter_unavailable", message: "tool_adapter_unavailable" });
       return true;
     }
@@ -365,8 +467,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         ? requestInput
         : { request: requestInput, executionPlan: policyDecision.executionPlan };
       const output = redactSecrets(await adapter.invoke(adapterInput));
-      const storedOutput = await persistToolArtifacts(run.id, persistedRunning.id, output);
+      const storedOutput = await persistToolArtifacts(run.id, persistedRunning.id, persistedRunning.type, output);
       await transitionToolInvocation(persistedRunning, "completed", undefined, storedOutput);
+      emitToolInfo("tool.job.completed", {
+        toolType: normalizeToolTypeLabel(persistedRunning.type)
+      });
+      emitToolMetric("tool_job_completed_total", {
+        toolType: normalizeToolTypeLabel(persistedRunning.type)
+      });
       await toolQueue.ackTool(claimed.id);
       return true;
     } catch (error) {
@@ -374,6 +482,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       await transitionToolInvocation(persistedRunning, "failed", {
         code: reasonCode,
         message: error instanceof Error ? error.message : String(error)
+      });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(persistedRunning.type),
+        reason: normalizeReasonLabel(reasonCode)
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(persistedRunning.type),
+        reason: normalizeReasonLabel(reasonCode)
       });
       await toolQueue.failTool(claimed.id, { reasonCode, message: reasonCode });
       return true;
@@ -383,6 +499,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   async function persistToolArtifacts(
     runId: string,
     toolInvocationId: string,
+    toolType: string,
     output: Record<string, unknown>
   ): Promise<Record<string, unknown>> {
     const candidates = Array.isArray(output["artifactCandidates"])
@@ -396,12 +513,22 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     for (const candidate of candidates) {
       const logicalPath = typeof candidate["logicalPath"] === "string" ? candidate["logicalPath"] : "output.log";
       const artifactType = typeof candidate["type"] === "string" ? candidate["type"] : "raw_log";
-      const content = redactSecrets(typeof candidate["content"] === "string" ? candidate["content"] : "");
+      const maxBytes = runtimeConfig.tools.policy.global.maxArtifactBytes;
+      const content = truncateUtf8Bytes(
+        redactSecrets(typeof candidate["content"] === "string" ? candidate["content"] : ""),
+        maxBytes
+      );
       const contentType = typeof candidate["contentType"] === "string" ? candidate["contentType"] : "text/plain";
       const safeName = sanitizeArtifactName(logicalPath);
       const artifactPath = `runs/${runId}/tools/${toolInvocationId}/${safeName}`;
 
       const stored = await artifactContent.writeText(artifactPath, content, { contentType });
+      const digest = createHash("sha256").update(content, "utf8").digest("hex");
+      if (stored.sha256 !== digest) {
+        const digestError = new Error("artifact_digest_mismatch");
+        (digestError as Error & { reasonCode: string }).reasonCode = "artifact_digest_mismatch";
+        throw digestError;
+      }
       const artifact: ArtifactRecord = {
         id: `artifact_${crypto.randomUUID()}`,
         runId,
@@ -418,7 +545,27 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         }),
         createdAt: new Date().toISOString()
       };
-      await artifacts.create(artifact);
+      const created = await artifacts.create(artifact);
+      await deps?.attachArtifactOwnership?.({
+        runId,
+        toolInvocationId,
+        artifactId: created.id,
+        artifactPath: created.path,
+        artifactBytes: stored.sizeBytes,
+        artifactSha256: stored.sha256
+      });
+      await deps?.consumeToolArtifactBytesQuota?.({
+        runId,
+        toolInvocationId,
+        artifactId: created.id,
+        bytes: stored.sizeBytes
+      });
+      emitToolInfo("tool.job.artifact.stored", {
+        toolType: normalizeToolTypeLabel(toolType)
+      });
+      emitToolMetric("tool_artifact_stored_total", {
+        toolType: normalizeToolTypeLabel(toolType)
+      });
       artifactIds.push(artifact.id);
     }
 
@@ -469,6 +616,14 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       return;
     }
     await transitionToolInvocation(invocation, "failed", { code, message });
+    emitToolWarn("tool.job.failed", {
+      toolType: normalizeToolTypeLabel(invocation.type),
+      reason: normalizeReasonLabel(code)
+    });
+    emitToolMetric("tool_job_failed_total", {
+      toolType: normalizeToolTypeLabel(invocation.type),
+      reason: normalizeReasonLabel(code)
+    });
   }
 
   async function reconcileStaleRunningInvocations(): Promise<void> {
@@ -477,11 +632,38 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       limit: 5000
     });
     for (const invocation of page.invocations) {
+      const run = invocation.runId ? await runs.get(invocation.runId) : undefined;
+      if (!isHostedInvocation(invocation, run)) {
+        continue;
+      }
+      if (hasToolClaimProbeSupport(toolQueue) && await toolQueue.hasLiveToolClaim(invocation.id)) {
+        continue;
+      }
       await transitionToolInvocation(invocation, "failed", {
         code: "tool_worker_restarted",
         message: "Tool invocation interrupted by worker restart"
       });
+      emitToolWarn("tool.job.failed", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("tool_worker_restarted")
+      });
+      emitToolMetric("tool_job_failed_total", {
+        toolType: normalizeToolTypeLabel(invocation.type),
+        reason: normalizeReasonLabel("tool_worker_restarted")
+      });
     }
+  }
+
+  function emitToolInfo(event: string, details: Record<string, string>): void {
+    deps?.logger?.info(event, details);
+  }
+
+  function emitToolWarn(event: string, details: Record<string, string>): void {
+    deps?.logger?.warn(event, details);
+  }
+
+  function emitToolMetric(metric: string, labels: Record<string, string>): void {
+    deps?.incrementToolMetric?.(metric, labels);
   }
 
   async function appendToolEvent(
@@ -729,6 +911,12 @@ function hasToolQueueSupport(queue: Partial<ToolQueuePort>): queue is ToolQueueP
     && typeof queue.recoverStaleToolClaims === "function";
 }
 
+function hasToolClaimProbeSupport(
+  queue: Partial<ToolQueuePort>
+): queue is Partial<ToolQueuePort> & Pick<ToolQueuePort, "hasLiveToolClaim"> {
+  return typeof queue.hasLiveToolClaim === "function";
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
@@ -753,6 +941,51 @@ function extractReasonCode(error: unknown): string | undefined {
     return record.code;
   }
   return undefined;
+}
+
+function normalizeToolTypeLabel(value: string | undefined): string {
+  if (!value || value.trim().length === 0) {
+    return "unknown";
+  }
+  return value.trim().slice(0, 48);
+}
+
+function normalizeReasonLabel(code: string | undefined): string {
+  if (!code || code.trim().length === 0) {
+    return "unknown";
+  }
+  const normalized = code.trim().toLowerCase();
+  if (normalized.includes("approval")) return "approval";
+  if (normalized.includes("policy")) return "policy";
+  if (normalized.includes("adapter")) return "adapter";
+  if (normalized.includes("dispatch")) return "dispatch";
+  if (normalized.includes("timeout")) return "timeout";
+  if (normalized.includes("quota")) return "quota";
+  if (normalized.includes("ownership")) return "ownership";
+  if (normalized.includes("worker")) return "worker";
+  if (normalized.includes("not_found")) return "not_found";
+  return "other";
+}
+
+function isHostedInvocation(invocation: ToolInvocationRecord, run: RunRecord | undefined): boolean {
+  const target = asRecord(invocation.input["target"]);
+  if (typeof target["placement"] === "string") {
+    return target["placement"] === "hosted";
+  }
+  return run?.placement === "hosted";
+}
+
+function truncateUtf8Bytes(input: string, maxBytes: number): string {
+  if (maxBytes <= 0) {
+    return "";
+  }
+  if (Buffer.byteLength(input, "utf8") <= maxBytes) {
+    return input;
+  }
+  return Buffer.from(input, "utf8")
+    .subarray(0, maxBytes)
+    .toString("utf8")
+    .replace(/\uFFFD+$/g, "");
 }
 
 function sandboxReadinessDiagnostics(config: WorkerConfig): Record<string, unknown> {
