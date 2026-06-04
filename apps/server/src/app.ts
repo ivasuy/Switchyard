@@ -89,6 +89,7 @@ type QuotaReservation = Awaited<ReturnType<PostgresControlPlaneStore["reserveQuo
 type Run = NonNullable<Awaited<ReturnType<RunStore["get"]>>>;
 type SwitchyardEvent = Parameters<EventStore["append"]>[0];
 type DebateExecutionJob = Parameters<DebateService["processExecutionJob"]>[0];
+type ConnectedNodeRecord = Awaited<ReturnType<NodeStore["list"]>>[number];
 
 export async function createServerApp(config: ServerConfig) {
   const serverAuthMode = config.serverAuthMode ?? "disabled";
@@ -753,18 +754,6 @@ export async function createServerApp(config: ServerConfig) {
   const runtimeBridgeEnabled = config.hostedRuntimeAllowlist.includes("claude_code.sdk")
     || config.hostedRuntimeAllowlist.includes("opencode.acp")
     || wrapperRuntimeBridgeEnabled;
-  const wrapperConfigReadiness = wrapperRuntimeBridgeEnabled
-    ? {
-        ok: false,
-        reasonCode: wrapperReadinessReasonCode(config.hostedRuntimeAllowlist, "config")
-      }
-    : undefined;
-  const wrapperCapabilityReadiness = wrapperRuntimeBridgeEnabled
-    ? {
-        ok: false,
-        reasonCode: wrapperReadinessReasonCode(config.hostedRuntimeAllowlist, "capability")
-      }
-    : undefined;
 
   app.get("/health", async () => ({ ok: true }));
   app.get("/ready", async (_request, reply) => {
@@ -793,6 +782,13 @@ export async function createServerApp(config: ServerConfig) {
           nodeTokenBound: config.nodeSharedToken ? false : true,
           unownedResources: undefined
         };
+    const onlineBridgeNodes = runtimeBridgeEnabled ? await listOnlineBridgeNodes(nodes) : [];
+    const runtimeBridgeWorkerReadiness = runtimeBridgeEnabled
+      ? resolveRuntimeBridgeWorkerReadiness({
+          allowlist: config.hostedRuntimeAllowlist,
+          onlineNodes: onlineBridgeNodes
+        })
+      : undefined;
     const ready = await probeServerReadiness({
       config,
       postgres,
@@ -807,14 +803,11 @@ export async function createServerApp(config: ServerConfig) {
         quota: controlPlaneStoreInstance,
         audit: controlPlaneStoreInstance,
         routeAuth: controlPlane,
-        wrapperConfig: wrapperConfigReadiness,
-        wrapperBridgeCapability: wrapperCapabilityReadiness,
-        workerReadiness: {
-          claim: false,
-          adapterCapability: false,
-          sessionReconciliation: false,
-          approvalSender: false
-        }
+        wrapperConfig: wrapperRuntimeBridgeEnabled
+          ? resolveWrapperConfigReadiness(config.hostedRuntimeAllowlist, config.providerRuntimeActivation)
+          : undefined,
+        wrapperBridgeCapability: wrapperRuntimeBridgeEnabled ? runtimeBridgeWorkerReadiness?.wrapperBridgeCapability : undefined,
+        workerReadiness: runtimeBridgeWorkerReadiness
       }
     });
     if (!ready.ok) {
@@ -2377,14 +2370,6 @@ function createUnavailableBridgeCommandPayloadStore(): {
   };
 }
 
-function wrapperReadinessReasonCode(allowlist: readonly string[], kind: "config" | "capability"): string {
-  const genericOnly = allowlist.includes("generic_http.async_rest") && !allowlist.includes("agentfield.async_rest");
-  if (genericOnly) {
-    return kind === "config" ? "generic_http_bridge_config_missing" : "generic_http_bridge_capability_missing";
-  }
-  return kind === "config" ? "agentfield_bridge_config_missing" : "agentfield_bridge_capability_missing";
-}
-
 function resolveRuntimeBridgeQuota(entitlement: Record<string, unknown>): {
   maxRuntimeBridgeCommandsPerHour: number;
   maxActiveRuntimeBridgeCommands: number;
@@ -2404,4 +2389,111 @@ function toPositiveNumber(value: unknown): number {
     return 0;
   }
   return Math.floor(value);
+}
+
+type RuntimeBridgeMode =
+  | "claude_code.sdk"
+  | "opencode.acp"
+  | "agentfield.async_rest"
+  | "generic_http.async_rest";
+
+type WrapperBridgeMode = "agentfield.async_rest" | "generic_http.async_rest";
+
+function bridgeModesForAllowlist(allowlist: readonly string[]): RuntimeBridgeMode[] {
+  const modes: RuntimeBridgeMode[] = [];
+  for (const mode of ["claude_code.sdk", "opencode.acp", "agentfield.async_rest", "generic_http.async_rest"] as const) {
+    if (allowlist.includes(mode)) {
+      modes.push(mode);
+    }
+  }
+  return modes;
+}
+
+function wrapperBridgeModesForAllowlist(allowlist: readonly string[]): WrapperBridgeMode[] {
+  return bridgeModesForAllowlist(allowlist).filter((mode): mode is WrapperBridgeMode =>
+    mode === "agentfield.async_rest" || mode === "generic_http.async_rest"
+  );
+}
+
+async function listOnlineBridgeNodes(nodes: NodeStore): Promise<ConnectedNodeRecord[]> {
+  const now = Date.now();
+  const listed = await nodes.list({ status: "online" });
+  return listed.filter((node) => {
+    if (!node.heartbeatExpiresAt) {
+      return true;
+    }
+    const expiresAt = Date.parse(node.heartbeatExpiresAt);
+    return Number.isFinite(expiresAt) && expiresAt > now;
+  });
+}
+
+function resolveRuntimeBridgeWorkerReadiness(input: {
+  allowlist: readonly string[];
+  onlineNodes: readonly ConnectedNodeRecord[];
+}): {
+  claim: boolean;
+  adapterCapability: boolean;
+  sessionReconciliation: boolean;
+  approvalSender: boolean;
+  wrapperBridgeCapability?: { ok: boolean; reasonCode?: string };
+} {
+  const bridgeModes = bridgeModesForAllowlist(input.allowlist);
+  const wrapperModes = wrapperBridgeModesForAllowlist(input.allowlist);
+  const hasCap = (capability: string) => input.onlineNodes.some((node) => node.capabilities.includes(capability));
+  const modeCapable = (mode: RuntimeBridgeMode) =>
+    hasCap(`hosted_runtime_bridge.adapter_capability.${mode}`)
+    || hasCap(`runtime.${mode}`)
+    || hasCap(mode);
+  const wrapperCapabilityOk = wrapperModes.every((mode) =>
+    hasCap(`hosted_runtime_bridge.wrapper_bridge_capability.${mode}`)
+  );
+
+  const result: {
+    claim: boolean;
+    adapterCapability: boolean;
+    sessionReconciliation: boolean;
+    approvalSender: boolean;
+    wrapperBridgeCapability?: { ok: boolean; reasonCode?: string };
+  } = {
+    claim: hasCap("hosted_runtime_bridge.worker_claim") || hasCap("hosted_runtime_bridge.claim"),
+    adapterCapability: bridgeModes.length > 0 && bridgeModes.every(modeCapable),
+    sessionReconciliation: hasCap("hosted_runtime_bridge.session_reconciliation"),
+    approvalSender: hasCap("hosted_runtime_bridge.approval_sender")
+  };
+  if (wrapperModes.length > 0) {
+    result.wrapperBridgeCapability = wrapperCapabilityOk
+      ? { ok: true }
+      : {
+          ok: false,
+          reasonCode: wrapperReadinessReasonCode(wrapperModes, "capability")
+        };
+  }
+  return result;
+}
+
+function resolveWrapperConfigReadiness(
+  allowlist: readonly string[],
+  activation: ServerConfig["providerRuntimeActivation"]
+): { ok: boolean; reasonCode?: string } | undefined {
+  const wrapperModes = wrapperBridgeModesForAllowlist(allowlist);
+  if (wrapperModes.length === 0) {
+    return undefined;
+  }
+  const enabled = new Set(activation.enabledRealModes);
+  const allEnabled = wrapperModes.every((mode) => enabled.has(mode));
+  if (allEnabled) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reasonCode: wrapperReadinessReasonCode(wrapperModes, "config")
+  };
+}
+
+function wrapperReadinessReasonCode(modes: readonly WrapperBridgeMode[], kind: "config" | "capability"): string {
+  const mode = modes.includes("agentfield.async_rest") ? "agentfield.async_rest" : "generic_http.async_rest";
+  if (mode === "generic_http.async_rest") {
+    return kind === "config" ? "generic_http_bridge_config_missing" : "generic_http_bridge_capability_missing";
+  }
+  return kind === "config" ? "agentfield_bridge_config_missing" : "agentfield_bridge_capability_missing";
 }

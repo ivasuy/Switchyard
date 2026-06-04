@@ -609,6 +609,64 @@ describe("production readiness", () => {
     });
   });
 
+  it("allows wrapper bridge readiness when activation and worker bridge diagnostics are ready", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(
+        createAuthEnabledTestEnv({
+          SWITCHYARD_OBJECT_STORE_BACKEND: "memory",
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,generic_http.async_rest",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createGenericHttpProviderPolicyJson(),
+          SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://wrapper.example",
+          SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "wrapper-token"
+        })
+      ),
+      postgres: undefined,
+      queue: createReadyQueue(),
+      artifactContent: createReadyArtifactContent(),
+      controlPlane: createReadyControlPlane(),
+      hostedDebate: createHostedDebateDependencies(),
+      runtimeBridge: {
+        enabled: true,
+        commandStore: {},
+        commandOutbox: {},
+        approvalOwnership: {},
+        quota: {},
+        audit: {},
+        routeAuth: {},
+        workerReadiness: {
+          claim: true,
+          adapterCapability: true,
+          sessionReconciliation: true,
+          approvalSender: true
+        },
+        wrapperConfig: { ok: true },
+        wrapperBridgeCapability: { ok: true }
+      }
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.checks.hostedRuntimeBridge).toMatchObject({
+      ok: true,
+      diagnostics: {
+        status: "ready",
+        checks: expect.arrayContaining([
+          { name: "wrapper_config", ok: true },
+          { name: "wrapper_bridge_capability", ok: true }
+        ])
+      }
+    });
+    expect(report.checks.hostedDebate).toMatchObject({
+      ok: true,
+      diagnostics: {
+        runtime: {
+          bridgeRequired: true,
+          bridgeReady: true
+        }
+      }
+    });
+  });
+
   it("fails wrapper bridge readiness closed on missing wrapper config and capability checks", async () => {
     const report = await probeServerReadiness({
       config: loadServerConfig(
