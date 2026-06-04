@@ -212,6 +212,47 @@ describe("debate routes", () => {
     await app.close();
   });
 
+  it("allows wait=1 fake deterministic participants with explicit hosted placement", async () => {
+    const app = Fastify({ logger: false });
+    const debates = new InMemoryDebateStore();
+    const events = new InMemoryEventStore();
+    const finalDebate = makeDebate("debate_1");
+    finalDebate.status = "no_consensus";
+    const create = vi.fn(async () => ({
+      debate: finalDebate,
+      events: [] as SwitchyardEvent[],
+      finalReportArtifact: null
+    }));
+
+    registerDebateRoutes(app, {
+      debateService: {
+        create,
+        execute: vi.fn(),
+        inspect: vi.fn(),
+        listEvents: vi.fn()
+      } as unknown as DebateRouteDependencies["debateService"],
+      debates,
+      events
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/debates?wait=1",
+      payload: {
+        topic: "Topic",
+        participants: [
+          { role: "affirmative", placement: "hosted" },
+          { role: "skeptic", placement: "hosted" }
+        ]
+      }
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().debate.status).toBe("no_consensus");
+    expect(create).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({ wait: true }));
+    await app.close();
+  });
+
   it("rejects hosted ownership overrides before debate service or enqueue side effects", async () => {
     const app = Fastify({ logger: false });
     const debates = new InMemoryDebateStore();

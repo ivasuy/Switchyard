@@ -434,7 +434,7 @@ function isRealParticipantInput(value: unknown): boolean {
   if (!isRecord(value)) {
     return false;
   }
-  if (value["realRuntimeOptIn"] === true || value["placement"] === "hosted") {
+  if (value["realRuntimeOptIn"] === true) {
     return true;
   }
   return (typeof value["runtime"] === "string" && value["runtime"] !== "fake") ||
