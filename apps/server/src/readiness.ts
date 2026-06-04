@@ -71,6 +71,8 @@ interface RuntimeBridgeReadinessInput {
   audit?: unknown;
   routeAuth?: unknown;
   workerReadiness?: unknown;
+  wrapperConfig?: unknown;
+  wrapperBridgeCapability?: unknown;
 }
 
 interface HostedDebateReadinessInput {
@@ -99,7 +101,9 @@ type HostedRuntimeBridgeReadinessCheckName =
   | "worker_claim"
   | "adapter_capability"
   | "session_reconciliation"
-  | "approval_sender";
+  | "approval_sender"
+  | "wrapper_config"
+  | "wrapper_bridge_capability";
 
 interface HostedRuntimeBridgeReadinessReport {
   status: "ready" | "not_ready";
@@ -414,7 +418,10 @@ export async function probeServerReadiness(input: {
       quota: input.runtimeBridge.quota,
       audit: input.runtimeBridge.audit,
       routeAuth: input.runtimeBridge.routeAuth,
-      workerReadiness: input.runtimeBridge.workerReadiness
+      workerReadiness: input.runtimeBridge.workerReadiness,
+      wrapperRequired: hasWrapperRuntimeAllowlist(input.config.hostedRuntimeAllowlist),
+      wrapperConfig: input.runtimeBridge.wrapperConfig,
+      wrapperBridgeCapability: input.runtimeBridge.wrapperBridgeCapability
     });
     const firstFailure = bridgeReadiness.checks.find((check: { ok: boolean; reasonCode?: string }) => !check.ok)?.reasonCode ?? "hosted_runtime_bridge_worker_unavailable";
     checks.hostedRuntimeBridge = readinessCheck(
@@ -445,7 +452,10 @@ export async function probeServerReadiness(input: {
               quota: input.runtimeBridge.quota,
               audit: input.runtimeBridge.audit,
               routeAuth: input.runtimeBridge.routeAuth,
-              workerReadiness: input.runtimeBridge.workerReadiness
+              workerReadiness: input.runtimeBridge.workerReadiness,
+              wrapperRequired: hasWrapperRuntimeAllowlist(input.config.hostedRuntimeAllowlist),
+              wrapperConfig: input.runtimeBridge.wrapperConfig,
+              wrapperBridgeCapability: input.runtimeBridge.wrapperBridgeCapability
             })
           : undefined
       ),
@@ -466,10 +476,15 @@ export function getServerRuntimeBridgeReadiness(deps: {
   audit?: unknown;
   routeAuth?: unknown;
   workerReadiness?: unknown;
+  wrapperRequired?: boolean;
+  wrapperConfig?: unknown;
+  wrapperBridgeCapability?: unknown;
 }): HostedRuntimeBridgeReadinessReport {
   const worker = asRecord(deps.workerReadiness);
   const check = (name: HostedRuntimeBridgeReadinessCheckName, ok: boolean, reasonCode: string) =>
     ok ? { name, ok: true as const } : { name, ok: false as const, reasonCode };
+  const wrapperConfigReason = wrapperReasonCode(deps.wrapperConfig, "config");
+  const wrapperCapabilityReason = wrapperReasonCode(deps.wrapperBridgeCapability, "capability");
 
   const checks: HostedRuntimeBridgeReadinessReport["checks"] = [
     check("command_store", isPresent(deps.commandStore), "hosted_runtime_bridge_store_unavailable"),
@@ -483,6 +498,16 @@ export function getServerRuntimeBridgeReadiness(deps: {
     check("session_reconciliation", workerFlag(worker, "sessionReconciliation"), "hosted_runtime_bridge_worker_unavailable"),
     check("approval_sender", workerFlag(worker, "approvalSender"), "hosted_runtime_bridge_worker_unavailable")
   ];
+  if (deps.wrapperRequired) {
+    checks.push(
+      check("wrapper_config", wrapperConfigReason === undefined, wrapperConfigReason ?? "agentfield_bridge_config_missing"),
+      check(
+        "wrapper_bridge_capability",
+        wrapperCapabilityReason === undefined,
+        wrapperCapabilityReason ?? "agentfield_bridge_capability_missing"
+      )
+    );
+  }
 
   return {
     status: checks.every((entry: { ok: boolean }) => entry.ok) ? "ready" : "not_ready",
@@ -630,7 +655,34 @@ function dependencyAvailable(
 }
 
 function requiresRuntimeBridge(allowlist: readonly string[]): boolean {
-  return allowlist.includes("claude_code.sdk") || allowlist.includes("opencode.acp");
+  return allowlist.includes("claude_code.sdk")
+    || allowlist.includes("opencode.acp")
+    || hasWrapperRuntimeAllowlist(allowlist);
+}
+
+function hasWrapperRuntimeAllowlist(allowlist: readonly string[]): boolean {
+  return allowlist.includes("agentfield.async_rest") || allowlist.includes("generic_http.async_rest");
+}
+
+function wrapperReasonCode(value: unknown, kind: "config" | "capability"): string | undefined {
+  if (!isPresent(value)) {
+    return kind === "config" ? "agentfield_bridge_config_missing" : "agentfield_bridge_capability_missing";
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  if (typeof value === "boolean") {
+    return value ? undefined : kind === "config" ? "agentfield_bridge_config_missing" : "agentfield_bridge_capability_missing";
+  }
+
+  const record = asRecord(value);
+  if (record["ok"] === false && typeof record["reasonCode"] === "string") {
+    return record["reasonCode"];
+  }
+  if (record["ready"] === false && typeof record["reasonCode"] === "string") {
+    return record["reasonCode"];
+  }
+  return undefined;
 }
 
 function hostedDebateProviderActivationFailureCode(

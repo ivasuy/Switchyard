@@ -468,6 +468,24 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
 
     if (isHostedRealRun(run)) {
       if (!deps.hostedRuntimeBridge) {
+        if (deps.controlPlane && auth) {
+          await deps.controlPlane.recordAudit({
+            auth,
+            eventType: "hosted.runtime_bridge.admission",
+            decision: "deny",
+            reasonCode: "hosted_runtime_bridge_store_unavailable",
+            resourceType: "run",
+            resourceId: id,
+            requestId: request.id,
+            payload: {
+              routeId: "runs.input",
+              resourceId: id,
+              reasonCode: "hosted_runtime_bridge_store_unavailable",
+              runtimeMode: run.runtimeMode,
+              operation: "input"
+            }
+          });
+        }
         return sendHttpError(reply, "adapter_protocol_failed", "Hosted runtime bridge payload store unavailable", [
           { path: "reasonCode", issue: "hosted_runtime_bridge_store_unavailable" }
         ]);

@@ -434,6 +434,71 @@ describe("run routes", () => {
     await app.close();
   });
 
+  it.each([
+    {
+      runtimeMode: "agentfield.async_rest",
+      runtime: "agentfield",
+      provider: "agentfield",
+      model: "agentfield-default",
+      adapterType: "http" as const
+    },
+    {
+      runtimeMode: "generic_http.async_rest",
+      runtime: "generic_http",
+      provider: "generic_http",
+      model: "generic-http-default",
+      adapterType: "http" as const
+    }
+  ])("admits active hosted $runtimeMode input through existing run input route", async (mode) => {
+    const harness = createRouteHarness();
+    await harness.runs.create({
+      id: `run_hosted_${mode.runtime}_input`,
+      runtime: mode.runtime,
+      provider: mode.provider,
+      model: mode.model,
+      adapterType: mode.adapterType,
+      cwd: "/repo",
+      task: `active hosted ${mode.runtime}`,
+      status: "running",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: mode.runtimeMode,
+      createdAt: "2026-06-04T00:00:00.000Z"
+    });
+    const createInputCommand = vi.fn(async () => ({
+      accepted: true as const,
+      commandId: `bridge_cmd_${mode.runtime}`,
+      duplicate: false
+    }));
+    const app = Fastify();
+    registerRunRoutes(app, {
+      runService: harness.runService,
+      runs: harness.runs,
+      events: harness.events,
+      registry: harness.registry,
+      registryService: new RegistryService({ registry: harness.registry }),
+      hostedRuntimeBridge: { createInputCommand }
+    });
+    const sendSpy = vi.spyOn(harness.runService, "sendInput");
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/runs/run_hosted_${mode.runtime}_input/input`,
+      payload: { text: "continue wrapper" }
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ accepted: true, bridgeCommandId: `bridge_cmd_${mode.runtime}` });
+    expect(createInputCommand).toHaveBeenCalledWith(expect.objectContaining({
+      runId: `run_hosted_${mode.runtime}_input`,
+      body: { text: "continue wrapper" }
+    }));
+    expect(sendSpy).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("maps hosted codex input to named unsupported reason from bridge service", async () => {
     const harness = createRouteHarness({
       hostedRuntimeBridge: {
@@ -1359,6 +1424,177 @@ describe("run routes hosted auth", () => {
     expect(preflightRunCreate).not.toHaveBeenCalled();
     expect(hostedRuns.createRun).not.toHaveBeenCalled();
     expect(runCreateSpy).not.toHaveBeenCalled();
+  });
+
+  it("denies hosted wrapper wait=1 before control-plane reservation and durable run side effects", async () => {
+    const preflightRunCreate = vi.fn(async () => ({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "reserved",
+      reasonCode: "run_create",
+      createdAt: "2026-06-04T00:00:00.000Z",
+      expiresAt: "2026-06-04T00:05:00.000Z"
+    }));
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      preflightRunCreate,
+      ensureOwnedOrAttachFromRun: vi.fn(async () => ({ ok: true, created: true })),
+      releaseQuotaReservation: vi.fn(async () => ({})),
+      recordAudit: vi.fn(async () => ({ ok: true })),
+      authorizeResource: vi.fn(async () => ({ ok: false, decision: "not_found", code: "run_not_found", reasonCode: "resource_not_owned" }))
+    };
+    const hostedRuns = {
+      preflightCreateRun: vi.fn(async () => {
+        const error = new Error("hosted_wait_unsupported");
+        (error as { code?: string }).code = "placement_denied";
+        throw error;
+      }),
+      createRun: vi.fn(async () => {
+        throw new Error("must_not_create");
+      })
+    };
+    const harness = createRouteHarness({
+      withLauncher: false,
+      controlPlane: controlPlane as never,
+      hostedRuns: hostedRuns as never
+    });
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+    const runCreateSpy = vi.spyOn(harness.runService, "createRun");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs?wait=1",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: {
+        runtime: "generic_http",
+        provider: "generic_http",
+        model: "generic-http-default",
+        adapterType: "http",
+        runtimeMode: "generic_http.async_rest",
+        cwd: "/repo",
+        task: "wrapper wait denied",
+        placement: "hosted"
+      }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.details).toEqual([{ path: "placement", issue: "hosted_wait_unsupported" }]);
+    expect(preflightRunCreate).not.toHaveBeenCalled();
+    expect(hostedRuns.createRun).not.toHaveBeenCalled();
+    expect(runCreateSpy).not.toHaveBeenCalled();
+  });
+
+  it("denies hosted wrapper input ownership before run or bridge probing", async () => {
+    const getRun = vi.fn(async () => undefined);
+    const createInputCommand = vi.fn(async () => ({
+      accepted: true as const,
+      commandId: "bridge_cmd_should_not_exist",
+      duplicate: false
+    }));
+    const recordAudit = vi.fn(async () => ({ ok: true }));
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      authorizeResource: vi.fn(async () => ({
+        ok: false,
+        decision: "not_found",
+        code: "run_not_found",
+        reasonCode: "resource_not_owned"
+      })),
+      recordAudit
+    };
+    const harness = createRouteHarness({
+      controlPlane: controlPlane as never,
+      hostedRuntimeBridge: { createInputCommand }
+    });
+    harness.runs.get = getRun;
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs/run_hidden_wrapper/input",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: { text: "secret input that must not be audited" }
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.code).toBe("run_not_found");
+    expect(getRun).not.toHaveBeenCalled();
+    expect(createInputCommand).not.toHaveBeenCalled();
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "tenant.access_denied",
+      decision: "deny",
+      reasonCode: "resource_not_owned",
+      resourceType: "run",
+      resourceId: "run_hidden_wrapper",
+      payload: {
+        routeId: "runs.input",
+        reasonCode: "resource_not_owned"
+      }
+    }));
+    expect(JSON.stringify(recordAudit.mock.calls)).not.toContain("secret input");
+  });
+
+  it("audits hosted wrapper bridge dependency denial without creating a command", async () => {
+    const recordAudit = vi.fn(async () => ({ ok: true }));
+    const controlPlane = {
+      authenticateRequest: vi.fn(async () => hostedAuthContext()),
+      requireScope: vi.fn(),
+      authorizeResource: vi.fn(async () => ({ ok: true })),
+      recordAudit
+    };
+    const harness = createRouteHarness({
+      controlPlane: controlPlane as never
+    });
+    registerHostedAuthHooks(harness.app, { controlPlane: controlPlane as never });
+    await harness.runs.create({
+      id: "run_hosted_wrapper_no_bridge",
+      runtime: "generic_http",
+      provider: "generic_http",
+      model: "generic-http-default",
+      adapterType: "http",
+      cwd: "/repo",
+      task: "active hosted generic",
+      status: "running",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "generic_http.async_rest",
+      createdAt: "2026-06-04T00:00:00.000Z"
+    });
+    const sendSpy = vi.spyOn(harness.runService, "sendInput");
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: "/runs/run_hosted_wrapper_no_bridge/input",
+      headers: { authorization: "Bearer sk_sw_test_1" },
+      payload: { text: "do not persist" }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.details).toEqual([{ path: "reasonCode", issue: "hosted_runtime_bridge_store_unavailable" }]);
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "hosted.runtime_bridge.admission",
+      decision: "deny",
+      reasonCode: "hosted_runtime_bridge_store_unavailable",
+      resourceType: "run",
+      resourceId: "run_hosted_wrapper_no_bridge",
+      payload: {
+        routeId: "runs.input",
+        resourceId: "run_hosted_wrapper_no_bridge",
+        reasonCode: "hosted_runtime_bridge_store_unavailable",
+        runtimeMode: "generic_http.async_rest",
+        operation: "input"
+      }
+    }));
+    expect(JSON.stringify(recordAudit.mock.calls)).not.toContain("do not persist");
   });
 
   it("denies hosted real implicit placement before control-plane reservation and durable side effects", async () => {

@@ -26,13 +26,13 @@ function makeApproval(id: string, toolInvocationId = "tool_1"): Approval {
   };
 }
 
-function makeRuntimeApproval(id: string): Approval {
+function makeRuntimeApproval(id: string, runtimeMode = "claude_code.sdk"): Approval {
   return {
     id,
     runId: "run_1",
     approvalType: "before_external_web_action",
     status: "pending",
-    payload: { runtimeApprovalToken: "pause_1", runtimeMode: "claude_code.sdk" },
+    payload: { runtimeApprovalToken: "pause_1", runtimeMode },
     createdAt: "2026-06-01T00:00:00.000Z"
   };
 }
@@ -522,6 +522,132 @@ describe("hosted tool route ownership and approval filtering", () => {
         path: "reasonCode",
         issue: "hosted_runtime_bridge_payload_mismatch"
       });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    ["agentfield.async_rest", "bridge_cmd_agentfield"],
+    ["generic_http.async_rest", "bridge_cmd_generic_http"]
+  ])("exposes and resolves %s runtime approvals through existing approval routes", async (runtimeMode, commandId) => {
+    const app = Fastify();
+    registerErrorEnvelope(app);
+    attachHostedAuth(app);
+
+    const approval = makeRuntimeApproval("approval_wrapper_runtime", runtimeMode);
+    const getRun = vi.fn(async () => ({ id: "run_1", runtimeMode } as any));
+    const resolveRuntimeApproval = vi.fn(async () => ({
+      approval: { ...approval, status: "approved", resolvedAt: "2026-06-04T00:00:01.000Z" },
+      commandId,
+      duplicate: false
+    }));
+
+    registerHostedToolRoutes(app, {
+      hostedTools: {
+        invoke: async () => ({ statusCode: 202, invocation: makeInvocation("tool_1") }),
+        resolveApproval: async () => ({ approval: makeApproval("approval_wrapper_runtime"), invocation: makeInvocation("tool_1") })
+      },
+      runs: { get: getRun },
+      invocations: {
+        get: async () => makeInvocation("tool_1"),
+        list: async () => ({ invocations: [makeInvocation("tool_1")], nextCursor: null })
+      },
+      approvals: {
+        get: async () => approval,
+        list: async () => ({ approvals: [approval], nextCursor: null })
+      },
+      controlPlane: {
+        authorizeResource: async () => ({ ok: true })
+      } as any,
+      controlPlaneStore: {
+        listOwnedResourceIds: async () => ["approval_wrapper_runtime"]
+      } as any,
+      hostedRuntimeBridge: { resolveRuntimeApproval }
+    });
+
+    try {
+      const list = await app.inject({ method: "GET", url: "/approvals" });
+      expect(list.statusCode).toBe(200);
+      expect(list.json().approvals.map((entry: Approval) => entry.id)).toEqual(["approval_wrapper_runtime"]);
+
+      const get = await app.inject({ method: "GET", url: "/approvals/approval_wrapper_runtime" });
+      expect(get.statusCode).toBe(200);
+      expect(get.json().approval.payload.runtimeMode).toBe(runtimeMode);
+      expect(getRun).not.toHaveBeenCalled();
+
+      const approve = await app.inject({
+        method: "POST",
+        url: "/approvals/approval_wrapper_runtime/approve",
+        headers: { "idempotency-key": `${runtimeMode}-approval-key` },
+        payload: { message: "approved" }
+      });
+      expect(approve.statusCode).toBe(200);
+      expect(approve.json().bridgeCommandId).toBe(commandId);
+      expect(resolveRuntimeApproval).toHaveBeenCalledWith(expect.objectContaining({
+        approvalId: "approval_wrapper_runtime",
+        decision: "approved",
+        idempotencyKey: `${runtimeMode}-approval-key`
+      }));
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("denies runtime approval ownership before approval, run, or bridge probing", async () => {
+    const app = Fastify();
+    registerErrorEnvelope(app);
+    attachHostedAuth(app);
+
+    const getApproval = vi.fn(async () => makeRuntimeApproval("approval_hidden", "generic_http.async_rest"));
+    const getRun = vi.fn(async () => ({ id: "run_1", runtimeMode: "generic_http.async_rest" } as any));
+    const resolveRuntimeApproval = vi.fn(async () => ({
+      approval: makeRuntimeApproval("approval_hidden", "generic_http.async_rest"),
+      commandId: "bridge_cmd_hidden",
+      duplicate: false
+    }));
+    const authorizeResource = vi.fn(async () => ({
+      ok: false,
+      code: "approval_not_found",
+      reasonCode: "resource_not_owned"
+    }));
+
+    registerHostedToolRoutes(app, {
+      hostedTools: {
+        invoke: async () => ({ statusCode: 202, invocation: makeInvocation("tool_1") }),
+        resolveApproval: async () => ({ approval: makeApproval("approval_hidden"), invocation: makeInvocation("tool_1") })
+      },
+      runs: { get: getRun },
+      invocations: {
+        get: async () => makeInvocation("tool_1"),
+        list: async () => ({ invocations: [makeInvocation("tool_1")], nextCursor: null })
+      },
+      approvals: {
+        get: getApproval,
+        list: async () => ({ approvals: [], nextCursor: null })
+      },
+      controlPlane: { authorizeResource } as any,
+      controlPlaneStore: {
+        listOwnedResourceIds: async () => []
+      } as any,
+      hostedRuntimeBridge: { resolveRuntimeApproval }
+    });
+
+    try {
+      const get = await app.inject({ method: "GET", url: "/approvals/approval_hidden" });
+      expect(get.statusCode).toBe(404);
+      expect(getApproval).not.toHaveBeenCalled();
+      expect(getRun).not.toHaveBeenCalled();
+
+      const approve = await app.inject({
+        method: "POST",
+        url: "/approvals/approval_hidden/approve",
+        payload: { message: "do not leak" }
+      });
+      expect(approve.statusCode).toBe(404);
+      expect(getApproval).not.toHaveBeenCalled();
+      expect(getRun).not.toHaveBeenCalled();
+      expect(resolveRuntimeApproval).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }

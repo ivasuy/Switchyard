@@ -748,8 +748,23 @@ export async function createServerApp(config: ServerConfig) {
     }
   });
 
+  const wrapperRuntimeBridgeEnabled = config.hostedRuntimeAllowlist.includes("agentfield.async_rest")
+    || config.hostedRuntimeAllowlist.includes("generic_http.async_rest");
   const runtimeBridgeEnabled = config.hostedRuntimeAllowlist.includes("claude_code.sdk")
-    || config.hostedRuntimeAllowlist.includes("opencode.acp");
+    || config.hostedRuntimeAllowlist.includes("opencode.acp")
+    || wrapperRuntimeBridgeEnabled;
+  const wrapperConfigReadiness = wrapperRuntimeBridgeEnabled
+    ? {
+        ok: false,
+        reasonCode: wrapperReadinessReasonCode(config.hostedRuntimeAllowlist, "config")
+      }
+    : undefined;
+  const wrapperCapabilityReadiness = wrapperRuntimeBridgeEnabled
+    ? {
+        ok: false,
+        reasonCode: wrapperReadinessReasonCode(config.hostedRuntimeAllowlist, "capability")
+      }
+    : undefined;
 
   app.get("/health", async () => ({ ok: true }));
   app.get("/ready", async (_request, reply) => {
@@ -792,6 +807,8 @@ export async function createServerApp(config: ServerConfig) {
         quota: controlPlaneStoreInstance,
         audit: controlPlaneStoreInstance,
         routeAuth: controlPlane,
+        wrapperConfig: wrapperConfigReadiness,
+        wrapperBridgeCapability: wrapperCapabilityReadiness,
         workerReadiness: {
           claim: false,
           adapterCapability: false,
@@ -2358,6 +2375,14 @@ function createUnavailableBridgeCommandPayloadStore(): {
       return;
     }
   };
+}
+
+function wrapperReadinessReasonCode(allowlist: readonly string[], kind: "config" | "capability"): string {
+  const genericOnly = allowlist.includes("generic_http.async_rest") && !allowlist.includes("agentfield.async_rest");
+  if (genericOnly) {
+    return kind === "config" ? "generic_http_bridge_config_missing" : "generic_http_bridge_capability_missing";
+  }
+  return kind === "config" ? "agentfield_bridge_config_missing" : "agentfield_bridge_capability_missing";
 }
 
 function resolveRuntimeBridgeQuota(entitlement: Record<string, unknown>): {

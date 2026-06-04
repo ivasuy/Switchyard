@@ -110,6 +110,20 @@ function createOpencodePolicyJson(): string {
   });
 }
 
+function createGenericHttpPolicyJson(): string {
+  return JSON.stringify({
+    version: 1,
+    modes: {
+      "generic_http.async_rest": {
+        enabled: true,
+        baseUrlEnv: "SWITCHYARD_GENERIC_HTTP_BASE_URL",
+        auth: { type: "api_key", env: "SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN" },
+        spendControls: createSpendControls()
+      }
+    }
+  });
+}
+
 function expectConfigError(fn: () => unknown): ConfigError {
   try {
     fn();
@@ -267,7 +281,7 @@ describe("production server config", () => {
     expect(() =>
       loadServerConfig(
         createProductionEnv({
-          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,generic_http.async_rest",
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,browser.session",
           SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
           SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createOpencodePolicyJson()
         })
@@ -351,6 +365,26 @@ describe("production server config", () => {
     const serializedSummary = JSON.stringify(config.redactedSummary);
     expect(serializedSummary).not.toContain("/bin/echo");
     expect(serializedSummary).not.toContain("\"modes\"");
+  });
+
+  it("accepts production Generic HTTP wrapper runtime when policy, env, and controls are valid", () => {
+    const config = loadServerConfig(
+      createProductionEnv({
+        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,generic_http.async_rest",
+        SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+        SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createGenericHttpPolicyJson(),
+        SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://wrapper.example",
+        SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "wrapper-token"
+      })
+    );
+
+    expect(config.providerRuntimeActivation.valid).toBe(true);
+    expect(config.providerRuntimeActivation.enabledRealModes).toEqual(["generic_http.async_rest"]);
+    const serializedSummary = JSON.stringify(config.redactedSummary);
+    expect(serializedSummary).toContain("generic_http.async_rest");
+    expect(serializedSummary).not.toContain("wrapper.example");
+    expect(serializedSummary).not.toContain("wrapper-token");
+    expect(serializedSummary).not.toContain("SWITCHYARD_GENERIC_HTTP");
   });
 
   it("still rejects unsafe production metrics posture", () => {
