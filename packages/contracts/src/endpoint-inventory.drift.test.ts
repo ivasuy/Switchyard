@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { HOSTED_SERVER_ROUTE_INVENTORY, LOCAL_DAEMON_ROUTE_INVENTORY } from "./endpoint-inventory.js";
 
 const FORBIDDEN_PUBLIC_ROUTE_PREFIX =
-  /^\/(exec|shell|process|command|pty|terminal|sandbox|browser|search|github|fetch|repo|dashboard|tui)(\/|$)/;
-const FORBIDDEN_ROUTE_CONTAINS = ["/runtime-bridge", "/session"];
+  /^\/(exec|shell|process|command|pty|terminal|sandbox|browser|search|github|fetch|repo|judge|model-judge|judging|dashboard|tui)(\/|$)/;
+const FORBIDDEN_ROUTE_CONTAINS = ["/runtime-bridge", "/session", "/model-judge", "/judging"];
 const FORBIDDEN_TOP_LEVEL_PATHS = [/^\/input(\/|$)/, /^\/approval(\/|$)/];
 const FORBIDDEN_OPERATION_TOKENS = [
   "sandbox",

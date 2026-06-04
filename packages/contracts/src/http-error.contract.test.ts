@@ -75,15 +75,42 @@ const R24_DEBATE_ERROR_CODES = [
   "debate_fake_canary_failed"
 ] as const;
 
+const R25_HOSTED_WRAPPER_BRIDGE_STATUS_BY_CODE = {
+  runtime_input_empty: 409,
+  runtime_input_too_large: 409,
+  agentfield_bridge_capability_missing: 409,
+  agentfield_bridge_config_missing: 503,
+  agentfield_input_failed: 503,
+  agentfield_invalid_input_response: 502,
+  agentfield_input_response_too_large: 502,
+  agentfield_approval_request_invalid: 409,
+  agentfield_approval_resolution_failed: 503,
+  agentfield_invalid_approval_response: 502,
+  agentfield_approval_response_too_large: 502,
+  generic_http_bridge_capability_missing: 409,
+  generic_http_bridge_config_missing: 503,
+  generic_http_input_failed: 503,
+  generic_http_invalid_input_response: 502,
+  generic_http_input_response_too_large: 502,
+  generic_http_approval_request_invalid: 409,
+  generic_http_approval_resolution_failed: 503,
+  generic_http_invalid_approval_response: 502,
+  generic_http_approval_response_too_large: 502,
+  provider_bridge_live_canary_spend_unconfirmed: 400
+} as const;
+
 function protocolErrorCodes(): string[] {
   const here = dirname(fileURLToPath(import.meta.url));
   const protocolFile = join(here, "../../protocol-rest/src/http-errors.ts");
   const source = readFileSync(protocolFile, "utf8");
-  const match = source.match(/export type HttpErrorCode =([\s\S]*?)\n\nexport interface HttpErrorDetail/);
+  const match = source.match(/const STATUS_BY_CODE: Partial<Record<HttpErrorCode, number>> = \{([\s\S]*?)\n\};/);
   if (!match || !match[1]) {
-    throw new Error("failed to locate protocol-rest HttpErrorCode union");
+    throw new Error("failed to locate protocol-rest STATUS_BY_CODE map");
   }
-  return [...match[1].matchAll(/\|\s+"([a-z0-9_]+)"/g)].map((entry) => entry[1] ?? "").filter(Boolean).sort();
+  return [...match[1].matchAll(/^\s*([a-z0-9_]+):\s*\d+,?$/gm)]
+    .map((entry) => entry[1] ?? "")
+    .filter(Boolean)
+    .sort();
 }
 
 function protocolStatusFor(code: string): number {
@@ -170,5 +197,12 @@ describe("http error contract", () => {
     expect(protocolStatusFor("hosted_debate_ownership_attach_failed")).toBe(503);
     expect(protocolStatusFor("hosted_debate_quota_exceeded")).toBe(429);
     expect(protocolStatusFor("debate_live_canary_spend_unconfirmed")).toBe(400);
+  });
+
+  it("includes all named R25 hosted wrapper bridge HTTP errors with spec-aligned statuses", () => {
+    for (const [code, status] of Object.entries(R25_HOSTED_WRAPPER_BRIDGE_STATUS_BY_CODE)) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+      expect(protocolStatusFor(code)).toBe(status);
+    }
   });
 });

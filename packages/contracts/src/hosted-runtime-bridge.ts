@@ -30,7 +30,28 @@ export const HOSTED_RUNTIME_BRIDGE_REASON_CODES = [
   "codex_exec_json_input_unsupported",
   "codex_exec_json_approval_bridge_unsupported",
   "agentfield_bridge_unshipped",
-  "generic_http_bridge_unshipped"
+  "generic_http_bridge_unshipped",
+  "runtime_input_empty",
+  "runtime_input_too_large",
+  "agentfield_bridge_capability_missing",
+  "agentfield_bridge_config_missing",
+  "agentfield_input_failed",
+  "agentfield_invalid_input_response",
+  "agentfield_input_response_too_large",
+  "agentfield_approval_request_invalid",
+  "agentfield_approval_resolution_failed",
+  "agentfield_invalid_approval_response",
+  "agentfield_approval_response_too_large",
+  "generic_http_bridge_capability_missing",
+  "generic_http_bridge_config_missing",
+  "generic_http_input_failed",
+  "generic_http_invalid_input_response",
+  "generic_http_input_response_too_large",
+  "generic_http_approval_request_invalid",
+  "generic_http_approval_resolution_failed",
+  "generic_http_invalid_approval_response",
+  "generic_http_approval_response_too_large",
+  "provider_bridge_live_canary_spend_unconfirmed"
 ] as const;
 
 export const ACP_RUNTIME_BRIDGE_REASON_CODES = [
@@ -53,7 +74,12 @@ export const hostedRuntimeBridgeStatusSchema = z.enum([
   "expired",
   "cancelled"
 ]);
-export const hostedRuntimeBridgeSupportedModeSchema = z.enum(["claude_code.sdk", "opencode.acp"]);
+export const hostedRuntimeBridgeSupportedModeSchema = z.enum([
+  "claude_code.sdk",
+  "opencode.acp",
+  "agentfield.async_rest",
+  "generic_http.async_rest"
+]);
 
 const HOSTED_RUNTIME_BRIDGE_ALLOWED_MODES = new Set<string>(hostedRuntimeBridgeSupportedModeSchema.options);
 
@@ -140,7 +166,9 @@ export const hostedRuntimeBridgeReadinessCheckNameSchema = z.enum([
   "worker_claim",
   "adapter_capability",
   "session_reconciliation",
-  "approval_sender"
+  "approval_sender",
+  "wrapper_config",
+  "wrapper_bridge_capability"
 ]);
 
 export const hostedRuntimeBridgeReadinessCheckSchema = z
@@ -172,10 +200,7 @@ export function isHostedRuntimeBridgeSupportedMode(
   if (!HOSTED_RUNTIME_BRIDGE_ALLOWED_MODES.has(runtimeMode)) {
     return false;
   }
-  if (operation === "approval_resolution") {
-    return runtimeMode === "claude_code.sdk" || runtimeMode === "opencode.acp";
-  }
-  return true;
+  return operation === undefined || hostedRuntimeBridgeOperationSchema.safeParse(operation).success;
 }
 
 export type HostedRuntimeBridgeReasonCode = z.infer<typeof hostedRuntimeBridgeReasonCodeSchema>;

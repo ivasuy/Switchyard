@@ -26,7 +26,9 @@ import {
 import { nodePolicySchema } from "./node.js";
 import {
   acceptedResponseSchema,
+  hostedRuntimeBridgeOperationSchema,
   hostedRuntimeBridgeReadinessReportSchema,
+  hostedRuntimeBridgeSupportedModeSchema,
   isHostedRuntimeBridgeSupportedMode
 } from "./hosted-runtime-bridge.js";
 
@@ -69,6 +71,26 @@ const FORBIDDEN_EXACT_PATHS = [
   "/github",
   "/fetch",
   "/repo"
+];
+const FORBIDDEN_HOSTED_R25_ROUTE_FAMILY_PATTERNS = [
+  /^\/runtime-bridge(\/|$)/,
+  /^\/input(\/|$)/,
+  /^\/approval(\/|$)/,
+  /^\/session(\/|$)/,
+  /^\/exec(\/|$)/,
+  /^\/shell(\/|$)/,
+  /^\/process(\/|$)/,
+  /^\/command(\/|$)/,
+  /^\/pty(\/|$)/,
+  /^\/terminal(\/|$)/,
+  /^\/sandbox(\/|$)/,
+  /^\/browser(\/|$)/,
+  /^\/repo(\/|$)/,
+  /^\/judge(\/|$)/,
+  /^\/model-judge(\/|$)/,
+  /^\/judging(\/|$)/,
+  /^\/dashboard(\/|$)/,
+  /^\/tui(\/|$)/
 ];
 const FORBIDDEN_HOSTED_PROVIDER_EXPANSION_PATH_PREFIX =
   /^\/(cursor|openclaw|paperclip|debates\/participants\/real|debates\/judge|model-judge|judging)(\/|$)/;
@@ -271,10 +293,17 @@ describe("openapi generation", () => {
       status: "not_ready",
       checks: [
         { name: "session_reconciliation", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
-        { name: "approval_sender", ok: true }
+        { name: "approval_sender", ok: true },
+        { name: "wrapper_config", ok: true },
+        { name: "wrapper_bridge_capability", ok: false, reasonCode: "generic_http_bridge_capability_missing" }
       ]
     });
-    expect(readiness.checks.map((entry) => entry.name)).toEqual(["session_reconciliation", "approval_sender"]);
+    expect(readiness.checks.map((entry) => entry.name)).toEqual([
+      "session_reconciliation",
+      "approval_sender",
+      "wrapper_config",
+      "wrapper_bridge_capability"
+    ]);
   });
 
   it("protects hosted runs and node routes with SwitchyardApiKey", () => {
@@ -407,6 +436,32 @@ describe("openapi generation", () => {
       ).toBe(false);
       expect(combined).not.toMatch(/debates\/participants\/real|model[ _-]?judge|debate[ _-]?judge|judging/);
     }
+  });
+
+  it("keeps R25 hosted wrapper bridge public route boundary closed", () => {
+    const hosted = generateOpenApiDocument({ surface: "hosted_server" });
+    const paths = Object.keys(hosted.paths);
+    const lower = paths.map((path) => path.toLowerCase());
+
+    expect(paths).toContain("/runs/{id}/input");
+    expect(hosted.paths["/runs/{id}/input"]?.post?.operationId).toBe("sendRunInput");
+    expect(hosted.paths["/approvals"]?.get?.operationId).toBe("listApprovals");
+    expect(hosted.paths["/approvals"]?.post).toBeUndefined();
+    expect(hosted.paths["/approvals/{id}"]?.get?.operationId).toBe("getApproval");
+    expect(hosted.paths["/approvals/{id}/approve"]?.post?.operationId).toBe("approveApproval");
+    expect(hosted.paths["/approvals/{id}/reject"]?.post?.operationId).toBe("rejectApproval");
+
+    for (const path of lower) {
+      for (const pattern of FORBIDDEN_HOSTED_R25_ROUTE_FAMILY_PATTERNS) {
+        expect(pattern.test(path)).toBe(false);
+      }
+    }
+
+    expect(lower).not.toContain("/runtime-bridge");
+    expect(lower).not.toContain("/input");
+    expect(lower).not.toContain("/approval");
+    expect(lower).not.toContain("/approvals/{id}/resolve");
+    expect(lower).not.toContain("/runs/{id}/runtime-bridge");
   });
 
   it("documents R24 hosted debate boundary in product docs", () => {
@@ -715,10 +770,39 @@ describe("openapi generation", () => {
     expect(extended.bridgeCommandId).toBe("bridge_cmd_123");
   });
 
-  it("supports only hosted runtime bridge modes claude_code.sdk and opencode.acp", () => {
-    expect(isHostedRuntimeBridgeSupportedMode("claude_code.sdk", "input")).toBe(true);
-    expect(isHostedRuntimeBridgeSupportedMode("opencode.acp", "approval_resolution")).toBe(true);
-    expect(isHostedRuntimeBridgeSupportedMode("codex.exec_json", "input")).toBe(false);
-    expect(isHostedRuntimeBridgeSupportedMode("generic_http.async_rest", "approval_resolution")).toBe(false);
+  it("supports exactly the R25 hosted runtime bridge modes and operations", () => {
+    expect(hostedRuntimeBridgeOperationSchema.options).toEqual(["input", "approval_resolution"]);
+    expect(hostedRuntimeBridgeSupportedModeSchema.options).toEqual([
+      "claude_code.sdk",
+      "opencode.acp",
+      "agentfield.async_rest",
+      "generic_http.async_rest"
+    ]);
+
+    for (const mode of hostedRuntimeBridgeSupportedModeSchema.options) {
+      expect(isHostedRuntimeBridgeSupportedMode(mode, "input")).toBe(true);
+      expect(isHostedRuntimeBridgeSupportedMode(mode, "approval_resolution")).toBe(true);
+    }
+
+    for (const unsupported of [
+      "codex.exec_json",
+      "codex.interactive",
+      "browser",
+      "browser.session",
+      "repo",
+      "repo.checkout",
+      "process",
+      "process.exec",
+      "PTY",
+      "pty",
+      "shell",
+      "Cursor",
+      "OpenClaw",
+      "Paperclip",
+      "unknown.runtime"
+    ]) {
+      expect(isHostedRuntimeBridgeSupportedMode(unsupported, "input")).toBe(false);
+      expect(isHostedRuntimeBridgeSupportedMode(unsupported, "approval_resolution")).toBe(false);
+    }
   });
 });
