@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import type { AuthContext } from "@switchyard/contracts";
-import { HostedRuntimeBridgeService, resolveHostedSandboxConfig, type DebateExecutionStore } from "@switchyard/core";
+import { HostedRuntimeBridgeService, resolveHostedSandboxConfig, type ControlPlaneStore, type DebateExecutionStore } from "@switchyard/core";
 import { MemoryRunQueue } from "@switchyard/queue";
 import {
   PostgresDebateExecutionStore,
@@ -252,37 +252,132 @@ describe("hosted worker app", () => {
     }
   });
 
-  it("recovers stale debate claims and exhausts max-attempt claims", async () => {
+  it("terminalizes debates and finalizes quota for exhausted and invalid stale debate claims", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-02T00:00:00.000Z"));
     const debateExecution: DebateExecutionStore = new PostgresDebateExecutionStore() as DebateExecutionStore;
+    const debates = new InMemoryDebateStore();
+    await debates.create(fakeDebate("debate_stale_exhausted_1"));
+    await debates.create(fakeDebate("debate_stale_invalid_1"));
     await debateExecution.enqueue({
       id: "debate_job_stale_1",
-      debateId: "debate_worker_1",
+      debateId: "debate_stale_exhausted_1",
       stage: "participant_turn",
       maxAttempts: 1,
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      nextAttemptAt: "2026-06-02T00:00:00.000Z"
+    });
+    await debateExecution.enqueue({
+      id: "debate_job_stale_invalid_1",
+      debateId: "debate_stale_invalid_1",
+      stage: "participant_turn",
+      maxAttempts: 3,
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
       nextAttemptAt: "2026-06-02T00:00:00.000Z"
     });
     await debateExecution.claim({ leaseMs: 10 });
+    await debateExecution.claim({ leaseMs: 10 });
+    setDebateJobField(debateExecution, "debate_job_stale_1", "activeDebateReservationId", "quota_reservation_stale_exhausted");
+    setDebateJobField(debateExecution, "debate_job_stale_invalid_1", "activeDebateReservationId", "quota_reservation_stale_invalid");
+    deleteDebateJobField(debateExecution, "debate_job_stale_invalid_1", "leaseUntil");
     vi.setSystemTime(new Date("2026-06-02T00:00:00.050Z"));
+    const finalized: string[] = [];
     const worker = createHostedWorker(baseConfig(), {
       queue: new MemoryRunQueue({ now: () => new Date().toISOString() }),
       runs: new GuardedInMemoryRunStore(),
       events: new InMemoryEventStore(),
-      debates: new InMemoryDebateStore(),
+      debates,
       messages: new InMemoryMessageStore(),
       evidence: new InMemoryEvidenceStore(),
       artifacts: new InMemoryArtifactStore(),
-      debateExecution
+      debateExecution,
+      finalizeActiveDebateQuota: async (input) => {
+        finalized.push(`${input.debateId}:${input.outcome}:${input.reasonCode ?? ""}:${(input.job as Record<string, unknown>)["activeDebateReservationId"] ?? ""}`);
+      }
     });
 
     try {
       await worker.tick();
       expect((await debateExecution.get("debate_job_stale_1"))?.state).toBe("exhausted");
       expect((await debateExecution.get("debate_job_stale_1"))?.reasonCode).toBe("debate_execution_attempts_exhausted");
+      expect((await debateExecution.get("debate_job_stale_invalid_1"))?.state).toBe("failed");
+      expect((await debateExecution.get("debate_job_stale_invalid_1"))?.reasonCode).toBe("debate_execution_invalid_claim");
+      expect(await debates.get("debate_stale_exhausted_1")).toMatchObject({
+        status: "failed",
+        stopReason: "failed",
+        error: { code: "debate_execution_attempts_exhausted" }
+      });
+      expect(await debates.get("debate_stale_invalid_1")).toMatchObject({
+        status: "failed",
+        stopReason: "failed",
+        error: { code: "hosted_debate_worker_unavailable" }
+      });
+      expect(finalized).toEqual([
+        "debate_stale_exhausted_1:failed:debate_execution_attempts_exhausted:quota_reservation_stale_exhausted",
+        "debate_stale_invalid_1:failed:hosted_debate_worker_unavailable:quota_reservation_stale_invalid"
+      ]);
     } finally {
       await worker.stop();
       vi.useRealTimers();
+    }
+  });
+
+  it("uses the explicit active debate reservation id when finalizing worker quota", async () => {
+    const debateExecution: DebateExecutionStore = new PostgresDebateExecutionStore() as DebateExecutionStore;
+    const debates = new InMemoryDebateStore();
+    await debates.create({
+      ...fakeDebate("debate_quota_exact_1"),
+      status: "completed",
+      stopReason: "completed"
+    });
+    await debateExecution.enqueue({
+      id: "debate_job_quota_exact_1",
+      debateId: "debate_quota_exact_1",
+      stage: "judging",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      nextAttemptAt: "2026-06-02T00:00:00.000Z"
+    });
+    setDebateJobField(debateExecution, "debate_job_quota_exact_1", "activeDebateReservationId", "quota_reservation_debate_b");
+    const transitioned: Array<{ reservationId: string; nextState: string; reasonCode?: string }> = [];
+    const controlPlaneStore = {
+      transitionQuotaReservation: async (input: { reservationId: string; nextState: string; reasonCode?: string }) => {
+        transitioned.push({
+          reservationId: input.reservationId,
+          nextState: input.nextState,
+          reasonCode: input.reasonCode
+        });
+        return {} as never;
+      }
+    } as ControlPlaneStore;
+    const worker = createHostedWorker(baseConfig(), {
+      queue: new MemoryRunQueue(),
+      runs: new GuardedInMemoryRunStore(),
+      events: new InMemoryEventStore(),
+      debates,
+      messages: new InMemoryMessageStore(),
+      evidence: new InMemoryEvidenceStore(),
+      artifacts: new InMemoryArtifactStore(),
+      debateExecution,
+      controlPlaneStore
+    });
+
+    try {
+      await worker.tick();
+      expect(transitioned).toEqual([
+        {
+          reservationId: "quota_reservation_debate_b",
+          nextState: "consumed",
+          reasonCode: "completed"
+        }
+      ]);
+    } finally {
+      await worker.stop();
     }
   });
 
@@ -1073,6 +1168,22 @@ describe("hosted worker app", () => {
     }
   });
 });
+
+function setDebateJobField(store: DebateExecutionStore, jobId: string, key: string, value: unknown): void {
+  const items = (store as unknown as { items?: Map<string, Record<string, unknown>> }).items;
+  const job = items?.get(jobId);
+  if (job) {
+    job[key] = value;
+  }
+}
+
+function deleteDebateJobField(store: DebateExecutionStore, jobId: string, key: string): void {
+  const items = (store as unknown as { items?: Map<string, Record<string, unknown>> }).items;
+  const job = items?.get(jobId);
+  if (job) {
+    delete job[key];
+  }
+}
 
 function fakeDebate(id = "debate_worker_1") {
   return {

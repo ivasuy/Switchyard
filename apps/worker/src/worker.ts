@@ -101,7 +101,7 @@ const HOSTED_BRIDGE_SUPPORTED_MODES = ["claude_code.sdk", "opencode.acp"] as con
 const DEFAULT_BRIDGE_LEASE_MS = 30_000;
 const DEFAULT_RUNTIME_APPROVAL_TTL_MS = 5 * 60 * 1000;
 
-type ActiveDebateQuotaFinalizerInput = DebateQuotaFinalization & { job?: DebateExecutionJob };
+type ActiveDebateQuotaFinalizerInput = DebateQuotaFinalization & { job?: DebateExecutionJob; debate?: unknown };
 type HostedBridgeSupportedMode = (typeof HOSTED_BRIDGE_SUPPORTED_MODES)[number];
 type HostedRuntimeBridgeCommandPayloadStore = {
   put(input: { commandId: string; payload: Record<string, unknown> }): Promise<void>;
@@ -632,13 +632,19 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   }
 
   async function processDebateJobs(): Promise<boolean> {
-    const recovered = await debateExecution.recoverStaleClaims({ now: new Date().toISOString() });
+    const recoveryNow = new Date().toISOString();
+    const staleClaims = await listStaleDebateClaimsForRecovery(recoveryNow);
+    const recovered = await debateExecution.recoverStaleClaims({ now: recoveryNow });
     if (recovered.recovered > 0 || recovered.exhausted > 0 || recovered.invalid > 0) {
       runtimeLogger.warn("worker.debate.claims.recovered", {
         recovered: String(recovered.recovered),
         exhausted: String(recovered.exhausted),
         invalid: String(recovered.invalid)
       });
+    }
+    const terminalizedStaleClaims = await failTerminalRecoveredDebateClaims(staleClaims);
+    if (terminalizedStaleClaims > 0) {
+      return true;
     }
 
     const job = await debateExecution.claim({ leaseMs: 30_000 });
@@ -657,7 +663,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       if (result.action === "complete") {
         await debateExecution.complete(job.id);
         if (result.quotaFinalization) {
-          await finalizeActiveDebateQuota({ ...result.quotaFinalization, job });
+          await finalizeDebateQuota(result.quotaFinalization, job);
         }
       } else if (result.action === "requeue") {
         await debateExecution.release(job.id, {
@@ -669,7 +675,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
           reasonCode: result.reasonCode,
           retryable: false
         });
-        await finalizeActiveDebateQuota({ ...result.quotaFinalization, job });
+        await finalizeDebateQuota(result.quotaFinalization, job);
       }
       runtimeLogger.info("worker.debate.job.processed", {
         action: result.action,
@@ -687,6 +693,74 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       });
       return true;
     }
+  }
+
+  async function finalizeDebateQuota(finalization: DebateQuotaFinalization, job: DebateExecutionJob): Promise<void> {
+    await finalizeActiveDebateQuota({
+      ...finalization,
+      job,
+      debate: await debates.get(finalization.debateId)
+    });
+  }
+
+  async function failTerminalRecoveredDebateClaims(staleClaims: DebateExecutionJob[]): Promise<number> {
+    let terminalized = 0;
+    for (const job of staleClaims) {
+      const reasonCode = staleRecoveryTerminalReason(job);
+      if (!reasonCode) {
+        continue;
+      }
+      const debate = await debates.get(job.debateId);
+      if (!debate) {
+        continue;
+      }
+      if (!isTerminalDebateStatusValue(debate.status)) {
+        const completedAt = new Date().toISOString();
+        await debates.update({
+          ...debate,
+          status: "failed",
+          stopReason: "failed",
+          error: {
+            code: reasonCode,
+            message: reasonCode
+          },
+          updatedAt: completedAt,
+          completedAt
+        });
+      }
+      await finalizeActiveDebateQuota({
+        debateId: job.debateId,
+        outcome: "failed",
+        reasonCode,
+        job,
+        debate
+      });
+      terminalized += 1;
+    }
+    return terminalized;
+  }
+
+  async function listStaleDebateClaimsForRecovery(nowIso: string): Promise<DebateExecutionJob[]> {
+    if (postgres) {
+      try {
+        const result = await postgres.pool.query(
+          `SELECT *
+           FROM debate_execution_jobs
+           WHERE state = 'claimed'
+             AND (lease_until IS NULL OR lease_until <= $1)
+           ORDER BY updated_at ASC, id ASC`,
+          [nowIso]
+        );
+        return result.rows.map((row) => rowToDebateExecutionJob(row as Record<string, unknown>));
+      } catch {
+        return [];
+      }
+    }
+    const items = (debateExecution as unknown as { items?: Map<string, DebateExecutionJob> }).items;
+    if (!items) {
+      return [];
+    }
+    return [...items.values()].filter((job) => isStaleDebateClaim(job, nowIso));
   }
 
   async function stampSessionOwnerForStartedRun(run: RunRecord): Promise<void> {
@@ -1686,27 +1760,11 @@ function createActiveDebateQuotaFinalizer(deps: {
 }): (input: ActiveDebateQuotaFinalizerInput) => Promise<void> {
   const finalizedDebateIds = new Set<string>();
   return async (input) => {
-    if (finalizedDebateIds.has(input.debateId)) {
-      return;
-    }
-    finalizedDebateIds.add(input.debateId);
-    if (!deps.postgres || !deps.controlPlaneStore || !input.job?.accountId || !input.job.tenantId || !input.job.projectId) {
+    if (!deps.controlPlaneStore || !input.job?.accountId || !input.job.tenantId || !input.job.projectId) {
       return;
     }
 
-    const result = await deps.postgres.pool.query(
-      `SELECT id
-       FROM quota_reservations
-       WHERE account_id = $1
-         AND tenant_id = $2
-         AND project_id = $3
-         AND quota_kind = 'active_debates'
-         AND state = 'reserved'
-       ORDER BY created_at ASC, id ASC
-       LIMIT 1`,
-      [input.job.accountId, input.job.tenantId, input.job.projectId]
-    );
-    const reservationId = typeof result.rows[0]?.["id"] === "string" ? result.rows[0]["id"] : undefined;
+    const reservationId = activeDebateReservationIdFrom(input.job, input.debate);
     if (!reservationId) {
       deps.logger.warn("worker.debate.quota.finalize_skipped", {
         reasonCode: "active_debate_reservation_missing",
@@ -1714,6 +1772,10 @@ function createActiveDebateQuotaFinalizer(deps: {
       });
       return;
     }
+    if (finalizedDebateIds.has(input.debateId)) {
+      return;
+    }
+    finalizedDebateIds.add(input.debateId);
 
     try {
       await deps.controlPlaneStore.transitionQuotaReservation({
@@ -1730,6 +1792,99 @@ function createActiveDebateQuotaFinalizer(deps: {
       throw error;
     }
   };
+}
+
+function activeDebateReservationIdFrom(job: DebateExecutionJob | undefined, debate: unknown): string | undefined {
+  return stringField(asRecord(job), "activeDebateReservationId")
+    ?? stringField(asRecord(job), "activeDebatesReservationId")
+    ?? stringField(asRecord(job), "activeDebateQuotaReservationId")
+    ?? stringField(asRecord(job), "quotaReservationId")
+    ?? stringField(asRecordField(asRecord(job), "metadata"), "activeDebateReservationId")
+    ?? stringField(asRecordField(asRecord(job), "metadata"), "activeDebateQuotaReservationId")
+    ?? stringField(asRecord(debate), "activeDebateReservationId")
+    ?? stringField(asRecord(debate), "activeDebateQuotaReservationId")
+    ?? stringField(asRecordField(asRecord(debate), "metadata"), "activeDebateReservationId")
+    ?? stringField(asRecordField(asRecord(debate), "metadata"), "activeDebateQuotaReservationId");
+}
+
+function staleRecoveryTerminalReason(job: DebateExecutionJob): string | undefined {
+  if (!job.leaseUntil) {
+    return "hosted_debate_worker_unavailable";
+  }
+  if (job.attempts >= job.maxAttempts) {
+    return "debate_execution_attempts_exhausted";
+  }
+  return undefined;
+}
+
+function isStaleDebateClaim(job: DebateExecutionJob, nowIso: string): boolean {
+  if (job.state !== "claimed") {
+    return false;
+  }
+  if (!job.leaseUntil) {
+    return true;
+  }
+  return Date.parse(job.leaseUntil) <= Date.parse(nowIso);
+}
+
+function isTerminalDebateStatusValue(status: string): boolean {
+  return status === "consensus_found"
+    || status === "no_consensus"
+    || status === "stopped_by_user"
+    || status === "completed"
+    || status === "failed";
+}
+
+function rowToDebateExecutionJob(row: Record<string, unknown>): DebateExecutionJob {
+  const job: DebateExecutionJob = {
+    id: String(row["id"]),
+    debateId: String(row["debate_id"]),
+    stage: String(row["stage"]),
+    debateRound: Number(row["debate_round"] ?? 0),
+    debatePhase: String(row["debate_phase"] ?? ""),
+    state: String(row["state"]) as DebateExecutionJob["state"],
+    attempts: Number(row["attempts"] ?? 0),
+    maxAttempts: Number(row["max_attempts"] ?? 1),
+    nextAttemptAt: String(row["next_attempt_at"] ?? new Date().toISOString()),
+    createdAt: String(row["created_at"] ?? new Date().toISOString()),
+    updatedAt: String(row["updated_at"] ?? new Date().toISOString())
+  };
+  const writable = job as unknown as Record<string, unknown>;
+  assignOptionalNumber(writable, "participantIndex", row["participant_index"]);
+  assignOptionalString(writable, "pendingRunId", row["pending_run_id"]);
+  assignOptionalString(writable, "pendingJudgeRunId", row["pending_judge_run_id"]);
+  assignOptionalString(writable, "pendingChildRunKey", row["pending_child_run_key"]);
+  assignOptionalString(writable, "claimedAt", row["claimed_at"]);
+  assignOptionalString(writable, "leaseUntil", row["lease_until"]);
+  assignOptionalString(writable, "reasonCode", row["reason_code"]);
+  assignOptionalString(writable, "accountId", row["account_id"]);
+  assignOptionalString(writable, "tenantId", row["tenant_id"]);
+  assignOptionalString(writable, "projectId", row["project_id"]);
+  assignOptionalString(writable, "userId", row["user_id"]);
+  assignOptionalString(writable, "apiKeyId", row["api_key_id"]);
+  return job;
+}
+
+function assignOptionalString(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (typeof value === "string") {
+    target[key] = value;
+  }
+}
+
+function assignOptionalNumber(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (typeof value === "number") {
+    target[key] = value;
+  }
+}
+
+function asRecordField(value: Record<string, unknown>, key: string): Record<string, unknown> {
+  const field = value[key];
+  return field && typeof field === "object" && !Array.isArray(field) ? field as Record<string, unknown> : {};
+}
+
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
+  const field = value[key];
+  return typeof field === "string" && field.trim().length > 0 ? field : undefined;
 }
 
 function sandboxReadinessDiagnostics(config: WorkerConfig): Record<string, unknown> {
