@@ -25,11 +25,13 @@ import {
   InMemoryEvidenceStore,
   InMemoryMessageStore,
   InMemoryRunStore,
+  startFakeAgentFieldServer,
+  startFakeHttpRuntimeServer,
   InMemorySessionStore
 } from "@switchyard/testkit";
 import type { SandboxProcessFactory } from "@switchyard/adapters";
 import { loadWorkerConfig } from "../src/config.js";
-import { buildHostedWorkerAdapters, createHostedSafeLogger } from "../src/hosted-runtime-adapters.js";
+import { buildHostedWorkerAdapters, checkConfiguredHostedAdapters, createHostedSafeLogger } from "../src/hosted-runtime-adapters.js";
 import { createWorkerHostedSandboxService } from "../src/sandbox.js";
 import { createHostedWorker, getWorkerRuntimeBridgeReadiness } from "../src/worker.js";
 
@@ -591,6 +593,85 @@ describe("hosted worker app", () => {
     expect(adapters.has("claude_code")).toBe(false);
   });
 
+  it("builds wrapper adapters only when real mode and wrapper config gates pass", () => {
+    expect(buildHostedWorkerAdapters(baseConfig()).has("generic_http")).toBe(false);
+    expect(buildHostedWorkerAdapters(baseConfig()).has("agentfield")).toBe(false);
+
+    const disabledReal = buildHostedWorkerAdapters({
+      ...baseConfig(),
+      hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+      genericHttp: {
+        ...baseConfig().genericHttp,
+        baseUrl: "http://127.0.0.1:5055"
+      }
+    });
+    expect(disabledReal.has("generic_http")).toBe(false);
+
+    const gated = buildHostedWorkerAdapters({
+      ...baseConfig(),
+      hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest", "agentfield.async_rest"],
+      hostedRealRuntimeExecution: "enabled",
+      genericHttp: {
+        ...baseConfig().genericHttp,
+        baseUrl: "http://127.0.0.1:5055",
+        authToken: "generic-token"
+      },
+      agentfield: {
+        ...baseConfig().agentfield,
+        baseUrl: "http://127.0.0.1:5057",
+        apiKey: "af-key",
+        target: "research-agent.deep_analysis"
+      }
+    });
+    expect(gated.has("generic_http")).toBe(true);
+    expect(gated.has("agentfield")).toBe(true);
+
+    const missingAgentFieldConfig = buildHostedWorkerAdapters({
+      ...baseConfig(),
+      hostedRuntimeAllowlist: ["fake.deterministic", "agentfield.async_rest"],
+      hostedRealRuntimeExecution: "enabled",
+      agentfield: {
+        ...baseConfig().agentfield,
+        baseUrl: "http://127.0.0.1:5057"
+      }
+    });
+    expect(missingAgentFieldConfig.has("agentfield")).toBe(false);
+  });
+
+  it("checks wrapper adapter readiness without creating upstream executions", async () => {
+    const generic = await startFakeHttpRuntimeServer({ scenario: "bridge_happy", expectedAuthToken: "generic-token" });
+    const agentfield = await startFakeAgentFieldServer({ scenario: "bridge_happy", expectedApiKey: "af-key" });
+
+    try {
+      const result = await checkConfiguredHostedAdapters({
+        ...baseConfig(),
+        hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest", "agentfield.async_rest"],
+        hostedRealRuntimeExecution: "enabled",
+        genericHttp: {
+          ...baseConfig().genericHttp,
+          baseUrl: generic.baseUrl,
+          authToken: "generic-token"
+        },
+        agentfield: {
+          ...baseConfig().agentfield,
+          baseUrl: agentfield.baseUrl,
+          apiKey: "af-key",
+          target: "research-agent.deep_analysis"
+        }
+      });
+
+      expect(result.modes["generic_http.async_rest"]).toEqual({ ok: true });
+      expect(result.modes["agentfield.async_rest"]).toEqual({ ok: true });
+      expect(generic.stats()).toMatchObject({ healthRequests: 1, startRequests: 0 });
+      expect(agentfield.stats.healthCalls).toBe(1);
+      expect(agentfield.stats.discoveryCalls).toBe(1);
+      expect(agentfield.stats.executeAsyncCalls).toBe(0);
+    } finally {
+      await generic.close();
+      await agentfield.close();
+    }
+  });
+
   it("reports hosted runtime gate disabled in readiness", async () => {
     const worker = createHostedWorker({
       ...baseConfig(),
@@ -778,6 +859,8 @@ describe("hosted worker app", () => {
     expect(adapterSource).toContain("ClaudeCodeAdapter");
     expect(adapterSource).toContain("OpenCodeAcpAdapter");
     expect(adapterSource).toContain("createClaudeCodeCliClient");
+    expect(adapterSource).toContain("GenericHttpAsyncRestAdapter");
+    expect(adapterSource).toContain("AgentFieldAsyncRestAdapter");
 
     expect(workerSource).not.toContain("GenericHttpAsyncRestAdapter");
     expect(workerSource).not.toContain("AgentFieldAsyncRestAdapter");
@@ -812,6 +895,8 @@ describe("hosted worker app", () => {
       { name: "command_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" },
       { name: "worker_claim", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
       { name: "adapter_capability", ok: false, reasonCode: "hosted_runtime_bridge_operation_unsupported" },
+      { name: "wrapper_config", ok: true },
+      { name: "wrapper_bridge_capability", ok: true },
       { name: "session_reconciliation", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
       { name: "approval_sender", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" }
     ]);
@@ -828,6 +913,48 @@ describe("hosted worker app", () => {
     });
     expect(ready.status).toBe("ready");
     expect(ready.checks.every((entry) => entry.ok)).toBe(true);
+  });
+
+  it("reports wrapper config and bridge capability readiness failures by mode", () => {
+    const sharedDeps = {
+      commandStore: { put: async () => undefined, get: async () => undefined, delete: async () => undefined },
+      workerClaim: { claimAndApplyNext: async () => false },
+      sessionReconciliation: { reconcileHostedRuntimeSessions: async () => ({ reconciled: 0, failed: 0 }) },
+      approvalSender: { createWorkerRuntimeApproval: async () => ({ id: "approval_1" }) }
+    };
+    const missingConfig = getWorkerRuntimeBridgeReadiness({
+      ...sharedDeps,
+      adapterCapabilities: {
+        "agentfield.async_rest": {
+          adapter: false,
+          wrapperConfig: false,
+          wrapperBridgeCapability: false,
+          reasonCode: "agentfield_bridge_config_missing"
+        }
+      }
+    });
+    expect(missingConfig.checks).toContainEqual({
+      name: "wrapper_config",
+      ok: false,
+      reasonCode: "agentfield_bridge_config_missing"
+    });
+
+    const missingCapability = getWorkerRuntimeBridgeReadiness({
+      ...sharedDeps,
+      adapterCapabilities: {
+        "generic_http.async_rest": {
+          adapter: true,
+          wrapperConfig: true,
+          wrapperBridgeCapability: false,
+          reasonCode: "generic_http_bridge_capability_missing"
+        }
+      }
+    });
+    expect(missingCapability.checks).toContainEqual({
+      name: "wrapper_bridge_capability",
+      ok: false,
+      reasonCode: "generic_http_bridge_capability_missing"
+    });
   });
 
   it("does not allow worker B to apply bridge input for worker A owned live session", async () => {
@@ -1101,7 +1228,15 @@ describe("hosted worker app", () => {
       leaseMs: 10_000
     });
     expect(processed).toBe(true);
-    expect(workerSent).toEqual([{ text: "continue", type: "input" }]);
+    expect(workerSent).toEqual([
+      expect.objectContaining({
+        text: "continue",
+        type: "input",
+        switchyardRunId: "run_bridge_e2e_payload",
+        idempotencyKey: "bridge_e2e_payload",
+        bridgeCommandId: admitted.commandId
+      })
+    ]);
     const persisted = await commands.get(admitted.commandId);
     expect(persisted?.status).toBe("completed");
   });
@@ -1266,6 +1401,16 @@ function baseConfig() {
       requestTimeoutMs: 5000,
       cancelTimeoutMs: 5000,
       maxMessageBytes: 1_048_576
+    },
+    genericHttp: {
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 100,
+      maxResponseBytes: 1_048_576
+    },
+    agentfield: {
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 1000,
+      maxResponseBytes: 1_048_576
     },
     providerRuntimeActivation: {
       valid: true,

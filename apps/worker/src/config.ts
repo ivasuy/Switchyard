@@ -69,6 +69,21 @@ export interface WorkerConfig {
     cancelTimeoutMs: number;
     maxMessageBytes: number;
   };
+  genericHttp: {
+    baseUrl?: string;
+    authToken?: string;
+    requestTimeoutMs: number;
+    pollIntervalMs: number;
+    maxResponseBytes: number;
+  };
+  agentfield: {
+    baseUrl?: string;
+    apiKey?: string;
+    target?: string;
+    requestTimeoutMs: number;
+    pollIntervalMs: number;
+    maxResponseBytes: number;
+  };
   providerRuntimeActivation: ProviderRuntimeActivationResult;
   tools: WorkerToolConfig;
   redactedSummary: Record<string, unknown>;
@@ -85,6 +100,11 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   const toolAdapterMode = parseToolAdapterMode(optional(env["SWITCHYARD_TOOL_ADAPTER_MODE"]));
   const toolPolicyJson = optional(env["SWITCHYARD_REAL_TOOL_POLICY_JSON"]);
   const toolPolicyPath = optional(env["SWITCHYARD_REAL_TOOL_POLICY_PATH"]);
+  const genericHttpBaseUrl = optional(env["SWITCHYARD_GENERIC_HTTP_BASE_URL"]);
+  const genericHttpAuthToken = optional(env["SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN"]);
+  const agentfieldBaseUrl = optional(env["SWITCHYARD_AGENTFIELD_BASE_URL"]);
+  const agentfieldApiKey = optional(env["SWITCHYARD_AGENTFIELD_API_KEY"]);
+  const agentfieldTarget = optional(env["SWITCHYARD_AGENTFIELD_TARGET"]);
   const config: WorkerConfig = {
     deploymentMode,
     hostedRuntimeAllowlist: parseCsv(hostedRuntimeAllowlistEnv, "fake.deterministic"),
@@ -106,6 +126,21 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
       requestTimeoutMs: parsePositiveInteger(optional(env["SWITCHYARD_ACP_REQUEST_TIMEOUT_MS"]) ?? "5000", "SWITCHYARD_ACP_REQUEST_TIMEOUT_MS"),
       cancelTimeoutMs: parsePositiveInteger(optional(env["SWITCHYARD_ACP_CANCEL_TIMEOUT_MS"]) ?? "5000", "SWITCHYARD_ACP_CANCEL_TIMEOUT_MS"),
       maxMessageBytes: parsePositiveInteger(optional(env["SWITCHYARD_ACP_MAX_MESSAGE_BYTES"]) ?? "1048576", "SWITCHYARD_ACP_MAX_MESSAGE_BYTES")
+    },
+    genericHttp: {
+      ...(genericHttpBaseUrl ? { baseUrl: genericHttpBaseUrl } : {}),
+      ...(genericHttpAuthToken ? { authToken: genericHttpAuthToken } : {}),
+      requestTimeoutMs: parsePositiveInteger(optional(env["SWITCHYARD_GENERIC_HTTP_REQUEST_TIMEOUT_MS"]) ?? "5000", "SWITCHYARD_GENERIC_HTTP_REQUEST_TIMEOUT_MS"),
+      pollIntervalMs: parsePositiveInteger(optional(env["SWITCHYARD_GENERIC_HTTP_POLL_INTERVAL_MS"]) ?? "100", "SWITCHYARD_GENERIC_HTTP_POLL_INTERVAL_MS"),
+      maxResponseBytes: parsePositiveInteger(optional(env["SWITCHYARD_GENERIC_HTTP_MAX_RESPONSE_BYTES"]) ?? "1048576", "SWITCHYARD_GENERIC_HTTP_MAX_RESPONSE_BYTES")
+    },
+    agentfield: {
+      ...(agentfieldBaseUrl ? { baseUrl: agentfieldBaseUrl } : {}),
+      ...(agentfieldApiKey ? { apiKey: agentfieldApiKey } : {}),
+      ...(agentfieldTarget ? { target: agentfieldTarget } : {}),
+      requestTimeoutMs: parsePositiveInteger(optional(env["SWITCHYARD_AGENTFIELD_REQUEST_TIMEOUT_MS"]) ?? "5000", "SWITCHYARD_AGENTFIELD_REQUEST_TIMEOUT_MS"),
+      pollIntervalMs: parsePositiveInteger(optional(env["SWITCHYARD_AGENTFIELD_POLL_INTERVAL_MS"]) ?? "1000", "SWITCHYARD_AGENTFIELD_POLL_INTERVAL_MS"),
+      maxResponseBytes: parsePositiveInteger(optional(env["SWITCHYARD_AGENTFIELD_MAX_RESPONSE_BYTES"]) ?? "1048576", "SWITCHYARD_AGENTFIELD_MAX_RESPONSE_BYTES")
     },
     providerRuntimeActivation: {
       valid: true,
@@ -510,6 +545,23 @@ function buildSummary(config: WorkerConfig): Record<string, unknown> {
       cancelTimeoutMs: config.acp.cancelTimeoutMs,
       maxMessageBytes: config.acp.maxMessageBytes
     },
+    genericHttp: {
+      configured: Boolean(config.genericHttp.baseUrl),
+      baseUrl: redactUrlForSummary(config.genericHttp.baseUrl),
+      authToken: config.genericHttp.authToken ? "[REDACTED]" : undefined,
+      requestTimeoutMs: config.genericHttp.requestTimeoutMs,
+      pollIntervalMs: config.genericHttp.pollIntervalMs,
+      maxResponseBytes: config.genericHttp.maxResponseBytes
+    },
+    agentfield: {
+      configured: Boolean(config.agentfield.baseUrl && config.agentfield.apiKey && config.agentfield.target),
+      baseUrl: redactUrlForSummary(config.agentfield.baseUrl),
+      apiKey: config.agentfield.apiKey ? "[REDACTED]" : undefined,
+      target: redactSecretLikeTarget(config.agentfield.target),
+      requestTimeoutMs: config.agentfield.requestTimeoutMs,
+      pollIntervalMs: config.agentfield.pollIntervalMs,
+      maxResponseBytes: config.agentfield.maxResponseBytes
+    },
     providerRuntimePolicy: {
       valid: config.providerRuntimeActivation.valid,
       source: config.providerRuntimeActivation.redactedSummary.source.kind,
@@ -537,4 +589,27 @@ function buildSummary(config: WorkerConfig): Record<string, unknown> {
       }
     }
   });
+}
+
+function redactUrlForSummary(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(value);
+    parsed.username = parsed.username ? "[REDACTED]" : "";
+    parsed.password = parsed.password ? "[REDACTED]" : "";
+    return parsed.toString();
+  } catch {
+    return "[REDACTED]";
+  }
+}
+
+function redactSecretLikeTarget(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return /(token|secret|password|credential|apikey|api_key|private|bearer|key)/i.test(value)
+    ? "[REDACTED]"
+    : value;
 }

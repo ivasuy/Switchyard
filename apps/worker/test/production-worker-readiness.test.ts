@@ -3,7 +3,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { resolveHostedSandboxConfig } from "@switchyard/core";
-import { resolveObjectStoreConfig } from "@switchyard/storage";
+import {
+  PostgresDebateExecutionStore,
+  PostgresHostedRuntimeBridgeCommandStore,
+  resolveObjectStoreConfig
+} from "@switchyard/storage";
 import { InMemoryEventStore, InMemoryRunStore } from "@switchyard/testkit";
 import { MemoryRunQueue } from "@switchyard/queue";
 import { createHostedWorker } from "../src/worker.js";
@@ -42,6 +46,16 @@ function baseConfig(): WorkerConfig {
       requestTimeoutMs: 5000,
       cancelTimeoutMs: 5000,
       maxMessageBytes: 1024 * 1024
+    },
+    genericHttp: {
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 100,
+      maxResponseBytes: 1024 * 1024
+    },
+    agentfield: {
+      requestTimeoutMs: 5000,
+      pollIntervalMs: 1000,
+      maxResponseBytes: 1024 * 1024
     },
     providerRuntimeActivation: {
       valid: true,
@@ -332,6 +346,58 @@ describe("production worker readiness", () => {
     }
   });
 
+  it("reports wrapper config failures in hosted bridge readiness diagnostics", async () => {
+    const worker = createHostedWorker({
+      ...baseConfig(),
+      deploymentMode: "staging",
+      postgresUrl: undefined,
+      redisUrl: undefined,
+      hostedRuntimeAllowlist: ["fake.deterministic", "agentfield.async_rest"],
+      hostedRealRuntimeExecution: "enabled",
+      providerRuntimeActivation: baseConfig().providerRuntimeActivation
+    }, {
+      queue: new MemoryRunQueue(),
+      runs: new InMemoryRunStore(),
+      events: new InMemoryEventStore(),
+      bridgeCommandStore: new PostgresHostedRuntimeBridgeCommandStore(),
+      bridgeCommandPayloads: createMemoryBridgePayloadStore(),
+      debateExecution: new PostgresDebateExecutionStore() as never,
+      ensurePostgresSchema: async () => {},
+      probePostgres: async () => {},
+      checkSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 })
+    });
+
+    try {
+      const readiness = await worker.ready();
+      expect(readiness.ok).toBe(false);
+      expect(readiness.reason).toBe("agentfield_bridge_config_missing");
+      expect(readiness.checks?.hostedRuntimeBridge).toMatchObject({
+        ok: false,
+        code: "agentfield_bridge_config_missing",
+        diagnostics: {
+          bridgeModes: ["agentfield.async_rest"]
+        }
+      });
+      expect(readiness.checks?.hostedRuntimeBridge?.diagnostics?.["checks"]).toContainEqual({
+        name: "wrapper_config",
+        ok: false,
+        reasonCode: "agentfield_bridge_config_missing"
+      });
+      expect(readiness.checks?.hostedDebate).toMatchObject({
+        ok: false,
+        code: "agentfield_bridge_config_missing",
+        diagnostics: {
+          bridge: {
+            ok: false,
+            code: "agentfield_bridge_config_missing"
+          }
+        }
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
   it("does not claim jobs when sandbox readiness fails with missing policy", async () => {
     const queue = new MemoryRunQueue();
     let claimCalls = 0;
@@ -443,4 +509,23 @@ function runWorkerReadyCli(env: Record<string, string>): Promise<{ code: number 
       resolveResult({ code, stdout, stderr });
     });
   });
+}
+
+function createMemoryBridgePayloadStore(): {
+  put(input: { commandId: string; payload: Record<string, unknown> }): Promise<void>;
+  get(commandId: string): Promise<Record<string, unknown> | undefined>;
+  delete(commandId: string): Promise<void>;
+} {
+  const map = new Map<string, Record<string, unknown>>();
+  return {
+    async put(input) {
+      map.set(input.commandId, input.payload);
+    },
+    async get(commandId) {
+      return map.get(commandId);
+    },
+    async delete(commandId) {
+      map.delete(commandId);
+    }
+  };
 }

@@ -82,12 +82,20 @@ type HostedRuntimeBridgeReadinessCheckName =
   | "command_store"
   | "worker_claim"
   | "adapter_capability"
+  | "wrapper_config"
+  | "wrapper_bridge_capability"
   | "session_reconciliation"
   | "approval_sender";
 type HostedRuntimeBridgeReadinessReport = {
   status: "ready" | "not_ready";
   checks: Array<{ name: HostedRuntimeBridgeReadinessCheckName; ok: boolean; reasonCode?: string }>;
 };
+interface WorkerRuntimeBridgeModeCapability {
+  adapter: boolean;
+  wrapperConfig: boolean;
+  wrapperBridgeCapability: boolean;
+  reasonCode?: string;
+}
 
 const TOOL_KIND_REPO = `re${"po"}`;
 const TOOL_KIND_BROWSER = `bro${"wser"}`;
@@ -97,7 +105,7 @@ const POLICY_KEY_FETCH = `fe${"tch"}` as const;
 const POLICY_KEY_WEB = `web_${"se"}${"arch"}` as const;
 const POLICY_KEY_GH = `git${"hub"}` as const;
 const POLICY_KEY_SH = `sh${"ell"}` as const;
-const HOSTED_BRIDGE_SUPPORTED_MODES = ["claude_code.sdk", "opencode.acp"] as const;
+const HOSTED_BRIDGE_SUPPORTED_MODES = ["claude_code.sdk", "opencode.acp", "agentfield.async_rest", "generic_http.async_rest"] as const;
 const DEFAULT_BRIDGE_LEASE_MS = 30_000;
 const DEFAULT_RUNTIME_APPROVAL_TTL_MS = 5 * 60 * 1000;
 
@@ -517,7 +525,9 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     adapterRuntimeModes: new Set([
       ...(adapters.has("codex") ? ["codex.exec_json"] : []),
       ...(adapters.has("claude_code") ? ["claude_code.sdk"] : []),
-      ...(adapters.has("opencode") ? ["opencode.acp"] : [])
+      ...(adapters.has("opencode") ? ["opencode.acp"] : []),
+      ...(adapters.has("agentfield") ? ["agentfield.async_rest"] : []),
+      ...(adapters.has("generic_http") ? ["generic_http.async_rest"] : [])
     ])
   } as any);
 
@@ -794,7 +804,9 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         ...currentState,
         hostedWorkerId: workerId,
         hostedRuntimeSessionId: session.id,
-        hostedBridgeCapable: bridgeEnabledModes.has(run.runtimeMode as HostedBridgeSupportedMode)
+        hostedBridgeCapable: bridgeEnabledModes.has(run.runtimeMode as HostedBridgeSupportedMode),
+        runtimeMode: run.runtimeMode,
+        ...(session.externalSessionKey ? { externalSessionKey: session.externalSessionKey } : {})
       },
       updatedAt: new Date().toISOString()
     });
@@ -1394,14 +1406,25 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
           code: firstAdapterFailureCode(adapterCheck.modes),
           diagnostics: { modes: adapterCheck.modes }
         };
-      if (!adapterCheck.ok) {
+      if (!adapterCheck.ok && !bridgeSupportEnabled) {
         return markFailure(firstAdapterFailureCode(adapterCheck.modes));
       }
 
       if (bridgeSupportEnabled) {
-        const adapterCapabilities = requiredBridgeModes.reduce<Record<string, boolean>>((acc, mode) => {
-          const adapterId = mode === "claude_code.sdk" ? "claude_code" : "opencode";
-          acc[mode] = Boolean(adapters.get(adapterId)) && bridgeEnabledModes.has(mode);
+        const adapterCapabilities = requiredBridgeModes.reduce<Record<string, WorkerRuntimeBridgeModeCapability>>((acc, mode) => {
+          const adapterCheckMode = adapterCheck.modes[mode];
+          const adapterId = adapterIdForBridgeMode(mode);
+          const constructed = Boolean(adapters.get(adapterId));
+          acc[mode] = {
+            adapter: constructed && bridgeEnabledModes.has(mode),
+            wrapperConfig: isWrapperBridgeMode(mode)
+              ? constructed || adapterCheckMode?.code !== wrapperConfigMissingCode(mode)
+              : true,
+            wrapperBridgeCapability: isWrapperBridgeMode(mode)
+              ? adapterCheckMode?.ok === true
+              : true,
+            ...(adapterCheckMode?.ok === false && adapterCheckMode.code ? { reasonCode: adapterCheckMode.code } : {})
+          };
           return acc;
         }, {});
         const bridgeReadiness = getWorkerRuntimeBridgeReadiness({
@@ -1424,6 +1447,27 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
           }
         };
         if (bridgeReadiness.status !== "ready") {
+          if (shouldCheckHostedDebateReadiness()) {
+            const debateReadiness = getWorkerHostedDebateReadiness({
+              debateExecution,
+              queue,
+              runs,
+              events,
+              messages,
+              evidence,
+              artifacts,
+              artifactContent,
+              finalizeActiveDebateQuota,
+              bridgeReadiness: checks.hostedRuntimeBridge
+            });
+            checks.hostedDebate = debateReadiness.ok
+              ? { ok: true, diagnostics: debateReadiness.diagnostics }
+              : {
+                ok: false,
+                code: debateReadiness.code,
+                diagnostics: debateReadiness.diagnostics
+              };
+          }
           return markFailure(firstFailure);
         }
       } else {
@@ -1435,6 +1479,9 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
             status: "disabled"
           }
         };
+      }
+      if (!adapterCheck.ok) {
+        return markFailure(firstAdapterFailureCode(adapterCheck.modes));
       }
 
       if (shouldCheckHostedDebateReadiness()) {
@@ -1535,19 +1582,30 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
 export function getWorkerRuntimeBridgeReadiness(deps: {
   commandStore?: unknown;
   sessionReconciliation?: unknown;
-  adapterCapabilities?: Record<string, boolean>;
+  adapterCapabilities?: Record<string, boolean | WorkerRuntimeBridgeModeCapability>;
   approvalSender?: unknown;
   workerClaim?: unknown;
 }): HostedRuntimeBridgeReadinessReport {
   const check = (name: HostedRuntimeBridgeReadinessCheckName, ok: boolean, reasonCode: string) =>
     ok ? { name, ok: true as const } : { name, ok: false as const, reasonCode };
   const adapterCapabilities = deps.adapterCapabilities ?? {};
-  const adapterCapable = Object.keys(adapterCapabilities).length > 0
-    && Object.values(adapterCapabilities).every((value) => value === true);
+  const normalizedCapabilities = Object.entries(adapterCapabilities).map(([mode, value]) => normalizeBridgeModeCapability(mode, value));
+  const adapterCapable = normalizedCapabilities.length > 0
+    && normalizedCapabilities.every((entry) => entry.adapter);
+  const wrapperConfig = normalizedCapabilities.every((entry) => entry.wrapperConfig);
+  const wrapperBridgeCapability = normalizedCapabilities.every((entry) => entry.wrapperBridgeCapability);
+  const firstAdapterReason = normalizedCapabilities.find((entry) => !entry.adapter)?.reasonCode
+    ?? "hosted_runtime_bridge_operation_unsupported";
+  const firstWrapperConfigReason = normalizedCapabilities.find((entry) => !entry.wrapperConfig)?.reasonCode
+    ?? "hosted_runtime_bridge_operation_unsupported";
+  const firstWrapperBridgeReason = normalizedCapabilities.find((entry) => !entry.wrapperBridgeCapability)?.reasonCode
+    ?? "hosted_runtime_bridge_operation_unsupported";
   const checks: HostedRuntimeBridgeReadinessReport["checks"] = [
     check("command_store", isPresent(deps.commandStore), "hosted_runtime_bridge_store_unavailable"),
     check("worker_claim", isPresent(deps.workerClaim), "hosted_runtime_bridge_worker_unavailable"),
-    check("adapter_capability", adapterCapable, "hosted_runtime_bridge_operation_unsupported"),
+    check("adapter_capability", adapterCapable, firstAdapterReason),
+    check("wrapper_config", wrapperConfig, firstWrapperConfigReason),
+    check("wrapper_bridge_capability", wrapperBridgeCapability, firstWrapperBridgeReason),
     check("session_reconciliation", isPresent(deps.sessionReconciliation), "hosted_runtime_bridge_worker_unavailable"),
     check("approval_sender", isPresent(deps.approvalSender), "hosted_runtime_bridge_worker_unavailable")
   ];
@@ -1924,6 +1982,65 @@ function hostedBridgeModesFromAllowlist(allowlist: readonly string[]): HostedBri
 
 function isBridgeSupportedMode(mode: string): mode is HostedBridgeSupportedMode {
   return (HOSTED_BRIDGE_SUPPORTED_MODES as readonly string[]).includes(mode);
+}
+
+function adapterIdForBridgeMode(mode: HostedBridgeSupportedMode): string {
+  if (mode === "claude_code.sdk") {
+    return "claude_code";
+  }
+  if (mode === "opencode.acp") {
+    return "opencode";
+  }
+  if (mode === "agentfield.async_rest") {
+    return "agentfield";
+  }
+  return "generic_http";
+}
+
+function isWrapperBridgeMode(mode: HostedBridgeSupportedMode | string): mode is "agentfield.async_rest" | "generic_http.async_rest" {
+  return mode === "agentfield.async_rest" || mode === "generic_http.async_rest";
+}
+
+function wrapperConfigMissingCode(mode: HostedBridgeSupportedMode | string): string {
+  return mode === "agentfield.async_rest"
+    ? "agentfield_bridge_config_missing"
+    : "generic_http_bridge_config_missing";
+}
+
+function wrapperCapabilityMissingCode(mode: HostedBridgeSupportedMode | string): string {
+  return mode === "agentfield.async_rest"
+    ? "agentfield_bridge_capability_missing"
+    : "generic_http_bridge_capability_missing";
+}
+
+function normalizeBridgeModeCapability(
+  mode: string,
+  value: boolean | WorkerRuntimeBridgeModeCapability
+): WorkerRuntimeBridgeModeCapability {
+  if (typeof value === "boolean") {
+    return {
+      adapter: value,
+      wrapperConfig: true,
+      wrapperBridgeCapability: true,
+      ...(value ? {} : { reasonCode: "hosted_runtime_bridge_operation_unsupported" })
+    };
+  }
+  if (!isWrapperBridgeMode(mode)) {
+    return value;
+  }
+  if (!value.wrapperConfig) {
+    return {
+      ...value,
+      reasonCode: value.reasonCode ?? wrapperConfigMissingCode(mode)
+    };
+  }
+  if (!value.wrapperBridgeCapability) {
+    return {
+      ...value,
+      reasonCode: value.reasonCode ?? wrapperCapabilityMissingCode(mode)
+    };
+  }
+  return value;
 }
 
 function resolveHostedWorkerId(config: WorkerConfig): string {

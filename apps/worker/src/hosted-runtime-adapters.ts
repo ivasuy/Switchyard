@@ -1,14 +1,18 @@
 import {
   ClaudeCodeAdapter,
   CodexExecJsonAdapter,
+  AgentFieldAsyncRestAdapter,
+  GenericHttpAsyncRestAdapter,
   OpenCodeAcpAdapter,
   createClaudeCodeCliClient,
+  type AgentFieldAsyncRestAdapterOptions,
   type ClaudeCodeAdapterOptions,
   type ClaudeCodeCliClientOptions,
   type ClaudeCodeClient,
   type ClaudeCodeCliProcessFactory,
   type CodexExecJsonAdapterOptions,
   type CodexProcessFactory,
+  type GenericHttpAsyncRestAdapterOptions,
   type OpenCodeAcpAdapterOptions
 } from "@switchyard/adapters";
 import {
@@ -106,6 +110,29 @@ export function buildHostedWorkerAdapters(
     }
   }
 
+  if (shouldEnableRealMode(config, "generic_http.async_rest") && hasGenericHttpWrapperConfig(config)) {
+    adapters.set("generic_http", new GenericHttpAsyncRestAdapter({
+      ...(config.genericHttp.baseUrl ? { baseUrl: config.genericHttp.baseUrl } : {}),
+      ...(config.genericHttp.authToken ? { authToken: config.genericHttp.authToken } : {}),
+      requestTimeoutMs: config.genericHttp.requestTimeoutMs,
+      pollIntervalMs: config.genericHttp.pollIntervalMs,
+      maxResponseBytes: config.genericHttp.maxResponseBytes,
+      ...(safeLogger ? { logger: safeLogger } : {})
+    } satisfies GenericHttpAsyncRestAdapterOptions));
+  }
+
+  if (shouldEnableRealMode(config, "agentfield.async_rest") && hasAgentFieldWrapperConfig(config)) {
+    adapters.set("agentfield", new AgentFieldAsyncRestAdapter({
+      ...(config.agentfield.baseUrl ? { baseUrl: config.agentfield.baseUrl } : {}),
+      ...(config.agentfield.apiKey ? { apiKey: config.agentfield.apiKey } : {}),
+      ...(config.agentfield.target ? { target: config.agentfield.target } : {}),
+      requestTimeoutMs: config.agentfield.requestTimeoutMs,
+      pollIntervalMs: config.agentfield.pollIntervalMs,
+      maxResponseBytes: config.agentfield.maxResponseBytes,
+      ...(safeLogger ? { logger: safeLogger } : {})
+    } satisfies AgentFieldAsyncRestAdapterOptions));
+  }
+
   return adapters;
 }
 
@@ -118,13 +145,17 @@ export async function checkConfiguredHostedAdapters(
     "fake.deterministic": { ok: true },
     "codex.exec_json": statusForMode(config, "codex.exec_json", adapters.has("codex")),
     "claude_code.sdk": statusForMode(config, "claude_code.sdk", adapters.has("claude_code")),
-    "opencode.acp": statusForMode(config, "opencode.acp", adapters.has("opencode"))
+    "opencode.acp": statusForMode(config, "opencode.acp", adapters.has("opencode")),
+    "agentfield.async_rest": statusForMode(config, "agentfield.async_rest", adapters.has("agentfield")),
+    "generic_http.async_rest": statusForMode(config, "generic_http.async_rest", adapters.has("generic_http"))
   };
 
   for (const [mode, adapterId] of [
     ["codex.exec_json", "codex"],
     ["claude_code.sdk", "claude_code"],
-    ["opencode.acp", "opencode"]
+    ["opencode.acp", "opencode"],
+    ["agentfield.async_rest", "agentfield"],
+    ["generic_http.async_rest", "generic_http"]
   ] as const) {
     if (!modes[mode].ok || modes[mode].code === "not_allowlisted") {
       continue;
@@ -142,6 +173,15 @@ export async function checkConfiguredHostedAdapters(
         ? availability["reasonCode"]
         : "adapter_check_failed";
       modes[mode] = { ok: false, code: reasonCode };
+      continue;
+    }
+    const details = check.details as Record<string, unknown> | undefined;
+    const bridge = details?.["bridge"] as Record<string, unknown> | undefined;
+    if (isWrapperMode(mode) && bridge?.["canBridge"] === false) {
+      modes[mode] = {
+        ok: false,
+        code: typeof bridge["reasonCode"] === "string" ? bridge["reasonCode"] : bridgeCapabilityMissingCode(mode)
+      };
     }
   }
 
@@ -271,7 +311,8 @@ function shouldEnableRealMode(config: WorkerConfig, mode: HostedRuntimeModeSlug)
   }
   if (config.deploymentMode === "production") {
     return config.providerRuntimeActivation.valid
-      && config.providerRuntimeActivation.enabledRealModes.includes(mode as "codex.exec_json" | "claude_code.sdk" | "opencode.acp");
+      && isProviderHostedRuntimeMode(mode)
+      && config.providerRuntimeActivation.enabledRealModes.includes(mode);
   }
   if (config.hostedRealRuntimeExecution !== "enabled") {
     return false;
@@ -297,11 +338,20 @@ function statusForMode(
       code: config.providerRuntimeActivation.reasons[0]?.code ?? "provider_runtime_policy_missing"
     };
   }
-  if (config.deploymentMode === "production" && !config.providerRuntimeActivation.enabledRealModes.includes(mode as "codex.exec_json" | "claude_code.sdk" | "opencode.acp")) {
+  if (
+    config.deploymentMode === "production" &&
+    (!isProviderHostedRuntimeMode(mode) || !config.providerRuntimeActivation.enabledRealModes.includes(mode))
+  ) {
     return { ok: false, code: "provider_runtime_policy_disabled" };
   }
   if (config.hostedRealRuntimeExecution !== "enabled") {
     return { ok: false, code: "hosted_real_runtime_disabled" };
+  }
+  if (mode === "generic_http.async_rest" && !hasGenericHttpWrapperConfig(config)) {
+    return { ok: false, code: "generic_http_bridge_config_missing" };
+  }
+  if (mode === "agentfield.async_rest" && !hasAgentFieldWrapperConfig(config)) {
+    return { ok: false, code: "agentfield_bridge_config_missing" };
   }
   return isConstructed ? { ok: true } : { ok: false, code: "adapter_not_constructed" };
 }
@@ -315,8 +365,8 @@ function resolveHostedProviderCommand(
   if (!activation.valid || !activation.policy) {
     return undefined;
   }
-  const policyEntry = activation.policy.modes[runtimeMode as "codex.exec_json" | "claude_code.sdk" | "opencode.acp"];
-  if (!policyEntry || policyEntry.cwdPrefixes.length === 0) {
+  const policyEntry = activation.policy.modes[runtimeMode];
+  if (!policyEntry || !("cwdPrefixes" in policyEntry) || policyEntry.cwdPrefixes.length === 0) {
     return undefined;
   }
   const commandInput: BuildProviderResolvedCommandInput = {
@@ -339,4 +389,28 @@ export function hostedRuntimeModesFromAllowlist(allowlist: string[]): HostedRunt
 
 export function hostedRuntimeCatalog(): typeof HOSTED_RUNTIME_CATALOG {
   return HOSTED_RUNTIME_CATALOG;
+}
+
+function hasGenericHttpWrapperConfig(config: WorkerConfig): boolean {
+  return Boolean(config.genericHttp.baseUrl);
+}
+
+function hasAgentFieldWrapperConfig(config: WorkerConfig): boolean {
+  return Boolean(config.agentfield.baseUrl && config.agentfield.apiKey && config.agentfield.target);
+}
+
+function isProviderHostedRuntimeMode(
+  mode: HostedRuntimeModeSlug
+): mode is "codex.exec_json" | "claude_code.sdk" | "opencode.acp" | "agentfield.async_rest" | "generic_http.async_rest" {
+  return mode !== "fake.deterministic";
+}
+
+function isWrapperMode(mode: HostedRuntimeModeSlug): mode is "agentfield.async_rest" | "generic_http.async_rest" {
+  return mode === "agentfield.async_rest" || mode === "generic_http.async_rest";
+}
+
+function bridgeCapabilityMissingCode(mode: "agentfield.async_rest" | "generic_http.async_rest"): string {
+  return mode === "agentfield.async_rest"
+    ? "agentfield_bridge_capability_missing"
+    : "generic_http_bridge_capability_missing";
 }

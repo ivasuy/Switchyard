@@ -62,6 +62,37 @@ function validCodexPolicy(overrides: {
   });
 }
 
+function validWrapperPolicy(): string {
+  return JSON.stringify({
+    version: 1,
+    modes: {
+      "generic_http.async_rest": {
+        enabled: true,
+        baseUrlEnv: "SWITCHYARD_GENERIC_HTTP_BASE_URL",
+        auth: { type: "api_key", env: "SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN" },
+        spendControls: {
+          maxActiveRuns: 2,
+          maxRunsPerHour: 20,
+          maxRunTimeoutSeconds: 120,
+          maxPromptBytes: 1024
+        }
+      },
+      "agentfield.async_rest": {
+        enabled: true,
+        baseUrlEnv: "SWITCHYARD_AGENTFIELD_BASE_URL",
+        auth: { type: "api_key", env: "SWITCHYARD_AGENTFIELD_API_KEY" },
+        targetEnv: "SWITCHYARD_AGENTFIELD_TARGET",
+        spendControls: {
+          maxActiveRuns: 2,
+          maxRunsPerHour: 20,
+          maxRunTimeoutSeconds: 120,
+          maxPromptBytes: 1024
+        }
+      }
+    }
+  });
+}
+
 describe("production worker config", () => {
   it("parses valid production env and keeps redacted summary", () => {
     const config = loadWorkerConfig(createProductionEnv());
@@ -253,6 +284,87 @@ describe("production worker config", () => {
     expect(config.redisUrl).toBeUndefined();
     expect(config.hostedRuntimeAllowlist).toEqual(["fake.deterministic"]);
     expect(config.hostedRealRuntimeExecution).toBe("disabled");
+  });
+
+  it("loads wrapper env values, validates numeric bounds, and redacts secrets", () => {
+    const config = loadWorkerConfig({
+      SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://generic-user:generic-pass@generic.example.com/wrapper",
+      SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "generic-token-secret",
+      SWITCHYARD_GENERIC_HTTP_REQUEST_TIMEOUT_MS: "1111",
+      SWITCHYARD_GENERIC_HTTP_POLL_INTERVAL_MS: "222",
+      SWITCHYARD_GENERIC_HTTP_MAX_RESPONSE_BYTES: "3333",
+      SWITCHYARD_AGENTFIELD_BASE_URL: "https://agent-user:agent-pass@agentfield.example.com/api",
+      SWITCHYARD_AGENTFIELD_API_KEY: "agentfield-api-key-secret",
+      SWITCHYARD_AGENTFIELD_TARGET: "api-key-like-target",
+      SWITCHYARD_AGENTFIELD_REQUEST_TIMEOUT_MS: "4444",
+      SWITCHYARD_AGENTFIELD_POLL_INTERVAL_MS: "555",
+      SWITCHYARD_AGENTFIELD_MAX_RESPONSE_BYTES: "6666"
+    });
+
+    expect(config.genericHttp).toMatchObject({
+      baseUrl: "https://generic-user:generic-pass@generic.example.com/wrapper",
+      authToken: "generic-token-secret",
+      requestTimeoutMs: 1111,
+      pollIntervalMs: 222,
+      maxResponseBytes: 3333
+    });
+    expect(config.agentfield).toMatchObject({
+      baseUrl: "https://agent-user:agent-pass@agentfield.example.com/api",
+      apiKey: "agentfield-api-key-secret",
+      target: "api-key-like-target",
+      requestTimeoutMs: 4444,
+      pollIntervalMs: 555,
+      maxResponseBytes: 6666
+    });
+
+    const summary = JSON.stringify(config.redactedSummary);
+    expect(summary).not.toContain("generic-user");
+    expect(summary).not.toContain("generic-pass");
+    expect(summary).not.toContain("generic-token-secret");
+    expect(summary).not.toContain("agent-user");
+    expect(summary).not.toContain("agent-pass");
+    expect(summary).not.toContain("agentfield-api-key-secret");
+    expect(summary).not.toContain("api-key-like-target");
+
+    expect(() => loadWorkerConfig({ SWITCHYARD_GENERIC_HTTP_REQUEST_TIMEOUT_MS: "0" })).toThrow(
+      "config_invalid:SWITCHYARD_GENERIC_HTTP_REQUEST_TIMEOUT_MS"
+    );
+    expect(() => loadWorkerConfig({ SWITCHYARD_AGENTFIELD_MAX_RESPONSE_BYTES: "-1" })).toThrow(
+      "config_invalid:SWITCHYARD_AGENTFIELD_MAX_RESPONSE_BYTES"
+    );
+  });
+
+  it("accepts production wrapper modes only when policy env references are valid", () => {
+    const config = loadWorkerConfig(
+      createProductionEnv({
+        SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,generic_http.async_rest,agentfield.async_rest",
+        SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+        SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: validWrapperPolicy(),
+        SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://generic.example.com",
+        SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "generic-token",
+        SWITCHYARD_AGENTFIELD_BASE_URL: "https://agentfield.example.com",
+        SWITCHYARD_AGENTFIELD_API_KEY: "agentfield-key",
+        SWITCHYARD_AGENTFIELD_TARGET: "research-agent.deep_analysis"
+      })
+    );
+
+    expect(config.providerRuntimeActivation.valid).toBe(true);
+    expect(config.providerRuntimeActivation.enabledRealModes).toEqual([
+      "generic_http.async_rest",
+      "agentfield.async_rest"
+    ]);
+
+    expect(() =>
+      loadWorkerConfig(
+        createProductionEnv({
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,generic_http.async_rest",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: validWrapperPolicy(),
+          SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://user:pass@generic.example.com",
+          SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "generic-token"
+        })
+      )
+    ).toThrow("provider_credentials_invalid");
   });
 
   it("fails closed for provider policy path loading states and json/path conflict", async () => {
