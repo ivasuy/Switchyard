@@ -16,7 +16,7 @@ R19 scope note: production hosted deployment readiness is shipped for the existi
 
 R20 boundary note: production subprocess/PTY sandboxing is an internal hosted-worker substrate only. There is still no public arbitrary execution API on either local or hosted surfaces: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` route exists.
 
-R24 hosted boundary note:
+R24/R25 hosted boundary note:
 
 - does not ship generic process/pty runtime adapters.
 - does not ship cursor/openclaw/paperclip.
@@ -188,7 +188,7 @@ Closed code set:
 | `approval_not_found` | 404 | Unknown approval id. |
 | `tool_invocation_not_found` | 404 | Unknown tool invocation id. |
 | `debate_real_participant_opt_in_required` | 400 | Non-fake debate participant requested without real runtime opt-in. |
-| `debate_runtime_unsupported` | 409 | Debate participant runtime is not in the allowed R24 set. |
+| `debate_runtime_unsupported` | 409 | Debate participant runtime is not in the allowed debate runtime set. |
 | `debate_wait_real_runtime_unsupported` | 409 | `wait=1` was requested for real participant or live judge debate work. |
 | `debate_participant_count_invalid` | 400 | Debate participant count is invalid. |
 | `debate_participant_placement_required` | 400 | Real hosted debate participant did not explicitly request hosted placement. |

@@ -91,7 +91,7 @@ The repository is a TypeScript pnpm/Turborepo monorepo with these shipped packag
 
 - `apps/daemon`: local Fastify daemon.
 - `apps/server`: hosted-like API gateway for the safe fake-worker slice.
-- `apps/worker`: hosted worker app with fake deterministic default and opt-in self-hosted/staging real runtime execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- `apps/worker`: hosted worker app with fake deterministic default plus opt-in self-hosted/staging real runtime execution for the R25 known provider set: `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, and conditional wrapper modes `agentfield.async_rest` and `generic_http.async_rest` under explicit operator, spend, and readiness gates.
 - `apps/node`: connected local-node app for registration, claim, and sync flows.
 - `packages/contracts`: Zod schemas, inferred TypeScript types, endpoint inventory, and OpenAPI 3.1 generation/checks.
 - `packages/core`: protocol-neutral ports and runtime lifecycle services.
@@ -1021,7 +1021,7 @@ Known release risks:
 - Local open-ended SSE (`GET /runs/:id/events?live=1`) is shipped for daemon use, but hosted production streaming remains unshipped.
 - Runtime capability and doctor reporting are shipped for `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; external/provider-backed modes still require local binaries/configuration or remain no-spend skipped in CI.
 - Artifact metadata/content endpoints are shipped (`GET /artifacts/:id`, `GET /artifacts/:id/content`), but HTTP `HEAD` and `Range` support is not implemented.
-- Hosted-like execution remains safety-first and worker-owned. Managed hosted deployment, public arbitrary hosted subprocess execution, generic process adapters, and PTY adapters remain unshipped. Hosted real worker execution is operator opt-in only for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` with production fail-closed posture.
+- Hosted-like execution remains safety-first and worker-owned. Managed hosted deployment, public arbitrary hosted subprocess execution, generic process adapters, and PTY adapters remain unshipped. Hosted real worker execution is operator opt-in only for the R25 known provider set: `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, and conditional wrapper modes `agentfield.async_rest` and `generic_http.async_rest`; wrapper modes additionally require wrapper config/capability, bridge readiness, provider activation, and spend gates with production fail-closed posture.
 - Local real tools are shipped through `POST /tools/invocations` and remain disabled by default, deny-by-default, explicitly configured/allowlisted, and approval-by-default. R22 also ships hosted worker tools for `fetch`, `web_search`, `github`, and command-catalog `shell`, plus connected-node tools for `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell`.
 - Hosted debate readiness depends on Postgres stores, queue/outbox, object store, ownership, quota, audit, worker readiness, provider activation, and R23 bridge stores where applicable. Missing dependencies fail closed before provider dispatch.
 
