@@ -45,6 +45,11 @@ export function registerDebateRoutes(app: FastifyInstance, deps: DebateRouteDepe
       if (wait && hasRealRuntimeWaitConflict(request.body)) {
         return sendHttpError(reply, "debate_wait_real_runtime_unsupported", "wait=true is only supported for no-spend fake deterministic debates");
       }
+      if (hosted && !wait && !hasHostedDebateEnqueue(deps)) {
+        return sendHttpError(reply, "hosted_debate_queue_unavailable", "Hosted debate queue is not configured", [
+          { path: "reasonCode", issue: "hosted_debate_queue_unavailable" }
+        ]);
+      }
 
       const createOptions = {
         wait,
@@ -55,9 +60,7 @@ export function registerDebateRoutes(app: FastifyInstance, deps: DebateRouteDepe
         return reply.code(201).send(created);
       }
       if (hosted) {
-        if (deps.enqueueDebateJob && auth) {
-          await deps.enqueueDebateJob({ debateId: created.debate.id, auth, requestId: request.id });
-        }
+        await enqueueHostedDebateJob(deps, created.debate.id, auth, request.id);
       } else {
         queueMicrotask(() => {
           void debateService(deps).execute(created.debate.id).catch(() => {});
@@ -128,7 +131,7 @@ async function handleDebateEventsRequest(
     return;
   }
 
-  const events = await deps.events.listByDebate(debateId);
+  const events = (await deps.events.listByDebate(debateId)).filter((event) => event.debateId === debateId);
   const query = request.query as Record<string, unknown>;
   const live = query["live"] === "1";
   const rawStopAfter = typeof query["stopAfter"] === "string" ? Number(query["stopAfter"]) : undefined;
@@ -173,7 +176,7 @@ async function handleDebateEventsRequest(
   }
 
   const handle = streamEntityEvents({
-    replay: events.filter((event) => event.debateId === debateId),
+    replay: events,
     destination: reply.raw,
     live: true,
     eventBus: deps.eventBus,
@@ -253,6 +256,64 @@ function isHostedMode(deps: DebateRouteDependencies): boolean {
     !!deps.controlPlane ||
     !!deps.debateJobs ||
     !!deps.enqueueDebateJob;
+}
+
+function hasHostedDebateEnqueue(deps: DebateRouteDependencies): boolean {
+  return !!deps.enqueueDebateJob || !!deps.debateJobs;
+}
+
+async function enqueueHostedDebateJob(
+  deps: DebateRouteDependencies,
+  debateId: string,
+  auth: AuthContext | undefined,
+  requestId: string | undefined
+): Promise<void> {
+  try {
+    if (deps.enqueueDebateJob && auth) {
+      await deps.enqueueDebateJob({ debateId, auth, ...(requestId ? { requestId } : {}) });
+      return;
+    }
+    if (deps.debateJobs) {
+      await deps.debateJobs.enqueue({
+        debateId,
+        stage: "participant_turn",
+        debateRound: 1,
+        debatePhase: "arguing",
+        participantIndex: 0,
+        ...(auth ? ownershipFieldsFromAuth(auth) : {})
+      });
+      return;
+    }
+    throw new HttpProblem("hosted_debate_queue_unavailable", "Hosted debate queue is not configured", [
+      { path: "reasonCode", issue: "hosted_debate_queue_unavailable" }
+    ]);
+  } catch (error) {
+    if (error instanceof HttpProblem) {
+      throw error;
+    }
+    if (isKnownServiceError(error)) {
+      throw error;
+    }
+    throw new HttpProblem("hosted_debate_queue_unavailable", "Hosted debate queue is unavailable", [
+      { path: "reasonCode", issue: "hosted_debate_queue_unavailable" }
+    ]);
+  }
+}
+
+function ownershipFieldsFromAuth(auth: AuthContext): {
+  accountId: string;
+  tenantId: string;
+  projectId: string;
+  userId: string;
+  apiKeyId: string;
+} {
+  return {
+    accountId: auth.account.id,
+    tenantId: auth.tenant.id,
+    projectId: auth.project.id,
+    userId: auth.user.id,
+    apiKeyId: auth.apiKey.id
+  };
 }
 
 function getRouteAuthContext(request: FastifyRequest, deps: DebateRouteDependencies): AuthContext | undefined {
@@ -419,6 +480,16 @@ function sendFromServiceError(reply: FastifyReply, deps: DebateRouteDependencies
     }
   }
   throw error;
+}
+
+function isKnownServiceError(error: unknown): error is { code: HttpErrorCode; message: string; details?: HttpErrorDetail[] } {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const serviceError = error as { code?: unknown; message?: unknown };
+  return typeof serviceError.code === "string" &&
+    typeof serviceError.message === "string" &&
+    isKnownDebateHttpErrorCode(serviceError.code);
 }
 
 function isKnownDebateHttpErrorCode(code: string): code is HttpErrorCode {

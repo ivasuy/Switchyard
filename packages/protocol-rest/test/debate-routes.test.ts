@@ -306,6 +306,40 @@ describe("debate routes", () => {
     await app.close();
   });
 
+  it("fails closed for hosted async create when durable enqueue is missing", async () => {
+    const app = Fastify({ logger: false });
+    const debates = new InMemoryDebateStore();
+    const events = new InMemoryEventStore();
+    const create = vi.fn(async () => ({ debate: makeDebate("debate_1") }));
+
+    registerDebateRoutes(app, {
+      routeMode: "hosted",
+      debateService: {
+        create,
+        execute: vi.fn(),
+        inspect: vi.fn(),
+        listEvents: vi.fn()
+      } as unknown as DebateRouteDependencies["debateService"],
+      debates,
+      events,
+      getAuthContext: () => hostedAuthContext()
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/debates",
+      payload: {
+        topic: "Topic",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }]
+      }
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json().error.code).toBe("hosted_debate_queue_unavailable");
+    expect(create).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("denies hosted debate inspect and events before service or store reads", async () => {
     const app = Fastify({ logger: false });
     const debates = new InMemoryDebateStore();
@@ -386,6 +420,66 @@ describe("debate routes", () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain("event_1");
     expect(response.body).not.toContain("event_other");
+    await app.close();
+  });
+
+  it("filters replay SSE events strictly by debate id on every no-bus write path", async () => {
+    const app = Fastify({ logger: false });
+    const debates = new InMemoryDebateStore();
+    const events = new InMemoryEventStore();
+    const debate = makeDebate("debate_1");
+    debates.items.set(debate.id, debate);
+    vi.spyOn(events, "listByDebate").mockResolvedValue([
+      {
+        id: "event_target_1",
+        debateId: "debate_1",
+        type: "debate.round.started",
+        sequence: 0,
+        payload: {},
+        createdAt: "2026-05-30T00:00:00.000Z"
+      },
+      {
+        id: "event_other",
+        debateId: "debate_other",
+        runId: "run_other",
+        type: "debate.round.started",
+        sequence: 1,
+        payload: {},
+        createdAt: "2026-05-30T00:00:01.000Z"
+      },
+      {
+        id: "event_target_2",
+        debateId: "debate_1",
+        runId: "run_unrelated",
+        type: "debate.round.completed",
+        sequence: 2,
+        payload: {},
+        createdAt: "2026-05-30T00:00:02.000Z"
+      }
+    ]);
+
+    registerDebateRoutes(app, {
+      debateService: {
+        create: vi.fn(),
+        execute: vi.fn(),
+        inspect: vi.fn(),
+        listEvents: vi.fn()
+      } as unknown as DebateRouteDependencies["debateService"],
+      debates,
+      events
+    });
+
+    const replay = await app.inject({ method: "GET", url: "/debates/debate_1/events" });
+    const liveWithStop = await app.inject({ method: "GET", url: "/debates/debate_1/events?live=1&stopAfter=5" });
+    const liveNoBus = await app.inject({ method: "GET", url: "/debates/debate_1/events?live=1" });
+
+    for (const response of [replay, liveWithStop, liveNoBus]) {
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain("event_target_1");
+      expect(response.body).toContain("event_target_2");
+      expect(response.body).not.toContain("event_other");
+      expect(response.body).not.toContain("debate_other");
+    }
     await app.close();
   });
 
