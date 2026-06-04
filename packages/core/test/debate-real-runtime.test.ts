@@ -44,6 +44,18 @@ describe("debate real runtime helpers", () => {
         runtime: "opencode",
         provider: "opencode",
         adapterType: "acpx"
+      },
+      {
+        runtimeMode: "agentfield.async_rest",
+        runtime: "agentfield",
+        provider: "agentfield",
+        adapterType: "http"
+      },
+      {
+        runtimeMode: "generic_http.async_rest",
+        runtime: "generic_http",
+        provider: "generic_http",
+        adapterType: "http"
       }
     ] as const;
 
@@ -78,23 +90,44 @@ describe("debate real runtime helpers", () => {
     expect(sideEffects).toBe(0);
     expect(() => normalizeDebateRuntime({ runtimeMode: "codex.exec_json", placement: "hosted" }, 0))
       .toThrowError(expect.objectContaining({ code: "debate_real_participant_opt_in_required" }));
+
+    expect(() => normalizeDebateRuntime({ runtimeMode: "agentfield.async_rest", placement: "hosted" }, 0))
+      .toThrowError(expect.objectContaining({ code: "debate_real_participant_opt_in_required" }));
   });
 
   it("requires hosted placement for real participants with opt-in", () => {
     for (const placement of [undefined, "local", "connected_local_node"] as const) {
       expect(() => normalizeDebateRuntime({
-        runtimeMode: "opencode.acp",
+        runtimeMode: "generic_http.async_rest",
         placement,
         realRuntimeOptIn: true
       }, 1)).toThrowError(expect.objectContaining({ code: "debate_participant_placement_required" }));
     }
   });
 
+  it("rejects wrapper catalog field mismatches", () => {
+    const cases = [
+      { runtimeMode: "agentfield.async_rest", runtime: "generic_http", provider: "agentfield", adapterType: "http" },
+      { runtimeMode: "generic_http.async_rest", runtime: "generic_http", provider: "agentfield", adapterType: "http" },
+      { runtimeMode: "generic_http.async_rest", runtime: "generic_http", provider: "generic_http", adapterType: "process" }
+    ];
+
+    for (const testCase of cases) {
+      expect(() => normalizeDebateRuntime({
+        role: "skeptic",
+        model: "model",
+        placement: "hosted",
+        realRuntimeOptIn: true,
+        ...testCase
+      }, 0)).toThrowError(expect.objectContaining({ code: "debate_runtime_unsupported" }));
+    }
+  });
+
   it("fails closed for unsupported and unshipped debate runtimes", () => {
     const cases = [
       ["codex.interactive", "hosted_codex_interactive_unshipped"],
-      ["agentfield.async_rest", "agentfield_bridge_unshipped"],
-      ["generic_http.async_rest", "generic_http_bridge_unshipped"],
+      ["agentfield.experimental", "agentfield_bridge_unshipped"],
+      ["generic-http.experimental", "generic_http_bridge_unshipped"],
       ["browser.session", "browser_tool_unshipped"],
       ["repo.checkout", "repo_hosted_unshipped"],
       ["process.exec", "debate_runtime_unsupported"],
@@ -102,7 +135,10 @@ describe("debate real runtime helpers", () => {
       ["shell", "debate_runtime_unsupported"],
       ["sandbox", "debate_runtime_unsupported"],
       ["pty", "debate_runtime_unsupported"],
-      ["cursor", "debate_runtime_unsupported"]
+      ["cursor", "debate_runtime_unsupported"],
+      ["openclaw", "debate_runtime_unsupported"],
+      ["paperclip", "debate_runtime_unsupported"],
+      ["unknown.runtime", "debate_runtime_unsupported"]
     ] as const;
 
     for (const [runtimeMode, code] of cases) {

@@ -532,6 +532,55 @@ describe("debate routes", () => {
     await app.close();
   });
 
+  it("rejects wait=1 wrapper participants before create or enqueue side effects", async () => {
+    const app = Fastify({ logger: false });
+    const debates = new InMemoryDebateStore();
+    const events = new InMemoryEventStore();
+    const create = vi.fn();
+    const enqueueDebateJob = vi.fn();
+
+    registerDebateRoutes(app, {
+      routeMode: "hosted",
+      debateService: {
+        create,
+        execute: vi.fn(),
+        inspect: vi.fn(),
+        listEvents: vi.fn()
+      } as unknown as DebateRouteDependencies["debateService"],
+      debates,
+      events,
+      getAuthContext: () => hostedAuthContext(),
+      enqueueDebateJob
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/debates?wait=1",
+      payload: {
+        topic: "Topic",
+        participants: [
+          {
+            role: "affirmative",
+            runtime: "generic_http",
+            provider: "generic_http",
+            model: "generic-http-default",
+            adapterType: "http",
+            runtimeMode: "generic_http.async_rest",
+            placement: "hosted",
+            realRuntimeOptIn: true
+          },
+          { role: "skeptic" }
+        ]
+      }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("debate_wait_real_runtime_unsupported");
+    expect(create).not.toHaveBeenCalled();
+    expect(enqueueDebateJob).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("maps R24 debate service errors to named REST errors", async () => {
     const app = Fastify({ logger: false });
     const debates = new InMemoryDebateStore();

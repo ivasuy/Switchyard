@@ -180,6 +180,7 @@ const FAKE_RUNTIME = {
 
 const MAX_PARTICIPANT_OUTPUT_BYTES = 16 * 1024;
 const MAX_JUDGE_OUTPUT_BYTES = 8 * 1024;
+const WRAPPER_DEBATE_RUNTIME_MODES = new Set(["agentfield.async_rest", "generic_http.async_rest"]);
 
 export class DebateService {
   private readonly judgeRunner: DebateJudgeRunner;
@@ -248,6 +249,16 @@ export class DebateService {
       realParticipantCount: parsed.participants.filter((participant) => participant.isRealRuntime).length,
       judgeMode: parsed.judgeConfig.mode ?? "deterministic"
     });
+    for (const participant of debate.participants as DebateParticipantWithRuntimeConfig[]) {
+      if (WRAPPER_DEBATE_RUNTIME_MODES.has(participant.runtimeMode ?? "")) {
+        this.deps.logger?.info("debate.participant.wrapper.admitted", {
+          debateId: debate.id,
+          participantId: participant.id,
+          participantRole: participant.role,
+          runtimeMode: participant.runtimeMode
+        });
+      }
+    }
     for (const evidenceId of debate.evidenceIds) {
       const event = await this.appendDebateEvent(debate, "debate.evidence.added", { evidenceId });
       debate.eventIds.push(event.id);
@@ -644,6 +655,12 @@ export class DebateService {
     judgeConfig: ParsedCreateInput["judgeConfig"] | undefined;
   }, childRunKey: string): Parameters<RunService["createRun"]>[0] {
     const config = input.participant ?? input.judgeConfig ?? this.parseJudgeConfig(undefined);
+    const runtime = config.runtime ?? FAKE_RUNTIME.runtime;
+    const provider = config.provider ?? FAKE_RUNTIME.provider;
+    const model = config.model ?? FAKE_RUNTIME.model;
+    const adapterType = config.adapterType ?? FAKE_RUNTIME.adapterType;
+    const runtimeMode = config.runtimeMode ?? FAKE_RUNTIME.runtimeMode;
+    const placement = config.placement ?? "local";
     const metadata = buildDebateChildRunMetadata({
       debateId: input.debate.id,
       debateRound: input.debateRound,
@@ -654,18 +671,24 @@ export class DebateService {
     });
     metadata.debateChildRunKey = childRunKey;
     return {
-      runtime: config.runtime ?? FAKE_RUNTIME.runtime,
-      provider: config.provider ?? FAKE_RUNTIME.provider,
-      model: config.model ?? FAKE_RUNTIME.model,
-      adapterType: config.adapterType ?? FAKE_RUNTIME.adapterType,
-      runtimeMode: config.runtimeMode ?? FAKE_RUNTIME.runtimeMode,
+      runtime,
+      provider,
+      model,
+      adapterType,
+      runtimeMode,
       cwd: this.deps.defaultCwd,
       task: input.task,
-      placement: config.placement ?? "local",
+      placement,
       approvalPolicy: "default",
       timeoutSeconds: Math.min(60, input.debate.limits.maxDurationSeconds),
       metadata: {
         ...metadata,
+        runtime,
+        provider,
+        model,
+        adapterType,
+        runtimeMode,
+        placement,
         debateTopic: input.debate.topic,
         originalTask: input.task
       }
@@ -757,7 +780,15 @@ export class DebateService {
       const runtime = normalizeDebateRuntime(value, index);
       return { role, ...runtime };
     } catch (error) {
-      throw toServiceError(error, "invalid_input");
+      const serviceError = toServiceError(error, "invalid_input");
+      if (isWrapperDebateParticipantInput(value)) {
+        this.deps.logger?.warn("debate.participant.wrapper.denied", {
+          participantPath: `participants.${index}`,
+          runtimeMode: typeof value["runtimeMode"] === "string" ? value["runtimeMode"] : undefined,
+          reasonCode: serviceError.code
+        });
+      }
+      throw serviceError;
     }
   }
 
@@ -1547,4 +1578,17 @@ function toServiceError(error: unknown, fallbackCode: string): DebateServiceErro
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isWrapperDebateParticipantInput(value: Record<string, unknown>): boolean {
+  const fields = [
+    value["runtimeMode"],
+    value["runtime"],
+    value["provider"],
+    value["adapterType"]
+  ];
+  return fields.some((field) =>
+    typeof field === "string" &&
+    (field.includes("agentfield") || field.includes("generic_http") || field.includes("generic-http"))
+  );
 }

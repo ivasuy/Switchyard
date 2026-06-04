@@ -102,7 +102,13 @@ const ALLOWED_DEBATE_RUNTIME_MODES = new Set<HostedRuntimeModeSlug>([
   "fake.deterministic",
   "codex.exec_json",
   "claude_code.sdk",
-  "opencode.acp"
+  "opencode.acp",
+  "agentfield.async_rest",
+  "generic_http.async_rest"
+]);
+const WRAPPER_DEBATE_RUNTIME_MODES = new Set<HostedRuntimeModeSlug>([
+  "agentfield.async_rest",
+  "generic_http.async_rest"
 ]);
 
 export function isAllowedDebateRuntimeMode(value: string | undefined): value is HostedRuntimeModeSlug {
@@ -124,7 +130,10 @@ export function normalizeDebateRuntime(
   }
   if (!isAllowedDebateRuntimeMode(runtimeMode) || !isKnownHostedRuntimeMode(runtimeMode)) {
     throw new DebateRuntimeMatrixError("debate_runtime_unsupported", `Debate runtime is not supported: ${runtimeMode}`, [
-      { path: `${participantPath}.runtimeMode`, issue: "must be fake.deterministic, codex.exec_json, claude_code.sdk, or opencode.acp" }
+      {
+        path: `${participantPath}.runtimeMode`,
+        issue: "must be fake.deterministic, codex.exec_json, claude_code.sdk, opencode.acp, agentfield.async_rest, or generic_http.async_rest"
+      }
     ]);
   }
 
@@ -281,6 +290,9 @@ function classifyUnsupportedDebateRuntime(input: DebateParticipantRuntimeInput, 
 
   if (runtimeMode === "codex.interactive" || haystack.includes("codex.interactive")) {
     return "hosted_codex_interactive_unshipped";
+  }
+  if (WRAPPER_DEBATE_RUNTIME_MODES.has(runtimeMode as HostedRuntimeModeSlug)) {
+    return undefined;
   }
   if (haystack.includes("agentfield")) {
     return "agentfield_bridge_unshipped";

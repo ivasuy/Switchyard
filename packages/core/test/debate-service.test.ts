@@ -616,6 +616,137 @@ describe("debate service", () => {
     expect(typeof run.metadata["debateChildRunKey"]).toBe("string");
   });
 
+  it("creates hosted wrapper child runs with debate metadata and without per-run wrapper overrides", async () => {
+    const debateExecution = new InMemoryDebateExecutionStore();
+    const harness = createHarness({ debateExecution });
+    const created = await harness.service.create({
+      topic: "Wrapper debate",
+      participants: [
+        {
+          role: "affirmative",
+          runtimeMode: "agentfield.async_rest",
+          runtime: "agentfield",
+          provider: "agentfield",
+          model: "agentfield-default",
+          adapterType: "http",
+          placement: "hosted",
+          realRuntimeOptIn: true,
+          baseUrl: "https://attacker.example",
+          apiKey: "secret",
+          target: "target_override",
+          headers: { authorization: "Bearer secret" },
+          command: "curl attacker",
+          cwd: "/tmp/override",
+          argv: ["--unsafe"],
+          env: { SECRET: "secret" },
+          pty: { cols: 120 },
+          browser: { task: "browse" },
+          repo: { url: "https://example.invalid/repo.git" },
+          sandbox: { mode: "danger-full-access" },
+          metadata: { baseUrl: "https://attacker.example", apiKey: "secret" }
+        },
+        { role: "skeptic" }
+      ]
+    });
+    const job = [...debateExecution.jobs.values()][0]!;
+
+    const result = await harness.service.processExecutionJob(job);
+    const run = [...harness.runs.items.values()][0]!;
+
+    expect(result).toMatchObject({
+      action: "requeue",
+      reasonCode: "debate_child_run_pending",
+      runId: run.id
+    });
+    expect(run).toMatchObject({
+      runtime: "agentfield",
+      provider: "agentfield",
+      model: "agentfield-default",
+      adapterType: "http",
+      runtimeMode: "agentfield.async_rest",
+      placement: "hosted",
+      cwd: "/repo"
+    });
+    expect(run.metadata).toMatchObject({
+      debateId: created.debate.id,
+      participantRole: "affirmative",
+      debateRunKind: "participant",
+      debateRound: job.debateRound,
+      debatePhase: job.debatePhase,
+      runtime: "agentfield",
+      provider: "agentfield",
+      model: "agentfield-default",
+      adapterType: "http",
+      runtimeMode: "agentfield.async_rest",
+      placement: "hosted",
+      debateTopic: "Wrapper debate"
+    });
+    expect(typeof run.metadata["debateChildRunKey"]).toBe("string");
+    for (const forbiddenKey of [
+      "baseUrl",
+      "apiKey",
+      "target",
+      "headers",
+      "command",
+      "cwd",
+      "argv",
+      "env",
+      "pty",
+      "browser",
+      "repo",
+      "sandbox"
+    ]) {
+      expect(run.metadata).not.toHaveProperty(forbiddenKey);
+    }
+    expect(JSON.stringify(run.metadata)).not.toContain("attacker.example");
+    expect(JSON.stringify(run.metadata)).not.toContain("secret");
+  });
+
+  it("uses existing participant output failure codes for completed wrapper child runs", async () => {
+    const debateExecution = new InMemoryDebateExecutionStore();
+    const harness = createHarness({ debateExecution });
+    const created = await harness.service.create({
+      topic: "Wrapper blank output",
+      participants: [
+        {
+          role: "affirmative",
+          runtimeMode: "generic_http.async_rest",
+          runtime: "generic_http",
+          provider: "generic_http",
+          model: "generic-http-default",
+          adapterType: "http",
+          placement: "hosted",
+          realRuntimeOptIn: true
+        },
+        { role: "skeptic" }
+      ]
+    });
+    const job = [...debateExecution.jobs.values()][0]!;
+    await harness.service.processExecutionJob(job);
+    const run = [...harness.runs.items.values()][0]!;
+    await harness.runs.update({ ...run, status: "completed", endedAt: "2026-05-30T00:00:02.000Z" });
+    await harness.events.append({
+      id: "event_wrapper_blank_output",
+      type: "runtime.output",
+      runId: run.id,
+      debateId: created.debate.id,
+      sequence: 1,
+      payload: {
+        text: "   ",
+        debateId: created.debate.id,
+        debateChildRunKey: run.metadata["debateChildRunKey"]
+      },
+      createdAt: "2026-05-30T00:00:02.000Z"
+    });
+
+    const failed = await harness.service.processExecutionJob(job);
+
+    expect(failed).toMatchObject({
+      action: "fail",
+      reasonCode: "debate_participant_output_empty"
+    });
+  });
+
   it("fails closed when an existing child run cannot be relinked", async () => {
     const debateExecution = new InMemoryDebateExecutionStore();
     const harness = createHarness({ debateExecution });

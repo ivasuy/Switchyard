@@ -501,6 +501,11 @@ function isKnownDebateHttpErrorCode(code: string): code is HttpErrorCode {
     code === "debate_evidence_not_found_or_denied" ||
     code === "debate_real_participant_opt_in_required" ||
     code === "debate_runtime_unsupported" ||
+    code === "hosted_codex_interactive_unshipped" ||
+    code === "agentfield_bridge_unshipped" ||
+    code === "generic_http_bridge_unshipped" ||
+    code === "repo_hosted_unshipped" ||
+    code === "browser_tool_unshipped" ||
     code === "debate_wait_real_runtime_unsupported" ||
     code === "debate_participant_count_invalid" ||
     code === "debate_participant_placement_required" ||
