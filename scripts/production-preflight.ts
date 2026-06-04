@@ -49,6 +49,7 @@ interface HostedDebateCheckResult {
 interface HostedRuntimeBridgeReadinessCheck {
   name:
     | "command_store"
+    | "payload_store"
     | "command_outbox"
     | "worker_claim"
     | "adapter_capability"
@@ -483,6 +484,10 @@ function appendHostedRuntimeBridgeCheck(
   const providerAdapterFailureCode = checks.find(
     (check) => check.name === "providerAdapterChecks" && check.status === "fail"
   )?.code;
+  const payloadStoreStatus = gateCheckStatus("payload_store", {
+    missingOk: false,
+    missingReasonCode: "hosted_runtime_bridge_store_unavailable"
+  });
   const wrapperConfigStatus = gateCheckStatus("wrapper_config", {
     missingOk: !wrapperRequired,
     missingReasonCode: firstWrapperReasonCode(wrapperBridgeModes, "config")
@@ -507,10 +512,10 @@ function appendHostedRuntimeBridgeCheck(
     },
     {
       name: "payload_store",
-      ok: !hasFailure("schema") && gateCheckStatus("command_store").ok,
+      ok: !hasFailure("schema") && payloadStoreStatus.ok,
       reasonCode: hasFailure("schema")
         ? "hosted_runtime_bridge_store_unavailable"
-        : gateCheckStatus("command_store").reasonCode
+        : payloadStoreStatus.reasonCode
     },
     {
       name: "command_outbox",
@@ -646,6 +651,7 @@ function readHostedRuntimeBridgeChecks(
     const reasonCode = entry["reasonCode"];
     if (
       (name === "command_store" ||
+        name === "payload_store" ||
         name === "command_outbox" ||
         name === "worker_claim" ||
         name === "adapter_capability" ||

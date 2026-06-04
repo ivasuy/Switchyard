@@ -833,6 +833,7 @@ describe("runProductionPreflight", () => {
           bridgeReadiness: {
             checks: [
               { name: "command_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" },
+              { name: "payload_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" },
               { name: "command_outbox", ok: false, reasonCode: "hosted_runtime_bridge_queue_unavailable" },
               { name: "adapter_capability", ok: false, reasonCode: "hosted_runtime_bridge_operation_unsupported" },
               { name: "session_reconciliation", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
@@ -862,6 +863,72 @@ describe("runProductionPreflight", () => {
     }));
   });
 
+  test("fails closed when bridge command store is ready but payload store is absent or failing", async () => {
+    const activation = makeProviderActivation({
+      valid: true,
+      enabledRealModes: ["generic_http.async_rest"],
+      reasons: [],
+      reasonCodes: []
+    });
+    const payloadCases = [
+      { label: "missing", payloadStoreEntry: undefined },
+      {
+        label: "failing",
+        payloadStoreEntry: { name: "payload_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" }
+      }
+    ] as const;
+
+    for (const payloadCase of payloadCases) {
+      const readinessChecks = [
+        { name: "command_store", ok: true },
+        payloadCase.payloadStoreEntry,
+        { name: "command_outbox", ok: true },
+        { name: "worker_claim", ok: true },
+        { name: "adapter_capability", ok: true },
+        { name: "wrapper_config", ok: true },
+        { name: "wrapper_bridge_capability", ok: true },
+        { name: "session_reconciliation", ok: true },
+        { name: "approval_sender", ok: true }
+      ].filter((entry): entry is { name: string; ok: boolean; reasonCode?: string } => entry !== undefined);
+
+      const result = await runDependencyPreflight({
+        loadServerConfig: () =>
+          makeServerConfig({
+            hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+            hostedRealRuntimeExecution: "enabled",
+            providerRuntimeActivation: activation
+          }),
+        loadWorkerConfig: () =>
+          makeWorkerConfig({
+            providerRuntimeActivation: activation
+          }),
+        checkHostedRuntimeGate: async () => ({
+          ok: true,
+          diagnostics: {
+            hostedDebate: { ok: true },
+            bridgeReadiness: {
+              checks: readinessChecks
+            }
+          }
+        })
+      });
+
+      expect(result.ok, payloadCase.label).toBe(false);
+      expect(result.checks).toContainEqual(expect.objectContaining({
+        name: "hostedRuntimeBridge",
+        status: "fail",
+        code: "hosted_runtime_bridge_store_unavailable",
+        diagnostics: expect.objectContaining({
+          failedChecks: expect.arrayContaining(["payload_store"]),
+          checks: expect.objectContaining({
+            command_store: "pass",
+            payload_store: "fail"
+          })
+        })
+      }));
+    }
+  });
+
   test("passes hosted runtime bridge check when bridge dependencies are ready", async () => {
     const activation = makeProviderActivation({
       valid: true,
@@ -886,6 +953,7 @@ describe("runProductionPreflight", () => {
           bridgeReadiness: {
             checks: [
               { name: "command_store", ok: true },
+              { name: "payload_store", ok: true },
               { name: "command_outbox", ok: true },
               { name: "worker_claim", ok: true },
               { name: "adapter_capability", ok: true },
@@ -953,6 +1021,7 @@ describe("runProductionPreflight", () => {
           bridgeReadiness: {
             checks: [
               { name: "command_store", ok: true },
+              { name: "payload_store", ok: true },
               { name: "command_outbox", ok: true },
               { name: "worker_claim", ok: true },
               { name: "adapter_capability", ok: true },
@@ -1005,6 +1074,7 @@ describe("runProductionPreflight", () => {
           bridgeReadiness: {
             checks: [
               { name: "command_store", ok: true },
+              { name: "payload_store", ok: true },
               { name: "command_outbox", ok: true },
               { name: "worker_claim", ok: true },
               { name: "adapter_capability", ok: true },
@@ -1051,6 +1121,7 @@ describe("runProductionPreflight", () => {
           bridgeReadiness: {
             checks: [
               { name: "command_store", ok: true },
+              { name: "payload_store", ok: true },
               { name: "command_outbox", ok: true },
               { name: "worker_claim", ok: true },
               { name: "adapter_capability", ok: true },
