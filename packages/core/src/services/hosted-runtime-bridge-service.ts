@@ -138,18 +138,24 @@ export class HostedRuntimeBridgeService {
 
   async createInputCommand(input: {
     runId: string;
-    body: Record<string, unknown>;
+    body: unknown;
     auth?: AuthContext;
     requestId?: string;
     idempotencyKey?: string;
   }): Promise<{ accepted: true; commandId: string; duplicate: boolean }> {
     if (!isRecord(input.body)) {
-      throw this.invalidInput("body", "must be an object");
+      throw this.invalidInput("body.text", "required for hosted wrapper input");
     }
 
     const text = input.body["text"];
-    if (typeof text === "string" && text.trim().length === 0) {
+    if (typeof text !== "string") {
+      throw this.invalidInput("body.text", "required for hosted wrapper input");
+    }
+    if (text.trim().length === 0) {
       throw this.protocolError("runtime_input_empty", "Runtime input text must be non-empty");
+    }
+    if (Buffer.byteLength(text, "utf8") > 64 * 1024) {
+      throw this.protocolError("runtime_input_too_large", "Runtime input text exceeds the 64 KiB limit");
     }
 
     if (input.auth && this.deps.preflight?.authorizeRun) {
@@ -179,12 +185,23 @@ export class HostedRuntimeBridgeService {
       throw this.protocolError("hosted_runtime_bridge_session_missing", "Hosted runtime session is missing");
     }
     this.assertSessionActiveForInput(session);
+    this.assertWrapperBridgeCapability(runtimeMode, session);
 
-    const rawPayload = { text: typeof text === "string" ? text : "", type: "input" };
     const operation: HostedRuntimeBridgeCommand["operation"] = "input";
     const idempotencyKey =
       normalizeNonEmpty(input.idempotencyKey) ??
-      deterministicIdempotencyKey(run.id, operation, rawPayload);
+      deterministicIdempotencyKey(run.id, operation, {
+        switchyardRunId: run.id,
+        type: "input",
+        text
+      });
+
+    const rawPayload = {
+      switchyardRunId: run.id,
+      idempotencyKey,
+      type: "input",
+      text
+    };
 
     const payloadHash = payloadHashFor(rawPayload);
     const payloadBytes = payloadBytesFor(rawPayload);
@@ -230,7 +247,7 @@ export class HostedRuntimeBridgeService {
         };
       }
 
-      await this.persistWorkerPayloadOrFail(created.command, rawPayload, reservations);
+      await this.persistWorkerPayloadOrFail(created.command, withCommandDispatchMetadata(created.command, rawPayload), reservations);
       await this.recordAudit({
         eventType: "hosted.runtime_bridge.admission",
         decision: "allow",
@@ -297,6 +314,7 @@ export class HostedRuntimeBridgeService {
       if (!session) {
         throw this.protocolError("hosted_runtime_bridge_session_missing", "Hosted runtime session is missing");
       }
+      this.assertWrapperBridgeCapability(runtimeMode, session);
 
       const deadline = resolveDeadlineFromApproval(approval, this.defaultCommandTtlMs, this.now());
       if (Date.parse(deadline) <= Date.parse(this.now())) {
@@ -310,6 +328,16 @@ export class HostedRuntimeBridgeService {
         ? rawBody["message"].trim()
         : `${input.decision} by hosted-api`;
       const rawPayload = {
+        switchyardRunId: run.id,
+        idempotencyKey:
+          normalizeNonEmpty(input.idempotencyKey) ??
+          deterministicIdempotencyKey(approval.id, "approval_resolution", {
+            approvalId: approval.id,
+            runtimeApprovalToken,
+            decision: input.decision,
+            message,
+            ...(answers ? { answers } : {})
+          }),
         type: "approval_resolution",
         approvalId: approval.id,
         runtimeApprovalToken,
@@ -319,9 +347,7 @@ export class HostedRuntimeBridgeService {
       };
 
       const operation: HostedRuntimeBridgeCommand["operation"] = "approval_resolution";
-      const idempotencyKey =
-        normalizeNonEmpty(input.idempotencyKey) ??
-        deterministicIdempotencyKey(approval.id, operation, rawPayload);
+      const idempotencyKey = String(rawPayload.idempotencyKey);
       const payloadHash = payloadHashFor(rawPayload);
       const payloadBytes = payloadBytesFor(rawPayload);
       const redactedPayload = redactForStorage(operation, rawPayload, payloadBytes);
@@ -391,7 +417,7 @@ export class HostedRuntimeBridgeService {
           throw new HostedRuntimeBridgeServiceError("approval_not_pending", `Approval is not pending: ${approval.id}`);
         }
 
-        await this.persistWorkerPayloadOrFail(created.command, rawPayload, reservations);
+        await this.persistWorkerPayloadOrFail(created.command, withCommandDispatchMetadata(created.command, rawPayload), reservations);
         await this.recordAudit({
           eventType: "hosted.runtime_bridge.approval_resolved",
           decision: "allow",
@@ -531,6 +557,21 @@ export class HostedRuntimeBridgeService {
       return true;
     }
 
+    if (!this.isSessionRuntimeIdConsistent(session)) {
+      await this.failClaimedCommand(command, input.workerId, "hosted_runtime_bridge_payload_mismatch");
+      await this.terminalizeRunForBridgeFailure(run, "hosted_runtime_session_state_incomplete");
+      return true;
+    }
+
+    try {
+      this.assertWrapperBridgeCapability(command.runtimeMode, session);
+    } catch (error) {
+      const reasonCode = reasonCodeFromError(error) ?? "hosted_runtime_bridge_payload_mismatch";
+      await this.failClaimedCommand(command, input.workerId, reasonCode);
+      await this.terminalizeRunForBridgeFailure(run, "hosted_runtime_session_state_incomplete");
+      return true;
+    }
+
     if (command.operation === "approval_resolution") {
       const approvalReason = await this.validateApprovalResolutionCommand(command, run.id, now);
       if (approvalReason) {
@@ -544,7 +585,12 @@ export class HostedRuntimeBridgeService {
       await this.failClaimedCommand(command, input.workerId, "hosted_runtime_bridge_store_unavailable");
       return true;
     }
-    const recomputedHash = payloadHashFor(dispatchPayload);
+    const payloadReason = validateDispatchPayloadForCommand(command, dispatchPayload);
+    if (payloadReason) {
+      await this.failClaimedCommand(command, input.workerId, payloadReason);
+      return true;
+    }
+    const recomputedHash = payloadHashFor(hashPayloadForCommand(command, dispatchPayload));
     if (recomputedHash !== command.payloadHash) {
       await this.failClaimedCommand(command, input.workerId, "hosted_runtime_bridge_payload_mismatch");
       return true;
@@ -574,10 +620,7 @@ export class HostedRuntimeBridgeService {
       });
       return true;
     } catch (error) {
-      const reasonCode =
-        error instanceof HostedRuntimeBridgeServiceError && error.reasonCode
-          ? error.reasonCode
-          : "hosted_runtime_bridge_worker_unavailable";
+      const reasonCode = reasonCodeFromError(error) ?? "hosted_runtime_bridge_worker_unavailable";
       await this.failClaimedCommand(command, input.workerId, reasonCode);
       await this.terminalizeRunForBridgeFailure(run, reasonCode);
       return true;
@@ -739,7 +782,17 @@ export class HostedRuntimeBridgeService {
     const commandToken = typeof command.redactedPayload["runtimeApprovalToken"] === "string"
       ? command.redactedPayload["runtimeApprovalToken"]
       : undefined;
-    if (!runtimeApprovalToken || !commandToken || runtimeApprovalToken !== commandToken) {
+    const commandTokenHash = typeof command.redactedPayload["runtimeApprovalTokenHash"] === "string"
+      ? command.redactedPayload["runtimeApprovalTokenHash"]
+      : undefined;
+    if (
+      !runtimeApprovalToken ||
+      (
+        commandToken
+          ? runtimeApprovalToken !== commandToken
+          : commandTokenHash !== secretHash(runtimeApprovalToken)
+      )
+    ) {
       return "approval_not_pending";
     }
     const expiresAt = approval.payload["expiresAt"];
@@ -862,7 +915,28 @@ export class HostedRuntimeBridgeService {
     if (!payload) {
       return undefined;
     }
-    return payload;
+    return withCommandDispatchMetadata(command, payload);
+  }
+
+  private assertWrapperBridgeCapability(runtimeMode: string, session: RuntimeSession): void {
+    if (!isWrapperRuntimeMode(runtimeMode)) {
+      return;
+    }
+    if (!isRecord(session.state) || session.state["hostedBridgeCapable"] !== true) {
+      throw this.protocolError(wrapperCapabilityReasonCode(runtimeMode), "Hosted wrapper bridge capability is missing");
+    }
+  }
+
+  private isSessionRuntimeIdConsistent(session: RuntimeSession): boolean {
+    if (!isRecord(session.state)) {
+      return true;
+    }
+    const hostedRuntimeSessionId = session.state["hostedRuntimeSessionId"];
+    return (
+      typeof hostedRuntimeSessionId !== "string" ||
+      hostedRuntimeSessionId.trim().length === 0 ||
+      hostedRuntimeSessionId.trim() === session.id
+    );
   }
 
   private assertSupportedMode(runtimeMode: string, operation: HostedRuntimeBridgeCommand["operation"]): void {
@@ -935,6 +1009,16 @@ function reasonForUnsupportedMode(runtimeMode: string, operation: HostedRuntimeB
   return "hosted_runtime_bridge_operation_unsupported";
 }
 
+function isWrapperRuntimeMode(runtimeMode: string): runtimeMode is "agentfield.async_rest" | "generic_http.async_rest" {
+  return runtimeMode === "agentfield.async_rest" || runtimeMode === "generic_http.async_rest";
+}
+
+function wrapperCapabilityReasonCode(runtimeMode: string): string {
+  return runtimeMode === "agentfield.async_rest"
+    ? "agentfield_bridge_capability_missing"
+    : "generic_http_bridge_capability_missing";
+}
+
 function readRuntimeMode(run: Run): string {
   return typeof run.runtimeMode === "string" && run.runtimeMode.length > 0 ? run.runtimeMode : run.runtime;
 }
@@ -955,6 +1039,56 @@ function payloadBytesFor(payload: Record<string, unknown>): number {
   return Buffer.byteLength(canonicalJson(payload), "utf8");
 }
 
+function withCommandDispatchMetadata(
+  command: HostedRuntimeBridgeCommand,
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    switchyardRunId: command.runId,
+    bridgeCommandId: command.id,
+    idempotencyKey: command.idempotencyKey,
+    ...payload
+  };
+}
+
+function hashPayloadForCommand(
+  _command: HostedRuntimeBridgeCommand,
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  const { bridgeCommandId: _bridgeCommandId, ...hashPayload } = payload;
+  return hashPayload;
+}
+
+function validateDispatchPayloadForCommand(
+  command: HostedRuntimeBridgeCommand,
+  payload: Record<string, unknown>
+): string | undefined {
+  if (payload["switchyardRunId"] !== command.runId) {
+    return "hosted_runtime_bridge_payload_mismatch";
+  }
+  if (payload["bridgeCommandId"] !== command.id) {
+    return "hosted_runtime_bridge_payload_mismatch";
+  }
+  if (payload["idempotencyKey"] !== command.idempotencyKey) {
+    return "hosted_runtime_bridge_payload_mismatch";
+  }
+  if (payload["type"] !== command.operation) {
+    return "hosted_runtime_bridge_payload_mismatch";
+  }
+  if (command.operation === "input" && typeof payload["text"] !== "string") {
+    return "hosted_runtime_bridge_payload_mismatch";
+  }
+  if (command.operation === "approval_resolution") {
+    if (payload["approvalId"] !== command.approvalId) {
+      return "hosted_runtime_bridge_payload_mismatch";
+    }
+    if (typeof payload["runtimeApprovalToken"] !== "string" || payload["runtimeApprovalToken"].trim().length === 0) {
+      return "hosted_runtime_bridge_payload_mismatch";
+    }
+  }
+  return undefined;
+}
+
 function redactForStorage(
   operation: HostedRuntimeBridgeCommand["operation"],
   payload: Record<string, unknown>,
@@ -962,10 +1096,8 @@ function redactForStorage(
 ): HostedRuntimeBridgeCommand["redactedPayload"] {
   if (operation === "input") {
     const text = typeof payload["text"] === "string" ? payload["text"] : "";
-    const redacted = redactSecretLikeValue(text);
     return {
       kind: "input",
-      content: redacted,
       textBytes: Buffer.byteLength(text, "utf8"),
       payloadBytes,
       redacted: true
@@ -974,7 +1106,9 @@ function redactForStorage(
 
   return sanitizeApprovalPayload({
     kind: "approval_resolution",
-    runtimeApprovalToken: payload["runtimeApprovalToken"],
+    runtimeApprovalTokenHash: typeof payload["runtimeApprovalToken"] === "string"
+      ? secretHash(payload["runtimeApprovalToken"])
+      : undefined,
     decision: payload["decision"] === "rejected" ? "rejected" : "approved",
     message: redactSecretLikeValue(typeof payload["message"] === "string" ? payload["message"] : ""),
     payloadBytes,
@@ -1022,6 +1156,19 @@ function reservationMetadataFromCommand(
 
 function isPayloadMismatchError(error: unknown): error is { code: "hosted_runtime_bridge_payload_mismatch" } {
   return !!error && typeof error === "object" && (error as { code?: string }).code === "hosted_runtime_bridge_payload_mismatch";
+}
+
+function reasonCodeFromError(error: unknown): string | undefined {
+  if (error instanceof HostedRuntimeBridgeServiceError && error.reasonCode) {
+    return error.reasonCode;
+  }
+  if (error && typeof error === "object") {
+    const reasonCode = (error as { reasonCode?: unknown }).reasonCode;
+    if (typeof reasonCode === "string" && reasonCode.length > 0) {
+      return reasonCode;
+    }
+  }
+  return undefined;
 }
 
 function readSessionWorkerId(session: RuntimeSession): string | undefined {
@@ -1093,6 +1240,10 @@ function sanitizeApprovalPayload(value: Record<string, unknown>): Record<string,
     out[key] = entry;
   }
   return out;
+}
+
+function secretHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function redactSecretLikeValue(input: string): string {

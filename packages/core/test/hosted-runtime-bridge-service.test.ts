@@ -321,6 +321,36 @@ function makeAuth(): AuthContext {
   };
 }
 
+function makeWrapperRun(runtimeMode: "agentfield.async_rest" | "generic_http.async_rest", overrides: Partial<Run> = {}): Run {
+  const provider = runtimeMode === "agentfield.async_rest" ? "agentfield" : "generic_http";
+  return makeRun({
+    runtime: provider,
+    provider,
+    adapterType: "http",
+    runtimeMode,
+    ...overrides
+  });
+}
+
+function makeWrapperSession(
+  runtimeMode: "agentfield.async_rest" | "generic_http.async_rest",
+  overrides: Partial<RuntimeSession> = {}
+): RuntimeSession {
+  const provider = runtimeMode === "agentfield.async_rest" ? "agentfield" : "generic_http";
+  return makeSession({
+    runtime: provider,
+    provider,
+    protocol: "http",
+    runtimeMode,
+    state: {
+      hostedWorkerId: "worker_a",
+      hostedBridgeCapable: true,
+      hostedRuntimeSessionId: "session_1"
+    },
+    ...overrides
+  });
+}
+
 function buildPersistedQuotaReconciler(
   commands: InMemoryHostedRuntimeBridgeCommandStore,
   finalized: Array<{ reservationId: string; outcome: string; reasonCode?: string }>
@@ -396,6 +426,90 @@ describe("hosted runtime bridge service", () => {
     expect(commands.items.size).toBe(0);
     expect(quotaReserves).toHaveLength(0);
     expect(runnerCalls).toHaveLength(0);
+  });
+
+  it("rejects missing empty and oversized wrapper input before side effects", async () => {
+    const cases: Array<{
+      name: string;
+      body: unknown;
+      expected: Partial<HostedRuntimeBridgeServiceError>;
+    }> = [
+      {
+        name: "missing body",
+        body: undefined,
+        expected: { code: "invalid_input", details: [{ path: "body.text", issue: "required for hosted wrapper input" }] }
+      },
+      {
+        name: "missing text",
+        body: {},
+        expected: { code: "invalid_input", details: [{ path: "body.text", issue: "required for hosted wrapper input" }] }
+      },
+      {
+        name: "empty text",
+        body: { text: " \n\t " },
+        expected: { code: "adapter_protocol_failed", reasonCode: "runtime_input_empty" }
+      },
+      {
+        name: "oversized text",
+        body: { text: "x".repeat(64 * 1024 + 1) },
+        expected: { code: "adapter_protocol_failed", reasonCode: "runtime_input_too_large" }
+      }
+    ];
+
+    for (const entry of cases) {
+      const runs = new MemoryRunStore();
+      const sessions = new MemorySessionStore();
+      const approvals = new MemoryApprovalStore();
+      const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+      const payloads = new MemoryCommandPayloadStore();
+      const sideEffects = {
+        quota: 0,
+        audit: 0,
+        runner: 0,
+        payload: 0
+      };
+      await runs.create(makeWrapperRun("generic_http.async_rest"));
+      await sessions.create(makeWrapperSession("generic_http.async_rest"));
+
+      const service = new HostedRuntimeBridgeService({
+        runs,
+        sessions,
+        approvals,
+        commands,
+        commandPayloads: {
+          put: async (input) => {
+            sideEffects.payload += 1;
+            await payloads.put(input);
+          },
+          get: (commandId) => payloads.get(commandId),
+          delete: (commandId) => payloads.delete(commandId)
+        },
+        runtimeRunner: {
+          sendInput: async () => {
+            sideEffects.runner += 1;
+          }
+        },
+        preflight: {
+          reserveBridgeQuota: async () => {
+            sideEffects.quota += 1;
+            return { hourlyReservationId: "h_invalid", activeReservationId: "a_invalid" };
+          },
+          recordAudit: async () => {
+            sideEffects.audit += 1;
+          }
+        }
+      });
+
+      await expect(service.createInputCommand({
+        runId: "run_1",
+        body: entry.body as Record<string, unknown>,
+        idempotencyKey: `idem_${entry.name}`,
+        auth: makeAuth()
+      })).rejects.toMatchObject(entry.expected);
+      expect(commands.items.size, entry.name).toBe(0);
+      expect(payloads.items.size, entry.name).toBe(0);
+      expect(sideEffects, entry.name).toEqual({ quota: 0, audit: 0, runner: 0, payload: 0 });
+    }
   });
 
   it("handles idempotent duplicates and payload mismatch without double quota reserve", async () => {
@@ -519,7 +633,8 @@ describe("hosted runtime bridge service", () => {
       auth: makeAuth()
     });
     const persisted = await commands.get(admitted.commandId);
-    expect(persisted?.redactedPayload).toMatchObject({ content: "[redacted]", redacted: true });
+    expect(persisted?.redactedPayload).toMatchObject({ redacted: true, textBytes: 36 });
+    expect(JSON.stringify(persisted?.redactedPayload)).not.toContain("sk-real-secret");
 
     const workerService = new HostedRuntimeBridgeService({
       runs,
@@ -536,8 +651,130 @@ describe("hosted runtime bridge service", () => {
 
     const applied = await workerService.claimAndApplyNext({ workerId: "worker_a", leaseMs: 10_000 });
     expect(applied).toBe(true);
-    expect(sent).toEqual([{ text: "Authorization: Bearer sk-real-secret", type: "input" }]);
+    expect(sent).toEqual([{
+      switchyardRunId: "run_1",
+      bridgeCommandId: admitted.commandId,
+      idempotencyKey: "idem_secret_dispatch",
+      text: "Authorization: Bearer sk-real-secret",
+      type: "input"
+    }]);
     expect(payloads.items.size).toBe(0);
+  });
+
+  it("admits wrapper input commands with wrapper mode and final bounded dispatch payload", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    const payloads = new MemoryCommandPayloadStore();
+    const sent: Array<Record<string, unknown>> = [];
+    await runs.create(makeWrapperRun("agentfield.async_rest"));
+    await sessions.create(makeWrapperSession("agentfield.async_rest"));
+
+    const server = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined }
+    });
+    const admitted = await server.createInputCommand({
+      runId: "run_1",
+      body: { text: "continue wrapper" },
+      idempotencyKey: "idem_wrapper_input",
+      auth: makeAuth()
+    });
+    const duplicate = await server.createInputCommand({
+      runId: "run_1",
+      body: { text: "continue wrapper" },
+      idempotencyKey: "idem_wrapper_input",
+      auth: makeAuth()
+    });
+    await expect(server.createInputCommand({
+      runId: "run_1",
+      body: { text: "different wrapper input" },
+      idempotencyKey: "idem_wrapper_input",
+      auth: makeAuth()
+    })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "hosted_runtime_bridge_payload_mismatch"
+    } satisfies Partial<HostedRuntimeBridgeServiceError>);
+
+    const command = await commands.get(admitted.commandId);
+    const storedPayload = await payloads.get(admitted.commandId);
+    expect(command).toMatchObject({
+      runtimeMode: "agentfield.async_rest",
+      operation: "input",
+      idempotencyKey: "idem_wrapper_input"
+    });
+    expect(command?.redactedPayload).toMatchObject({ kind: "input", redacted: true, textBytes: 16 });
+    expect(JSON.stringify(command?.redactedPayload)).not.toContain("continue wrapper");
+    expect(storedPayload).toEqual({
+      switchyardRunId: "run_1",
+      bridgeCommandId: admitted.commandId,
+      idempotencyKey: "idem_wrapper_input",
+      type: "input",
+      text: "continue wrapper"
+    });
+    expect(duplicate).toEqual({ accepted: true, commandId: admitted.commandId, duplicate: true });
+
+    const worker = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: {
+        sendInput: async (_runId, payload) => {
+          sent.push(payload);
+        }
+      }
+    });
+    await worker.claimAndApplyNext({ workerId: "worker_a", leaseMs: 10_000 });
+    expect(sent).toEqual([storedPayload]);
+  });
+
+  it("fails wrapper admission when the current session is not bridge capable", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    const quotaReserves: string[] = [];
+    await runs.create(makeWrapperRun("generic_http.async_rest"));
+    await sessions.create(makeWrapperSession("generic_http.async_rest", {
+      state: {
+        hostedWorkerId: "worker_a",
+        hostedRuntimeSessionId: "session_1",
+        hostedBridgeCapable: false
+      }
+    }));
+
+    const service = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      runtimeRunner: { sendInput: async () => undefined },
+      preflight: {
+        reserveBridgeQuota: async () => {
+          quotaReserves.push("reserved");
+          return {};
+        }
+      }
+    });
+
+    await expect(service.createInputCommand({
+      runId: "run_1",
+      body: { text: "continue" },
+      idempotencyKey: "idem_capability_missing",
+      auth: makeAuth()
+    })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "generic_http_bridge_capability_missing"
+    } satisfies Partial<HostedRuntimeBridgeServiceError>);
+    expect(commands.items.size).toBe(0);
+    expect(quotaReserves).toHaveLength(0);
   });
 
   it("creates exactly one durable approval decision and supports same-key same-decision idempotency", async () => {
@@ -964,6 +1201,87 @@ describe("hosted runtime bridge service", () => {
     const command = await commands.getByIdempotencyKey("approval_dispatch");
     expect(command?.status).toBe("failed");
     expect(command?.reasonCode).toBe("approval_not_pending");
+  });
+
+  it("creates wrapper approval resolution commands with bounded dispatch payload and redacted metadata", async () => {
+    const runs = new MemoryRunStore();
+    const sessions = new MemorySessionStore();
+    const approvals = new MemoryApprovalStore();
+    const commands = new InMemoryHostedRuntimeBridgeCommandStore();
+    const payloads = new MemoryCommandPayloadStore();
+    const sent: Array<Record<string, unknown>> = [];
+    await runs.create(makeWrapperRun("generic_http.async_rest", { status: "waiting_for_approval" }));
+    await sessions.create(makeWrapperSession("generic_http.async_rest", { status: "waiting_for_approval" }));
+    await approvals.create({
+      id: "approval_wrapper",
+      runId: "run_1",
+      approvalType: "before_external_message",
+      status: "pending",
+      payload: {
+        runtimeApprovalToken: "wrapper-token-1",
+        runtimeMode: "generic_http.async_rest",
+        runtimeSessionId: "session_1",
+        expiresAt: BRIDGE_TEST_FUTURE_EXPIRES_AT
+      },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+
+    const server = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: { sendInput: async () => undefined },
+      now: () => BRIDGE_TEST_NOW
+    });
+    const resolved = await server.resolveRuntimeApproval({
+      approvalId: "approval_wrapper",
+      decision: "approved",
+      body: {
+        message: "use answer token=secret",
+        answers: { choice: "yes" }
+      },
+      idempotencyKey: "idem_wrapper_approval",
+      auth: makeAuth()
+    });
+
+    const command = await commands.get(resolved.commandId);
+    const storedPayload = await payloads.get(resolved.commandId);
+    expect(command).toMatchObject({
+      runtimeMode: "generic_http.async_rest",
+      operation: "approval_resolution",
+      approvalId: "approval_wrapper"
+    });
+    expect(storedPayload).toEqual({
+      switchyardRunId: "run_1",
+      bridgeCommandId: resolved.commandId,
+      idempotencyKey: "idem_wrapper_approval",
+      type: "approval_resolution",
+      approvalId: "approval_wrapper",
+      runtimeApprovalToken: "wrapper-token-1",
+      decision: "approved",
+      message: "use answer token=secret",
+      answers: { choice: "yes" }
+    });
+    expect(JSON.stringify(command?.redactedPayload)).not.toContain("wrapper-token-1");
+    expect(JSON.stringify(command?.redactedPayload)).not.toContain("token=secret");
+
+    const worker = new HostedRuntimeBridgeService({
+      runs,
+      sessions,
+      approvals,
+      commands,
+      commandPayloads: payloads,
+      runtimeRunner: {
+        sendInput: async (_runId, payload) => {
+          sent.push(payload);
+        }
+      },
+      now: () => BRIDGE_TEST_NOW
+    });
+    await worker.claimAndApplyNext({ workerId: "worker_a", leaseMs: 10_000 });
+    expect(sent).toEqual([storedPayload]);
   });
 
   it("reconciliation blocks non-idempotent stale retries and terminalizes stuck waiting approvals", async () => {

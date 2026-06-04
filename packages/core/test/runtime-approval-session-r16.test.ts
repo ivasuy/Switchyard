@@ -186,6 +186,7 @@ class PlannedAdapter implements RuntimeAdapter {
   };
 
   startError?: Error;
+  startResult?: Partial<RuntimeStartResult>;
   startedRequests: Array<Record<string, unknown>> = [];
   sentSessions: Array<Record<string, unknown>> = [];
   sentInputs: Array<Record<string, unknown>> = [];
@@ -203,7 +204,7 @@ class PlannedAdapter implements RuntimeAdapter {
     if (this.startError) {
       throw this.startError;
     }
-    return { sessionId: "session_1" };
+    return { sessionId: "session_1", ...this.startResult };
   }
 
   async send(session: Record<string, unknown>, input: Record<string, unknown>): Promise<void> {
@@ -416,6 +417,66 @@ describe("runtime approval + session R16", () => {
       runtimeMode: "codex.interactive",
       runtimeSessionId: "session_1",
       expiresAt: "2026-05-31T00:00:00.000Z"
+    });
+  });
+
+  it("accepts wrapper approval events and wrapper waiting/running status transitions", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const approvals: Array<{ runId: string; approvalType: string; payload: Record<string, unknown> }> = [];
+    const adapter = new PlannedAdapter([
+      runtimeEvent("runtime.status", 1, { status: "waiting_for_input" }),
+      runtimeEvent("runtime.status", 2, { status: "running" }),
+      runtimeEvent("approval.requested", 3, {
+        runtimeApprovalToken: "wrapper-token-1",
+        approvalType: "before_external_message",
+        message: "approve wrapper action",
+        answers: { choice: "yes" },
+        expiresAt: "2026-05-31T00:05:00.000Z"
+      }),
+      runtimeEvent("runtime.status", 4, { status: "resumed" }),
+      runtimeEvent("run.completed", 5, { status: "completed" })
+    ]);
+    adapter.startResult = { externalSessionKey: "external_wrapper_run_1" };
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["generic_http", adapter]]),
+      runtimeApprovals: {
+        create: async (input) => {
+          approvals.push(input);
+        }
+      }
+    });
+    const run = makeRun({
+      runtime: "generic_http",
+      provider: "generic_http",
+      adapterType: "http",
+      runtimeMode: "generic_http.async_rest"
+    });
+    await runs.create(run);
+    await events.append(runtimeEvent("run.queued", 0, {}));
+
+    const result = await runner.start(run);
+
+    expect(result.status).toBe("completed");
+    expect(events.items.some((event) => event.type === "runtime.status" && event.payload["status"] === "waiting_for_input")).toBe(true);
+    expect(events.items.some((event) => event.type === "runtime.status" && event.payload["status"] === "resumed")).toBe(true);
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({
+      runId: "run_1",
+      approvalType: "before_external_message",
+      payload: {
+        runtimeApprovalToken: "wrapper-token-1",
+        runtimeMode: "generic_http.async_rest",
+        runtimeSessionId: "session_1",
+        externalSessionKey: "external_wrapper_run_1",
+        expiresAt: "2026-05-31T00:05:00.000Z",
+        message: "approve wrapper action",
+        answers: { choice: "yes" }
+      }
     });
   });
 
