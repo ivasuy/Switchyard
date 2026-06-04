@@ -565,7 +565,8 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
             answers
           },
           tooLargeReasonCode: "generic_http_approval_response_too_large",
-          invalidJsonReasonCode: "generic_http_invalid_approval_response"
+          invalidJsonReasonCode: "generic_http_invalid_approval_response",
+          recordPath: `/v1/runs/${stored.state.externalRunId}/approvals/:runtimeApprovalToken/resolve`
         },
         stored.transcript
       );
@@ -615,6 +616,7 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
       body?: unknown;
       tooLargeReasonCode: string;
       invalidJsonReasonCode: string;
+      recordPath?: string;
     },
     transcript?: TranscriptRecorder
   ): Promise<GenericHttpRequestResult> {
@@ -631,6 +633,7 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
     if (this.authToken) {
       headers.authorization = `Bearer ${this.authToken}`;
     }
+    const recordPath = options.recordPath ?? path;
 
     try {
       const response = await requestJson({
@@ -646,24 +649,24 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
       });
       transcript?.appendHttpRequest({
         method: options.method,
-        path,
+        path: recordPath,
         status: response.status,
         durationMs: response.durationMs,
         bytes: response.bytes,
         maxBytes: this.maxResponseBytes
       });
-      this.log("info", "generic_http.request", { method: options.method, path, status: response.status, durationMs: response.durationMs });
+      this.log("info", "generic_http.request", { method: options.method, path: recordPath, status: response.status, durationMs: response.durationMs });
       return response;
     } catch (error) {
       const reasonCode = eventErrorReason(error);
       transcript?.appendHttpRequest({
         method: options.method,
-        path,
+        path: recordPath,
         reasonCode,
         maxBytes: this.maxResponseBytes,
         message: sanitize(this.authToken, error instanceof Error ? error.message : String(error))
       });
-      this.log("warn", "generic_http.request", { method: options.method, path, reasonCode });
+      this.log("warn", "generic_http.request", { method: options.method, path: recordPath, reasonCode });
       throw error;
     }
   }

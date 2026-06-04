@@ -843,11 +843,26 @@ describe("GenericHttpAsyncRestAdapter", () => {
         idempotencyKey: "idem_redaction",
         text: rawText
       });
+      const runtimeApprovalToken = "secret-runtime-approval-token";
+      await adapter.send({ ...session, runId: "run_redaction" }, {
+        type: "approval_resolution",
+        switchyardRunId: "run_redaction",
+        bridgeCommandId: "cmd_redaction_approval",
+        idempotencyKey: "idem_redaction_approval",
+        runtimeApprovalToken,
+        decision: "approved",
+        message: "approved by hosted-api",
+        answers: {}
+      });
       const artifacts = await adapter.artifacts({ ...session, runId: "run_redaction" });
       expect(JSON.stringify(logs)).not.toContain(rawText);
       expect(JSON.stringify(logs)).not.toContain("secret-bridge-token");
+      expect(JSON.stringify(logs)).not.toContain(runtimeApprovalToken);
+      expect(JSON.stringify(logs)).toContain(":runtimeApprovalToken");
       expect(JSON.stringify(artifacts)).not.toContain(rawText);
       expect(JSON.stringify(artifacts)).not.toContain("secret-bridge-token");
+      expect(JSON.stringify(artifacts)).not.toContain(runtimeApprovalToken);
+      expect(JSON.stringify(artifacts)).toContain(":runtimeApprovalToken");
     } finally {
       await server.close();
     }
