@@ -227,6 +227,27 @@ async function runDependencyPreflight(deps: Record<string, unknown>): Promise<Aw
   });
 }
 
+async function runDefaultGateDependencyPreflight(deps: Record<string, unknown>): Promise<Awaited<ReturnType<typeof runProductionPreflight>>> {
+  return withTempResult(async (dir) => {
+    const envPath = join(dir, "ok.env");
+    await writeFile(envPath, "SWITCHYARD_DEPLOYMENT_MODE=production\n", "utf8");
+    return runProductionPreflight({
+      envFile: envPath,
+      deps: {
+        validateManifest: async () => ({ ok: true, manifest: {} as never }),
+        loadServerConfig: () => makeServerConfig(),
+        loadWorkerConfig: () => makeWorkerConfig(),
+        openPostgresDatabase: () => ({ close: async () => undefined } as never),
+        checkPostgresSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 }),
+        queueStats: async () => undefined,
+        probeObjectStore: async () => undefined,
+        checkControlPlane: async () => ({ checks: [] }),
+        ...deps
+      }
+    });
+  });
+}
+
 async function withTempResult<T>(run: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "switchyard-production-preflight-test-"));
   try {
@@ -1157,6 +1178,83 @@ describe("runProductionPreflight", () => {
       name: "hostedDebate.r23BridgeReadiness",
       status: "pass",
       code: "hosted_debate_r23_bridge_ready"
+    }));
+  });
+
+  test("default preflight gate passes healthy wrapper setup when payload store is ready", async () => {
+    const activation = makeProviderActivation({
+      valid: true,
+      enabledRealModes: ["generic_http.async_rest"],
+      reasons: [],
+      reasonCodes: []
+    });
+    const result = await runDefaultGateDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        })
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedRuntimeBridge",
+      status: "pass",
+      code: "hosted_runtime_bridge_ready",
+      diagnostics: expect.objectContaining({
+        checks: expect.objectContaining({
+          command_store: "pass",
+          payload_store: "pass",
+          wrapper_config: "pass",
+          wrapper_bridge_capability: "pass"
+        })
+      })
+    }));
+  });
+
+  test("default preflight gate fails when payload store is missing while command store is ready", async () => {
+    const activation = makeProviderActivation({
+      valid: true,
+      enabledRealModes: ["generic_http.async_rest"],
+      reasons: [],
+      reasonCodes: []
+    });
+    const result = await runDefaultGateDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      createBridgePayloadStore: () => undefined
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedRuntimeBridge",
+      status: "fail",
+      code: "hosted_runtime_bridge_store_unavailable",
+      diagnostics: expect.objectContaining({
+        failedChecks: expect.arrayContaining(["payload_store"]),
+        checks: expect.objectContaining({
+          command_store: "pass",
+          payload_store: "fail"
+        })
+      })
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.hostedBridgeReadiness",
+      status: "fail",
+      code: "hosted_runtime_bridge_store_unavailable"
     }));
   });
 

@@ -65,6 +65,7 @@ interface ControlPlaneReadinessInput {
 interface RuntimeBridgeReadinessInput {
   enabled: boolean;
   commandStore?: unknown;
+  payloadStore?: unknown;
   commandOutbox?: unknown;
   approvalOwnership?: unknown;
   quota?: unknown;
@@ -93,6 +94,7 @@ interface HostedDebateReadinessInput {
 
 type HostedRuntimeBridgeReadinessCheckName =
   | "command_store"
+  | "payload_store"
   | "command_outbox"
   | "approval_ownership"
   | "quota"
@@ -413,6 +415,7 @@ export async function probeServerReadiness(input: {
   if (input.runtimeBridge?.enabled) {
     bridgeReadiness = getServerRuntimeBridgeReadiness({
       commandStore: input.runtimeBridge.commandStore,
+      payloadStore: input.runtimeBridge.payloadStore,
       commandOutbox: input.runtimeBridge.commandOutbox,
       approvalOwnership: input.runtimeBridge.approvalOwnership,
       quota: input.runtimeBridge.quota,
@@ -447,6 +450,7 @@ export async function probeServerReadiness(input: {
         requiresRuntimeBridge(input.config.hostedRuntimeAllowlist) && input.runtimeBridge
           ? getServerRuntimeBridgeReadiness({
               commandStore: input.runtimeBridge.commandStore,
+              payloadStore: input.runtimeBridge.payloadStore,
               commandOutbox: input.runtimeBridge.commandOutbox,
               approvalOwnership: input.runtimeBridge.approvalOwnership,
               quota: input.runtimeBridge.quota,
@@ -470,6 +474,7 @@ export async function probeServerReadiness(input: {
 
 export function getServerRuntimeBridgeReadiness(deps: {
   commandStore?: unknown;
+  payloadStore?: unknown;
   commandOutbox?: unknown;
   approvalOwnership?: unknown;
   quota?: unknown;
@@ -488,6 +493,7 @@ export function getServerRuntimeBridgeReadiness(deps: {
 
   const checks: HostedRuntimeBridgeReadinessReport["checks"] = [
     check("command_store", isPresent(deps.commandStore), "hosted_runtime_bridge_store_unavailable"),
+    check("payload_store", isPresent(deps.payloadStore), "hosted_runtime_bridge_store_unavailable"),
     check("command_outbox", isPresent(deps.commandOutbox), "hosted_runtime_bridge_queue_unavailable"),
     check("approval_ownership", isPresent(deps.approvalOwnership), "approval_ownership_attach_failed"),
     check("quota", isPresent(deps.quota), "quota_store_unavailable"),

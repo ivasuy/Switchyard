@@ -577,6 +577,7 @@ describe("production readiness", () => {
       runtimeBridge: {
         enabled: true,
         commandStore: {},
+        payloadStore: {},
         commandOutbox: {},
         approvalOwnership: {},
         quota: {},
@@ -629,6 +630,7 @@ describe("production readiness", () => {
       runtimeBridge: {
         enabled: true,
         commandStore: {},
+        payloadStore: {},
         commandOutbox: {},
         approvalOwnership: {},
         quota: {},
@@ -667,6 +669,59 @@ describe("production readiness", () => {
     });
   });
 
+  it("fails bridge readiness when command store is ready but payload store is missing", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(
+        createAuthEnabledTestEnv({
+          SWITCHYARD_OBJECT_STORE_BACKEND: "memory",
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,generic_http.async_rest",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createGenericHttpProviderPolicyJson(),
+          SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://wrapper.example",
+          SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "wrapper-token"
+        })
+      ),
+      postgres: undefined,
+      queue: createReadyQueue(),
+      artifactContent: createReadyArtifactContent(),
+      controlPlane: createReadyControlPlane(),
+      hostedDebate: createHostedDebateDependencies(),
+      runtimeBridge: {
+        enabled: true,
+        commandStore: {},
+        commandOutbox: {},
+        approvalOwnership: {},
+        quota: {},
+        audit: {},
+        routeAuth: {},
+        workerReadiness: {
+          claim: true,
+          adapterCapability: true,
+          sessionReconciliation: true,
+          approvalSender: true
+        },
+        wrapperConfig: { ok: true },
+        wrapperBridgeCapability: { ok: true }
+      }
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.hostedRuntimeBridge).toMatchObject({
+      ok: false,
+      code: "hosted_runtime_bridge_store_unavailable",
+      diagnostics: {
+        checks: expect.arrayContaining([
+          { name: "command_store", ok: true },
+          { name: "payload_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" }
+        ])
+      }
+    });
+    expect(report.checks.hostedDebate).toMatchObject({
+      ok: false,
+      code: "hosted_runtime_bridge_store_unavailable"
+    });
+  });
+
   it("fails wrapper bridge readiness closed on missing wrapper config and capability checks", async () => {
     const report = await probeServerReadiness({
       config: loadServerConfig(
@@ -687,6 +742,7 @@ describe("production readiness", () => {
       runtimeBridge: {
         enabled: true,
         commandStore: {},
+        payloadStore: {},
         commandOutbox: {},
         approvalOwnership: {},
         quota: {},

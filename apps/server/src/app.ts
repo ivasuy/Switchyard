@@ -798,6 +798,7 @@ export async function createServerApp(config: ServerConfig) {
       runtimeBridge: {
         enabled: runtimeBridgeEnabled,
         commandStore: hostedRuntimeBridgeCommands,
+        payloadStore: bridgeCommandPayloads,
         commandOutbox: hostedRuntimeBridgeCommands,
         approvalOwnership: controlPlaneStoreInstance,
         quota: controlPlaneStoreInstance,

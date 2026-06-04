@@ -1964,6 +1964,7 @@ describe("Switchyard contracts", () => {
     const readiness = hostedRuntimeBridgeReadinessReportSchema.parse({
       status: "ready",
       checks: [
+        { name: "payload_store", ok: true },
         { name: "session_reconciliation", ok: true },
         { name: "approval_sender", ok: true }
       ]

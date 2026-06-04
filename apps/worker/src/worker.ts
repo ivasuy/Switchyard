@@ -80,6 +80,7 @@ type ArtifactRecord = Awaited<ReturnType<ArtifactStore["create"]>>;
 type SwitchyardEventRecord = Awaited<ReturnType<EventStore["append"]>>;
 type HostedRuntimeBridgeReadinessCheckName =
   | "command_store"
+  | "payload_store"
   | "worker_claim"
   | "adapter_capability"
   | "wrapper_config"
@@ -1458,7 +1459,8 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
           return acc;
         }, {});
         const bridgeReadiness = getWorkerRuntimeBridgeReadiness({
-          commandStore: bridgeStoreReady ? bridgeCommandPayloads : undefined,
+          commandStore: bridgeCommandStore,
+          payloadStore: bridgeCommandPayloads,
           workerClaim: hostedRuntimeBridge,
           sessionReconciliation: hostedRuntimeBridge,
           approvalSender: hostedRuntimeBridge,
@@ -1611,6 +1613,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
 
 export function getWorkerRuntimeBridgeReadiness(deps: {
   commandStore?: unknown;
+  payloadStore?: unknown;
   sessionReconciliation?: unknown;
   adapterCapabilities?: Record<string, boolean | WorkerRuntimeBridgeModeCapability>;
   approvalSender?: unknown;
@@ -1632,6 +1635,7 @@ export function getWorkerRuntimeBridgeReadiness(deps: {
     ?? "hosted_runtime_bridge_operation_unsupported";
   const checks: HostedRuntimeBridgeReadinessReport["checks"] = [
     check("command_store", isPresent(deps.commandStore), "hosted_runtime_bridge_store_unavailable"),
+    check("payload_store", isPresent(deps.payloadStore), "hosted_runtime_bridge_store_unavailable"),
     check("worker_claim", isPresent(deps.workerClaim), "hosted_runtime_bridge_worker_unavailable"),
     check("adapter_capability", adapterCapable, firstAdapterReason),
     check("wrapper_config", wrapperConfig, firstWrapperConfigReason),

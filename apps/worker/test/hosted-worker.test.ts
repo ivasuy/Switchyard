@@ -979,6 +979,7 @@ describe("hosted worker app", () => {
   it("reports runtime bridge readiness dependencies with aggregate failures", () => {
     const notReady = getWorkerRuntimeBridgeReadiness({
       commandStore: undefined,
+      payloadStore: undefined,
       workerClaim: undefined,
       sessionReconciliation: undefined,
       approvalSender: undefined,
@@ -991,6 +992,7 @@ describe("hosted worker app", () => {
     expect(notReady.status).toBe("not_ready");
     expect(notReady.checks).toEqual([
       { name: "command_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" },
+      { name: "payload_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" },
       { name: "worker_claim", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
       { name: "adapter_capability", ok: false, reasonCode: "hosted_runtime_bridge_operation_unsupported" },
       { name: "wrapper_config", ok: true },
@@ -1001,6 +1003,7 @@ describe("hosted worker app", () => {
 
     const ready = getWorkerRuntimeBridgeReadiness({
       commandStore: { put: async () => undefined, get: async () => undefined, delete: async () => undefined },
+      payloadStore: { put: async () => undefined, get: async () => undefined, delete: async () => undefined },
       workerClaim: { claimAndApplyNext: async () => false },
       sessionReconciliation: { reconcileHostedRuntimeSessions: async () => ({ reconciled: 0, failed: 0 }) },
       approvalSender: { createWorkerRuntimeApproval: async () => ({ id: "approval_1" }) },
@@ -1016,6 +1019,7 @@ describe("hosted worker app", () => {
   it("reports wrapper config and bridge capability readiness failures by mode", () => {
     const sharedDeps = {
       commandStore: { put: async () => undefined, get: async () => undefined, delete: async () => undefined },
+      payloadStore: { put: async () => undefined, get: async () => undefined, delete: async () => undefined },
       workerClaim: { claimAndApplyNext: async () => false },
       sessionReconciliation: { reconcileHostedRuntimeSessions: async () => ({ reconciled: 0, failed: 0 }) },
       approvalSender: { createWorkerRuntimeApproval: async () => ({ id: "approval_1" }) }

@@ -341,6 +341,10 @@ describe("production worker readiness", () => {
         ok: false,
         code: "hosted_runtime_bridge_store_unavailable"
       });
+      expect(readiness.checks?.hostedRuntimeBridge?.diagnostics?.["checks"]).toEqual(expect.arrayContaining([
+        { name: "command_store", ok: true },
+        { name: "payload_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" }
+      ]));
     } finally {
       await worker.stop();
     }

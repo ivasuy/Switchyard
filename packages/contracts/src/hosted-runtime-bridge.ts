@@ -158,6 +158,7 @@ export const hostedRuntimeBridgeCommandSchema = z
 
 export const hostedRuntimeBridgeReadinessCheckNameSchema = z.enum([
   "command_store",
+  "payload_store",
   "command_outbox",
   "approval_ownership",
   "quota",

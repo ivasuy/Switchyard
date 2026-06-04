@@ -292,6 +292,7 @@ describe("openapi generation", () => {
     const readiness = hostedRuntimeBridgeReadinessReportSchema.parse({
       status: "not_ready",
       checks: [
+        { name: "payload_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" },
         { name: "session_reconciliation", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
         { name: "approval_sender", ok: true },
         { name: "wrapper_config", ok: true },
@@ -299,6 +300,7 @@ describe("openapi generation", () => {
       ]
     });
     expect(readiness.checks.map((entry) => entry.name)).toEqual([
+      "payload_store",
       "session_reconciliation",
       "approval_sender",
       "wrapper_config",

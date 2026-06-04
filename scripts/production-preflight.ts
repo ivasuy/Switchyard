@@ -11,12 +11,16 @@ import {
   createArtifactContentStoreFromObjectConfig,
   openPostgresDatabase,
   PostgresControlPlaneStore,
+  PostgresHostedRuntimeBridgeCommandStore,
+  PostgresHostedRuntimeBridgePayloadStore,
   type PostgresDatabaseHandle,
   type PostgresSchemaCompatibility,
   type ResolvedObjectStoreConfig
 } from "../packages/storage/src/index.js";
 import { loadServerConfig } from "../apps/server/src/config.js";
+import { getServerRuntimeBridgeReadiness } from "../apps/server/src/readiness.js";
 import { loadWorkerConfig } from "../apps/worker/src/config.js";
+import { getWorkerRuntimeBridgeReadiness } from "../apps/worker/src/worker.js";
 import { loadNodeConfig } from "../apps/node/src/config.js";
 import { parseProductionEnvFile, type ProductionEnvParseErrorCode } from "./production-env.js";
 import { validateProductionManifest, type ProductionManifestErrorCode, type ProductionManifestValidationResult } from "./production-manifest.js";
@@ -89,7 +93,15 @@ export interface PreflightDeps {
     deploymentMode: string;
     allowlist: string[];
     hostedRealRuntimeExecution: string;
+    serverConfig?: ReturnType<typeof loadServerConfig>;
+    workerConfig?: ReturnType<typeof loadWorkerConfig>;
+    postgres?: PostgresDatabaseHandle;
+    checks?: ProductionPreflightCheck[];
+    bridgeCommandStore?: unknown;
+    bridgePayloadStore?: unknown;
   }) => Promise<{ ok: true; diagnostics?: Record<string, unknown> } | { ok: false; code: string; diagnostics?: Record<string, unknown> }>;
+  createBridgeCommandStore?: (postgres: PostgresDatabaseHandle | undefined) => unknown;
+  createBridgePayloadStore?: (postgres: PostgresDatabaseHandle | undefined) => unknown;
   checkProviderAdapters?: (input: {
     workerConfig: ReturnType<typeof loadWorkerConfig>;
   }) => Promise<{
@@ -298,12 +310,25 @@ export async function runProductionPreflight(options: {
     nodeConfig
   });
 
+  const bridgeCommandStore = createReadinessDependency(
+    () => (deps.createBridgeCommandStore ?? defaultBridgeCommandStore)(postgres)
+  );
+  const bridgePayloadStore = createReadinessDependency(
+    () => (deps.createBridgePayloadStore ?? defaultBridgePayloadStore)(postgres)
+  );
+
   const hostedRuntimeGate = await resolveWithTimeout(
     async () => {
       return (deps.checkHostedRuntimeGate ?? defaultHostedRuntimeGateCheck)({
         deploymentMode: serverConfig.deploymentMode,
         allowlist: serverConfig.hostedRuntimeAllowlist,
-        hostedRealRuntimeExecution: serverConfig.hostedRealRuntimeExecution
+        hostedRealRuntimeExecution: serverConfig.hostedRealRuntimeExecution,
+        serverConfig,
+        workerConfig,
+        postgres,
+        checks,
+        bridgeCommandStore,
+        bridgePayloadStore
       });
     },
     timeoutMs
@@ -1145,6 +1170,22 @@ async function defaultObjectStoreProbe(input: { objectStore: ResolvedObjectStore
   await store.probe();
 }
 
+function defaultBridgeCommandStore(postgres: PostgresDatabaseHandle | undefined): unknown {
+  return postgres ? new PostgresHostedRuntimeBridgeCommandStore(postgres) : undefined;
+}
+
+function defaultBridgePayloadStore(postgres: PostgresDatabaseHandle | undefined): unknown {
+  return postgres ? new PostgresHostedRuntimeBridgePayloadStore(postgres) : undefined;
+}
+
+function createReadinessDependency(factory: () => unknown): unknown {
+  try {
+    return factory();
+  } catch {
+    return undefined;
+  }
+}
+
 async function defaultControlPlaneCheck(input: {
   serverConfig: ReturnType<typeof loadServerConfig>;
   postgres?: PostgresDatabaseHandle;
@@ -1367,15 +1408,22 @@ async function defaultHostedRuntimeGateCheck(input: {
   deploymentMode: string;
   allowlist: string[];
   hostedRealRuntimeExecution: string;
-}): Promise<{ ok: true } | { ok: false; code: string; diagnostics?: Record<string, unknown> }> {
+  serverConfig?: ReturnType<typeof loadServerConfig>;
+  workerConfig?: ReturnType<typeof loadWorkerConfig>;
+  postgres?: PostgresDatabaseHandle;
+  checks?: ProductionPreflightCheck[];
+  bridgeCommandStore?: unknown;
+  bridgePayloadStore?: unknown;
+}): Promise<{ ok: true; diagnostics?: Record<string, unknown> } | { ok: false; code: string; diagnostics?: Record<string, unknown> }> {
   const validation = validateHostedRuntimeAllowlist({
     allowlist: input.allowlist,
     deploymentMode: input.deploymentMode as "local" | "test" | "staging" | "production",
-    realRuntimeExecution: input.hostedRealRuntimeExecution as "enabled" | "disabled"
+    realRuntimeExecution: input.hostedRealRuntimeExecution as "enabled" | "disabled",
+    providerActivation: input.serverConfig?.providerRuntimeActivation ?? input.workerConfig?.providerRuntimeActivation
   });
 
   if (validation.ok) {
-    return { ok: true };
+    return { ok: true, diagnostics: buildDefaultHostedRuntimeGateDiagnostics(input) };
   }
 
   return {
@@ -1385,6 +1433,98 @@ async function defaultHostedRuntimeGateCheck(input: {
       sourceCode: validation.code
     }
   };
+}
+
+function buildDefaultHostedRuntimeGateDiagnostics(input: {
+  allowlist: string[];
+  serverConfig?: ReturnType<typeof loadServerConfig>;
+  workerConfig?: ReturnType<typeof loadWorkerConfig>;
+  checks?: ProductionPreflightCheck[];
+  bridgeCommandStore?: unknown;
+  bridgePayloadStore?: unknown;
+}): Record<string, unknown> {
+  const diagnostics: Record<string, unknown> = {
+    hostedDebate: { ok: true }
+  };
+  const bridgeModes = input.allowlist.filter(isHostedRuntimeBridgeMode);
+  if (bridgeModes.length === 0) {
+    return diagnostics;
+  }
+
+  const checks = input.checks ?? [];
+  const failed = (name: string): ProductionPreflightCheck | undefined =>
+    checks.find((check) => check.name === name && check.status === "fail");
+  const providerAdapterFailure = failed("providerAdapterChecks");
+  const adapterOk = !providerAdapterFailure;
+  const wrapperModes = bridgeModes.filter(isWrapperRuntimeBridgeMode);
+  const wrapperConfig = buildWrapperReadiness(input.serverConfig, input.workerConfig, wrapperModes, "config");
+  const wrapperBridgeCapability = buildWrapperReadiness(input.serverConfig, input.workerConfig, wrapperModes, "capability", adapterOk);
+  const adapterCapabilities = Object.fromEntries(bridgeModes.map((mode) => [
+    mode,
+    isWrapperRuntimeBridgeMode(mode)
+      ? {
+          adapter: adapterOk,
+          wrapperConfig: !wrapperConfig || wrapperConfig.ok !== false,
+          wrapperBridgeCapability: !wrapperBridgeCapability || wrapperBridgeCapability.ok !== false,
+          ...(providerAdapterFailure?.code ? { reasonCode: providerAdapterFailure.code } : {})
+        }
+      : adapterOk
+  ]));
+  const workerBridgeReadiness = getWorkerRuntimeBridgeReadiness({
+    commandStore: input.bridgeCommandStore,
+    payloadStore: input.bridgePayloadStore,
+    workerClaim: failed("queue") ? undefined : input.bridgeCommandStore,
+    sessionReconciliation: input.bridgeCommandStore,
+    approvalSender: input.bridgeCommandStore,
+    adapterCapabilities
+  });
+  const workerCheck = (name: string): boolean =>
+    workerBridgeReadiness.checks.find((entry) => entry.name === name)?.ok === true;
+  const serverBridgeReadiness = getServerRuntimeBridgeReadiness({
+    commandStore: input.bridgeCommandStore,
+    payloadStore: input.bridgePayloadStore,
+    commandOutbox: input.bridgeCommandStore,
+    approvalOwnership: failed("bootstrap") || failed("unownedResources") ? undefined : {},
+    quota: failed("quotaStore") ? undefined : {},
+    audit: failed("auditStore") ? undefined : {},
+    routeAuth: input.serverConfig?.serverAuthMode === "api_key" ? {} : undefined,
+    workerReadiness: {
+      claim: workerCheck("worker_claim"),
+      adapterCapability: workerCheck("adapter_capability"),
+      sessionReconciliation: workerCheck("session_reconciliation"),
+      approvalSender: workerCheck("approval_sender")
+    },
+    wrapperRequired: wrapperModes.length > 0,
+    wrapperConfig,
+    wrapperBridgeCapability
+  });
+
+  diagnostics["workerBridgeReadiness"] = workerBridgeReadiness;
+  diagnostics["bridgeReadiness"] = serverBridgeReadiness;
+  return diagnostics;
+}
+
+function buildWrapperReadiness(
+  serverConfig: ReturnType<typeof loadServerConfig> | undefined,
+  workerConfig: ReturnType<typeof loadWorkerConfig> | undefined,
+  wrapperModes: Array<typeof WRAPPER_RUNTIME_BRIDGE_MODES[number]>,
+  kind: "config" | "capability",
+  capabilityOk = true
+): { ok: boolean; reasonCode?: string } | undefined {
+  if (wrapperModes.length === 0) {
+    return undefined;
+  }
+  if (kind === "capability") {
+    return capabilityOk
+      ? { ok: true }
+      : { ok: false, reasonCode: firstWrapperReasonCode(wrapperModes, "capability") };
+  }
+  const activation = serverConfig?.providerRuntimeActivation ?? workerConfig?.providerRuntimeActivation;
+  const enabled = new Set(activation?.enabledRealModes ?? []);
+  const allEnabled = wrapperModes.every((mode) => enabled.has(mode));
+  return allEnabled
+    ? { ok: true }
+    : { ok: false, reasonCode: firstWrapperReasonCode(wrapperModes, "config") };
 }
 
 function redactDiagnostics(diagnostics: unknown): Record<string, unknown> | undefined {
