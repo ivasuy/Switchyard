@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 
 export type FakeAgentFieldScenario =
   | "happy"
+  | "bridge_happy"
+  | "bridge_capability_missing"
   | "health_http_500"
   | "health_degraded"
   | "invalid_health_json"
@@ -15,10 +17,24 @@ export type FakeAgentFieldScenario =
   | "upstream_failed"
   | "upstream_cancelled"
   | "upstream_timeout"
+  | "waiting_for_input"
+  | "waiting_for_approval"
+  | "waiting_for_approval_duplicate"
+  | "waiting_for_approval_malformed"
   | "unknown_status"
   | "invalid_status_json"
   | "oversized_status_response"
   | "oversized_result_response"
+  | "bridge_input_http_500"
+  | "bridge_input_invalid_json"
+  | "bridge_input_malformed_response"
+  | "bridge_input_oversized_response"
+  | "bridge_input_timeout"
+  | "bridge_approval_http_500"
+  | "bridge_approval_invalid_json"
+  | "bridge_approval_malformed_response"
+  | "bridge_approval_oversized_response"
+  | "bridge_approval_timeout"
   | "pending_forever"
   | "late_success"
   | "error_echo_secret";
@@ -43,6 +59,11 @@ export interface FakeAgentFieldServerStats {
   discoveryCalls: number;
   executeAsyncCalls: number;
   pollCalls: number;
+  inputCalls: number;
+  approvalResolutionCalls: number;
+  lastInput: Record<string, unknown> | undefined;
+  lastApprovalResolution: Record<string, unknown> | undefined;
+  lastApprovalToken: string | undefined;
 }
 
 export interface FakeAgentFieldServerHandle {
@@ -66,7 +87,12 @@ export async function startFakeAgentFieldServer(
     healthCalls: 0,
     discoveryCalls: 0,
     executeAsyncCalls: 0,
-    pollCalls: 0
+    pollCalls: 0,
+    inputCalls: 0,
+    approvalResolutionCalls: 0,
+    lastInput: undefined,
+    lastApprovalResolution: undefined,
+    lastApprovalToken: undefined
   };
   const executions = new Map<string, ExecutionState>();
   let executionCounter = 0;
@@ -128,7 +154,25 @@ export async function startFakeAgentFieldServer(
       targets: scenario === "target_not_found"
         ? ["other.target"]
         : [target, "summarizer.default"],
-      supports_async_execution: true
+      supports_async_execution: true,
+      ...(scenario === "bridge_happy"
+        ? {
+            switchyard_bridge: {
+              input: true,
+              approval_request: true,
+              approval_resolution: true
+            }
+          }
+        : {}),
+      ...(scenario === "bridge_capability_missing"
+        ? {
+            switchyard_bridge: {
+              input: true,
+              approval_request: false,
+              approval_resolution: true
+            }
+          }
+        : {})
     });
   });
 
@@ -166,6 +210,83 @@ export async function startFakeAgentFieldServer(
     return reply.code(202).send({
       execution_id: executionId,
       status: "queued"
+    });
+  });
+
+  app.post("/api/v1/executions/:executionId/input", async (request, reply) => {
+    stats.inputCalls += 1;
+    stats.lastInput = isRecord(request.body) ? request.body : undefined;
+    const executionId = (request.params as { executionId: string }).executionId;
+    if (!executions.has(executionId)) {
+      return reply.code(404).send({
+        error: "execution_not_found"
+      });
+    }
+    if (scenario === "bridge_input_http_500") {
+      return reply.code(500).send({
+        error: "input_failed"
+      });
+    }
+    if (scenario === "bridge_input_invalid_json") {
+      reply.type("application/json");
+      return reply.send("not-json");
+    }
+    if (scenario === "bridge_input_malformed_response") {
+      return reply.send({
+        accepted: false
+      });
+    }
+    if (scenario === "bridge_input_oversized_response") {
+      return reply.send({
+        accepted: true,
+        payload: oversizedPayload()
+      });
+    }
+    if (scenario === "bridge_input_timeout") {
+      await sleep(1000);
+    }
+    return reply.code(202).send({
+      accepted: true,
+      input_id: `input_${stats.inputCalls}`
+    });
+  });
+
+  app.post("/api/v1/executions/:executionId/approvals/:runtimeApprovalToken/resolve", async (request, reply) => {
+    stats.approvalResolutionCalls += 1;
+    stats.lastApprovalResolution = isRecord(request.body) ? request.body : undefined;
+    stats.lastApprovalToken = (request.params as { runtimeApprovalToken: string }).runtimeApprovalToken;
+    const executionId = (request.params as { executionId: string }).executionId;
+    if (!executions.has(executionId)) {
+      return reply.code(404).send({
+        error: "execution_not_found"
+      });
+    }
+    if (scenario === "bridge_approval_http_500") {
+      return reply.code(500).send({
+        error: "approval_failed"
+      });
+    }
+    if (scenario === "bridge_approval_invalid_json") {
+      reply.type("application/json");
+      return reply.send("not-json");
+    }
+    if (scenario === "bridge_approval_malformed_response") {
+      return reply.send({
+        accepted: false
+      });
+    }
+    if (scenario === "bridge_approval_oversized_response") {
+      return reply.send({
+        accepted: true,
+        payload: oversizedPayload()
+      });
+    }
+    if (scenario === "bridge_approval_timeout") {
+      await sleep(1000);
+    }
+    return reply.code(202).send({
+      accepted: true,
+      resolution_id: `resolution_${stats.approvalResolutionCalls}`
     });
   });
 
@@ -241,6 +362,34 @@ function buildExecutionResponse(input: {
       status: "pending"
     };
   }
+  if (scenario === "waiting_for_input") {
+    return {
+      execution_id: execution.executionId,
+      status: execution.pollCount === 1 ? "running" : "waiting_for_input"
+    };
+  }
+  if (scenario === "waiting_for_approval" || scenario === "waiting_for_approval_duplicate") {
+    return {
+      execution_id: execution.executionId,
+      status: execution.pollCount === 1 ? "running" : "waiting_for_approval",
+      approval: {
+        token: "af_approval_1",
+        approval_type: "before_external_message",
+        message: "AgentField requests permission to continue.",
+        expires_at: "2026-06-04T20:00:00.000Z"
+      }
+    };
+  }
+  if (scenario === "waiting_for_approval_malformed") {
+    return {
+      execution_id: execution.executionId,
+      status: execution.pollCount === 1 ? "running" : "waiting_for_approval",
+      approval: {
+        approval_type: "before_external_message",
+        expires_at: "2026-06-04T20:00:00.000Z"
+      }
+    };
+  }
   if (scenario === "unknown_status") {
     return {
       execution_id: execution.executionId,
@@ -304,6 +453,14 @@ function buildExecutionResponse(input: {
 
 function oversizedPayload(): string {
   return "x".repeat(8192);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function closeApp(app: FastifyInstance): Promise<void> {

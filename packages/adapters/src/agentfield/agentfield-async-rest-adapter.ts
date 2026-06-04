@@ -21,10 +21,20 @@ import type {
 } from "./types.js";
 
 export const AGENTFIELD_RUNTIME_MODE_SLUG = "agentfield.async_rest";
+const MAX_RUNTIME_INPUT_BYTES = 64 * 1024;
+const BRIDGE_OVERRIDE_KEYS = new Set(["baseUrl", "base_url", "apiKey", "api_key", "target"]);
 
 interface StoredSession {
   state: AgentFieldSessionState;
   transcript: TranscriptRecorder;
+}
+
+interface AgentFieldApprovalRequest {
+  runtimeApprovalToken: string;
+  approvalType: string;
+  expiresAt: string;
+  message?: string;
+  answers?: Record<string, unknown>;
 }
 
 export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
@@ -40,9 +50,11 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
     kind: "async_rest",
     capabilities: [
       "run.start",
+      "run.input",
       "run.timeout",
       "event.normalized",
       "event.streaming",
+      "approval.bridge",
       "artifact.transcript",
       "auth.api_key"
     ],
@@ -51,15 +63,22 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
         code: "configured_target_only",
         message: "agentfield.async_rest uses the daemon-level AgentField target configured by SWITCHYARD_AGENTFIELD_TARGET."
       },
-      { code: "no_post_start_input", message: "agentfield.async_rest does not support POST /runs/:id/input in R6." },
+      {
+        code: "configured_wrapper_only",
+        message: "AgentField wrapper endpoints are operator configured and cannot be overridden per run."
+      },
+      {
+        code: "hosted_bridge_readiness_required",
+        message: "Hosted AgentField bridge paths require wrapper_config and wrapper_bridge_capability readiness checks."
+      },
       {
         code: "cancel_unsupported",
-        message: "AgentField upstream cancellation is not claimed in R6 because no cancel endpoint is verified by this spec."
+        message: "AgentField upstream cancellation is not claimed because no cancel endpoint is verified by this spec."
       },
-      { code: "polling_only", message: "R6 polls AgentField execution status and does not accept webhooks." },
+      { code: "polling_only", message: "AgentField polls execution status and does not accept webhooks." },
       {
         code: "no_agentfield_control_plane_proxy",
-        message: "AgentField memory, admin, node lifecycle, permissions, and Agentic APIs are not exposed through Switchyard in R6."
+        message: "AgentField memory, admin, node lifecycle, permissions, and Agentic APIs are not exposed through Switchyard."
       }
     ],
     placement: {
@@ -67,13 +86,13 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
         support: "conditional",
         reason: "Requires SWITCHYARD_AGENTFIELD_BASE_URL, SWITCHYARD_AGENTFIELD_API_KEY, and SWITCHYARD_AGENTFIELD_TARGET."
       },
-      hosted: { support: "future", reason: "Hosted execution is not shipped in R6." },
-      connectedLocalNode: { support: "future", reason: "Hybrid local-node execution is not shipped in R6." }
+      hosted: { support: "conditional", reason: "Worker execution requires explicit operator opt-in and provider activation." },
+      connectedLocalNode: { support: "future", reason: "Connected node support remains future scope." }
     },
     docsPath: "docs/development/adapters/AGENTFIELD.md",
     check: {
       strategy: "custom",
-      required: ["base_url_configured", "api_key_configured", "target_configured", "agentfield_health"],
+      required: ["wrapper_config", "wrapper_bridge_capability"],
       optional: ["target_discovery"]
     }
   };
@@ -153,21 +172,23 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
     }
 
     const healthStatus = String(healthBody["status"]).toLowerCase();
-    if (healthStatus === "degraded") {
-      return {
-        ok: true,
-        details: {
-          availability: {
-            state: "partial",
-            canRun: true,
-            installed: true,
-            auth: "configured",
-            reasonCode: "agentfield_health_degraded",
-            message: "AgentField health returned degraded."
-          }
+    const availability = healthStatus === "degraded"
+      ? {
+          state: "partial",
+          canRun: true,
+          installed: true,
+          auth: "configured",
+          reasonCode: "agentfield_health_degraded",
+          message: "AgentField health returned degraded."
         }
-      };
-    }
+      : {
+          state: "available",
+          canRun: true,
+          installed: true,
+          auth: "configured",
+          reasonCode: null,
+          message: null
+        };
 
     try {
       const discovery = await this.request("api/v1/discovery/capabilities?format=compact", {
@@ -179,14 +200,17 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
         return {
           ok: true,
           details: {
-            availability: {
+            availability: availability.reasonCode
+              ? availability
+              : {
               state: "partial",
               canRun: true,
               installed: true,
               auth: "configured",
               reasonCode: "agentfield_discovery_unavailable",
               message: `discovery endpoint returned ${discovery.status}`
-            }
+            },
+            bridge: bridgeReadiness(undefined)
           }
         };
       }
@@ -208,35 +232,32 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
           }
         };
       }
+      const bridge = bridgeReadiness(discoveryBody);
+      return {
+        ok: true,
+        details: {
+          availability,
+          bridge
+        }
+      };
     } catch {
       return {
         ok: true,
         details: {
-          availability: {
+          availability: availability.reasonCode
+            ? availability
+            : {
             state: "partial",
             canRun: true,
             installed: true,
             auth: "configured",
             reasonCode: "agentfield_discovery_unavailable",
             message: "Target discovery unavailable; runtime remains runnable."
-          }
+          },
+          bridge: bridgeReadiness(undefined)
         }
       };
     }
-
-    return {
-      ok: true,
-      details: {
-        availability: {
-          state: "available",
-          canRun: true,
-          installed: true,
-          auth: "configured",
-          reasonCode: null,
-          message: null
-        }
-      }
-    };
   }
 
   async start(request: Record<string, unknown>): Promise<RuntimeStartResult> {
@@ -249,6 +270,7 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
     const cwd = requiredString(request["cwd"], "cwd");
     const metadata = isRecord(request["metadata"]) ? request["metadata"] : {};
     const agentfieldMetadata = isRecord(metadata["agentfield"]) ? metadata["agentfield"] : {};
+    rejectConfiguredOverrideKeys(agentfieldMetadata, "agentfield bridge configuration is operator controlled");
     const inputPayload = this.parseCustomInput(agentfieldMetadata);
     const headerMetadata = this.parseHeaderMetadata(agentfieldMetadata);
 
@@ -310,7 +332,8 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
         sessionId,
         runId,
         executionId,
-        target: this.target!
+        target: this.target!,
+        seenApprovalTokens: new Set<string>()
       },
       transcript
     };
@@ -331,9 +354,21 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
     };
   }
 
-  async send(_session: Record<string, unknown>, _input: Record<string, unknown>): Promise<void> {
-    throw new AdapterProtocolError("agentfield.async_rest does not support POST /runs/:id/input in R6.", {
-      reasonCode: "agentfield_input_unsupported"
+  async send(session: Record<string, unknown>, input: Record<string, unknown>): Promise<void> {
+    rejectConfiguredOverrideKeys(input, "agentfield bridge configuration is operator controlled");
+    const type = input["type"] === undefined && input["text"] !== undefined
+      ? "input"
+      : requiredString(input["type"], "type");
+    if (type === "input") {
+      await this.sendRuntimeInput(session, input);
+      return;
+    }
+    if (type === "approval_resolution") {
+      await this.sendApprovalResolution(session, input);
+      return;
+    }
+    throw new AdapterProtocolError("Unsupported AgentField bridge payload type.", {
+      reasonCode: "agentfield_input_failed"
     });
   }
 
@@ -386,12 +421,37 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
       if (
         normalized === "queued" ||
         normalized === "pending" ||
-        normalized === "running"
+        normalized === "running" ||
+        normalized === "waiting_for_input"
       ) {
         if (stored.state.lastStatus !== normalized) {
           yield event(runId, sequence++, "runtime.status", statusPayload);
           stored.state.lastStatus = normalized;
         }
+        await sleep(this.pollIntervalMs);
+        continue;
+      }
+
+      if (normalized === "waiting_for_approval") {
+        const approval = parseApprovalRequest(body);
+        if (!approval) {
+          yield this.failureEvent(runId, sequence++, "agentfield_approval_request_invalid", stored);
+          return;
+        }
+        if (!stored.state.seenApprovalTokens.has(approval.runtimeApprovalToken)) {
+          stored.state.seenApprovalTokens.add(approval.runtimeApprovalToken);
+          this.log("info", "agentfield.bridge.approval.requested", {
+            runId,
+            executionId: stored.state.executionId,
+            approvalType: approval.approvalType
+          });
+          yield event(runId, sequence++, "approval.requested", {
+            ...approval,
+            agentfieldExecutionId: stored.state.executionId,
+            target: stored.state.target
+          });
+        }
+        stored.state.lastStatus = normalized;
         await sleep(this.pollIntervalMs);
         continue;
       }
@@ -558,7 +618,134 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
     if (!isRecord(metadata["input"])) {
       throw new Error("agentfield_input_invalid");
     }
+    rejectConfiguredOverrideKeys(metadata["input"], "agentfield input cannot override adapter configuration");
     return metadata["input"];
+  }
+
+  private async sendRuntimeInput(session: Record<string, unknown>, input: Record<string, unknown>): Promise<void> {
+    const text = runtimeInputText(input["text"]);
+    const stored = this.requireSession(session);
+    if (stored.state.terminalStatus) {
+      throw new AdapterProtocolError("Runtime input is only supported for active AgentField executions.", {
+        reasonCode: "runtime_input_not_active"
+      });
+    }
+    const runId = readOptionalString(input["switchyardRunId"]) ?? requiredString(session["runId"], "runId");
+    const bridgeCommandId = readOptionalString(input["bridgeCommandId"]);
+    const idempotencyKey = readOptionalString(input["idempotencyKey"]);
+    const body = {
+      switchyardRunId: runId,
+      ...(bridgeCommandId ? { bridgeCommandId } : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+      type: "input",
+      input: {
+        text
+      }
+    };
+
+    let response: AgentFieldRequestResult;
+    try {
+      response = await this.request(`api/v1/executions/${encodeURIComponent(stored.state.executionId)}/input`, {
+        method: "POST",
+        body,
+        tooLargeReasonCode: "agentfield_input_response_too_large",
+        invalidJsonReasonCode: "agentfield_invalid_input_response",
+        requestFailedReasonCode: "agentfield_input_failed"
+      }, stored.transcript);
+    } catch (error) {
+      throw bridgeProtocolError(error, {
+        failedReasonCode: "agentfield_input_failed",
+        invalidReasonCode: "agentfield_invalid_input_response",
+        tooLargeReasonCode: "agentfield_input_response_too_large"
+      });
+    }
+
+    if (!response.ok) {
+      throw new AdapterProtocolError("AgentField input endpoint failed.", {
+        reasonCode: "agentfield_input_failed"
+      });
+    }
+    if (!isAcceptedResponse(response.body)) {
+      throw new AdapterProtocolError("AgentField input response was malformed.", {
+        reasonCode: "agentfield_invalid_input_response"
+      });
+    }
+    this.log("info", "agentfield.bridge.input", {
+      runId,
+      executionId: stored.state.executionId,
+      bridgeCommandId,
+      status: response.status,
+      durationMs: response.durationMs
+    });
+  }
+
+  private async sendApprovalResolution(session: Record<string, unknown>, input: Record<string, unknown>): Promise<void> {
+    const runtimeApprovalToken = readOptionalString(input["runtimeApprovalToken"]);
+    const decision = readApprovalDecision(input["decision"]);
+    const answers = input["answers"];
+    if (!runtimeApprovalToken || !decision || (answers !== undefined && !isRecord(answers))) {
+      throw new AdapterProtocolError("Malformed AgentField approval resolution payload.", {
+        reasonCode: "agentfield_approval_request_invalid"
+      });
+    }
+
+    const stored = this.requireSession(session);
+    if (stored.state.terminalStatus) {
+      throw new AdapterProtocolError("Runtime approval resolution is only supported for active AgentField executions.", {
+        reasonCode: "runtime_input_not_active"
+      });
+    }
+    const runId = readOptionalString(input["switchyardRunId"]) ?? requiredString(session["runId"], "runId");
+    const bridgeCommandId = readOptionalString(input["bridgeCommandId"]);
+    const idempotencyKey = readOptionalString(input["idempotencyKey"]);
+    const message = readOptionalString(input["message"]);
+    const body = {
+      switchyardRunId: runId,
+      ...(bridgeCommandId ? { bridgeCommandId } : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+      decision,
+      ...(message ? { message } : {}),
+      answers: answers ?? {}
+    };
+
+    let response: AgentFieldRequestResult;
+    try {
+      response = await this.request(
+        `api/v1/executions/${encodeURIComponent(stored.state.executionId)}/approvals/${encodeURIComponent(runtimeApprovalToken)}/resolve`,
+        {
+          method: "POST",
+          body,
+          tooLargeReasonCode: "agentfield_approval_response_too_large",
+          invalidJsonReasonCode: "agentfield_invalid_approval_response",
+          requestFailedReasonCode: "agentfield_approval_resolution_failed"
+        },
+        stored.transcript
+      );
+    } catch (error) {
+      throw bridgeProtocolError(error, {
+        failedReasonCode: "agentfield_approval_resolution_failed",
+        invalidReasonCode: "agentfield_invalid_approval_response",
+        tooLargeReasonCode: "agentfield_approval_response_too_large"
+      });
+    }
+
+    if (!response.ok) {
+      throw new AdapterProtocolError("AgentField approval resolution endpoint failed.", {
+        reasonCode: "agentfield_approval_resolution_failed"
+      });
+    }
+    if (!isAcceptedResponse(response.body)) {
+      throw new AdapterProtocolError("AgentField approval resolution response was malformed.", {
+        reasonCode: "agentfield_invalid_approval_response"
+      });
+    }
+    this.log("info", "agentfield.bridge.approval.resolved", {
+      runId,
+      executionId: stored.state.executionId,
+      bridgeCommandId,
+      decision,
+      status: response.status
+    });
   }
 
   private parseHeaderMetadata(metadata: Record<string, unknown>): {
@@ -601,6 +788,7 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
       extraHeaders?: Record<string, string>;
       tooLargeReasonCode: string;
       invalidJsonReasonCode: string;
+      requestFailedReasonCode?: string;
     },
     transcript?: TranscriptRecorder
   ): Promise<AgentFieldRequestResult> {
@@ -632,7 +820,7 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
         maxBytes: this.maxResponseBytes,
         tooLargeReasonCode: options.tooLargeReasonCode,
         invalidJsonReasonCode: options.invalidJsonReasonCode,
-        requestFailedReasonCode: "agentfield_request_failed",
+        requestFailedReasonCode: options.requestFailedReasonCode ?? "agentfield_request_failed",
         fetchImpl: this.fetchImpl
       });
       transcript?.appendHttpRequest({
@@ -689,6 +877,112 @@ function requiredString(value: unknown, name: string): string {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function runtimeInputText(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new AdapterProtocolError("Runtime input text must be non-empty.", {
+      reasonCode: "runtime_input_empty"
+    });
+  }
+  if (Buffer.byteLength(value, "utf8") > MAX_RUNTIME_INPUT_BYTES) {
+    throw new AdapterProtocolError("Runtime input text exceeds 64 KiB.", {
+      reasonCode: "runtime_input_too_large"
+    });
+  }
+  return value;
+}
+
+function readApprovalDecision(value: unknown): "approved" | "rejected" | undefined {
+  return value === "approved" || value === "rejected" ? value : undefined;
+}
+
+function rejectConfiguredOverrideKeys(input: Record<string, unknown>, message: string): void {
+  for (const key of BRIDGE_OVERRIDE_KEYS) {
+    if (input[key] !== undefined) {
+      throw new AdapterProtocolError(message, {
+        reasonCode: "agentfield_bridge_config_missing"
+      });
+    }
+  }
+}
+
+function isAcceptedResponse(body: unknown): boolean {
+  return isRecord(body) && body["accepted"] === true;
+}
+
+function bridgeReadiness(discoveryBody: Record<string, unknown> | undefined): Record<string, unknown> {
+  const switchyardBridge = isRecord(discoveryBody?.["switchyard_bridge"])
+    ? discoveryBody["switchyard_bridge"]
+    : undefined;
+  const input = switchyardBridge?.["input"] === true;
+  const approvalRequest = switchyardBridge?.["approval_request"] === true;
+  const approvalResolution = switchyardBridge?.["approval_resolution"] === true;
+  const bridgeCapable = input && approvalRequest && approvalResolution;
+  return {
+    bridgeCapable,
+    canBridge: bridgeCapable,
+    reasonCode: bridgeCapable ? null : "agentfield_bridge_capability_missing",
+    capabilities: {
+      input,
+      approvalRequest,
+      approvalResolution
+    }
+  };
+}
+
+function parseApprovalRequest(body: Record<string, unknown>): AgentFieldApprovalRequest | undefined {
+  const approval = isRecord(body["approval"]) ? body["approval"] : undefined;
+  const runtimeApprovalToken = readOptionalString(approval?.["token"]);
+  const approvalType = readOptionalString(approval?.["approval_type"]);
+  const expiresAt = readOptionalString(approval?.["expires_at"]);
+  if (!runtimeApprovalToken || !approvalType || !expiresAt || !Number.isFinite(Date.parse(expiresAt))) {
+    return undefined;
+  }
+  const payload: AgentFieldApprovalRequest = {
+    runtimeApprovalToken,
+    approvalType,
+    expiresAt
+  };
+  const message = readOptionalString(approval?.["message"]);
+  if (message) {
+    payload["message"] = message;
+  }
+  if (isRecord(approval?.["answers"])) {
+    payload["answers"] = approval["answers"];
+  }
+  return payload;
+}
+
+function bridgeProtocolError(
+  error: unknown,
+  reasonCodes: { failedReasonCode: string; invalidReasonCode: string; tooLargeReasonCode: string }
+): AdapterProtocolError {
+  if (error instanceof AdapterProtocolError) {
+    return error;
+  }
+  if (error instanceof AgentFieldResponseTooLargeError) {
+    return new AdapterProtocolError("AgentField bridge response exceeded configured bounds.", {
+      reasonCode: reasonCodes.tooLargeReasonCode
+    });
+  }
+  if (error instanceof AgentFieldInvalidJsonError) {
+    return new AdapterProtocolError("AgentField bridge response was invalid JSON.", {
+      reasonCode: reasonCodes.invalidReasonCode
+    });
+  }
+  if (error instanceof AgentFieldRequestError) {
+    return new AdapterProtocolError(sanitize(undefined, error.message), {
+      reasonCode: reasonCodes.failedReasonCode
+    });
+  }
+  return new AdapterProtocolError(error instanceof Error ? error.message : String(error), {
+    reasonCode: reasonCodes.failedReasonCode
+  });
 }
 
 function parseBaseUrl(value: string | undefined): { url?: URL; state: "missing" | "invalid" | "configured" } {

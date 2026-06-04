@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AdapterProtocolError } from "@switchyard/core";
-import { runtimeModeSchema } from "@switchyard/contracts";
+import { runtimeModeSchema, type SwitchyardEvent } from "@switchyard/contracts";
 import { AgentFieldAsyncRestAdapter } from "../src/index.js";
 import { startFakeAgentFieldServer } from "@switchyard/testkit";
 
@@ -9,14 +9,15 @@ describe("AgentFieldAsyncRestAdapter", () => {
     const adapter = new AgentFieldAsyncRestAdapter();
     expect(adapter.manifest.runtimeModeSlug).toBe("agentfield.async_rest");
     expect(adapter.manifest.capabilities).toContain("auth.api_key");
+    expect(adapter.manifest.capabilities).toContain("run.input");
+    expect(adapter.manifest.capabilities).toContain("approval.bridge");
     expect(adapter.manifest.capabilities).not.toContain("run.cancel");
-    expect(adapter.manifest.capabilities).not.toContain("run.input");
     expect(adapter.manifest.placement.hosted).toMatchObject({
-      support: "future",
-      reason: expect.stringContaining("not shipped")
+      support: "conditional",
+      reason: expect.stringContaining("operator opt-in")
     });
     expect(adapter.manifest.limitations).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "no_post_start_input" })])
+      expect.arrayContaining([expect.objectContaining({ code: "configured_wrapper_only" })])
     );
 
     const mode = runtimeModeSchema.parse({
@@ -67,7 +68,7 @@ describe("AgentFieldAsyncRestAdapter", () => {
 
   it("checks health and discovery without leaking api key", async () => {
     const server = await startFakeAgentFieldServer({
-      scenario: "happy",
+      scenario: "bridge_happy",
       expectedApiKey: "af-secret-key"
     });
     try {
@@ -78,12 +79,36 @@ describe("AgentFieldAsyncRestAdapter", () => {
       }).check();
 
       expect(checked.ok).toBe(true);
+      expect((checked.details?.["bridge"] as Record<string, unknown>)["bridgeCapable"]).toBe(true);
       const detailsText = JSON.stringify(checked.details ?? {});
       expect(detailsText).not.toContain("af-secret-key");
       expect(server.stats.executeAsyncCalls).toBe(0);
       expect(server.stats.healthCalls).toBe(1);
     } finally {
       await server.close();
+    }
+  });
+
+  it("fails bridge readiness closed when discovery does not advertise bridge capabilities", async () => {
+    const server = await startFakeAgentFieldServer({ scenario: "bridge_capability_missing" });
+    const unavailable = await startFakeAgentFieldServer({ scenario: "discovery_unavailable" });
+    try {
+      for (const handle of [server, unavailable]) {
+        const checked = await new AgentFieldAsyncRestAdapter({
+          baseUrl: handle.baseUrl,
+          apiKey: "key-1",
+          target: "research-agent.deep_analysis"
+        }).check();
+        expect(checked.ok).toBe(true);
+        expect((checked.details?.["availability"] as Record<string, unknown>)["canRun"]).toBe(true);
+        expect(checked.details?.["bridge"]).toMatchObject({
+          bridgeCapable: false,
+          reasonCode: "agentfield_bridge_capability_missing"
+        });
+      }
+    } finally {
+      await server.close();
+      await unavailable.close();
     }
   });
 
@@ -169,7 +194,70 @@ describe("AgentFieldAsyncRestAdapter", () => {
     }
   });
 
-  it("reports unsupported input and unsupported active cancel", async () => {
+  it("sends bridge input and approval resolution to configured execution endpoints", async () => {
+    const server = await startFakeAgentFieldServer({ scenario: "bridge_happy" });
+    try {
+      const adapter = new AgentFieldAsyncRestAdapter({
+        baseUrl: server.baseUrl,
+        apiKey: "key-1",
+        target: "research-agent.deep_analysis",
+        pollIntervalMs: 5
+      });
+      const start = await adapter.start({
+        runId: "run_bridge_send",
+        runtime: "agentfield",
+        runtimeMode: "agentfield.async_rest",
+        provider: "agentfield",
+        model: "agentfield-default",
+        cwd: "/repo",
+        task: "pending",
+        metadata: {}
+      });
+
+      await adapter.send({ ...start, runId: "run_bridge_send" }, {
+        type: "input",
+        text: "continue",
+        switchyardRunId: "run_bridge_send",
+        bridgeCommandId: "cmd_input_1",
+        idempotencyKey: "idem_input_1"
+      });
+      expect(server.stats.inputCalls).toBe(1);
+      expect(server.stats.lastInput).toMatchObject({
+        switchyardRunId: "run_bridge_send",
+        bridgeCommandId: "cmd_input_1",
+        idempotencyKey: "idem_input_1",
+        type: "input",
+        input: {
+          text: "continue"
+        }
+      });
+
+      await adapter.send({ ...start, runId: "run_bridge_send" }, {
+        type: "approval_resolution",
+        switchyardRunId: "run_bridge_send",
+        bridgeCommandId: "cmd_approval_1",
+        idempotencyKey: "idem_approval_1",
+        runtimeApprovalToken: "af_approval_1",
+        decision: "rejected",
+        message: "rejected by hosted-api",
+        answers: { confirmed: false }
+      });
+      expect(server.stats.approvalResolutionCalls).toBe(1);
+      expect(server.stats.lastApprovalToken).toBe("af_approval_1");
+      expect(server.stats.lastApprovalResolution).toMatchObject({
+        switchyardRunId: "run_bridge_send",
+        bridgeCommandId: "cmd_approval_1",
+        idempotencyKey: "idem_approval_1",
+        decision: "rejected",
+        message: "rejected by hosted-api",
+        answers: { confirmed: false }
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects invalid bridge input and approval resolution payloads before upstream dispatch", async () => {
     const server = await startFakeAgentFieldServer({ scenario: "pending_forever" });
     try {
       const adapter = new AgentFieldAsyncRestAdapter({
@@ -189,10 +277,30 @@ describe("AgentFieldAsyncRestAdapter", () => {
         metadata: {}
       });
 
-      await expect(adapter.send({ ...start, runId: "run_pending" }, { text: "continue" })).rejects.toMatchObject({
+      await expect(adapter.send({ ...start, runId: "run_pending" }, { type: "input", text: " " })).rejects.toMatchObject({
         code: "adapter_protocol_failed",
-        reasonCode: "agentfield_input_unsupported"
+        reasonCode: "runtime_input_empty"
       } satisfies Partial<AdapterProtocolError>);
+      await expect(adapter.send({ ...start, runId: "run_pending" }, {
+        type: "input",
+        text: "x".repeat(64 * 1024 + 1)
+      })).rejects.toMatchObject({
+        code: "adapter_protocol_failed",
+        reasonCode: "runtime_input_too_large"
+      } satisfies Partial<AdapterProtocolError>);
+      for (const payload of [
+        { type: "approval_resolution", decision: "approved", answers: {} },
+        { type: "approval_resolution", runtimeApprovalToken: "af_approval_1", answers: {} },
+        { type: "approval_resolution", runtimeApprovalToken: "af_approval_1", decision: "maybe", answers: {} },
+        { type: "approval_resolution", runtimeApprovalToken: "af_approval_1", decision: "approved", answers: "yes" }
+      ]) {
+        await expect(adapter.send({ ...start, runId: "run_pending" }, payload)).rejects.toMatchObject({
+          code: "adapter_protocol_failed",
+          reasonCode: "agentfield_approval_request_invalid"
+        } satisfies Partial<AdapterProtocolError>);
+      }
+      expect(server.stats.inputCalls).toBe(0);
+      expect(server.stats.approvalResolutionCalls).toBe(0);
 
       await expect(adapter.cancel({ ...start, runId: "run_pending" })).rejects.toMatchObject({
         code: "adapter_protocol_failed",
@@ -200,6 +308,98 @@ describe("AgentFieldAsyncRestAdapter", () => {
       } satisfies Partial<AdapterProtocolError>);
     } finally {
       await server.close();
+    }
+  });
+
+  it("maps waiting_for_input and waiting_for_approval polling states", async () => {
+    const inputServer = await startFakeAgentFieldServer({ scenario: "waiting_for_input" });
+    const approvalServer = await startFakeAgentFieldServer({ scenario: "waiting_for_approval_duplicate" });
+    const malformedServer = await startFakeAgentFieldServer({ scenario: "waiting_for_approval_malformed" });
+    try {
+      const inputAdapter = adapterFor(inputServer.baseUrl);
+      const inputStart = await startRun(inputAdapter, "run_waiting_input", "waiting input");
+      const inputEvents = await collectAgentFieldEvents(inputAdapter, { ...inputStart, runId: "run_waiting_input" }, (event) =>
+        event.type === "runtime.status" && event.payload["status"] === "waiting_for_input"
+      );
+      expect(inputEvents.at(-1)).toMatchObject({
+        type: "runtime.status",
+        payload: {
+          status: "waiting_for_input"
+        }
+      });
+
+      const approvalAdapter = adapterFor(approvalServer.baseUrl);
+      const approvalStart = await startRun(approvalAdapter, "run_waiting_approval", "waiting approval");
+      const approvalEvents = await collectAgentFieldEvents(approvalAdapter, { ...approvalStart, runId: "run_waiting_approval" }, (event) =>
+        event.type === "approval.requested"
+      );
+      expect(approvalEvents.filter((event) => event.type === "approval.requested")).toHaveLength(1);
+      expect(approvalEvents.at(-1)).toMatchObject({
+        type: "approval.requested",
+        payload: {
+          runtimeApprovalToken: "af_approval_1",
+          approvalType: "before_external_message",
+          expiresAt: "2026-06-04T20:00:00.000Z"
+        }
+      });
+
+      const malformedAdapter = adapterFor(malformedServer.baseUrl);
+      const malformedStart = await startRun(malformedAdapter, "run_malformed_approval", "malformed approval");
+      const malformedEvents = await collectAgentFieldEvents(malformedAdapter, { ...malformedStart, runId: "run_malformed_approval" }, (event) =>
+        event.type === "run.failed"
+      );
+      expect(malformedEvents.at(-1)).toMatchObject({
+        type: "run.failed",
+        payload: {
+          error: "agentfield_approval_request_invalid"
+        }
+      });
+    } finally {
+      await inputServer.close();
+      await approvalServer.close();
+      await malformedServer.close();
+    }
+  });
+
+  it("maps bridge upstream failures and malformed responses to R25 reason codes", async () => {
+    for (const scenario of [
+      { scenario: "bridge_input_http_500" as const, payload: { type: "input", text: "continue" }, reasonCode: "agentfield_input_failed" },
+      { scenario: "bridge_input_invalid_json" as const, payload: { type: "input", text: "continue" }, reasonCode: "agentfield_invalid_input_response" },
+      { scenario: "bridge_input_malformed_response" as const, payload: { type: "input", text: "continue" }, reasonCode: "agentfield_invalid_input_response" },
+      { scenario: "bridge_input_oversized_response" as const, payload: { type: "input", text: "continue" }, reasonCode: "agentfield_input_response_too_large", maxResponseBytes: 64 },
+      {
+        scenario: "bridge_approval_http_500" as const,
+        payload: { type: "approval_resolution", runtimeApprovalToken: "af_approval_1", decision: "approved", answers: {} },
+        reasonCode: "agentfield_approval_resolution_failed"
+      },
+      {
+        scenario: "bridge_approval_invalid_json" as const,
+        payload: { type: "approval_resolution", runtimeApprovalToken: "af_approval_1", decision: "approved", answers: {} },
+        reasonCode: "agentfield_invalid_approval_response"
+      },
+      {
+        scenario: "bridge_approval_malformed_response" as const,
+        payload: { type: "approval_resolution", runtimeApprovalToken: "af_approval_1", decision: "approved", answers: {} },
+        reasonCode: "agentfield_invalid_approval_response"
+      },
+      {
+        scenario: "bridge_approval_oversized_response" as const,
+        payload: { type: "approval_resolution", runtimeApprovalToken: "af_approval_1", decision: "approved", answers: {} },
+        reasonCode: "agentfield_approval_response_too_large",
+        maxResponseBytes: 64
+      }
+    ]) {
+      const server = await startFakeAgentFieldServer({ scenario: scenario.scenario });
+      try {
+        const adapter = adapterFor(server.baseUrl, scenario.maxResponseBytes);
+        const start = await startRun(adapter, `run_${scenario.scenario}`, scenario.scenario);
+        await expect(adapter.send({ ...start, runId: `run_${scenario.scenario}` }, scenario.payload)).rejects.toMatchObject({
+          code: "adapter_protocol_failed",
+          reasonCode: scenario.reasonCode
+        } satisfies Partial<AdapterProtocolError>);
+      } finally {
+        await server.close();
+      }
     }
   });
 
@@ -319,9 +519,48 @@ describe("AgentFieldAsyncRestAdapter", () => {
       const artifacts = await adapter.artifacts({ ...start, runId: "run_redact" });
       const artifactText = JSON.stringify(artifacts);
       expect(artifactText).not.toContain(apiKey);
+      expect(artifactText).not.toContain("Authorization: Bearer");
       expect(artifactText).toContain("[REDACTED]");
     } finally {
       await server.close();
     }
   });
 });
+
+function adapterFor(baseUrl: string, maxResponseBytes?: number): AgentFieldAsyncRestAdapter {
+  return new AgentFieldAsyncRestAdapter({
+    baseUrl,
+    apiKey: "key-1",
+    target: "research-agent.deep_analysis",
+    pollIntervalMs: 5,
+    ...(maxResponseBytes ? { maxResponseBytes } : {})
+  });
+}
+
+async function startRun(adapter: AgentFieldAsyncRestAdapter, runId: string, task: string) {
+  return adapter.start({
+    runId,
+    runtime: "agentfield",
+    runtimeMode: "agentfield.async_rest",
+    provider: "agentfield",
+    model: "agentfield-default",
+    cwd: "/repo",
+    task,
+    metadata: {}
+  });
+}
+
+async function collectAgentFieldEvents(
+  adapter: AgentFieldAsyncRestAdapter,
+  session: Record<string, unknown>,
+  stop: (event: SwitchyardEvent) => boolean
+): Promise<SwitchyardEvent[]> {
+  const events: SwitchyardEvent[] = [];
+  for await (const event of adapter.events(session)) {
+    events.push(event);
+    if (stop(event)) {
+      break;
+    }
+  }
+  return events;
+}
