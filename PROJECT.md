@@ -339,3 +339,21 @@ Usable hosted runtime bridges require shared Postgres-backed hosted runtime brid
 
 ### Deferred Concerns
 - None.
+
+## Phase 23: R24 Hosted Real Debate
+**Date:** 2026-06-04T18:28:32+05:30
+**Spec:** docs/superpowers/specs/2026-06-02-phase-23-r24-hosted-real-debate.md
+**Plan:** docs/superpowers/plans/2026-06-02-phase-23-r24-hosted-real-debate.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-23-report.md
+**Branch:** agent/phase-23-r24-hosted-real-debate (audit GREEN; branch retained locally)
+**PR:** not created - native TUI/subagent workflow requested; branch left unmerged per user instruction.
+
+### What changed
+R24 is now shipped on the phase branch. Switchyard adds hosted/server-safe debate through the existing `/debates` route family only: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`. Fake deterministic hosted debate remains the default no-spend path, while opt-in local/hosted debate participant runs are limited to `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+
+The release adds durable Postgres debate/message/evidence/job state, child-run idempotency and stale-claim relinking, evidence ownership preauthorization, hosted auth/ownership/quota/audit admission, debate-scoped SSE filtering, worker-owned debate job processing, worker/readiness/preflight/canary gates, and an internal bounded judge runner. The deterministic judge remains default; live model judging is available only inside debate creation with explicit request opt-in and spend confirmation. The audit fixed brittle test/doc truth gates before green: the current-product fake-only phrase was restored, hosted bridge tests no longer depend on wall-clock date, stale hosted-tool contract assertions now match R22/R24 truth, and the endpoint-inventory drift test timeout was stabilized without loosening route equality.
+
+The shipped boundary remains explicit: R24 does not ship dashboard/TUI, public arbitrary execution routes, public model judge routes, hosted `codex.interactive`, Codex hosted input/approval bridges, AgentField or Generic HTTP hosted debate bridges, browser automation, hosted `repo` execution, generic process/PTY adapters, managed SaaS/public signup, billing, OAuth/OIDC/SAML/SSO/SCIM, or live provider spend in required tests/default smoke/default preflight/default canary.
+
+### Deferred Concerns
+- None.
