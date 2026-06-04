@@ -27,6 +27,12 @@ interface StoredSession {
   transcript: TranscriptRecorder;
 }
 
+type GenericHttpRuntimeStatus = "running" | "waiting_for_input" | "resumed" | "completed" | "failed" | "cancelled";
+type BridgeSendKind = "input" | "approval_resolution";
+
+const MAX_RUNTIME_INPUT_BYTES = 64 * 1024;
+const BRIDGE_CAPABILITIES = ["input", "approval_request", "approval_resolution"] as const;
+
 export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
   readonly id = "generic_http";
   readonly manifest: RuntimeAdapterManifest = {
@@ -40,28 +46,29 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
     kind: "async_rest",
     capabilities: [
       "run.start",
-      "run.cancel",
+      "run.input",
       "run.timeout",
+      "approval.bridge",
       "event.normalized",
       "event.streaming",
       "artifact.transcript",
-      "auth.none",
       "auth.api_key"
     ],
     limitations: [
-      { code: "no_post_start_input", message: "generic_http.async_rest does not support post-start input in R4." },
-      { code: "configured_endpoint_only", message: "The HTTP wrapper base URL is configured by daemon environment, not per run." },
-      { code: "no_webhooks", message: "Webhook callbacks are not shipped for Generic HTTP in R4." }
+      { code: "configured_wrapper_only", message: "Generic HTTP wrapper endpoints are operator configured and cannot be overridden per run." },
+      { code: "hosted_bridge_readiness_required", message: "Hosted Generic HTTP bridge paths require wrapper_config and wrapper_bridge_capability readiness checks." },
+      { code: "no_hosted_cancel_bridge", message: "Hosted active cancellation bridge is not shipped." },
+      { code: "production_forbidden", message: "Hosted generic_http.async_rest production execution is forbidden unless explicitly activated by provider policy." }
     ],
     placement: {
       local: { support: "conditional", reason: "Requires SWITCHYARD_GENERIC_HTTP_BASE_URL to point at a reachable HTTP wrapper." },
-      hosted: { support: "future", reason: "Hosted execution is not shipped in R4." },
-      connectedLocalNode: { support: "future", reason: "Hybrid node execution is not shipped in R4." }
+      hosted: { support: "conditional", reason: "Worker execution requires explicit operator opt-in and provider activation." },
+      connectedLocalNode: { support: "future", reason: "Connected node support remains future scope." }
     },
     docsPath: "docs/development/adapters/GENERIC_HTTP.md",
     check: {
       strategy: "http_health",
-      required: ["base_url_configured", "http_health"],
+      required: ["wrapper_config", "wrapper_bridge_capability"],
       optional: ["auth_token_present"]
     }
   };
@@ -128,6 +135,8 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
           }
         };
       }
+      const capabilities = readCapabilities(response.body);
+      const bridgeReady = hasBridgeCapabilities(capabilities);
       return {
         ok: true,
         details: {
@@ -138,6 +147,13 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
             auth: this.authToken ? "configured" : "not_required",
             reasonCode: null,
             message: null
+          },
+          bridge: {
+            state: bridgeReady ? "ready" : "unavailable",
+            canBridge: bridgeReady,
+            reasonCode: bridgeReady ? null : "generic_http_bridge_capability_missing",
+            message: bridgeReady ? null : "Generic HTTP health does not advertise input, approval_request, and approval_resolution.",
+            capabilities
           }
         }
       };
@@ -248,10 +264,16 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
     };
   }
 
-  async send(_session: Record<string, unknown>, _input: Record<string, unknown>): Promise<void> {
-    throw new AdapterProtocolError("Generic HTTP async REST does not support input after start", {
-      reasonCode: "generic_http_input_unsupported"
-    });
+  async send(session: Record<string, unknown>, input: Record<string, unknown>): Promise<void> {
+    const stored = this.requireSession(session);
+    const type = input["type"] === "approval_resolution" ? "approval_resolution" : "input";
+
+    if (type === "approval_resolution") {
+      await this.sendApprovalResolution(stored, input);
+      return;
+    }
+
+    await this.sendInput(stored, input);
   }
 
   async cancel(session: Record<string, unknown>): Promise<void> {
@@ -332,6 +354,13 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
         }
 
         const mapped = mapWrapperEvent(runId, sequence++, wrapperEvent, sourceId);
+        if (mapped.type === "approval.requested") {
+          this.log("info", "generic_http.bridge.approval.requested", {
+            runId,
+            sourceEventId: sourceId,
+            approvalType: mapped.payload["approvalType"]
+          });
+        }
         yield mapped;
         if (mapped.type === "run.completed" || mapped.type === "run.failed" || mapped.type === "run.cancelled") {
           terminalEmitted = true;
@@ -357,7 +386,7 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
       }
 
       if (wrapperEvents.length === 0 || (response.body["terminal"] === true && !terminalInBatch)) {
-        let status: "running" | "completed" | "failed" | "cancelled";
+        let status: GenericHttpRuntimeStatus;
         try {
           status = await this.fetchStatus(stored);
         } catch (error) {
@@ -378,6 +407,16 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
           terminalEmitted = true;
           stored.state.terminalStatus = status;
           return;
+        }
+        if (status === "waiting_for_input" || status === "resumed") {
+          yield {
+            id: `event_${crypto.randomUUID()}`,
+            type: "runtime.status",
+            runId,
+            sequence: sequence++,
+            payload: { status },
+            createdAt: new Date().toISOString()
+          };
         }
         if (response.body["terminal"] === true) {
           yield failureEvent(runId, sequence++, "generic_http_invalid_events_response", this.authToken);
@@ -454,7 +493,106 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
     return stored;
   }
 
-  private async fetchStatus(stored: StoredSession): Promise<"running" | "completed" | "failed" | "cancelled"> {
+  private async sendInput(stored: StoredSession, input: Record<string, unknown>): Promise<void> {
+    const text = validateInputText(input["text"]);
+    const switchyardRunId = requiredString(input["switchyardRunId"] ?? stored.state.runId, "switchyardRunId");
+    const bridgeCommandId = typeof input["bridgeCommandId"] === "string" && input["bridgeCommandId"].length > 0
+      ? input["bridgeCommandId"]
+      : `generic_http_local_input_${crypto.randomUUID()}`;
+    const idempotencyKey = typeof input["idempotencyKey"] === "string" && input["idempotencyKey"].length > 0
+      ? input["idempotencyKey"]
+      : `generic_http_local_idempotency_${crypto.randomUUID()}`;
+
+    let response: GenericHttpRequestResult;
+    try {
+      response = await this.request(`/v1/runs/${stored.state.externalRunId}/input`, {
+        method: "POST",
+        body: {
+          switchyardRunId,
+          bridgeCommandId,
+          idempotencyKey,
+          type: "input",
+          text
+        },
+        tooLargeReasonCode: "generic_http_input_response_too_large",
+        invalidJsonReasonCode: "generic_http_invalid_input_response"
+      }, stored.transcript);
+    } catch (error) {
+      throw toBridgeProtocolError("input", this.authToken, error);
+    }
+
+    if (!response.ok) {
+      throw new AdapterProtocolError("Generic HTTP input endpoint failed.", {
+        reasonCode: "generic_http_input_failed"
+      });
+    }
+    if (!isRecord(response.body) || response.body["accepted"] !== true) {
+      throw new AdapterProtocolError("Generic HTTP input response was invalid.", {
+        reasonCode: "generic_http_invalid_input_response"
+      });
+    }
+    this.log("info", "generic_http.bridge.input", {
+      runId: stored.state.runId,
+      externalRunId: stored.state.externalRunId,
+      bridgeCommandId,
+      status: response.status
+    });
+  }
+
+  private async sendApprovalResolution(stored: StoredSession, input: Record<string, unknown>): Promise<void> {
+    const switchyardRunId = requiredString(input["switchyardRunId"] ?? stored.state.runId, "switchyardRunId");
+    const bridgeCommandId = requiredString(input["bridgeCommandId"], "bridgeCommandId");
+    const idempotencyKey = requiredString(input["idempotencyKey"], "idempotencyKey");
+    const runtimeApprovalToken = validateApprovalToken(input["runtimeApprovalToken"]);
+    const decision = validateApprovalDecision(input["decision"]);
+    const message = typeof input["message"] === "string" && input["message"].trim().length > 0
+      ? input["message"].trim()
+      : `${decision} by switchyard`;
+    const answers = validateAnswers(input["answers"]);
+
+    let response: GenericHttpRequestResult;
+    try {
+      response = await this.request(
+        `/v1/runs/${stored.state.externalRunId}/approvals/${encodeURIComponent(runtimeApprovalToken)}/resolve`,
+        {
+          method: "POST",
+          body: {
+            switchyardRunId,
+            bridgeCommandId,
+            idempotencyKey,
+            decision,
+            message,
+            answers
+          },
+          tooLargeReasonCode: "generic_http_approval_response_too_large",
+          invalidJsonReasonCode: "generic_http_invalid_approval_response"
+        },
+        stored.transcript
+      );
+    } catch (error) {
+      throw toBridgeProtocolError("approval_resolution", this.authToken, error);
+    }
+
+    if (!response.ok) {
+      throw new AdapterProtocolError("Generic HTTP approval resolution endpoint failed.", {
+        reasonCode: "generic_http_approval_resolution_failed"
+      });
+    }
+    if (!isRecord(response.body) || response.body["accepted"] !== true) {
+      throw new AdapterProtocolError("Generic HTTP approval response was invalid.", {
+        reasonCode: "generic_http_invalid_approval_response"
+      });
+    }
+    this.log("info", "generic_http.bridge.approval.resolved", {
+      runId: stored.state.runId,
+      externalRunId: stored.state.externalRunId,
+      bridgeCommandId,
+      decision,
+      status: response.status
+    });
+  }
+
+  private async fetchStatus(stored: StoredSession): Promise<GenericHttpRuntimeStatus> {
     const response = await this.request(`/v1/runs/${stored.state.externalRunId}`, {
       method: "GET",
       tooLargeReasonCode: "generic_http_status_response_too_large",
@@ -464,7 +602,7 @@ export class GenericHttpAsyncRestAdapter implements RuntimeAdapter {
       throw new Error("generic_http_invalid_status_response");
     }
     const status = response.body["status"];
-    if (status === "running" || status === "completed" || status === "failed" || status === "cancelled") {
+    if (isGenericHttpRuntimeStatus(status)) {
       return status;
     }
     throw new Error("generic_http_invalid_status_response");
@@ -542,6 +680,68 @@ function requiredString(value: unknown, name: string): string {
   return value;
 }
 
+function bridgeProtocolError(message: string, reasonCode: string): AdapterProtocolError {
+  return new AdapterProtocolError(message, { reasonCode });
+}
+
+function requiredProtocolString(value: unknown, name: string, reasonCode: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw bridgeProtocolError(`${name} is required`, reasonCode);
+  }
+  return value;
+}
+
+function validateInputText(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw bridgeProtocolError("Runtime input text must be non-empty.", "runtime_input_empty");
+  }
+  if (Buffer.byteLength(value, "utf8") > MAX_RUNTIME_INPUT_BYTES) {
+    throw bridgeProtocolError("Runtime input text is too large.", "runtime_input_too_large");
+  }
+  return value;
+}
+
+function validateApprovalToken(value: unknown): string {
+  return requiredProtocolString(value, "runtimeApprovalToken", "generic_http_invalid_approval_response");
+}
+
+function validateApprovalDecision(value: unknown): "approved" | "rejected" {
+  if (value !== "approved" && value !== "rejected") {
+    throw bridgeProtocolError("Generic HTTP approval decision is invalid.", "generic_http_invalid_approval_response");
+  }
+  return value;
+}
+
+function validateAnswers(value: unknown): Record<string, unknown> {
+  if (value === undefined) {
+    return {};
+  }
+  if (!isRecord(value)) {
+    throw bridgeProtocolError("Generic HTTP approval answers must be an object.", "generic_http_invalid_approval_response");
+  }
+  return value;
+}
+
+function readCapabilities(body: unknown): string[] {
+  if (!isRecord(body) || !Array.isArray(body["capabilities"])) {
+    return [];
+  }
+  return body["capabilities"].filter((capability): capability is string => typeof capability === "string");
+}
+
+function hasBridgeCapabilities(capabilities: string[]): boolean {
+  return BRIDGE_CAPABILITIES.every((capability) => capabilities.includes(capability));
+}
+
+function isGenericHttpRuntimeStatus(value: unknown): value is GenericHttpRuntimeStatus {
+  return value === "running"
+    || value === "waiting_for_input"
+    || value === "resumed"
+    || value === "completed"
+    || value === "failed"
+    || value === "cancelled";
+}
+
 function parseBaseUrl(value: string | undefined): { url?: URL; state: "missing" | "invalid" | "configured" } {
   if (!value || value.trim().length === 0) {
     return { state: "missing" };
@@ -573,6 +773,30 @@ function mapWrapperEvent(
     payload["text"] = typeof wrapperEvent["text"] === "string" ? wrapperEvent["text"] : "";
   } else if (type === "runtime.status") {
     payload["status"] = typeof wrapperEvent["status"] === "string" ? wrapperEvent["status"] : "running";
+  } else if (type === "approval.requested") {
+    const runtimeApprovalToken = typeof wrapperEvent["runtimeApprovalToken"] === "string" && wrapperEvent["runtimeApprovalToken"].length > 0
+      ? wrapperEvent["runtimeApprovalToken"]
+      : undefined;
+    const approvalType = typeof wrapperEvent["approvalType"] === "string" && wrapperEvent["approvalType"].length > 0
+      ? wrapperEvent["approvalType"]
+      : undefined;
+    const expiresAt = typeof wrapperEvent["expiresAt"] === "string" && wrapperEvent["expiresAt"].length > 0
+      ? wrapperEvent["expiresAt"]
+      : undefined;
+    const answers = wrapperEvent["answers"];
+    if (!runtimeApprovalToken || !approvalType || !expiresAt || (answers !== undefined && !isRecord(answers))) {
+      type = "run.failed";
+      payload["status"] = "failed";
+      payload["error"] = "generic_http_approval_request_invalid";
+    } else {
+      payload["runtimeApprovalToken"] = runtimeApprovalToken;
+      payload["approvalType"] = approvalType;
+      payload["message"] = typeof wrapperEvent["message"] === "string" ? wrapperEvent["message"] : "";
+      payload["expiresAt"] = expiresAt;
+      if (isRecord(answers)) {
+        payload["answers"] = answers;
+      }
+    }
   } else if (type === "run.failed") {
     payload["status"] = "failed";
     if (typeof wrapperEvent["error"] === "string") {
@@ -631,7 +855,10 @@ function eventDedupeKey(event: Record<string, unknown>): string {
     type: event["type"],
     status: event["status"],
     text: event["text"],
-    error: event["error"]
+    error: event["error"],
+    runtimeApprovalToken: event["runtimeApprovalToken"],
+    approvalType: event["approvalType"],
+    expiresAt: event["expiresAt"]
   });
 }
 
@@ -663,6 +890,25 @@ function toCancelProtocolError(token: string | undefined, error: unknown): Adapt
   }
   return new AdapterProtocolError(sanitize(token, error instanceof Error ? error.message : String(error)), {
     reasonCode: "generic_http_cancel_failed"
+  });
+}
+
+function toBridgeProtocolError(kind: BridgeSendKind, token: string | undefined, error: unknown): AdapterProtocolError {
+  if (error instanceof AdapterProtocolError) {
+    return error;
+  }
+  if (error instanceof GenericHttpResponseTooLargeError) {
+    return new AdapterProtocolError("Generic HTTP bridge response was too large.", {
+      reasonCode: kind === "input" ? "generic_http_input_response_too_large" : "generic_http_approval_response_too_large"
+    });
+  }
+  if (error instanceof GenericHttpInvalidJsonError) {
+    return new AdapterProtocolError("Generic HTTP bridge response was invalid.", {
+      reasonCode: kind === "input" ? "generic_http_invalid_input_response" : "generic_http_invalid_approval_response"
+    });
+  }
+  return new AdapterProtocolError(sanitize(token, error instanceof Error ? error.message : String(error)), {
+    reasonCode: kind === "input" ? "generic_http_input_failed" : "generic_http_approval_resolution_failed"
   });
 }
 

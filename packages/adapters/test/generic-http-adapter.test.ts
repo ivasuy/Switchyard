@@ -11,13 +11,19 @@ describe("GenericHttpAsyncRestAdapter", () => {
     expect(adapter.manifest.adapterType).toBe("http");
     expect(adapter.manifest.kind).toBe("async_rest");
     expect(adapter.manifest.capabilities).toContain("auth.api_key");
-    expect(adapter.manifest.capabilities).not.toContain("run.input");
+    expect(adapter.manifest.capabilities).toEqual(
+      expect.arrayContaining(["run.start", "run.input", "run.timeout", "approval.bridge", "event.normalized", "event.streaming", "artifact.transcript", "auth.api_key"])
+    );
     expect(adapter.manifest.placement.hosted).toMatchObject({
-      support: "future",
-      reason: expect.stringContaining("not shipped")
+      support: "conditional",
+      reason: expect.stringContaining("operator opt-in")
     });
     expect(adapter.manifest.limitations).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "no_post_start_input" })])
+      expect.arrayContaining([
+        expect.objectContaining({ code: "configured_wrapper_only" }),
+        expect.objectContaining({ code: "hosted_bridge_readiness_required" }),
+        expect.objectContaining({ code: "no_hosted_cancel_bridge" })
+      ])
     );
 
     const mode = runtimeModeSchema.parse({
@@ -71,6 +77,7 @@ describe("GenericHttpAsyncRestAdapter", () => {
       const ok = await new GenericHttpAsyncRestAdapter({ baseUrl: happyServer.baseUrl }).check();
       expect(ok.ok).toBe(true);
       expect((ok.details?.["availability"] as Record<string, unknown>)["state"]).toBe("available");
+      expect((ok.details?.["bridge"] as Record<string, unknown>)["reasonCode"]).toBe("generic_http_bridge_capability_missing");
 
       const unavailable = await new GenericHttpAsyncRestAdapter({ baseUrl: badServer.baseUrl }).check();
       expect(unavailable.ok).toBe(false);
@@ -91,6 +98,33 @@ describe("GenericHttpAsyncRestAdapter", () => {
       await badServer.close();
       await invalidServer.close();
       await oversizedServer.close();
+    }
+  });
+
+  it("reports bridge-ready health only when required bridge capabilities are present", async () => {
+    const readyServer = await startFakeHttpRuntimeServer({ scenario: "bridge_happy" });
+    const missingServer = await startFakeHttpRuntimeServer({ scenario: "bridge_capability_missing" });
+    try {
+      const ready = await new GenericHttpAsyncRestAdapter({ baseUrl: readyServer.baseUrl }).check();
+      expect(ready.ok).toBe(true);
+      expect(ready.details?.["bridge"]).toMatchObject({
+        state: "ready",
+        canBridge: true,
+        reasonCode: null,
+        capabilities: expect.arrayContaining(["input", "approval_request", "approval_resolution"])
+      });
+
+      const missing = await new GenericHttpAsyncRestAdapter({ baseUrl: missingServer.baseUrl }).check();
+      expect(missing.ok).toBe(true);
+      expect(missing.details?.["bridge"]).toMatchObject({
+        state: "unavailable",
+        canBridge: false,
+        reasonCode: "generic_http_bridge_capability_missing"
+      });
+      expect(missingServer.stats().startRequests).toBe(0);
+    } finally {
+      await readyServer.close();
+      await missingServer.close();
     }
   });
 
@@ -267,7 +301,325 @@ describe("GenericHttpAsyncRestAdapter", () => {
     }
   });
 
-  it("rejects input and sanitizes unsafe artifact names", async () => {
+  it("sends bridge input to the configured wrapper endpoint", async () => {
+    const server = await startFakeHttpRuntimeServer({ scenario: "bridge_happy" });
+    try {
+      const adapter = new GenericHttpAsyncRestAdapter({ baseUrl: server.baseUrl });
+      const session = await adapter.start({
+        runId: "run_input",
+        runtime: "generic_http",
+        runtimeMode: "generic_http.async_rest",
+        provider: "generic_http",
+        model: "generic-http-default",
+        cwd: "/repo",
+        task: "input",
+        metadata: {}
+      });
+
+      await adapter.send({ ...session, runId: "run_input" }, {
+        type: "input",
+        switchyardRunId: "run_input",
+        bridgeCommandId: "cmd_input_1",
+        idempotencyKey: "idem_input_1",
+        text: "continue",
+        baseUrl: "https://evil.example",
+        authToken: "evil-token",
+        target: "evil-target",
+        path: "/evil",
+        header: { authorization: "Bearer evil" },
+        command: "rm -rf",
+        cwd: "/tmp/evil",
+        argv: ["evil"],
+        executable: "evil",
+        env: { EVIL: "1" },
+        process: { factory: "evil" },
+        pty: true,
+        browser: { task: "evil" },
+        repo: { url: "evil" },
+        sandbox: "danger-full-access"
+      });
+
+      const stats = server.stats();
+      expect(stats).toMatchObject({
+        inputRequests: 1,
+        lastInputBody: {
+          switchyardRunId: "run_input",
+          bridgeCommandId: "cmd_input_1",
+          idempotencyKey: "idem_input_1",
+          type: "input",
+          text: "continue"
+        }
+      });
+      for (const forbidden of ["baseUrl", "authToken", "target", "path", "header", "command", "cwd", "argv", "executable", "env", "process", "pty", "browser", "repo", "sandbox"]) {
+        expect(stats.lastInputBody).not.toHaveProperty(forbidden);
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects missing empty and oversized input before upstream dispatch", async () => {
+    const server = await startFakeHttpRuntimeServer({ scenario: "bridge_happy" });
+    try {
+      const adapter = new GenericHttpAsyncRestAdapter({ baseUrl: server.baseUrl });
+      const session = await adapter.start({
+        runId: "run_bad_input",
+        runtime: "generic_http",
+        runtimeMode: "generic_http.async_rest",
+        provider: "generic_http",
+        model: "generic-http-default",
+        cwd: "/repo",
+        task: "bad input",
+        metadata: {}
+      });
+
+      for (const text of [undefined, "", "   "]) {
+        await expect(adapter.send({ ...session, runId: "run_bad_input" }, {
+          type: "input",
+          switchyardRunId: "run_bad_input",
+          bridgeCommandId: "cmd_empty",
+          idempotencyKey: "idem_empty",
+          text
+        })).rejects.toMatchObject({
+          code: "adapter_protocol_failed",
+          reasonCode: "runtime_input_empty"
+        } satisfies Partial<AdapterProtocolError>);
+      }
+
+      await expect(adapter.send({ ...session, runId: "run_bad_input" }, {
+        type: "input",
+        switchyardRunId: "run_bad_input",
+        bridgeCommandId: "cmd_large",
+        idempotencyKey: "idem_large",
+        text: "x".repeat(64 * 1024 + 1)
+      })).rejects.toMatchObject({
+        code: "adapter_protocol_failed",
+        reasonCode: "runtime_input_too_large"
+      } satisfies Partial<AdapterProtocolError>);
+
+      expect(server.stats().inputRequests).toBe(0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("maps bridge input upstream failures to R25 reason codes", async () => {
+    const scenarios = [
+      { scenario: "bridge_input_http_500", reasonCode: "generic_http_input_failed" },
+      { scenario: "bridge_input_malformed_response", reasonCode: "generic_http_invalid_input_response" },
+      { scenario: "bridge_input_invalid_json", reasonCode: "generic_http_invalid_input_response" },
+      { scenario: "bridge_input_oversized_response", reasonCode: "generic_http_input_response_too_large", maxResponseBytes: 128 },
+      { scenario: "bridge_input_timeout", reasonCode: "generic_http_input_failed", requestTimeoutMs: 20 }
+    ] as const;
+
+    for (const entry of scenarios) {
+      const server = await startFakeHttpRuntimeServer({ scenario: entry.scenario });
+      try {
+        const adapter = new GenericHttpAsyncRestAdapter({
+          baseUrl: server.baseUrl,
+          maxResponseBytes: entry.maxResponseBytes,
+          requestTimeoutMs: entry.requestTimeoutMs
+        });
+        const session = await adapter.start({
+          runId: `run_${entry.scenario}`,
+          runtime: "generic_http",
+          runtimeMode: "generic_http.async_rest",
+          provider: "generic_http",
+          model: "generic-http-default",
+          cwd: "/repo",
+          task: "input failure",
+          metadata: {}
+        });
+        await expect(adapter.send({ ...session, runId: `run_${entry.scenario}` }, {
+          type: "input",
+          switchyardRunId: `run_${entry.scenario}`,
+          bridgeCommandId: `cmd_${entry.scenario}`,
+          idempotencyKey: `idem_${entry.scenario}`,
+          text: "continue"
+        })).rejects.toMatchObject({
+          code: "adapter_protocol_failed",
+          reasonCode: entry.reasonCode
+        } satisfies Partial<AdapterProtocolError>);
+        expect(server.stats().inputRequests).toBe(1);
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it("sends approval resolution and validates malformed local payloads before upstream dispatch", async () => {
+    const server = await startFakeHttpRuntimeServer({ scenario: "bridge_happy" });
+    try {
+      const adapter = new GenericHttpAsyncRestAdapter({ baseUrl: server.baseUrl });
+      const session = await adapter.start({
+        runId: "run_approval_resolution",
+        runtime: "generic_http",
+        runtimeMode: "generic_http.async_rest",
+        provider: "generic_http",
+        model: "generic-http-default",
+        cwd: "/repo",
+        task: "approval resolution",
+        metadata: {}
+      });
+
+      for (const badInput of [
+        { type: "approval_resolution", bridgeCommandId: "cmd_bad", idempotencyKey: "idem_bad", decision: "approved", answers: {} },
+        { type: "approval_resolution", bridgeCommandId: "cmd_bad", idempotencyKey: "idem_bad", runtimeApprovalToken: "approval_token_1", decision: "maybe", answers: {} },
+        { type: "approval_resolution", bridgeCommandId: "cmd_bad", idempotencyKey: "idem_bad", runtimeApprovalToken: "approval_token_1", decision: "approved", answers: "bad" }
+      ]) {
+        await expect(adapter.send({ ...session, runId: "run_approval_resolution" }, badInput)).rejects.toMatchObject({
+          code: "adapter_protocol_failed",
+          reasonCode: "generic_http_invalid_approval_response"
+        } satisfies Partial<AdapterProtocolError>);
+      }
+      expect(server.stats().approvalResolutionRequests).toBe(0);
+
+      await adapter.send({ ...session, runId: "run_approval_resolution" }, {
+        type: "approval_resolution",
+        switchyardRunId: "run_approval_resolution",
+        bridgeCommandId: "cmd_approval_1",
+        idempotencyKey: "idem_approval_1",
+        runtimeApprovalToken: "approval_token_1",
+        decision: "approved",
+        message: "approved by hosted-api",
+        answers: { selectedOption: "allow" },
+        baseUrl: "https://evil.example",
+        authToken: "evil-token",
+        target: "evil-target",
+        path: "/evil",
+        header: { authorization: "Bearer evil" },
+        command: "rm -rf",
+        cwd: "/tmp/evil",
+        argv: ["evil"],
+        executable: "evil",
+        env: { EVIL: "1" },
+        process: { factory: "evil" },
+        pty: true,
+        browser: { task: "evil" },
+        repo: { url: "evil" },
+        sandbox: "danger-full-access"
+      });
+
+      const stats = server.stats();
+      expect(stats).toMatchObject({
+        approvalResolutionRequests: 1,
+        lastApprovalResolutionToken: "approval_token_1",
+        lastApprovalResolutionBody: {
+          switchyardRunId: "run_approval_resolution",
+          bridgeCommandId: "cmd_approval_1",
+          idempotencyKey: "idem_approval_1",
+          decision: "approved",
+          message: "approved by hosted-api",
+          answers: { selectedOption: "allow" }
+        }
+      });
+      for (const forbidden of ["baseUrl", "authToken", "target", "path", "header", "command", "cwd", "argv", "executable", "env", "process", "pty", "browser", "repo", "sandbox"]) {
+        expect(stats.lastApprovalResolutionBody).not.toHaveProperty(forbidden);
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("maps approval resolution upstream failures to R25 reason codes", async () => {
+    const scenarios = [
+      { scenario: "bridge_approval_http_500", reasonCode: "generic_http_approval_resolution_failed" },
+      { scenario: "bridge_approval_malformed_response", reasonCode: "generic_http_invalid_approval_response" },
+      { scenario: "bridge_approval_invalid_json", reasonCode: "generic_http_invalid_approval_response" },
+      { scenario: "bridge_approval_oversized_response", reasonCode: "generic_http_approval_response_too_large", maxResponseBytes: 128 },
+      { scenario: "bridge_approval_timeout", reasonCode: "generic_http_approval_resolution_failed", requestTimeoutMs: 20 }
+    ] as const;
+
+    for (const entry of scenarios) {
+      const server = await startFakeHttpRuntimeServer({ scenario: entry.scenario });
+      try {
+        const adapter = new GenericHttpAsyncRestAdapter({
+          baseUrl: server.baseUrl,
+          maxResponseBytes: entry.maxResponseBytes,
+          requestTimeoutMs: entry.requestTimeoutMs
+        });
+        const session = await adapter.start({
+          runId: `run_${entry.scenario}`,
+          runtime: "generic_http",
+          runtimeMode: "generic_http.async_rest",
+          provider: "generic_http",
+          model: "generic-http-default",
+          cwd: "/repo",
+          task: "approval failure",
+          metadata: {}
+        });
+        await expect(adapter.send({ ...session, runId: `run_${entry.scenario}` }, {
+          type: "approval_resolution",
+          switchyardRunId: `run_${entry.scenario}`,
+          bridgeCommandId: `cmd_${entry.scenario}`,
+          idempotencyKey: `idem_${entry.scenario}`,
+          runtimeApprovalToken: "approval_token_1",
+          decision: "rejected",
+          message: "rejected by hosted-api",
+          answers: {}
+        })).rejects.toMatchObject({
+          code: "adapter_protocol_failed",
+          reasonCode: entry.reasonCode
+        } satisfies Partial<AdapterProtocolError>);
+        expect(server.stats().approvalResolutionRequests).toBe(1);
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it("maps approval requested waiting resumed and unknown wrapper events", async () => {
+    const approvalServer = await startFakeHttpRuntimeServer({ scenario: "approval_request" });
+    const duplicateServer = await startFakeHttpRuntimeServer({ scenario: "duplicate_approval_events" });
+    const malformedServer = await startFakeHttpRuntimeServer({ scenario: "malformed_approval_request" });
+    const waitingServer = await startFakeHttpRuntimeServer({ scenario: "waiting_for_input_event" });
+    const resumedServer = await startFakeHttpRuntimeServer({ scenario: "resumed_event" });
+    const unknownServer = await startFakeHttpRuntimeServer({ scenario: "unknown_wrapper_event" });
+    try {
+      const approvalEvents = await collectEvents(approvalServer, "run_approval_event");
+      expect(approvalEvents[0]).toMatchObject({
+        type: "approval.requested",
+        payload: {
+          runtimeApprovalToken: "approval_token_1",
+          approvalType: "before_external_message",
+          message: "Wrapper requests permission.",
+          expiresAt: "2026-06-04T20:00:00.000Z",
+          answers: { selectedOption: "allow" },
+          sourceEventId: "evt_approval_1"
+        }
+      });
+
+      const duplicateEvents = await collectEvents(duplicateServer, "run_duplicate_approval");
+      expect(duplicateEvents.filter((event) => event.type === "approval.requested")).toHaveLength(1);
+
+      const malformedEvents = await collectEvents(malformedServer, "run_bad_approval_event");
+      expect(malformedEvents.at(-1)).toMatchObject({
+        type: "run.failed",
+        payload: { error: "generic_http_approval_request_invalid" }
+      });
+
+      const waitingEvents = await collectEvents(waitingServer, "run_waiting_input");
+      expect(waitingEvents[0]).toMatchObject({ type: "runtime.status", payload: { status: "waiting_for_input" } });
+
+      const resumedEvents = await collectEvents(resumedServer, "run_resumed");
+      expect(resumedEvents[0]).toMatchObject({ type: "runtime.status", payload: { status: "resumed" } });
+
+      const unknownEvents = await collectEvents(unknownServer, "run_unknown");
+      expect(unknownEvents[0]).toMatchObject({
+        type: "runtime.status",
+        payload: { status: "unknown_event", eventType: "wrapper.custom" }
+      });
+    } finally {
+      await approvalServer.close();
+      await duplicateServer.close();
+      await malformedServer.close();
+      await waitingServer.close();
+      await resumedServer.close();
+      await unknownServer.close();
+    }
+  });
+
+  it("sanitizes unsafe artifact names", async () => {
     const server = await startFakeHttpRuntimeServer({ scenario: "unsafe_artifact_name" });
     try {
       const adapter = new GenericHttpAsyncRestAdapter({ baseUrl: server.baseUrl });
@@ -281,10 +633,6 @@ describe("GenericHttpAsyncRestAdapter", () => {
         task: "artifact",
         metadata: {}
       });
-      await expect(adapter.send({ ...session, runId: "run_artifact" }, { text: "continue" })).rejects.toMatchObject({
-        code: "adapter_protocol_failed",
-        reasonCode: "generic_http_input_unsupported"
-      } satisfies Partial<AdapterProtocolError>);
 
       const artifacts = await adapter.artifacts({ ...session, runId: "run_artifact" });
       const unsafe = artifacts.find((artifact) => artifact.path.includes("generic-http/"))!;
@@ -462,4 +810,69 @@ describe("GenericHttpAsyncRestAdapter", () => {
       await server.close();
     }
   });
+
+  it("does not leak raw input text or authorization-like content in logs or transcript metadata", async () => {
+    const logs: Array<{ event: string; details?: Record<string, unknown> }> = [];
+    const server = await startFakeHttpRuntimeServer({ scenario: "bridge_happy" });
+    try {
+      const adapter = new GenericHttpAsyncRestAdapter({
+        baseUrl: server.baseUrl,
+        authToken: "secret-bridge-token",
+        logger: {
+          debug: (event, details) => logs.push({ event, details }),
+          info: (event, details) => logs.push({ event, details }),
+          warn: (event, details) => logs.push({ event, details }),
+          error: (event, details) => logs.push({ event, details })
+        }
+      });
+      const session = await adapter.start({
+        runId: "run_redaction",
+        runtime: "generic_http",
+        runtimeMode: "generic_http.async_rest",
+        provider: "generic_http",
+        model: "generic-http-default",
+        cwd: "/repo",
+        task: "redaction",
+        metadata: {}
+      });
+      const rawText = "Authorization: Bearer secret-bridge-token should not appear";
+      await adapter.send({ ...session, runId: "run_redaction" }, {
+        type: "input",
+        switchyardRunId: "run_redaction",
+        bridgeCommandId: "cmd_redaction",
+        idempotencyKey: "idem_redaction",
+        text: rawText
+      });
+      const artifacts = await adapter.artifacts({ ...session, runId: "run_redaction" });
+      expect(JSON.stringify(logs)).not.toContain(rawText);
+      expect(JSON.stringify(logs)).not.toContain("secret-bridge-token");
+      expect(JSON.stringify(artifacts)).not.toContain(rawText);
+      expect(JSON.stringify(artifacts)).not.toContain("secret-bridge-token");
+    } finally {
+      await server.close();
+    }
+  });
 });
+
+async function collectEvents(server: Awaited<ReturnType<typeof startFakeHttpRuntimeServer>>, runId: string) {
+  const adapter = new GenericHttpAsyncRestAdapter({
+    baseUrl: server.baseUrl,
+    pollIntervalMs: 5,
+    requestTimeoutMs: 100
+  });
+  const session = await adapter.start({
+    runId,
+    runtime: "generic_http",
+    runtimeMode: "generic_http.async_rest",
+    provider: "generic_http",
+    model: "generic-http-default",
+    cwd: "/repo",
+    task: runId,
+    metadata: {}
+  });
+  const events = [];
+  for await (const event of adapter.events({ ...session, runId })) {
+    events.push(event);
+  }
+  return events;
+}
