@@ -1,7 +1,13 @@
 import path from "node:path";
 import { z } from "zod";
 
-export const PROVIDER_RUNTIME_MODES = ["codex.exec_json", "claude_code.sdk", "opencode.acp"] as const;
+export const PROVIDER_RUNTIME_MODES = [
+  "codex.exec_json",
+  "claude_code.sdk",
+  "opencode.acp",
+  "agentfield.async_rest",
+  "generic_http.async_rest"
+] as const;
 
 export const providerRuntimeModeSchema = z.enum(PROVIDER_RUNTIME_MODES);
 
@@ -85,10 +91,36 @@ const openCodeProviderModePolicySchema = providerCommonModeEntrySchema
   })
   .strict();
 
+const wrapperAuthEnvReferenceSchema = z
+  .object({
+    type: z.literal("api_key"),
+    env: providerEnvVarNameSchema
+  })
+  .strict();
+
+const wrapperCommonModeEntrySchema = z
+  .object({
+    enabled: z.boolean(),
+    baseUrlEnv: providerEnvVarNameSchema,
+    auth: wrapperAuthEnvReferenceSchema,
+    spendControls: providerSpendControlsSchema
+  })
+  .strict();
+
+const agentFieldWrapperModePolicySchema = wrapperCommonModeEntrySchema
+  .extend({
+    targetEnv: providerEnvVarNameSchema
+  })
+  .strict();
+
+const genericHttpWrapperModePolicySchema = wrapperCommonModeEntrySchema.strict();
+
 const providerModeEntrySchemaByMode = {
   "codex.exec_json": codexProviderModePolicySchema,
   "claude_code.sdk": claudeProviderModePolicySchema,
-  "opencode.acp": openCodeProviderModePolicySchema
+  "opencode.acp": openCodeProviderModePolicySchema,
+  "agentfield.async_rest": agentFieldWrapperModePolicySchema,
+  "generic_http.async_rest": genericHttpWrapperModePolicySchema
 } as const;
 
 const providerModesSchema = z
@@ -236,7 +268,14 @@ export type ProviderRuntimeSpendControls = z.infer<typeof providerSpendControlsS
 export type CodexProviderModePolicy = z.infer<typeof codexProviderModePolicySchema>;
 export type ClaudeProviderModePolicy = z.infer<typeof claudeProviderModePolicySchema>;
 export type OpenCodeProviderModePolicy = z.infer<typeof openCodeProviderModePolicySchema>;
-export type ProviderRuntimeModePolicy = CodexProviderModePolicy | ClaudeProviderModePolicy | OpenCodeProviderModePolicy;
+export type AgentFieldWrapperModePolicy = z.infer<typeof agentFieldWrapperModePolicySchema>;
+export type GenericHttpWrapperModePolicy = z.infer<typeof genericHttpWrapperModePolicySchema>;
+export type ProviderRuntimeModePolicy =
+  | CodexProviderModePolicy
+  | ClaudeProviderModePolicy
+  | OpenCodeProviderModePolicy
+  | AgentFieldWrapperModePolicy
+  | GenericHttpWrapperModePolicy;
 export type ProviderRuntimePolicy = z.infer<typeof providerRuntimePolicySchema>;
 export type ProviderResolvedCommand = z.infer<typeof providerResolvedCommandSchema>;
 export type ProviderRuntimeFailureCode = z.infer<typeof providerRuntimeFailureCodeSchema>;

@@ -28,6 +28,41 @@ const VALID_POLICY = JSON.stringify({
   }
 });
 
+const VALID_GENERIC_HTTP_POLICY = JSON.stringify({
+  version: 1,
+  modes: {
+    "generic_http.async_rest": {
+      enabled: true,
+      baseUrlEnv: "SWITCHYARD_GENERIC_HTTP_BASE_URL",
+      auth: { type: "api_key", env: "SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN" },
+      spendControls: {
+        maxActiveRuns: 2,
+        maxRunsPerHour: 20,
+        maxRunTimeoutSeconds: 300,
+        maxPromptBytes: 1024
+      }
+    }
+  }
+});
+
+const VALID_AGENTFIELD_POLICY = JSON.stringify({
+  version: 1,
+  modes: {
+    "agentfield.async_rest": {
+      enabled: true,
+      baseUrlEnv: "SWITCHYARD_AGENTFIELD_BASE_URL",
+      auth: { type: "api_key", env: "SWITCHYARD_AGENTFIELD_API_KEY" },
+      targetEnv: "SWITCHYARD_AGENTFIELD_TARGET",
+      spendControls: {
+        maxActiveRuns: 2,
+        maxRunsPerHour: 20,
+        maxRunTimeoutSeconds: 300,
+        maxPromptBytes: 1024
+      }
+    }
+  }
+});
+
 describe("provider runtime policy", () => {
   it("keeps production fake-only valid without policy", () => {
     const result = resolveProviderRuntimePolicy({
@@ -50,7 +85,7 @@ describe("provider runtime policy", () => {
     const result = resolveProviderRuntimePolicy({
       deploymentMode: "production",
       hostedRealRuntimeExecution: "enabled",
-      hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+      hostedRuntimeAllowlist: ["fake.deterministic", "cursor.sdk"],
       env: {}
     });
 
@@ -196,6 +231,168 @@ describe("provider runtime policy", () => {
 
     expect(result.activation.valid).toBe(true);
     expect(result.activation.enabledRealModes).toEqual(["codex.exec_json"]);
+  });
+
+  it("activates valid wrapper policy without executable command resolution", () => {
+    const result = resolveProviderRuntimePolicy({
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+      policyJson: VALID_GENERIC_HTTP_POLICY,
+      env: {
+        SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://wrapper.example",
+        SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "live-wrapper-token"
+      },
+      binaryProbe: () => false
+    });
+
+    expect(result.activation.valid).toBe(true);
+    expect(result.activation.enabledRealModes).toEqual(["generic_http.async_rest"]);
+    expect(result.activation.redactedSummary.modeStatuses).toEqual([
+      { runtimeMode: "generic_http.async_rest", ready: true, reasons: [] }
+    ]);
+
+    const command = buildProviderResolvedCommand({
+      activation: result.activation,
+      runtimeMode: "generic_http.async_rest",
+      cwd: "/srv/switchyard/work/project",
+      env: {
+        SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://wrapper.example",
+        SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "live-wrapper-token"
+      }
+    });
+    expect(command.ok).toBe(false);
+    if (command.ok) return;
+    expect(command.code).toBe("provider_command_policy_invalid");
+  });
+
+  it("requires wrapper policy and required wrapper env references", () => {
+    const missingPolicy = resolveProviderRuntimePolicy({
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      hostedRuntimeAllowlist: ["fake.deterministic", "agentfield.async_rest"],
+      env: {}
+    });
+    expect(missingPolicy.activation.valid).toBe(false);
+    expect(missingPolicy.activation.reasons[0]).toMatchObject({ code: "provider_runtime_policy_missing" });
+
+    const missingEnv = resolveProviderRuntimePolicy({
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      hostedRuntimeAllowlist: ["fake.deterministic", "agentfield.async_rest"],
+      policyJson: VALID_AGENTFIELD_POLICY,
+      env: {
+        SWITCHYARD_AGENTFIELD_BASE_URL: "https://agentfield.example",
+        SWITCHYARD_AGENTFIELD_API_KEY: "present"
+      }
+    });
+    expect(missingEnv.activation.valid).toBe(false);
+    expect(missingEnv.activation.reasons[0]).toMatchObject({
+      code: "provider_credentials_missing",
+      runtimeMode: "agentfield.async_rest"
+    });
+  });
+
+  it("rejects invalid wrapper spend controls, command fields, endpoint overrides, and credentialed base URLs", () => {
+    const invalidSpend = resolveProviderRuntimePolicy({
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+      policyJson: JSON.stringify({
+        version: 1,
+        modes: {
+          "generic_http.async_rest": {
+            enabled: true,
+            baseUrlEnv: "SWITCHYARD_GENERIC_HTTP_BASE_URL",
+            auth: { type: "api_key", env: "SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN" },
+            spendControls: {
+              maxActiveRuns: 0,
+              maxRunsPerHour: 20,
+              maxRunTimeoutSeconds: 300,
+              maxPromptBytes: 1024
+            }
+          }
+        }
+      }),
+      env: {
+        SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://wrapper.example",
+        SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "present"
+      }
+    });
+    expect(invalidSpend.activation.valid).toBe(false);
+    expect(invalidSpend.activation.reasons[0]).toMatchObject({ code: "provider_spend_controls_invalid" });
+
+    for (const unsafeField of ["executablePath", "fixedArgs", "cwdPrefixes", "argv", "shell", "command", "processFactory", "pty", "env", "perRunBaseUrl", "perRunAuthToken", "baseUrl"]) {
+      const unsafe = resolveProviderRuntimePolicy({
+        deploymentMode: "production",
+        hostedRealRuntimeExecution: "enabled",
+        hostedRuntimeAllowlist: ["fake.deterministic", "agentfield.async_rest"],
+        policyJson: JSON.stringify({
+          version: 1,
+          modes: {
+            "agentfield.async_rest": {
+              enabled: true,
+              baseUrlEnv: "SWITCHYARD_AGENTFIELD_BASE_URL",
+              auth: { type: "api_key", env: "SWITCHYARD_AGENTFIELD_API_KEY" },
+              targetEnv: "SWITCHYARD_AGENTFIELD_TARGET",
+              spendControls: {
+                maxActiveRuns: 2,
+                maxRunsPerHour: 20,
+                maxRunTimeoutSeconds: 300,
+                maxPromptBytes: 1024
+              },
+              [unsafeField]: unsafeField === "fixedArgs" || unsafeField === "cwdPrefixes" || unsafeField === "argv" ? [] : "unsafe"
+            }
+          }
+        }),
+        env: {}
+      });
+      expect(unsafe.activation.valid).toBe(false);
+      expect(["provider_command_policy_invalid", "provider_runtime_policy_malformed"]).toContain(
+        unsafe.activation.reasons[0]?.code
+      );
+    }
+
+    const credentialedUrl = resolveProviderRuntimePolicy({
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+      policyJson: VALID_GENERIC_HTTP_POLICY,
+      env: {
+        SWITCHYARD_GENERIC_HTTP_BASE_URL: "https://user:secret@wrapper.example",
+        SWITCHYARD_GENERIC_HTTP_AUTH_TOKEN: "present"
+      }
+    });
+    expect(credentialedUrl.activation.valid).toBe(false);
+    expect(credentialedUrl.activation.reasons[0]).toMatchObject({ code: "provider_credentials_invalid" });
+  });
+
+  it("keeps wrapper activation summaries redacted to status and reason codes", () => {
+    const result = resolveProviderRuntimePolicy({
+      deploymentMode: "production",
+      hostedRealRuntimeExecution: "enabled",
+      hostedRuntimeAllowlist: ["fake.deterministic", "agentfield.async_rest"],
+      policyJson: VALID_AGENTFIELD_POLICY,
+      env: {
+        SWITCHYARD_AGENTFIELD_BASE_URL: "https://agentfield.example",
+        SWITCHYARD_AGENTFIELD_API_KEY: "agentfield-secret-token",
+        SWITCHYARD_AGENTFIELD_TARGET: "research-agent.deep_analysis"
+      }
+    });
+
+    expect(result.activation.valid).toBe(true);
+    expect(result.activation.redactedSummary.modeStatuses).toEqual([
+      { runtimeMode: "agentfield.async_rest", ready: true, reasons: [] }
+    ]);
+    const summary = JSON.stringify(result.activation.redactedSummary);
+    expect(summary).toContain("agentfield.async_rest");
+    expect(summary).not.toContain("agentfield.example");
+    expect(summary).not.toContain("agentfield-secret-token");
+    expect(summary).not.toContain("research-agent.deep_analysis");
+    expect(summary).not.toContain("SWITCHYARD_AGENTFIELD");
+    expect(summary).not.toContain("executablePath");
+    expect(summary).not.toContain("argv");
+    expect(summary).not.toContain("cwd");
   });
 
   it("denies command policy injections and out-of-prefix cwd", () => {

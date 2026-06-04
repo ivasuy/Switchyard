@@ -137,10 +137,36 @@ describe("production config guards", () => {
     });
   });
 
-  it("fails closed on unknown hosted runtime allowlist entries before policy checks", () => {
+  it("requires activation for known wrapper runtime allowlist entries", () => {
     expect(
       validateProductionHostedRuntimeAllowlist({
         allowlist: ["fake.deterministic", "generic_http.async_rest"],
+        hostedRealRuntimeExecution: "enabled"
+      })
+    ).toEqual({
+      ok: false,
+      code: "provider_runtime_policy_missing",
+      variable: "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST"
+    });
+
+    expect(
+      validateProductionHostedRuntimeAllowlist({
+        allowlist: ["fake.deterministic", "generic_http.async_rest"],
+        hostedRealRuntimeExecution: "enabled",
+        providerActivation: {
+          valid: true,
+          enabledRealModes: ["generic_http.async_rest"],
+          reasons: [],
+          redactedSummary: {}
+        }
+      })
+    ).toEqual({ ok: true });
+  });
+
+  it("fails closed on unknown hosted runtime allowlist entries before policy checks", () => {
+    expect(
+      validateProductionHostedRuntimeAllowlist({
+        allowlist: ["fake.deterministic", "cursor.sdk"],
         hostedRealRuntimeExecution: "enabled"
       })
     ).toEqual({

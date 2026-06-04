@@ -10,7 +10,13 @@ import { providerRuntimeModeSchema, type ProviderRuntimeMode } from "@switchyard
 import type { RuntimeAdapterManifest } from "../ports/runtime-adapter.js";
 import type { ProviderRuntimeActivationResult } from "./provider-runtime-policy.js";
 
-export type HostedRuntimeModeSlug = "fake.deterministic" | "codex.exec_json" | "claude_code.sdk" | "opencode.acp";
+export type HostedRuntimeModeSlug =
+  | "fake.deterministic"
+  | "codex.exec_json"
+  | "claude_code.sdk"
+  | "opencode.acp"
+  | "agentfield.async_rest"
+  | "generic_http.async_rest";
 export type HostedDeploymentMode = "local" | "test" | "staging" | "production";
 export type HostedRealRuntimeExecution = "enabled" | "disabled";
 
@@ -323,6 +329,169 @@ export const HOSTED_RUNTIME_CATALOG: Record<HostedRuntimeModeSlug, HostedRuntime
         optional: ["stderr_warning"]
       }
     }
+  },
+  "agentfield.async_rest": {
+    runtimeModeSlug: "agentfield.async_rest",
+    runtime: "agentfield",
+    provider: "agentfield",
+    providerId: "provider_agentfield",
+    runtimeId: "runtime_agentfield",
+    adapterId: "agentfield",
+    adapterType: "http",
+    kind: "async_rest",
+    hostedSupport: "conditional",
+    requiresRealRuntimeGate: true,
+    productionAllowed: false,
+    safeLimitations: [
+      ...SHARED_LIMITATIONS,
+      {
+        code: "hosted_real_opt_in",
+        message: "agentfield.async_rest hosted execution is operator opt-in only."
+      },
+      {
+        code: "configured_wrapper_only",
+        message: "AgentField wrapper base URL, API key, and target are configured by operator environment references only."
+      },
+      {
+        code: "hosted_bridge_readiness_required",
+        message: "Hosted AgentField bridge paths require wrapper config and bridge capability readiness before admission."
+      },
+      {
+        code: "no_hosted_cancel_bridge",
+        message: "Hosted active cancellation bridge is not shipped for AgentField."
+      }
+    ],
+    manifest: {
+      adapterId: "agentfield",
+      providerId: "provider_agentfield",
+      runtimeId: "runtime_agentfield",
+      runtimeModeId: "runtime_mode_agentfield_async_rest",
+      runtimeModeSlug: "agentfield.async_rest",
+      name: "AgentField async REST",
+      adapterType: "http",
+      kind: "async_rest",
+      capabilities: [
+        "auth.api_key",
+        "event.streaming",
+        "event.normalized",
+        "run.start",
+        "run.input",
+        "run.timeout",
+        "approval.bridge",
+        "artifact.transcript"
+      ],
+      limitations: [
+        {
+          code: "configured_wrapper_only",
+          message: "AgentField wrapper endpoints are operator configured and cannot be overridden per run."
+        },
+        {
+          code: "hosted_bridge_readiness_required",
+          message: "Hosted AgentField bridge paths require wrapper_config and wrapper_bridge_capability readiness checks."
+        },
+        {
+          code: "no_hosted_cancel_bridge",
+          message: "Hosted active cancellation bridge is not shipped."
+        },
+        {
+          code: "production_forbidden",
+          message: "Hosted agentfield.async_rest production execution is forbidden unless explicitly activated by provider policy."
+        }
+      ],
+      placement: {
+        local: {
+          support: "conditional",
+          reason: "Requires SWITCHYARD_AGENTFIELD_BASE_URL, SWITCHYARD_AGENTFIELD_API_KEY, and SWITCHYARD_AGENTFIELD_TARGET."
+        },
+        hosted: { support: "conditional", reason: "Worker execution requires explicit operator opt-in and provider activation." },
+        connectedLocalNode: { support: "future", reason: "Connected node support remains future scope." }
+      },
+      check: {
+        strategy: "custom",
+        required: ["wrapper_config", "wrapper_bridge_capability"],
+        optional: ["target_discovery"]
+      }
+    }
+  },
+  "generic_http.async_rest": {
+    runtimeModeSlug: "generic_http.async_rest",
+    runtime: "generic_http",
+    provider: "generic_http",
+    providerId: "provider_generic_http",
+    runtimeId: "runtime_generic_http",
+    adapterId: "generic_http",
+    adapterType: "http",
+    kind: "async_rest",
+    hostedSupport: "conditional",
+    requiresRealRuntimeGate: true,
+    productionAllowed: false,
+    safeLimitations: [
+      ...SHARED_LIMITATIONS,
+      {
+        code: "hosted_real_opt_in",
+        message: "generic_http.async_rest hosted execution is operator opt-in only."
+      },
+      {
+        code: "configured_wrapper_only",
+        message: "Generic HTTP wrapper base URL and API key are configured by operator environment references only."
+      },
+      {
+        code: "hosted_bridge_readiness_required",
+        message: "Hosted Generic HTTP bridge paths require wrapper config and bridge capability readiness before admission."
+      },
+      {
+        code: "no_hosted_cancel_bridge",
+        message: "Hosted active cancellation bridge is not shipped for Generic HTTP."
+      }
+    ],
+    manifest: {
+      adapterId: "generic_http",
+      providerId: "provider_generic_http",
+      runtimeId: "runtime_generic_http",
+      runtimeModeId: "runtime_mode_generic_http_async_rest",
+      runtimeModeSlug: "generic_http.async_rest",
+      name: "Generic HTTP async REST",
+      adapterType: "http",
+      kind: "async_rest",
+      capabilities: [
+        "auth.api_key",
+        "event.streaming",
+        "event.normalized",
+        "run.start",
+        "run.input",
+        "run.timeout",
+        "approval.bridge",
+        "artifact.transcript"
+      ],
+      limitations: [
+        {
+          code: "configured_wrapper_only",
+          message: "Generic HTTP wrapper endpoints are operator configured and cannot be overridden per run."
+        },
+        {
+          code: "hosted_bridge_readiness_required",
+          message: "Hosted Generic HTTP bridge paths require wrapper_config and wrapper_bridge_capability readiness checks."
+        },
+        {
+          code: "no_hosted_cancel_bridge",
+          message: "Hosted active cancellation bridge is not shipped."
+        },
+        {
+          code: "production_forbidden",
+          message: "Hosted generic_http.async_rest production execution is forbidden unless explicitly activated by provider policy."
+        }
+      ],
+      placement: {
+        local: { support: "conditional", reason: "Requires SWITCHYARD_GENERIC_HTTP_BASE_URL." },
+        hosted: { support: "conditional", reason: "Worker execution requires explicit operator opt-in and provider activation." },
+        connectedLocalNode: { support: "future", reason: "Connected node support remains future scope." }
+      },
+      check: {
+        strategy: "http_health",
+        required: ["wrapper_config", "wrapper_bridge_capability"],
+        optional: ["auth_token_present"]
+      }
+    }
   }
 };
 
@@ -346,6 +515,7 @@ type HostedRuntimeConfigFailureCode =
   | "provider_command_policy_invalid"
   | "provider_binary_unavailable"
   | "provider_credentials_missing"
+  | "provider_credentials_invalid"
   | "provider_spend_controls_invalid";
 
 export type HostedRuntimeConfigValidation =
@@ -557,6 +727,7 @@ function toHostedRuntimeValidationCode(
     case "provider_command_policy_invalid":
     case "provider_binary_unavailable":
     case "provider_credentials_missing":
+    case "provider_credentials_invalid":
     case "provider_spend_controls_invalid":
     case "hosted_real_runtime_disabled":
     case "hosted_real_runtime_production_forbidden":

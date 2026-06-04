@@ -33,17 +33,19 @@ function baseRun(overrides: Record<string, unknown> = {}) {
 }
 
 describe("hosted runtime catalog", () => {
-  it("contains only the four closed hosted runtime modes", () => {
+  it("contains only the six closed hosted runtime modes", () => {
     const keys = Object.keys(HOSTED_RUNTIME_CATALOG).sort();
     expect(keys).toEqual([
+      "agentfield.async_rest",
       "claude_code.sdk",
       "codex.exec_json",
       "fake.deterministic",
+      "generic_http.async_rest",
       "opencode.acp"
     ]);
 
     const typed: HostedRuntimeModeSlug[] = keys as HostedRuntimeModeSlug[];
-    expect(typed).toHaveLength(4);
+    expect(typed).toHaveLength(6);
   });
 
   it("validates known runtime mode predicates", () => {
@@ -51,11 +53,14 @@ describe("hosted runtime catalog", () => {
     expect(isKnownHostedRuntimeMode("codex.exec_json")).toBe(true);
     expect(isKnownHostedRuntimeMode("claude_code.sdk")).toBe(true);
     expect(isKnownHostedRuntimeMode("opencode.acp")).toBe(true);
-    expect(isKnownHostedRuntimeMode("generic_http.async_rest")).toBe(false);
+    expect(isKnownHostedRuntimeMode("agentfield.async_rest")).toBe(true);
+    expect(isKnownHostedRuntimeMode("generic_http.async_rest")).toBe(true);
 
     expect(isRealHostedRuntimeMode("codex.exec_json")).toBe(true);
     expect(isRealHostedRuntimeMode("claude_code.sdk")).toBe(true);
     expect(isRealHostedRuntimeMode("opencode.acp")).toBe(true);
+    expect(isRealHostedRuntimeMode("agentfield.async_rest")).toBe(true);
+    expect(isRealHostedRuntimeMode("generic_http.async_rest")).toBe(true);
     expect(isRealHostedRuntimeMode("fake.deterministic")).toBe(false);
     expect(isRealHostedRuntimeMode(undefined)).toBe(false);
 
@@ -65,7 +70,7 @@ describe("hosted runtime catalog", () => {
 
   it("rejects unknown allowlist mode", () => {
     const result = validateHostedRuntimeAllowlist({
-      allowlist: ["fake.deterministic", "generic_http.async_rest"],
+      allowlist: ["fake.deterministic", "cursor.sdk"],
       deploymentMode: "staging",
       realRuntimeExecution: "disabled"
     });
@@ -75,7 +80,7 @@ describe("hosted runtime catalog", () => {
 
   it("rejects staging real mode when gate is disabled", () => {
     const result = validateHostedRuntimeAllowlist({
-      allowlist: ["fake.deterministic", "codex.exec_json"],
+      allowlist: ["fake.deterministic", "agentfield.async_rest"],
       deploymentMode: "staging",
       realRuntimeExecution: "disabled"
     });
@@ -191,6 +196,50 @@ describe("hosted runtime catalog", () => {
     expect(allowed.ok).toBe(true);
   });
 
+  it("allows production wrapper execution only with explicit activation", () => {
+    const denied = validateHostedRuntimeAllowlist({
+      allowlist: ["fake.deterministic", "generic_http.async_rest"],
+      deploymentMode: "production",
+      realRuntimeExecution: "enabled"
+    });
+    expect(denied.ok).toBe(false);
+    expect(denied.code).toBe("provider_runtime_policy_missing");
+
+    const allowed = validateHostedRuntimeAllowlist({
+      allowlist: ["fake.deterministic", "generic_http.async_rest"],
+      deploymentMode: "production",
+      realRuntimeExecution: "enabled",
+      providerActivation: {
+        valid: true,
+        enabledRealModes: ["generic_http.async_rest"],
+        reasons: [],
+        redactedSummary: {}
+      }
+    });
+    expect(allowed.ok).toBe(true);
+
+    const prepared = prepareHostedRunForExecution({
+      run: baseRun({
+        runtime: "generic_http",
+        provider: "generic_http",
+        adapterType: "http",
+        model: "generic-http-default",
+        runtimeMode: "generic_http.async_rest"
+      }),
+      queuePayload: { runId: "run_1", placement: "hosted", runtimeMode: "generic_http.async_rest" },
+      allowlist: ["fake.deterministic", "generic_http.async_rest"],
+      deploymentMode: "production",
+      realRuntimeExecution: "enabled",
+      providerActivation: {
+        valid: true,
+        enabledRealModes: ["generic_http.async_rest"],
+        reasons: [],
+        redactedSummary: {}
+      }
+    });
+    expect(prepared.ok).toBe(true);
+  });
+
   it("rejects unsafe codex sandbox metadata", () => {
     const denied = prepareHostedRunForExecution({
       run: baseRun({
@@ -258,5 +307,47 @@ describe("hosted runtime catalog", () => {
         expect.objectContaining({ code: "no_terminal_bridge" })
       ])
     );
+  });
+
+  it("advertises wrapper bridge capabilities without forbidden hosted surfaces", () => {
+    const expectedCapabilities = [
+      "auth.api_key",
+      "event.streaming",
+      "event.normalized",
+      "run.start",
+      "run.input",
+      "run.timeout",
+      "approval.bridge",
+      "artifact.transcript"
+    ];
+    const forbiddenCapabilities = [
+      "run.cancel",
+      "session.state",
+      "session.resume",
+      "artifact.raw_transcript",
+      "model.catalog",
+      "tool.call.normalized",
+      "tool.result.normalized",
+      "sandbox.read_only",
+      "sandbox.workspace_write",
+      "sandbox.danger_full_access"
+    ];
+
+    for (const mode of ["agentfield.async_rest", "generic_http.async_rest"] as const) {
+      const entry = HOSTED_RUNTIME_CATALOG[mode];
+      expect(entry).toMatchObject({
+        runtimeModeSlug: mode,
+        adapterType: "http",
+        kind: "async_rest",
+        hostedSupport: "conditional",
+        requiresRealRuntimeGate: true,
+        productionAllowed: false
+      });
+      expect(entry.manifest.capabilities).toEqual(expectedCapabilities);
+      expect(entry.manifest.capabilities).not.toEqual(expect.arrayContaining(forbiddenCapabilities));
+      expect(entry.manifest.limitations).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: "no_hosted_cancel_bridge" })])
+      );
+    }
   });
 });

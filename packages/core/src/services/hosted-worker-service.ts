@@ -1,7 +1,7 @@
 import type { RunQueuePort, RunQueueClaimedJob } from "../ports/queue.js";
 import type { RunStore } from "../ports/run-store.js";
 import type { EventStore } from "../ports/event-store.js";
-import type { Run, SwitchyardEvent } from "@switchyard/contracts";
+import type { ProviderRuntimeMode, Run, SwitchyardEvent } from "@switchyard/contracts";
 import { providerRuntimeModeSchema } from "@switchyard/contracts";
 import {
   isRealHostedRuntimeMode,
@@ -381,6 +381,7 @@ function isNonRetryableReason(reasonCode: string): boolean {
     || reasonCode === "provider_command_policy_invalid"
     || reasonCode === "provider_binary_unavailable"
     || reasonCode === "provider_credentials_missing"
+    || reasonCode === "provider_credentials_invalid"
     || reasonCode === "provider_spend_controls_invalid"
     || reasonCode === "provider_prompt_too_large"
     || reasonCode === "provider_spend_limit_exceeded"
@@ -398,7 +399,7 @@ function sanitizeMetricLabel(value: string): string {
     .slice(0, 96) || "unknown";
 }
 
-function toProviderRuntimeMode(value: string): "codex.exec_json" | "claude_code.sdk" | "opencode.acp" | undefined {
+function toProviderRuntimeMode(value: string): ProviderRuntimeMode | undefined {
   const parsed = providerRuntimeModeSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
 }

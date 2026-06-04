@@ -116,6 +116,10 @@ type NormalizedPolicySource =
   | { kind: "path"; state: ProviderRuntimePolicySourceState; contents?: string | undefined };
 
 const PROVIDER_REAL_MODE_SET = new Set<ProviderRuntimeMode>(PROVIDER_RUNTIME_MODES);
+const WRAPPER_RUNTIME_MODE_SET = new Set<ProviderRuntimeMode>([
+  "agentfield.async_rest",
+  "generic_http.async_rest"
+]);
 const POLICY_MAX_BYTES = 65_536;
 const METADATA_DENIED_KEYS = new Set([
   "command",
@@ -282,7 +286,7 @@ export function validateProviderRuntimeActivation(input: ProviderRuntimeActivati
       continue;
     }
 
-    if (!isCommandPolicyValid(runtimeMode, policyEntry)) {
+    if (!isActivationPolicyValid(runtimeMode, policyEntry)) {
       modeReasons.push("provider_command_policy_invalid");
       reasons.push({ code: "provider_command_policy_invalid", runtimeMode, detail: "command_policy_invalid" });
     }
@@ -292,7 +296,8 @@ export function validateProviderRuntimeActivation(input: ProviderRuntimeActivati
       reasons.push({ code: "provider_spend_controls_invalid", runtimeMode, detail: "spend_controls_invalid" });
     }
 
-    for (const requiredKey of policyEntry.requiredEnv) {
+    const requiredEnvKeys = getPolicyRequiredEnvKeys(runtimeMode, policyEntry);
+    for (const requiredKey of requiredEnvKeys) {
       if (!isPresent(input.env[requiredKey])) {
         modeReasons.push("provider_credentials_missing");
         reasons.push({ code: "provider_credentials_missing", runtimeMode, detail: "env_missing" });
@@ -300,7 +305,16 @@ export function validateProviderRuntimeActivation(input: ProviderRuntimeActivati
       }
     }
 
-    if (input.binaryProbe && !input.binaryProbe({ runtimeMode, executablePath: policyEntry.executablePath })) {
+    if (isWrapperRuntimeMode(runtimeMode) && !isWrapperEndpointValid(input.env[getWrapperBaseUrlEnv(policyEntry)])) {
+      modeReasons.push("provider_credentials_invalid");
+      reasons.push({ code: "provider_credentials_invalid", runtimeMode, detail: "env_missing" });
+    }
+
+    if (
+      input.binaryProbe &&
+      isCommandRuntimeMode(runtimeMode, policyEntry) &&
+      !input.binaryProbe({ runtimeMode, executablePath: policyEntry.executablePath })
+    ) {
       modeReasons.push("provider_binary_unavailable");
       reasons.push({ code: "provider_binary_unavailable", runtimeMode, detail: "binary_probe_failed" });
     }
@@ -365,7 +379,7 @@ export function buildProviderResolvedCommand(
   }
 
   const policyEntry = input.activation.policy.modes[runtimeMode];
-  if (!policyEntry || !policyEntry.enabled || !isCommandPolicyValid(runtimeMode, policyEntry)) {
+  if (!policyEntry || !policyEntry.enabled || !isCommandRuntimeMode(runtimeMode, policyEntry) || !isCommandPolicyValid(runtimeMode, policyEntry)) {
     return {
       ok: false,
       code: "provider_command_policy_invalid",
@@ -609,6 +623,13 @@ function classifyPolicyParseFailure(issues: Array<{ message: string; path: Prope
       return "provider_command_policy_invalid";
     }
 
+    if (
+      issue.message.includes("Unrecognized key") &&
+      issue.path.some((part) => part === "agentfield.async_rest" || part === "generic_http.async_rest")
+    ) {
+      return "provider_command_policy_invalid";
+    }
+
     if (issue.path.includes("spendControls") || issue.path.includes("maxPromptBytes") || issue.path.includes("maxRunsPerHour") || issue.path.includes("maxActiveRuns") || issue.path.includes("maxRunTimeoutSeconds")) {
       return "provider_spend_controls_invalid";
     }
@@ -710,7 +731,17 @@ function requiresPolicy(
   return input.deploymentMode === "production" && input.hostedRealRuntimeExecution === "enabled" && realModes.length > 0;
 }
 
+function isActivationPolicyValid(runtimeMode: ProviderRuntimeMode, entry: ProviderRuntimeModePolicy): boolean {
+  if (isWrapperRuntimeMode(runtimeMode)) {
+    return isWrapperPolicyValid(runtimeMode, entry);
+  }
+  return isCommandPolicyValid(runtimeMode, entry);
+}
+
 function isCommandPolicyValid(runtimeMode: ProviderRuntimeMode, entry: ProviderRuntimeModePolicy): boolean {
+  if (!isCommandRuntimeMode(runtimeMode, entry)) {
+    return false;
+  }
   if (!entry.enabled || entry.allowUserArgs) {
     return false;
   }
@@ -749,6 +780,74 @@ function isCommandPolicyValid(runtimeMode: ProviderRuntimeMode, entry: ProviderR
   }
 
   return PROVIDER_REAL_MODE_SET.has(runtimeMode);
+}
+
+function isWrapperPolicyValid(runtimeMode: ProviderRuntimeMode, entry: ProviderRuntimeModePolicy): boolean {
+  if (!("baseUrlEnv" in entry) || !("auth" in entry)) {
+    return false;
+  }
+  if (!entry.enabled || entry.auth.type !== "api_key") {
+    return false;
+  }
+  if (runtimeMode === "agentfield.async_rest") {
+    return "targetEnv" in entry;
+  }
+  if (runtimeMode === "generic_http.async_rest") {
+    return !("targetEnv" in entry);
+  }
+  return false;
+}
+
+function isWrapperRuntimeMode(runtimeMode: ProviderRuntimeMode): boolean {
+  return WRAPPER_RUNTIME_MODE_SET.has(runtimeMode);
+}
+
+function isCommandRuntimeMode(
+  runtimeMode: ProviderRuntimeMode,
+  entry: ProviderRuntimeModePolicy
+): entry is Extract<ProviderRuntimeModePolicy, { executablePath: string }> {
+  return !isWrapperRuntimeMode(runtimeMode) && "executablePath" in entry;
+}
+
+function getPolicyRequiredEnvKeys(runtimeMode: ProviderRuntimeMode, entry: ProviderRuntimeModePolicy): string[] {
+  if (!isWrapperRuntimeMode(runtimeMode)) {
+    return "requiredEnv" in entry ? [...entry.requiredEnv] : [];
+  }
+
+  if (!("baseUrlEnv" in entry) || !("auth" in entry)) {
+    return [];
+  }
+
+  const keys = [entry.baseUrlEnv, entry.auth.env];
+  if (runtimeMode === "agentfield.async_rest" && "targetEnv" in entry) {
+    keys.push(entry.targetEnv);
+  }
+  return [...new Set(keys)];
+}
+
+function getWrapperBaseUrlEnv(entry: ProviderRuntimeModePolicy): string {
+  return "baseUrlEnv" in entry ? entry.baseUrlEnv : "";
+}
+
+function isWrapperEndpointValid(value: string | undefined): boolean {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return false;
+  }
+  try {
+    const parsed = new URL(normalized);
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      Boolean(parsed.hostname) &&
+      parsed.username.length === 0 &&
+      parsed.password.length === 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 function hasValidSpendControls(controls: ProviderRuntimeSpendControls): boolean {
