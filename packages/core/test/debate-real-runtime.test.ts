@@ -179,6 +179,54 @@ describe("debate real runtime helpers", () => {
     });
   });
 
+  it("selects a later matching output from mixed persisted debate events", () => {
+    const childRunKey = buildDebateChildRunKey({
+      debateId: "debate_1",
+      participantId: "participant_1",
+      debateRound: 1,
+      debatePhase: "argument",
+      debateRunKind: "participant"
+    });
+
+    const result = extractDebateRuntimeOutput([
+      event({
+        id: "event_unrelated_output",
+        type: "runtime.output",
+        runId: "run_other",
+        debateId: "debate_1",
+        sequence: 1,
+        payload: {
+          text: "other participant answer",
+          debateChildRunKey: "debate-child:debate_1:participant_other:1:argument:participant"
+        }
+      }),
+      event({
+        id: "event_matching_output",
+        type: "runtime.output",
+        runId: "run_1",
+        debateId: "debate_1",
+        sequence: 2,
+        payload: {
+          text: "matching answer",
+          debateChildRunKey: childRunKey
+        }
+      })
+    ], {
+      debateId: "debate_1",
+      childRunKey,
+      maxBytes: 64
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      text: "matching answer",
+      outputBytes: 15,
+      eventId: "event_matching_output",
+      runId: "run_1",
+      sequence: 2
+    });
+  });
+
   it("rejects missing, blank, overlarge, wrong-debate, and wrong-child output", () => {
     const childRunKey = "debate-child:debate_1:participant_1:1:argument:participant";
     const baseExpected = {

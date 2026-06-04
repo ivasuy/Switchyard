@@ -65,18 +65,25 @@ export function extractDebateRuntimeOutput(
     return outputError(kind, "missing", "No persisted runtime.output event was found");
   }
 
-  for (const event of outputEvents) {
-    if (!eventMatchesDebateOutput(event, expected)) {
-      return outputError(kind, "unowned", "runtime.output metadata does not match the expected debate child run", {
-        eventId: event.id,
-        ...optionalRunId(event.runId)
-      });
+  if (expected.runId !== undefined) {
+    for (const event of outputEvents) {
+      if (!eventMatchesDebateOutput(event, expected)) {
+        return outputError(kind, "unowned", "runtime.output metadata does not match the expected debate child run", {
+          eventId: event.id,
+          ...optionalRunId(event.runId)
+        });
+      }
     }
   }
 
-  const event = outputEvents[outputEvents.length - 1];
+  const matchingOutputEvents = outputEvents.filter((event) => eventMatchesDebateOutput(event, expected));
+  if (matchingOutputEvents.length === 0) {
+    return outputError(kind, "missing", "No matching persisted runtime.output event was found");
+  }
+
+  const event = matchingOutputEvents[matchingOutputEvents.length - 1];
   if (!event) {
-    return outputError(kind, "missing", "No persisted runtime.output event was found");
+    return outputError(kind, "missing", "No matching persisted runtime.output event was found");
   }
   const rawText = event.payload["text"];
   if (typeof rawText !== "string") {
