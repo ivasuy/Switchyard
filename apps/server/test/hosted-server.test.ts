@@ -1,10 +1,10 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
-import { hashApiKey } from "@switchyard/core";
+import { describe, expect, it, vi } from "vitest";
+import { ControlPlaneService, hashApiKey } from "@switchyard/core";
 import { resolveHostedSandboxConfig } from "@switchyard/core";
-import { resolveObjectStoreConfig } from "@switchyard/storage";
+import { PostgresControlPlaneStore, resolveObjectStoreConfig } from "@switchyard/storage";
 import { createServerApp } from "../src/app.js";
 import { loadServerConfig } from "../src/config.js";
 import { probeServerReadiness } from "../src/readiness.js";
@@ -14,6 +14,7 @@ const NOW = "2026-05-31T00:00:00.000Z";
 const API_KEY_PEPPER = "pepper_super_secret";
 const ADMIN_RAW_KEY = "sk_sw_test_admin";
 const METRICS_ONLY_RAW_KEY = "sk_sw_test_metrics";
+const OTHER_RAW_KEY = "sk_sw_test_other";
 const NODE_SHARED_TOKEN = "bound-node-token";
 
 function createBootstrapJson(options?: {
@@ -135,6 +136,65 @@ function createBootstrapJson(options?: {
   });
 }
 
+function createMultiTenantBootstrapJson() {
+  const base = JSON.parse(createBootstrapJson()) as {
+    accounts: Array<Record<string, unknown>>;
+    tenants: Array<Record<string, unknown>>;
+    projects: Array<Record<string, unknown>>;
+    users: Array<Record<string, unknown>>;
+    apiKeys: Array<Record<string, unknown>>;
+    billingPlans: Array<Record<string, unknown>>;
+    nodeTokenBindings: Array<Record<string, unknown>>;
+  };
+  base.accounts.push({
+    id: "account_2",
+    name: "Other",
+    status: "active",
+    billingPlanId: "billing_plan_1",
+    createdAt: NOW
+  });
+  base.tenants.push({
+    id: "tenant_2",
+    accountId: "account_2",
+    slug: "other",
+    displayName: "Other",
+    status: "active",
+    createdAt: NOW
+  });
+  base.projects.push({
+    id: "project_2",
+    accountId: "account_2",
+    tenantId: "tenant_2",
+    slug: "project",
+    displayName: "Other Project",
+    status: "active",
+    createdAt: NOW
+  });
+  base.users.push({
+    id: "user_2",
+    accountId: "account_2",
+    tenantId: "tenant_2",
+    displayName: "Other Owner",
+    email: "other@example.com",
+    status: "active",
+    createdAt: NOW
+  });
+  base.apiKeys.push({
+    id: "api_key_other",
+    accountId: "account_2",
+    tenantId: "tenant_2",
+    projectId: "project_2",
+    userId: "user_2",
+    name: "other-key",
+    keyPrefix: "sk_sw",
+    secretHash: hashApiKey(OTHER_RAW_KEY, API_KEY_PEPPER),
+    scopes: ["runs:write", "runs:read", "metrics:read", "admin:read", "nodes:write", "registry:read", "artifacts:read"],
+    status: "active",
+    createdAt: NOW
+  });
+  return JSON.stringify(base);
+}
+
 function createStagingEnv(overrides?: Record<string, string>) {
   return {
     SWITCHYARD_DEPLOYMENT_MODE: "staging",
@@ -191,6 +251,13 @@ function createProviderRuntimePolicyJson(maxPromptBytes = 60000): string {
   });
 }
 
+function fakeDebatePayload(topic = "Should hosted fake debates ship first?") {
+  return {
+    topic,
+    participants: [{ role: "affirmative" }, { role: "skeptic" }]
+  };
+}
+
 describe("hosted server", () => {
   it("does not expose middleware tool invocation routes on hosted server", async () => {
     const app = await createServerApp({
@@ -216,6 +283,251 @@ describe("hosted server", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("registers only the hosted debate route family behind API key auth", async () => {
+    const config = loadServerConfig(createAuthEnabledTestEnv());
+    const app = await createServerApp(config);
+    try {
+      const noAuth = await app.inject({
+        method: "POST",
+        url: "/debates",
+        payload: fakeDebatePayload()
+      });
+      expect(noAuth.statusCode).toBe(401);
+      expect(noAuth.json().error.code).toBe("auth_required");
+
+      const forbiddenJudge = await app.inject({
+        method: "POST",
+        url: "/debates/judge",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: {}
+      });
+      expect(forbiddenJudge.statusCode).toBe(404);
+
+      const forbiddenParticipants = await app.inject({
+        method: "POST",
+        url: "/debates/participants/real",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: {}
+      });
+      expect(forbiddenParticipants.statusCode).toBe(404);
+
+      const forbiddenModelJudge = await app.inject({
+        method: "POST",
+        url: "/model-judge",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: {}
+      });
+      expect(forbiddenModelJudge.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("persists hosted fake async debate and allows owned inspect and events", async () => {
+    const config = loadServerConfig(createAuthEnabledTestEnv());
+    const app = await createServerApp(config);
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/debates",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: fakeDebatePayload("Should async hosted fake debates use durable jobs?")
+      });
+      expect(created.statusCode).toBe(202);
+      const debateId = created.json().debate.id;
+      expect(debateId).toMatch(/^debate_/);
+      expect(created.json().debate.status).toBe("created");
+
+      const inspected = await app.inject({
+        method: "GET",
+        url: `/debates/${debateId}`,
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` }
+      });
+      expect(inspected.statusCode).toBe(200);
+      expect(inspected.json().debate.id).toBe(debateId);
+
+      const events = await app.inject({
+        method: "GET",
+        url: `/debates/${debateId}/events`,
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` }
+      });
+      expect(events.statusCode).toBe(200);
+
+      const ready = await app.inject({
+        method: "GET",
+        url: "/ready",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` }
+      });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json().checks.unownedResources.ok).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("completes hosted fake debate with wait without live provider adapters", async () => {
+    const config = loadServerConfig(createAuthEnabledTestEnv());
+    const app = await createServerApp(config);
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/debates?wait=1",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: fakeDebatePayload("Should wait mode stay no spend?")
+      });
+      expect(created.statusCode).toBe(201);
+      const body = created.json();
+      expect(["no_consensus", "consensus_found", "completed"]).toContain(body.debate.status);
+      expect(body.events.length).toBeGreaterThan(0);
+      expect(body.finalReportArtifact.id).toMatch(/^artifact_/);
+      expect(body.finalReportArtifact.debateId).toBe(body.debate.id);
+      expect(body.debate.finalReportArtifactId).toBe(body.finalReportArtifact.id);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not leak debate existence on tenant mismatch for inspect or events", async () => {
+    const config = loadServerConfig(createAuthEnabledTestEnv({
+      SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_JSON: createMultiTenantBootstrapJson()
+    }));
+    const app = await createServerApp(config);
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/debates",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: fakeDebatePayload("Should tenant mismatch hide debates?")
+      });
+      expect(created.statusCode).toBe(202);
+      const debateId = created.json().debate.id;
+
+      const inspected = await app.inject({
+        method: "GET",
+        url: `/debates/${debateId}`,
+        headers: { authorization: `Bearer ${OTHER_RAW_KEY}` }
+      });
+      expect(inspected.statusCode).toBe(404);
+      expect(inspected.json().error.code).toBe("debate_not_found");
+
+      const events = await app.inject({
+        method: "GET",
+        url: `/debates/${debateId}/events`,
+        headers: { authorization: `Bearer ${OTHER_RAW_KEY}` }
+      });
+      expect(events.statusCode).toBe(404);
+      expect(events.json().error.code).toBe("debate_not_found");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("fails closed before disclosing debate or job ids when hosted debate ownership hooks fail", async () => {
+    const originalAttach = PostgresControlPlaneStore.prototype.attachOwnership;
+    const attachSpy = vi.spyOn(PostgresControlPlaneStore.prototype, "attachOwnership");
+    attachSpy.mockImplementation(async function mockedAttach(input) {
+      if (input.resourceType === "debate") {
+        throw new Error("forced_debate_attach_failure");
+      }
+      return originalAttach.call(this, input);
+    });
+    const config = loadServerConfig(createAuthEnabledTestEnv());
+    const app = await createServerApp(config);
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/debates",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: fakeDebatePayload("Should debate ownership fail closed?")
+      });
+      expect(created.statusCode).toBe(503);
+      expect(created.json().error.code).toBe("hosted_debate_ownership_attach_failed");
+      expect(created.json().debate).toBeUndefined();
+      expect(created.body).not.toMatch(/debate_[0-9a-f-]{8}/);
+      expect(created.body).not.toMatch(/debate_job_[0-9a-f_]{8}/);
+    } finally {
+      attachSpy.mockRestore();
+      await app.close();
+    }
+  });
+
+  it("fails closed before durable job enqueue success is disclosed when parent ownership check fails", async () => {
+    const originalAuthorize = ControlPlaneService.prototype.authorizeResource;
+    const authorizeSpy = vi.spyOn(ControlPlaneService.prototype, "authorizeResource");
+    authorizeSpy.mockImplementation(async function mockedAuthorize(input) {
+      if (input.resourceType === "debate" && input.notFoundCode === "hosted_debate_ownership_attach_failed") {
+        return {
+          ok: false,
+          decision: "denied",
+          code: "hosted_debate_ownership_attach_failed",
+          reasonCode: "forced_job_parent_denied"
+        };
+      }
+      return originalAuthorize.call(this, input);
+    });
+    const config = loadServerConfig(createAuthEnabledTestEnv());
+    const app = await createServerApp(config);
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/debates",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: fakeDebatePayload("Should debate job ownership fail closed?")
+      });
+      expect(created.statusCode).toBe(503);
+      expect(created.json().error.code).toBe("hosted_debate_ownership_attach_failed");
+      expect(created.json().debate).toBeUndefined();
+      expect(created.body).not.toMatch(/debate_job_[0-9a-f_]{8}/);
+    } finally {
+      authorizeSpy.mockRestore();
+      await app.close();
+    }
+  });
+
+  it("fails closed before child run, event, or artifact ids are disclosed when attachment fails", async () => {
+    const originalAttach = PostgresControlPlaneStore.prototype.attachOwnership;
+    for (const resourceType of ["run", "run_event", "artifact"] as const) {
+      const attachSpy = vi.spyOn(PostgresControlPlaneStore.prototype, "attachOwnership");
+      attachSpy.mockImplementation(async function mockedAttach(input) {
+        if (input.resourceType === resourceType) {
+          throw new Error(`forced_${resourceType}_attach_failure`);
+        }
+        return originalAttach.call(this, input);
+      });
+      const config = loadServerConfig(createAuthEnabledTestEnv());
+      const app = await createServerApp(config);
+      try {
+        const created = await app.inject({
+          method: "POST",
+          url: "/debates?wait=1",
+          headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+          payload: fakeDebatePayload(`Should ${resourceType} ownership fail closed?`)
+        });
+        expect(created.statusCode).toBe(503);
+        expect(created.json().error.code).toBe("hosted_debate_ownership_attach_failed");
+        if (resourceType === "run") {
+          expect(created.body).not.toMatch(/run_[0-9a-f-]{8}/);
+        }
+        if (resourceType === "run_event") {
+          expect(created.body).not.toMatch(/event_[0-9a-f-]{8}/);
+        }
+        if (resourceType === "artifact") {
+          expect(created.body).not.toMatch(/artifact_[0-9a-f-]{8}/);
+        }
+      } finally {
+        attachSpy.mockRestore();
+        await app.close();
+      }
+    }
+  });
+
+  it("does not import provider adapters for server debate execution", async () => {
+    const source = await readFile(new URL("../src/app.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("@switchyard/adapters");
+    const fakeAdapterConstructors = source.match(/new FakeRuntimeAdapter\(/g) ?? [];
+    expect(fakeAdapterConstructors).toHaveLength(1);
   });
 
   it("completes hosted fake run with wait", async () => {

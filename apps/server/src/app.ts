@@ -1,8 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import Fastify from "fastify";
 import {
   ArtifactSyncService,
+  ContextBuilder,
   ControlPlaneError,
   ControlPlaneService,
+  DEBATE_CHILD_RUN_KEY_METADATA_FIELD,
+  DebateService,
   EventBus,
   EventSyncService,
   HOSTED_RUNTIME_CATALOG,
@@ -11,6 +15,7 @@ import {
   HostedRunService,
   HostedSandboxService,
   LocalPolicyGate,
+  MessageRouter,
   createDisabledRealToolPolicyConfig,
   NodeCoordinatorService,
   PlacementService,
@@ -19,7 +24,12 @@ import {
   RuntimeCapabilityService,
   RuntimeRunnerService,
   type ArtifactStore,
+  type DebateExecutionStore,
+  type DebateStore,
   type EventStore,
+  type EvidenceStore,
+  type MemoryStore,
+  type MessageStore,
   type NodeAssignmentStore,
   type NodeStore,
   type PlacementStore,
@@ -32,6 +42,7 @@ import {
 } from "@switchyard/core";
 import {
   registerArtifactRoutes,
+  registerDebateRoutes,
   registerEnterpriseRoutes,
   registerErrorEnvelope,
   registerHostedAuthHooks,
@@ -48,7 +59,11 @@ import {
   ensurePostgresSchema,
   PostgresAssignmentStore,
   PostgresArtifactStore,
+  PostgresDebateExecutionStore,
+  PostgresDebateStore,
+  PostgresEvidenceStore,
   PostgresEventStore,
+  PostgresMessageStore,
   PostgresNodeStore,
   PostgresPlacementStore,
   PostgresToolDispatchOutboxStore,
@@ -66,6 +81,13 @@ import { FakeHostedSandboxExecutor, FakeRuntimeAdapter } from "@switchyard/testk
 import { ConfigError, type ControlPlaneBootstrapConfig, type ServerConfig } from "./config.js";
 import { HostedMetrics } from "./metrics.js";
 import { probeServerReadiness } from "./readiness.js";
+
+type Artifact = Parameters<ArtifactStore["create"]>[0];
+type AuthContext = Awaited<ReturnType<ControlPlaneService["authenticateRequest"]>>;
+type MemoryItem = Parameters<MemoryStore["create"]>[0];
+type QuotaReservation = Awaited<ReturnType<PostgresControlPlaneStore["reserveQuota"]>>;
+type Run = NonNullable<Awaited<ReturnType<RunStore["get"]>>>;
+type SwitchyardEvent = Parameters<EventStore["append"]>[0];
 
 export async function createServerApp(config: ServerConfig) {
   const serverAuthMode = config.serverAuthMode ?? "disabled";
@@ -155,10 +177,42 @@ export async function createServerApp(config: ServerConfig) {
     ? instrumentControlPlane(controlPlaneRaw, metrics)
     : undefined;
 
-  const runs: RunStore = new PostgresRunStore(postgres);
-  const events: EventStore = new PostgresEventStore(postgres);
+  const debateAuthScope = new AsyncLocalStorage<HostedDebateAuthScope>();
+  const baseRuns = new PostgresRunStore(postgres);
+  const baseEvents = new PostgresEventStore(postgres);
+  const baseArtifacts = new PostgresArtifactStore(postgres);
+  const runs: RunStore = wrapRunStoreForHostedDebateOwnership(baseRuns, {
+    authScope: debateAuthScope,
+    controlPlane: controlPlaneStoreInstance,
+    logger: app.log
+  });
+  const events: EventStore = wrapEventStoreForHostedDebateOwnership(baseEvents, runs, {
+    authScope: debateAuthScope,
+    controlPlane: controlPlaneStoreInstance,
+    logger: app.log
+  });
   const sessions: SessionStore = new PostgresSessionStore(postgres);
-  const artifacts: ArtifactStore = new PostgresArtifactStore(postgres);
+  const artifacts: ArtifactStore = wrapArtifactStoreForHostedDebateOwnership(baseArtifacts, {
+    authScope: debateAuthScope,
+    controlPlane: controlPlaneStoreInstance,
+    logger: app.log
+  });
+  const debates: DebateStore = wrapDebateStoreForHostedOwnership(new PostgresDebateStore(postgres), {
+    authScope: debateAuthScope,
+    controlPlane: controlPlaneStoreInstance,
+    logger: app.log
+  });
+  const messages: MessageStore = new PostgresMessageStore(postgres);
+  const evidence: EvidenceStore = new PostgresEvidenceStore(postgres);
+  const debateJobs: DebateExecutionStore = wrapDebateExecutionStoreForHostedOwnership(
+    new PostgresDebateExecutionStore(postgres) as DebateExecutionStore,
+    {
+      authScope: debateAuthScope,
+      controlPlane,
+      logger: app.log
+    }
+  );
+  const memory: MemoryStore = createEmptyMemoryStore();
   const invocations = new PostgresToolInvocationStore(postgres);
   const approvals = new PostgresApprovalStore(postgres);
   const dispatchOutbox = new PostgresToolDispatchOutboxStore(postgres);
@@ -450,6 +504,89 @@ export async function createServerApp(config: ServerConfig) {
       return run;
     }
   });
+  const hostedDebateRunService: Pick<RunService, "createRun" | "startRun"> = {
+    createRun: async (input) => {
+      const placementFacts = input.runtimeMode
+        ? (await registry.getRuntimeMode(input.runtimeMode))?.placement
+        : undefined;
+      if (placementFacts) {
+        const result = await hostedRuns.createRun({
+          ...input,
+          placementFacts
+        });
+        return result.run;
+      }
+      return runService.createRun(input);
+    },
+    startRun: (runId) => runService.startRun(runId)
+  };
+  const contextBuilder = new ContextBuilder({
+    memory,
+    evidence,
+    messages
+  });
+  const messageRouter = new MessageRouter({
+    runs,
+    messages,
+    events,
+    eventBus,
+    logger: {
+      info: (event, details) => app.log.info({ event, ...details }),
+      warn: (event, details) => app.log.warn({ event, ...details }),
+      error: (event, details) => app.log.error({ event, ...details })
+    }
+  });
+  const debateServiceCore = new DebateService({
+    debates,
+    runs,
+    runService: hostedDebateRunService,
+    contextBuilder,
+    messageRouter,
+    evidence,
+    events,
+    artifacts,
+    debateExecution: debateJobs,
+    eventBus,
+    artifactContent: {
+      writeText: async (path, content) => {
+        const result = await artifactContent.writeText(path, content, { contentType: "text/markdown; charset=utf-8" });
+        return result.path;
+      }
+    },
+    hosted: {
+      authorizeEvidence: async ({ evidenceId, auth }) => {
+        const item = await evidence.get(evidenceId);
+        if (!item) {
+          return { ok: false };
+        }
+        if (!item.debateId) {
+          return { ok: true };
+        }
+        if (!controlPlane) {
+          throw new ControlPlaneError("auth_required", "auth_required");
+        }
+        const owned = await controlPlane.authorizeResource({
+          auth,
+          resourceType: "debate",
+          resourceId: item.debateId,
+          notFoundCode: "debate_evidence_not_found_or_denied"
+        });
+        return { ok: owned.ok };
+      }
+    },
+    logger: {
+      info: (event, details) => app.log.info({ event, ...details }),
+      warn: (event, details) => app.log.warn({ event, ...details }),
+      error: (event, details) => app.log.error({ event, ...details })
+    },
+    defaultCwd: process.cwd()
+  });
+  const debateService = wrapDebateServiceForHostedAdmission(debateServiceCore, {
+    authScope: debateAuthScope,
+    controlPlane,
+    controlPlaneStore: controlPlaneStoreInstance,
+    logger: app.log
+  });
 
   const coordinator = new NodeCoordinatorService({
     nodes,
@@ -559,6 +696,17 @@ export async function createServerApp(config: ServerConfig) {
       : {})
   };
   const hostedTools = new HostedToolService(hostedToolsDeps);
+
+  app.addHook("onRequest", async (request, reply) => {
+    if (serverAuthMode !== "api_key" || !isHostedDebateRoute(request.method, request.url)) {
+      return;
+    }
+    if (hasAuthorizationHeader(request.headers)) {
+      return;
+    }
+    metrics.inc("auth.required");
+    return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+  });
 
   registerHostedAuthHooks(app, {
     ...(controlPlane ? { controlPlane } : {}),
@@ -688,6 +836,53 @@ export async function createServerApp(config: ServerConfig) {
     }
   });
 
+  registerDebateRoutes(app, {
+    debateService,
+    debates,
+    events,
+    eventBus,
+    debateJobs,
+    ...(controlPlane ? { controlPlane } : {}),
+    requireHostedAuth: serverAuthMode === "api_key",
+    routeMode: "hosted",
+    authorizeDebateRead: async ({ debateId, auth }) => {
+      if (!controlPlane) {
+        throw new ControlPlaneError("auth_required", "auth_required");
+      }
+      const owned = await controlPlane.authorizeResource({
+        auth,
+        resourceType: "debate",
+        resourceId: debateId,
+        notFoundCode: "debate_not_found"
+      });
+      return { ok: owned.ok };
+    },
+    enqueueDebateJob: async ({ debateId, auth, requestId }) => {
+      if (!controlPlane) {
+        throw new ControlPlaneError("auth_required", "auth_required");
+      }
+      const owned = await controlPlane.authorizeResource({
+        auth,
+        resourceType: "debate",
+        resourceId: debateId,
+        notFoundCode: "hosted_debate_ownership_attach_failed"
+      });
+      if (!owned.ok) {
+        throw new ControlPlaneError("hosted_debate_ownership_attach_failed", "debate_job_ownership_attach_failed");
+      }
+      await recordHostedDebateAudit(controlPlane, {
+        auth,
+        eventType: "hosted.debate.job.enqueued",
+        decision: "allow",
+        reasonCode: "debate_job_enqueued",
+        resourceType: "debate",
+        resourceId: debateId,
+        requestId,
+        payload: { route: "POST /debates" }
+      });
+    }
+  });
+
   if (controlPlane && controlPlaneStoreInstance) {
     registerHostedToolRoutes(app, {
       hostedTools,
@@ -769,6 +964,424 @@ export async function createServerApp(config: ServerConfig) {
     : nodeRouteDepsWithControl);
 
   return app;
+}
+
+interface HostedDebateAuthScope {
+  auth: AuthContext;
+  requestId?: string | undefined;
+}
+
+interface HostedDebateOwnershipDeps {
+  authScope: AsyncLocalStorage<HostedDebateAuthScope>;
+  controlPlane: PostgresControlPlaneStore | undefined;
+  logger: {
+    warn(input: Record<string, unknown>): void;
+  };
+}
+
+type OwnedResourceType = Parameters<PostgresControlPlaneStore["attachOwnership"]>[0]["resourceType"];
+
+function wrapDebateStoreForHostedOwnership(store: DebateStore, deps: HostedDebateOwnershipDeps): DebateStore {
+  return {
+    async create(debate) {
+      await attachHostedDebateOwnership(deps, "debate", debate.id);
+      return store.create(debate);
+    },
+    get: (id) => store.get(id),
+    update: (debate) => store.update(debate)
+  };
+}
+
+function wrapRunStoreForHostedDebateOwnership(store: RunStore, deps: HostedDebateOwnershipDeps): RunStore {
+  return {
+    async create(run) {
+      if (isDebateChildRun(run)) {
+        await attachHostedDebateOwnership(deps, "run", run.id);
+      }
+      return store.create(run);
+    },
+    get: (id) => store.get(id),
+    async update(run) {
+      return store.update(run);
+    },
+    list: (filter) => store.list(filter),
+    ...(store.findByDebateChildRunKey
+      ? { findByDebateChildRunKey: (key: string) => store.findByDebateChildRunKey!(key) }
+      : {}),
+    ...(store.updatePreparedMetadataIfMatch
+      ? { updatePreparedMetadataIfMatch: (input: Parameters<NonNullable<RunStore["updatePreparedMetadataIfMatch"]>>[0]) => store.updatePreparedMetadataIfMatch!(input) }
+      : {})
+  };
+}
+
+function wrapEventStoreForHostedDebateOwnership(
+  store: EventStore,
+  runs: RunStore,
+  deps: HostedDebateOwnershipDeps
+): EventStore {
+  return {
+    async append(event) {
+      if (event.debateId || await isDebateChildRunEvent(event, runs)) {
+        await attachHostedDebateOwnership(deps, "run_event", event.id);
+      }
+      return store.append(event);
+    },
+    listByRun: (runId) => store.listByRun(runId),
+    listByDebate: (debateId) => store.listByDebate(debateId)
+  };
+}
+
+function wrapArtifactStoreForHostedDebateOwnership(store: ArtifactStore, deps: HostedDebateOwnershipDeps): ArtifactStore {
+  return {
+    async create(artifact) {
+      if (artifact.debateId) {
+        await attachHostedDebateOwnership(deps, "artifact", artifact.id);
+      }
+      return store.create(artifact);
+    },
+    get: (id) => store.get(id),
+    update: (artifact) => store.update(artifact),
+    listByRun: (runId) => store.listByRun(runId),
+    listByDebate: (debateId) => store.listByDebate(debateId)
+  };
+}
+
+function wrapDebateExecutionStoreForHostedOwnership(
+  store: DebateExecutionStore,
+  deps: {
+    authScope: AsyncLocalStorage<HostedDebateAuthScope>;
+    controlPlane: ControlPlaneService | undefined;
+    logger: { warn(input: Record<string, unknown>): void };
+  }
+): DebateExecutionStore {
+  return {
+    async enqueue(input) {
+      const scope = deps.authScope.getStore();
+      const auth = scope?.auth;
+      if (auth && deps.controlPlane) {
+        const owned = await deps.controlPlane.authorizeResource({
+          auth,
+          resourceType: "debate",
+          resourceId: input.debateId,
+          notFoundCode: "hosted_debate_ownership_attach_failed"
+        });
+        if (!owned.ok) {
+          deps.logger.warn({
+            event: "hosted.debate.ownership.attach_failed",
+            resourceType: "debate_job",
+            reasonCode: "debate_job_parent_not_owned"
+          });
+          throw new ControlPlaneError("hosted_debate_ownership_attach_failed", "debate_job_ownership_attach_failed");
+        }
+        return store.enqueue({
+          ...input,
+          accountId: input.accountId ?? auth.account.id,
+          tenantId: input.tenantId ?? auth.tenant.id,
+          projectId: input.projectId ?? auth.project.id,
+          userId: input.userId ?? auth.user.id,
+          apiKeyId: input.apiKeyId ?? auth.apiKey.id
+        });
+      }
+      return store.enqueue(input);
+    },
+    claim: (options) => store.claim(options),
+    release: (jobId, update) => store.release(jobId, update),
+    complete: (jobId, now) => store.complete(jobId, now),
+    fail: (jobId, failure) => store.fail(jobId, failure),
+    recoverStaleClaims: (options) => store.recoverStaleClaims(options),
+    get: (id) => store.get(id),
+    stats: () => store.stats(),
+    linkPendingRun: (jobId, key, runId, expectedStage) => store.linkPendingRun(jobId, key, runId, expectedStage),
+    findPendingRunByKey: (key) => store.findPendingRunByKey(key)
+  };
+}
+
+function wrapDebateServiceForHostedAdmission(
+  service: DebateService,
+  deps: {
+    authScope: AsyncLocalStorage<HostedDebateAuthScope>;
+    controlPlane: ControlPlaneService | undefined;
+    controlPlaneStore: PostgresControlPlaneStore | undefined;
+    logger: { warn(input: Record<string, unknown>): void; info(input: Record<string, unknown>): void };
+  }
+): DebateService {
+  return {
+    create: async (input: unknown, options: Parameters<DebateService["create"]>[1] = {}) => {
+      const auth = options.auth;
+      if (!auth) {
+        return service.create(input, options);
+      }
+      const reservations = await reserveHostedDebateQuota(deps.controlPlaneStore, auth);
+      return deps.authScope.run({ auth, requestId: options.requestId }, async () => {
+        try {
+          const result = await service.create(input, options);
+          await finalizeHostedDebateAdmissionQuota(deps.controlPlaneStore, auth, reservations, options.wait ? "wait_terminal" : "accepted_async");
+          await recordHostedDebateAudit(deps.controlPlane, {
+            auth,
+            eventType: "hosted.debate.admission.allowed",
+            decision: "allow",
+            reasonCode: "debate_admitted",
+            resourceType: "debate",
+            resourceId: result.debate.id,
+            requestId: options.requestId,
+            payload: {
+              wait: options.wait === true,
+              runtimeModes: result.debate.participants.map((participant) => {
+                const runtimeMode = (participant as { runtimeMode?: unknown }).runtimeMode;
+                return typeof runtimeMode === "string" ? runtimeMode : "unknown";
+              })
+            }
+          });
+          return result;
+        } catch (error) {
+          await failHostedDebateAdmissionQuota(deps.controlPlaneStore, auth, reservations);
+          await recordHostedDebateAudit(deps.controlPlane, {
+            auth,
+            eventType: "hosted.debate.admission.denied",
+            decision: "deny",
+            reasonCode: error instanceof ControlPlaneError ? error.reasonCode : errorCodeOf(error),
+            requestId: options.requestId,
+            payload: { code: errorCodeOf(error) }
+          });
+          throw error;
+        }
+      });
+    },
+    execute: (debateId, options) => service.execute(debateId, options),
+    inspect: (debateId) => service.inspect(debateId),
+    listEvents: (debateId) => service.listEvents(debateId),
+    processExecutionJob: (job) => service.processExecutionJob(job)
+  } as DebateService;
+}
+
+async function attachHostedDebateOwnership(
+  deps: HostedDebateOwnershipDeps,
+  resourceType: OwnedResourceType,
+  resourceId: string
+): Promise<void> {
+  const scope = deps.authScope.getStore();
+  const auth = scope?.auth;
+  if (!auth || !deps.controlPlane) {
+    return;
+  }
+  try {
+    await deps.controlPlane.attachOwnership({
+      resourceType,
+      resourceId,
+      accountId: auth.account.id,
+      tenantId: auth.tenant.id,
+      projectId: auth.project.id,
+      userId: auth.user.id,
+      apiKeyId: auth.apiKey.id,
+      createdAt: new Date().toISOString()
+    });
+  } catch {
+    deps.logger.warn({
+      event: "hosted.debate.ownership.attach_failed",
+      resourceType,
+      reasonCode: "ownership_attach_failed"
+    });
+    throw new ControlPlaneError("hosted_debate_ownership_attach_failed", "ownership_attach_failed");
+  }
+}
+
+function isDebateChildRun(run: Run): boolean {
+  if (typeof run.metadata?.[DEBATE_CHILD_RUN_KEY_METADATA_FIELD] === "string") {
+    return true;
+  }
+  return typeof run.metadata?.["debateId"] === "string" && typeof run.metadata?.["debateRunKind"] === "string";
+}
+
+async function isDebateChildRunEvent(event: SwitchyardEvent, runs: RunStore): Promise<boolean> {
+  if (!event.runId) {
+    return false;
+  }
+  const run = await runs.get(event.runId);
+  return run ? isDebateChildRun(run) : false;
+}
+
+interface HostedDebateQuotaReservations {
+  hourly?: QuotaReservation;
+  active?: QuotaReservation;
+}
+
+async function reserveHostedDebateQuota(
+  controlPlaneStore: PostgresControlPlaneStore | undefined,
+  auth: AuthContext
+): Promise<HostedDebateQuotaReservations> {
+  if (!controlPlaneStore) {
+    return {};
+  }
+  const quotas = resolveDebateQuota(auth.entitlement as Record<string, unknown>);
+  if (quotas.maxDebatesPerHour <= 0 && quotas.maxActiveDebates <= 0) {
+    return {};
+  }
+  const now = new Date().toISOString();
+  const out: HostedDebateQuotaReservations = {};
+  if (quotas.maxDebatesPerHour > 0) {
+    out.hourly = await controlPlaneStore.reserveQuota({
+      accountId: auth.account.id,
+      tenantId: auth.tenant.id,
+      projectId: auth.project.id,
+      userId: auth.user.id,
+      apiKeyId: auth.apiKey.id,
+      quotaKind: "debates_per_hour",
+      amount: 1,
+      maxAllowed: quotas.maxDebatesPerHour,
+      windowMs: 60 * 60 * 1000,
+      reservationTtlMs: 5 * 60 * 1000,
+      reasonCode: "debate_create",
+      now
+    });
+  }
+  if (quotas.maxActiveDebates > 0) {
+    out.active = await controlPlaneStore.reserveQuota({
+      accountId: auth.account.id,
+      tenantId: auth.tenant.id,
+      projectId: auth.project.id,
+      userId: auth.user.id,
+      apiKeyId: auth.apiKey.id,
+      quotaKind: "active_debates",
+      amount: 1,
+      maxAllowed: quotas.maxActiveDebates,
+      windowMs: 24 * 60 * 60 * 1000,
+      reservationTtlMs: 5 * 60 * 1000,
+      reasonCode: "debate_active",
+      now
+    });
+  }
+  return out;
+}
+
+async function finalizeHostedDebateAdmissionQuota(
+  controlPlaneStore: PostgresControlPlaneStore | undefined,
+  auth: AuthContext,
+  reservations: HostedDebateQuotaReservations,
+  outcome: "accepted_async" | "wait_terminal"
+): Promise<void> {
+  if (!controlPlaneStore) {
+    return;
+  }
+  const now = new Date().toISOString();
+  if (reservations.hourly) {
+    await controlPlaneStore.transitionQuotaReservation({
+      reservationId: reservations.hourly.id,
+      accountId: auth.account.id,
+      tenantId: auth.tenant.id,
+      projectId: auth.project.id,
+      nextState: "consumed",
+      reasonCode: outcome,
+      now
+    });
+  }
+  if (reservations.active && outcome === "wait_terminal") {
+    await controlPlaneStore.transitionQuotaReservation({
+      reservationId: reservations.active.id,
+      accountId: auth.account.id,
+      tenantId: auth.tenant.id,
+      projectId: auth.project.id,
+      nextState: "released",
+      reasonCode: "debate_terminal_wait",
+      now
+    });
+  }
+}
+
+async function failHostedDebateAdmissionQuota(
+  controlPlaneStore: PostgresControlPlaneStore | undefined,
+  auth: AuthContext,
+  reservations: HostedDebateQuotaReservations
+): Promise<void> {
+  if (!controlPlaneStore) {
+    return;
+  }
+  const now = new Date().toISOString();
+  for (const reservation of [reservations.hourly, reservations.active]) {
+    if (!reservation) {
+      continue;
+    }
+    await controlPlaneStore.transitionQuotaReservation({
+      reservationId: reservation.id,
+      accountId: auth.account.id,
+      tenantId: auth.tenant.id,
+      projectId: auth.project.id,
+      nextState: "failed",
+      reasonCode: "debate_admission_failed",
+      now
+    }).catch(() => undefined);
+  }
+}
+
+function resolveDebateQuota(entitlement: Record<string, unknown>): {
+  maxDebatesPerHour: number;
+  maxActiveDebates: number;
+} {
+  const snapshot = asRecord(entitlement["quotas"]) ?? entitlement;
+  return {
+    maxDebatesPerHour: toPositiveNumber(snapshot["maxDebatesPerHour"]),
+    maxActiveDebates: toPositiveNumber(snapshot["maxActiveDebates"])
+  };
+}
+
+async function recordHostedDebateAudit(
+  controlPlane: ControlPlaneService | undefined,
+  input: {
+    auth: AuthContext;
+    eventType: string;
+    decision: "allow" | "deny" | "error";
+    reasonCode?: string | undefined;
+    resourceType?: string | undefined;
+    resourceId?: string | undefined;
+    requestId?: string | undefined;
+    payload: Record<string, unknown>;
+  }
+): Promise<void> {
+  if (!controlPlane) {
+    return;
+  }
+  await controlPlane.recordAudit({
+    auth: input.auth,
+    eventType: input.eventType,
+    decision: input.decision,
+    payload: input.payload,
+    ...(input.reasonCode ? { reasonCode: input.reasonCode } : {}),
+    ...(input.resourceType ? { resourceType: input.resourceType } : {}),
+    ...(input.resourceId ? { resourceId: input.resourceId } : {}),
+    ...(input.requestId ? { requestId: input.requestId } : {})
+  });
+}
+
+function errorCodeOf(error: unknown): string {
+  if (error instanceof ControlPlaneError) {
+    return error.code;
+  }
+  if (error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string") {
+    return (error as { code: string }).code;
+  }
+  return "internal_error";
+}
+
+function createEmptyMemoryStore(): MemoryStore {
+  const items = new Map<string, MemoryItem>();
+  return {
+    async create(item) {
+      items.set(item.id, item);
+      return item;
+    },
+    async get(id) {
+      return items.get(id);
+    },
+    async update(item) {
+      items.set(item.id, item);
+      return item;
+    },
+    async list() {
+      return { memory: [], nextCursor: null };
+    },
+    async search() {
+      return { memory: [], nextCursor: null };
+    }
+  };
 }
 
 function instrumentQueue(
@@ -1020,6 +1633,30 @@ function isMetricsRoute(method: string, url: string): boolean {
   }
   const normalized = path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
   return normalized === "/metrics";
+}
+
+function isHostedDebateRoute(method: string, url: string): boolean {
+  const normalizedMethod = method.toUpperCase();
+  if (normalizedMethod !== "POST" && normalizedMethod !== "GET") {
+    return false;
+  }
+  const [path] = url.split("?", 1);
+  const normalized = path && path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
+  if (normalizedMethod === "POST") {
+    return normalized === "/debates";
+  }
+  if (!normalized) {
+    return false;
+  }
+  return /^\/debates\/[^/]+(?:\/events)?$/.test(normalized);
+}
+
+function hasAuthorizationHeader(headers: Record<string, string | string[] | undefined>): boolean {
+  const value = headers["authorization"];
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  return Array.isArray(value) && value.some((entry) => entry.trim().length > 0);
 }
 
 function shouldProtectMetrics(config: ServerConfig, serverAuthMode: "disabled" | "api_key", publicMetrics: boolean): boolean {
