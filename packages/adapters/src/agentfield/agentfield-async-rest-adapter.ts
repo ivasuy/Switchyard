@@ -60,10 +60,6 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
     ],
     limitations: [
       {
-        code: "configured_target_only",
-        message: "agentfield.async_rest uses the daemon-level AgentField target configured by SWITCHYARD_AGENTFIELD_TARGET."
-      },
-      {
         code: "configured_wrapper_only",
         message: "AgentField wrapper endpoints are operator configured and cannot be overridden per run."
       },
@@ -72,13 +68,12 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
         message: "Hosted AgentField bridge paths require wrapper_config and wrapper_bridge_capability readiness checks."
       },
       {
-        code: "cancel_unsupported",
-        message: "AgentField upstream cancellation is not claimed because no cancel endpoint is verified by this spec."
+        code: "no_hosted_cancel_bridge",
+        message: "Hosted active cancellation bridge is not shipped."
       },
-      { code: "polling_only", message: "AgentField polls execution status and does not accept webhooks." },
       {
-        code: "no_agentfield_control_plane_proxy",
-        message: "AgentField memory, admin, node lifecycle, permissions, and Agentic APIs are not exposed through Switchyard."
+        code: "production_forbidden",
+        message: "Hosted agentfield.async_rest production execution is forbidden unless explicitly activated by provider policy."
       }
     ],
     placement: {
@@ -456,7 +451,6 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
         continue;
       }
 
-      stored.state.terminalPayload = sanitizeRecord(this.apiKey, body);
       if (normalized === "succeeded" || normalized === "completed") {
         const output = readOutputText(body);
         if (output) {
@@ -467,6 +461,7 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
             upstreamStatus: normalized
           });
         }
+        stored.state.terminalSummary = terminalSummary(stored, "completed", normalized);
         yield event(runId, sequence++, "run.completed", {
           status: "completed",
           agentfieldExecutionId: stored.state.executionId,
@@ -518,13 +513,13 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
       createdAt: new Date().toISOString()
     }];
 
-    if (stored.state.terminalPayload) {
+    if (stored.state.terminalSummary) {
       artifacts.push({
-        id: "agentfield_result",
+        id: "agentfield_summary",
         type: "raw_log",
-        path: `runs/${runId}/agentfield-result.json`,
+        path: `runs/${runId}/agentfield-summary.json`,
         metadata: {
-          content: JSON.stringify(stored.state.terminalPayload),
+          content: JSON.stringify(stored.state.terminalSummary),
           agentfieldExecutionId: stored.state.executionId,
           target: stored.state.target
         },
@@ -630,13 +625,13 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
         reasonCode: "runtime_input_not_active"
       });
     }
-    const runId = readOptionalString(input["switchyardRunId"]) ?? requiredString(session["runId"], "runId");
-    const bridgeCommandId = readOptionalString(input["bridgeCommandId"]);
-    const idempotencyKey = readOptionalString(input["idempotencyKey"]);
+    const runId = requiredBridgeField(input["switchyardRunId"], "switchyardRunId", "agentfield_input_failed");
+    const bridgeCommandId = requiredBridgeField(input["bridgeCommandId"], "bridgeCommandId", "agentfield_input_failed");
+    const idempotencyKey = requiredBridgeField(input["idempotencyKey"], "idempotencyKey", "agentfield_input_failed");
     const body = {
       switchyardRunId: runId,
-      ...(bridgeCommandId ? { bridgeCommandId } : {}),
-      ...(idempotencyKey ? { idempotencyKey } : {}),
+      bridgeCommandId,
+      idempotencyKey,
       type: "input",
       input: {
         text
@@ -695,14 +690,14 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
         reasonCode: "runtime_input_not_active"
       });
     }
-    const runId = readOptionalString(input["switchyardRunId"]) ?? requiredString(session["runId"], "runId");
-    const bridgeCommandId = readOptionalString(input["bridgeCommandId"]);
-    const idempotencyKey = readOptionalString(input["idempotencyKey"]);
+    const runId = requiredBridgeField(input["switchyardRunId"], "switchyardRunId", "agentfield_approval_request_invalid");
+    const bridgeCommandId = requiredBridgeField(input["bridgeCommandId"], "bridgeCommandId", "agentfield_approval_request_invalid");
+    const idempotencyKey = requiredBridgeField(input["idempotencyKey"], "idempotencyKey", "agentfield_approval_request_invalid");
     const message = readOptionalString(input["message"]);
     const body = {
       switchyardRunId: runId,
-      ...(bridgeCommandId ? { bridgeCommandId } : {}),
-      ...(idempotencyKey ? { idempotencyKey } : {}),
+      bridgeCommandId,
+      idempotencyKey,
       decision,
       ...(message ? { message } : {}),
       answers: answers ?? {}
@@ -717,7 +712,8 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
           body,
           tooLargeReasonCode: "agentfield_approval_response_too_large",
           invalidJsonReasonCode: "agentfield_invalid_approval_response",
-          requestFailedReasonCode: "agentfield_approval_resolution_failed"
+          requestFailedReasonCode: "agentfield_approval_resolution_failed",
+          logPath: "api/v1/executions/:executionId/approvals/:runtimeApprovalToken/resolve"
         },
         stored.transcript
       );
@@ -789,6 +785,7 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
       tooLargeReasonCode: string;
       invalidJsonReasonCode: string;
       requestFailedReasonCode?: string;
+      logPath?: string;
     },
     transcript?: TranscriptRecorder
   ): Promise<AgentFieldRequestResult> {
@@ -801,6 +798,7 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
     }
 
     const url = new URL(path, this.baseUrlRef).toString();
+    const logPath = `/${options.logPath ?? path}`;
     const headers: Record<string, string> = {
       accept: "application/json",
       authorization: `Bearer ${this.apiKey}`,
@@ -825,7 +823,7 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
       });
       transcript?.appendHttpRequest({
         method: options.method,
-        path: `/${path}`,
+        path: logPath,
         status: response.status,
         durationMs: response.durationMs,
         bytes: response.bytes,
@@ -833,7 +831,7 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
       });
       this.log("info", "agentfield.request", {
         method: options.method,
-        path: `/${path}`,
+        path: logPath,
         status: response.status,
         durationMs: response.durationMs
       });
@@ -843,14 +841,14 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
       const message = sanitize(this.apiKey, error instanceof Error ? error.message : String(error));
       transcript?.appendHttpRequest({
         method: options.method,
-        path: `/${path}`,
+        path: logPath,
         reasonCode,
         maxBytes: this.maxResponseBytes,
         message
       });
       this.log("warn", "agentfield.request", {
         method: options.method,
-        path: `/${path}`,
+        path: logPath,
         reasonCode
       });
       throw error;
@@ -859,6 +857,7 @@ export class AgentFieldAsyncRestAdapter implements RuntimeAdapter {
 
   private failureEvent(runId: string, sequence: number, reasonCode: string, stored: StoredSession): SwitchyardEvent {
     stored.state.terminalStatus = "failed";
+    stored.state.terminalSummary = terminalSummary(stored, "failed", stored.state.lastStatus, reasonCode);
     return event(runId, sequence, "run.failed", {
       status: "failed",
       error: reasonCode,
@@ -881,6 +880,15 @@ function requiredString(value: unknown, name: string): string {
 
 function readOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function requiredBridgeField(value: unknown, name: string, reasonCode: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new AdapterProtocolError(`AgentField bridge ${name} is required.`, {
+      reasonCode
+    });
+  }
+  return value;
 }
 
 function runtimeInputText(value: unknown): string {
@@ -1031,10 +1039,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function sanitizeRecord(token: string | undefined, value: Record<string, unknown>): Record<string, unknown> {
-  return JSON.parse(sanitize(token, JSON.stringify(value))) as Record<string, unknown>;
-}
-
 function event(
   runId: string,
   sequence: number,
@@ -1048,6 +1052,21 @@ function event(
     sequence,
     payload,
     createdAt: new Date().toISOString()
+  };
+}
+
+function terminalSummary(
+  stored: StoredSession,
+  status: "completed" | "failed",
+  upstreamStatus: string | undefined,
+  reasonCode?: string
+): Record<string, unknown> {
+  return {
+    status,
+    agentfieldExecutionId: stored.state.executionId,
+    target: stored.state.target,
+    ...(upstreamStatus ? { upstreamStatus } : {}),
+    ...(reasonCode ? { reasonCode } : {})
   };
 }
 

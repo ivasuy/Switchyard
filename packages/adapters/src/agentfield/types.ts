@@ -27,5 +27,5 @@ export interface AgentFieldSessionState {
   seenApprovalTokens: Set<string>;
   terminalStatus?: "completed" | "failed";
   lastStatus?: string;
-  terminalPayload?: Record<string, unknown>;
+  terminalSummary?: Record<string, unknown>;
 }
