@@ -357,3 +357,21 @@ The shipped boundary remains explicit: R24 does not ship dashboard/TUI, public a
 
 ### Deferred Concerns
 - None.
+
+## Phase 24: R25 Hosted Wrapper Runtime Bridges
+**Date:** 2026-06-04T23:10:59+05:30
+**Spec:** docs/superpowers/specs/2026-06-04-phase-24-r25-hosted-wrapper-runtime-bridges.md
+**Plan:** docs/superpowers/plans/2026-06-04-phase-24-r25-hosted-wrapper-runtime-bridges.md
+**Audit:** agent-runs/post-r11-remaining-20260530/audit/phase-24-report.md
+**Branch:** agent/phase-24-r25-hosted-wrapper-bridges (audit GREEN; branch retained locally)
+**PR:** not created - native TUI/subagent workflow requested; branch left unmerged per user instruction.
+
+### What changed
+R25 is now shipped on the phase branch. Switchyard conditionally widens hosted runtime input and approval bridges to `agentfield.async_rest` and `generic_http.async_rest`, reusing only the existing `POST /runs/:id/input` endpoint and approval list/get/approve/reject routes. Wrapper bridge admission now requires closed runtime contracts, provider activation/spend gates, wrapper config and bridge capability checks, durable command/payload stores, ownership, quota, audit, idempotency, redacted command metadata, worker claim/apply, and fail-closed readiness.
+
+The release adds Generic HTTP and AgentField wrapper bridge dispatch paths, approval request normalization, approval-resolution application, hosted catalog/provider-policy support, core bridge admission and stale-payload cleanup, server and worker readiness wiring with independent `payload_store` diagnostics, hosted debate eligibility for wrapper participants, and production preflight/canary gates that stay no-spend by default and require explicit spend confirmation for live provider bridge canaries.
+
+The shipped boundary remains explicit: R25 does not ship dashboard/TUI, hosted `codex.interactive`, hosted Codex input/approval bridging, public arbitrary execution routes, public model judge routes, arbitrary wrapper endpoint execution or per-run wrapper URL/auth/target overrides, browser automation, hosted `repo` execution, generic process/PTY adapters, Cursor/OpenClaw/Paperclip adapters, managed SaaS/public signup, billing, OAuth, SSO, or SCIM.
+
+### Deferred Concerns
+- None.
