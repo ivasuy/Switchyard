@@ -497,6 +497,49 @@ describe("production readiness", () => {
     });
   });
 
+  it("fails hosted debate readiness closed in staging when real runtime provider activation is invalid", async () => {
+    const config = loadServerConfig(createAuthEnabledTestEnv({ SWITCHYARD_OBJECT_STORE_BACKEND: "memory" }));
+    const report = await probeServerReadiness({
+      config: {
+        ...config,
+        deploymentMode: "staging",
+        hostedRuntimeAllowlist: ["fake.deterministic", "opencode.acp"],
+        hostedRealRuntimeExecution: "enabled",
+        providerRuntimeActivation: {
+          valid: false,
+          enabledRealModes: [],
+          reasons: [{ code: "provider_runtime_policy_missing", runtimeMode: "opencode.acp", detail: "entry_missing" }],
+          redactedSummary: {
+            deploymentMode: "staging",
+            hostedRealRuntimeExecution: "enabled",
+            realModeCount: 1,
+            enabledRealModeCount: 0,
+            source: { kind: "json" },
+            policyVersion: 1,
+            modeStatuses: [{ runtimeMode: "opencode.acp", ready: false, reasons: ["provider_runtime_policy_missing"] }],
+            reasonCodes: ["provider_runtime_policy_missing"]
+          }
+        }
+      },
+      postgres: undefined,
+      queue: createReadyQueue(),
+      artifactContent: createReadyArtifactContent(),
+      controlPlane: createReadyControlPlane(),
+      hostedDebate: createHostedDebateDependencies()
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.hostedDebate).toMatchObject({
+      ok: false,
+      code: "provider_runtime_policy_missing",
+      diagnostics: {
+        dependencyStatus: {
+          providerRuntimeActivation: false
+        }
+      }
+    });
+  });
+
   it("fails hosted debate readiness on missing R23 bridge worker when bridge runtimes are allowlisted", async () => {
     const report = await probeServerReadiness({
       config: loadServerConfig(

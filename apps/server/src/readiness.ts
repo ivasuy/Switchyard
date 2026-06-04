@@ -433,6 +433,7 @@ export async function probeServerReadiness(input: {
       hostedAllowlistCheck: checks.hostedAllowlist,
       hostedRuntimeGateCheck: checks.hostedRuntimeGate,
       providerRuntimeActivationCheck: checks.providerRuntimeActivation,
+      providerRuntimeActivation,
       controlPlane,
       unownedResources: unowned,
       bridgeReadiness: bridgeReadiness ?? (
@@ -519,6 +520,7 @@ function buildHostedDebateReadiness(input: {
   hostedAllowlistCheck: ReadinessReport["checks"][string];
   hostedRuntimeGateCheck: ReadinessReport["checks"][string];
   providerRuntimeActivationCheck: ReadinessReport["checks"][string];
+  providerRuntimeActivation: ProviderRuntimeActivationResult;
   controlPlane: ControlPlaneReadinessInput;
   unownedResources: UnownedResourceCounts | undefined;
   bridgeReadiness: HostedRuntimeBridgeReadinessReport | undefined;
@@ -526,6 +528,11 @@ function buildHostedDebateReadiness(input: {
   artifactContent: ProbeableArtifactContentStore;
 }): { ok: boolean; code?: string; diagnostics?: Record<string, unknown> } {
   const hostedDebate = input.hostedDebate;
+  const providerActivationFailureCode = hostedDebateProviderActivationFailureCode(
+    input.config,
+    input.providerRuntimeActivation,
+    input.providerRuntimeActivationCheck
+  );
   const dependencyStatus = {
     debateStore: dependencyAvailable(hostedDebate, "debateStore", Boolean(input.postgres)),
     messageStore: dependencyAvailable(hostedDebate, "messageStore", Boolean(input.postgres)),
@@ -542,7 +549,7 @@ function buildHostedDebateReadiness(input: {
     routeAuth: dependencyAvailable(hostedDebate, "routeAuth", input.controlPlane.mode === "enabled"),
     hostedRuntimeAllowlist: input.hostedAllowlistCheck.ok,
     hostedRuntimeGate: input.hostedRuntimeGateCheck.ok,
-    providerRuntimeActivation: input.providerRuntimeActivationCheck.ok
+    providerRuntimeActivation: providerActivationFailureCode === undefined
   };
   const bridgeRequired = requiresRuntimeBridge(input.config.hostedRuntimeAllowlist);
   const bridgeReady = !bridgeRequired || input.bridgeReadiness?.status === "ready";
@@ -593,11 +600,11 @@ function buildHostedDebateReadiness(input: {
   if (!dependencyStatus.hostedRuntimeAllowlist) {
     return readinessCheck(false, input.hostedAllowlistCheck.code ?? "hosted_runtime_not_allowed", diagnostics);
   }
+  if (!dependencyStatus.providerRuntimeActivation) {
+    return readinessCheck(false, providerActivationFailureCode ?? "provider_runtime_policy_missing", diagnostics);
+  }
   if (!dependencyStatus.hostedRuntimeGate) {
     return readinessCheck(false, input.hostedRuntimeGateCheck.code ?? "hosted_runtime_not_allowed", diagnostics);
-  }
-  if (!dependencyStatus.providerRuntimeActivation) {
-    return readinessCheck(false, input.providerRuntimeActivationCheck.code ?? "provider_runtime_policy_missing", diagnostics);
   }
   if (unownedTotal > 0) {
     return readinessCheck(false, "unowned_resources_present", diagnostics);
@@ -624,6 +631,30 @@ function dependencyAvailable(
 
 function requiresRuntimeBridge(allowlist: readonly string[]): boolean {
   return allowlist.includes("claude_code.sdk") || allowlist.includes("opencode.acp");
+}
+
+function hostedDebateProviderActivationFailureCode(
+  config: ServerConfig,
+  providerRuntimeActivation: ProviderRuntimeActivationResult,
+  providerRuntimeActivationCheck: ReadinessReport["checks"][string]
+): string | undefined {
+  if (!hasRealHostedRuntimeAllowlist(config.hostedRuntimeAllowlist)) {
+    return undefined;
+  }
+  if (!providerRuntimeActivationCheck.ok) {
+    return providerRuntimeActivationCheck.code ?? "provider_runtime_policy_missing";
+  }
+  if (
+    (config.deploymentMode === "staging" || config.deploymentMode === "production") &&
+    !providerRuntimeActivation.valid
+  ) {
+    return providerRuntimeActivation.reasons[0]?.code ?? "provider_runtime_policy_missing";
+  }
+  return undefined;
+}
+
+function hasRealHostedRuntimeAllowlist(allowlist: readonly string[]): boolean {
+  return allowlist.some((mode) => mode !== "fake.deterministic");
 }
 
 function countUnownedResources(unowned: UnownedResourceCounts | undefined): number {
