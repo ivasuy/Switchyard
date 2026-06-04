@@ -436,8 +436,32 @@ describe("runProductionCanary", () => {
       liveProviderBridges: true,
       fetchImpl
     });
-    expectFailure(result, "provider_bridge_live_canary_config_missing");
+    expectFailure(result, "provider_bridge_live_canary_spend_unconfirmed");
+    expect(result.steps).toContainEqual(expect.objectContaining({
+      name: "input.liveProviderBridges",
+      status: "fail",
+      code: "provider_bridge_live_canary_spend_unconfirmed"
+    }));
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test("fails fast with missing live provider bridge config after explicit spend confirmation", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const result = await runProductionCanary({
+      baseUrl: "https://switchyard.example",
+      apiKey: "test-key",
+      liveProviderBridges: true,
+      confirmLiveProviderSpend: true,
+      fetchImpl
+    });
+    expectFailure(result, "provider_bridge_live_canary_config_missing");
+    expect(result.steps).toContainEqual(expect.objectContaining({
+      name: "input.liveProviderBridges",
+      status: "fail",
+      code: "provider_bridge_live_canary_config_missing"
+    }));
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("test-key");
   });
 
   test("fails fast before fetch when live debate spend is not explicitly confirmed", async () => {

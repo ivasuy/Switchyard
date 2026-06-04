@@ -146,6 +146,12 @@ const REQUIRED_WORKER_ENV = [
   "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
   "SWITCHYARD_SANDBOX_REAL_EXECUTION"
 ] as const;
+const MANIFEST_ALLOWED_RUNTIME_MODES = new Set([
+  "fake.deterministic",
+  "agentfield.async_rest",
+  "generic_http.async_rest"
+]);
+const MANIFEST_WRAPPER_RUNTIME_MODES = new Set(["agentfield.async_rest", "generic_http.async_rest"]);
 
 export async function validateProductionManifest(path: string): Promise<ProductionManifestValidationResult> {
   let raw: string;
@@ -314,8 +320,8 @@ function validateRuntimePosture(
     }
     const allowlist = service.policy?.runtimeAllowlist ?? service.runtimeAllowlist;
     const hostedRealRuntimeExecution = service.policy?.hostedRealRuntimeExecution ?? service.hostedRealRuntimeExecution;
-    const fakeOnly = allowlist?.length === 1 && allowlist[0] === "fake.deterministic";
-    if (!fakeOnly || hostedRealRuntimeExecution !== "disabled") {
+    const posture = evaluateRuntimePosture(allowlist, hostedRealRuntimeExecution);
+    if (!posture.ok) {
       errors.push({ code: "manifest_forbidden_surface", service: name });
     }
 
@@ -330,6 +336,28 @@ function validateRuntimePosture(
       }
     }
   }
+}
+
+function evaluateRuntimePosture(
+  allowlist: string[] | undefined,
+  hostedRealRuntimeExecution: string | undefined
+): { ok: true } | { ok: false } {
+  if (!allowlist || allowlist.length === 0) {
+    return { ok: false };
+  }
+  if (allowlist.some((mode) => !MANIFEST_ALLOWED_RUNTIME_MODES.has(mode))) {
+    return { ok: false };
+  }
+
+  const hasFake = allowlist.includes("fake.deterministic");
+  const hasWrapper = allowlist.some((mode) => MANIFEST_WRAPPER_RUNTIME_MODES.has(mode));
+  if (!hasFake) {
+    return { ok: false };
+  }
+  if (!hasWrapper) {
+    return hostedRealRuntimeExecution === "disabled" ? { ok: true } : { ok: false };
+  }
+  return hostedRealRuntimeExecution === "enabled" ? { ok: true } : { ok: false };
 }
 
 function validateToolPosture(

@@ -22,6 +22,7 @@ type CanaryCode =
   | "approval_canary_failed"
   | "tool_live_canary_config_missing"
   | "provider_bridge_live_canary_config_missing"
+  | "provider_bridge_live_canary_spend_unconfirmed"
   | "debate_live_canary_spend_unconfirmed"
   | "debate_create_denied"
   | "debate_timeout"
@@ -182,12 +183,18 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
   }
   const confirmLiveProviderSpend = options.confirmLiveProviderSpend
     || process.env["SWITCHYARD_CONFIRM_LIVE_PROVIDER_BRIDGE_CANARY"] === "1";
+  if (options.liveProviderBridges && !confirmLiveProviderSpend) {
+    addStep(steps, now, startedAtMs, "input.liveProviderBridges", "fail", "provider_bridge_live_canary_spend_unconfirmed");
+    return finalize(false, "provider_bridge_live_canary_spend_unconfirmed", steps, summary, now, startedAtMs);
+  }
   if ((options.liveDebateRuntimes || options.liveDebateJudge) && !confirmLiveProviderSpend) {
     addStep(steps, now, startedAtMs, "input.liveDebate", "fail", "debate_live_canary_spend_unconfirmed");
     return finalize(false, "debate_live_canary_spend_unconfirmed", steps, summary, now, startedAtMs);
   }
-  if (options.liveProviderBridges && !confirmLiveProviderSpend) {
-    addStep(steps, now, startedAtMs, "input.liveProviderBridges", "fail", "provider_bridge_live_canary_config_missing");
+  if (options.liveProviderBridges) {
+    addStep(steps, now, startedAtMs, "input.liveProviderBridges", "fail", "provider_bridge_live_canary_config_missing", {
+      details: { reason: "live_provider_bridge_runtime_config_missing" }
+    });
     return finalize(false, "provider_bridge_live_canary_config_missing", steps, summary, now, startedAtMs);
   }
 

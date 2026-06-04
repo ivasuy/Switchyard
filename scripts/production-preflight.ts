@@ -53,10 +53,20 @@ interface HostedRuntimeBridgeReadinessCheck {
     | "worker_claim"
     | "adapter_capability"
     | "session_reconciliation"
-    | "approval_sender";
+    | "approval_sender"
+    | "wrapper_config"
+    | "wrapper_bridge_capability";
   ok: boolean;
   reasonCode?: string;
 }
+
+const HOSTED_RUNTIME_BRIDGE_MODES = [
+  "claude_code.sdk",
+  "opencode.acp",
+  "agentfield.async_rest",
+  "generic_http.async_rest"
+] as const;
+const WRAPPER_RUNTIME_BRIDGE_MODES = ["agentfield.async_rest", "generic_http.async_rest"] as const;
 
 export interface PreflightDeps {
   parseEnvFile?: typeof parseProductionEnvFile;
@@ -440,7 +450,9 @@ function appendHostedRuntimeBridgeCheck(
     hostedRuntimeGate: { ok: true; diagnostics?: Record<string, unknown> } | { ok: false; code: string; diagnostics?: Record<string, unknown> };
   }
 ): void {
-  const bridgeModes = input.allowlist.filter((mode) => mode === "claude_code.sdk" || mode === "opencode.acp");
+  const bridgeModes = input.allowlist.filter(isHostedRuntimeBridgeMode);
+  const wrapperBridgeModes = bridgeModes.filter(isWrapperRuntimeBridgeMode);
+  const wrapperRequired = wrapperBridgeModes.length > 0;
   if (bridgeModes.length === 0) {
     checks.push({ name: "hostedRuntimeBridge", status: "pass", code: "hosted_runtime_bridge_inactive" });
     return;
@@ -452,16 +464,33 @@ function appendHostedRuntimeBridgeCheck(
 
   const hasFailure = (name: string): boolean => checks.some((check) => check.name === name && check.status === "fail");
   const gateChecks = readHostedRuntimeBridgeChecks(input.hostedRuntimeGate.diagnostics);
-  const gateCheckStatus = (name: HostedRuntimeBridgeReadinessCheck["name"]): { ok: boolean; reasonCode: string } => {
+  const gateCheckStatus = (
+    name: HostedRuntimeBridgeReadinessCheck["name"],
+    options: { missingOk?: boolean; missingReasonCode?: string } = {}
+  ): { ok: boolean; reasonCode: string } => {
     const found = gateChecks.find((entry) => entry.name === name);
     if (!found) {
-      return { ok: true, reasonCode: "hosted_runtime_bridge_worker_unavailable" };
+      return {
+        ok: options.missingOk ?? true,
+        reasonCode: options.missingReasonCode ?? "hosted_runtime_bridge_worker_unavailable"
+      };
     }
     return {
       ok: found.ok,
       reasonCode: found.reasonCode ?? "hosted_runtime_bridge_worker_unavailable"
     };
   };
+  const providerAdapterFailureCode = checks.find(
+    (check) => check.name === "providerAdapterChecks" && check.status === "fail"
+  )?.code;
+  const wrapperConfigStatus = gateCheckStatus("wrapper_config", {
+    missingOk: !wrapperRequired,
+    missingReasonCode: firstWrapperReasonCode(wrapperBridgeModes, "config")
+  });
+  const wrapperBridgeCapabilityStatus = gateCheckStatus("wrapper_bridge_capability", {
+    missingOk: !wrapperRequired,
+    missingReasonCode: firstWrapperReasonCode(wrapperBridgeModes, "capability")
+  });
 
   const bridgeChecks = [
     {
@@ -513,9 +542,19 @@ function appendHostedRuntimeBridgeCheck(
     {
       name: "adapter_capability",
       ok: !hasFailure("providerAdapterChecks") && gateCheckStatus("adapter_capability").ok,
-      reasonCode: hasFailure("providerAdapterChecks")
-        ? "hosted_runtime_bridge_operation_unsupported"
+      reasonCode: providerAdapterFailureCode
+        ? providerAdapterFailureCode
         : gateCheckStatus("adapter_capability").reasonCode
+    },
+    {
+      name: "wrapper_config",
+      ok: !wrapperRequired || wrapperConfigStatus.ok,
+      reasonCode: wrapperConfigStatus.reasonCode
+    },
+    {
+      name: "wrapper_bridge_capability",
+      ok: !wrapperRequired || wrapperBridgeCapabilityStatus.ok,
+      reasonCode: wrapperBridgeCapabilityStatus.reasonCode
     },
     {
       name: "session_reconciliation",
@@ -533,7 +572,10 @@ function appendHostedRuntimeBridgeCheck(
   const diagnostics = redactDiagnostics({
     bridgeModes,
     failedChecks: failed.map((entry) => entry.name),
-    checks: Object.fromEntries(bridgeChecks.map((entry) => [entry.name, entry.ok ? "pass" : "fail"]))
+    checks: Object.fromEntries(bridgeChecks.map((entry) => [
+      entry.name,
+      !wrapperRequired && isWrapperReadinessCheckName(entry.name) ? "inactive" : entry.ok ? "pass" : "fail"
+    ]))
   });
 
   if (failed.length > 0) {
@@ -552,6 +594,32 @@ function appendHostedRuntimeBridgeCheck(
     code: "hosted_runtime_bridge_ready",
     ...(diagnostics ? { diagnostics } : {})
   });
+}
+
+function isHostedRuntimeBridgeMode(mode: string): mode is typeof HOSTED_RUNTIME_BRIDGE_MODES[number] {
+  return HOSTED_RUNTIME_BRIDGE_MODES.includes(mode as typeof HOSTED_RUNTIME_BRIDGE_MODES[number]);
+}
+
+function isWrapperRuntimeBridgeMode(mode: string): mode is typeof WRAPPER_RUNTIME_BRIDGE_MODES[number] {
+  return WRAPPER_RUNTIME_BRIDGE_MODES.includes(mode as typeof WRAPPER_RUNTIME_BRIDGE_MODES[number]);
+}
+
+function firstWrapperReasonCode(
+  modes: Array<typeof WRAPPER_RUNTIME_BRIDGE_MODES[number]>,
+  kind: "config" | "capability"
+): string {
+  const mode = modes[0];
+  if (mode === "agentfield.async_rest") {
+    return kind === "config" ? "agentfield_bridge_config_missing" : "agentfield_bridge_capability_missing";
+  }
+  if (mode === "generic_http.async_rest") {
+    return kind === "config" ? "generic_http_bridge_config_missing" : "generic_http_bridge_capability_missing";
+  }
+  return kind === "config" ? "hosted_runtime_bridge_worker_unavailable" : "hosted_runtime_bridge_operation_unsupported";
+}
+
+function isWrapperReadinessCheckName(name: string): boolean {
+  return name === "wrapper_config" || name === "wrapper_bridge_capability";
 }
 
 function readHostedRuntimeBridgeChecks(
@@ -582,7 +650,9 @@ function readHostedRuntimeBridgeChecks(
         name === "worker_claim" ||
         name === "adapter_capability" ||
         name === "session_reconciliation" ||
-        name === "approval_sender") &&
+        name === "approval_sender" ||
+        name === "wrapper_config" ||
+        name === "wrapper_bridge_capability") &&
       typeof ok === "boolean"
     ) {
       out.push({
@@ -713,7 +783,7 @@ function defaultProviderAdapterCheck(allowlist: string[]): {
   modes: Record<string, { ok: boolean; code?: string }>;
 } {
   const modes: Record<string, { ok: boolean; code?: string }> = {};
-  for (const mode of ["codex.exec_json", "claude_code.sdk", "opencode.acp"]) {
+  for (const mode of ["codex.exec_json", "claude_code.sdk", "opencode.acp", "agentfield.async_rest", "generic_http.async_rest"]) {
     if (allowlist.includes(mode)) {
       modes[mode] = { ok: true };
     }
@@ -1149,7 +1219,13 @@ async function defaultHostedDebateReadinessCheck(input: {
     input.checks.some((check) => check.name === name && check.status === "pass");
   const dependencyCode = (name: string, fallback: string): string => failed(name)?.code ?? fallback;
   const workerReadiness = readWorkerHostedDebateReadiness(input.checks);
-  const bridgeRequired = input.serverConfig.hostedRuntimeAllowlist.some((mode) => mode === "claude_code.sdk" || mode === "opencode.acp");
+  const bridgeRequired = input.serverConfig.hostedRuntimeAllowlist.some(isHostedRuntimeBridgeMode);
+  const bridgeReadinessOk = !bridgeRequired || !failed("hostedRuntimeBridge");
+  const bridgeReadinessCode = !bridgeRequired
+    ? "hosted_debate_hosted_bridge_inactive"
+    : bridgeReadinessOk
+      ? "hosted_debate_hosted_bridge_ready"
+      : dependencyCode("hostedRuntimeBridge", "hosted_runtime_bridge_worker_unavailable");
 
   const checks: HostedDebateCheckResult["checks"] = [
     {
@@ -1235,11 +1311,16 @@ async function defaultHostedDebateReadinessCheck(input: {
         : dependencyCode("providerRuntimePolicy", dependencyCode("providerCredentials", dependencyCode("providerSpendControls", dependencyCode("providerCommandResolution", dependencyCode("providerAdapterChecks", "provider_runtime_policy_missing")))))
     },
     {
+      name: "hostedDebate.hostedBridgeReadiness",
+      ok: bridgeReadinessOk,
+      code: bridgeReadinessCode
+    },
+    {
       name: "hostedDebate.r23BridgeReadiness",
-      ok: !bridgeRequired || !failed("hostedRuntimeBridge"),
+      ok: bridgeReadinessOk,
       code: !bridgeRequired
         ? "hosted_debate_r23_bridge_inactive"
-        : !failed("hostedRuntimeBridge")
+        : bridgeReadinessOk
           ? "hosted_debate_r23_bridge_ready"
           : dependencyCode("hostedRuntimeBridge", "hosted_runtime_bridge_worker_unavailable")
     }

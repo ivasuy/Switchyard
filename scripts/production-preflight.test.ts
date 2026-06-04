@@ -545,6 +545,61 @@ describe("validateProductionManifest", () => {
     });
   });
 
+  test("accepts explicit wrapper runtime posture in manifest", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      (manifest as any).tools = {
+        hostedRealTools: "disabled",
+        connectedNodeRealTools: "disabled",
+        policy: "required_when_enabled",
+        approvalDefault: "required",
+        adapterMode: "fake_for_smoke"
+      };
+      (manifest as any).forbiddenSurfaces = [
+        "/sandbox",
+        "/exec",
+        "/shell",
+        "/process",
+        "/command",
+        "/pty",
+        "/terminal",
+        "/browser",
+        "/search",
+        "/github",
+        "/fetch",
+        "/repo",
+        "/dashboard",
+        "/tui"
+      ];
+      (manifest.services as any).server.policy.runtimeAllowlist = ["fake.deterministic", "generic_http.async_rest"];
+      (manifest.services as any).server.policy.hostedRealRuntimeExecution = "enabled";
+      (manifest.services as any).worker.policy.runtimeAllowlist = ["fake.deterministic", "generic_http.async_rest"];
+      (manifest.services as any).worker.policy.hostedRealRuntimeExecution = "enabled";
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(true);
+    });
+  });
+
+  test("rejects stale unknown wrapper runtime posture in manifest", async () => {
+    await withTempDir(async (dir) => {
+      const manifestPath = join(dir, "manifest.json");
+      const manifest = validManifest();
+      (manifest.services as any).server.policy.runtimeAllowlist = ["fake.deterministic", "agentfield.bridge"];
+      (manifest.services as any).server.policy.hostedRealRuntimeExecution = "enabled";
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+      const result = await validateProductionManifest(manifestPath);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        return;
+      }
+      expect(result.errors).toContainEqual({ code: "manifest_forbidden_surface", service: "server" });
+    });
+  });
+
   test("rejects omitted explicit runtime posture", async () => {
     await withTempDir(async (dir) => {
       const manifestPath = join(dir, "manifest.json");
@@ -639,6 +694,16 @@ describe("runProductionPreflight", () => {
       status: "pass",
       code: "provider_runtime_policy_inactive"
     });
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedRuntimeBridge",
+      status: "pass",
+      code: "hosted_runtime_bridge_inactive"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.hostedBridgeReadiness",
+      status: "pass",
+      code: "hosted_debate_hosted_bridge_inactive"
+    }));
   });
 
   test("passes fake no-spend hosted debate readiness when dependencies are ready", async () => {
@@ -839,6 +904,189 @@ describe("runProductionPreflight", () => {
         code: "hosted_runtime_bridge_ready"
       })
     );
+  });
+
+  test("fails closed when wrapper bridge is allowlisted without hosted real runtime execution", async () => {
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "agentfield.async_rest"],
+          hostedRealRuntimeExecution: "disabled"
+        }),
+      checkHostedRuntimeGate: async () => ({
+        ok: false,
+        code: "hosted_real_runtime_disabled",
+        diagnostics: { hostedDebate: { ok: true } }
+      })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedRuntimeBridge",
+      status: "fail",
+      code: "hosted_real_runtime_disabled"
+    }));
+  });
+
+  test("fails closed with wrapper config reason when allowlisted wrapper readiness lacks config", async () => {
+    const activation = makeProviderActivation({
+      valid: true,
+      enabledRealModes: ["generic_http.async_rest"],
+      reasons: [],
+      reasonCodes: []
+    });
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({
+        ok: true,
+        diagnostics: {
+          hostedDebate: { ok: true },
+          bridgeReadiness: {
+            checks: [
+              { name: "command_store", ok: true },
+              { name: "command_outbox", ok: true },
+              { name: "worker_claim", ok: true },
+              { name: "adapter_capability", ok: true },
+              { name: "session_reconciliation", ok: true },
+              { name: "approval_sender", ok: true }
+            ]
+          }
+        }
+      })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedRuntimeBridge",
+      status: "fail",
+      code: "generic_http_bridge_config_missing",
+      diagnostics: expect.objectContaining({
+        bridgeModes: ["generic_http.async_rest"],
+        failedChecks: expect.arrayContaining(["wrapper_config", "wrapper_bridge_capability"]),
+        checks: expect.objectContaining({
+          wrapper_config: "fail",
+          wrapper_bridge_capability: "fail"
+        })
+      })
+    }));
+  });
+
+  test("fails closed with wrapper bridge capability reason from readiness diagnostics", async () => {
+    const activation = makeProviderActivation({
+      valid: true,
+      enabledRealModes: ["agentfield.async_rest"],
+      reasons: [],
+      reasonCodes: []
+    });
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "agentfield.async_rest"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({
+        ok: true,
+        diagnostics: {
+          hostedDebate: { ok: true },
+          bridgeReadiness: {
+            checks: [
+              { name: "command_store", ok: true },
+              { name: "command_outbox", ok: true },
+              { name: "worker_claim", ok: true },
+              { name: "adapter_capability", ok: true },
+              { name: "wrapper_config", ok: true },
+              { name: "wrapper_bridge_capability", ok: false, reasonCode: "agentfield_bridge_capability_missing" },
+              { name: "session_reconciliation", ok: true },
+              { name: "approval_sender", ok: true }
+            ]
+          }
+        }
+      })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedRuntimeBridge",
+      status: "fail",
+      code: "agentfield_bridge_capability_missing"
+    }));
+  });
+
+  test("passes with no-spend wrapper dependencies and valid bridge readiness diagnostics", async () => {
+    const activation = makeProviderActivation({
+      valid: true,
+      enabledRealModes: ["agentfield.async_rest", "generic_http.async_rest"],
+      reasons: [],
+      reasonCodes: []
+    });
+    const result = await runDependencyPreflight({
+      loadServerConfig: () =>
+        makeServerConfig({
+          hostedRuntimeAllowlist: ["fake.deterministic", "agentfield.async_rest", "generic_http.async_rest"],
+          hostedRealRuntimeExecution: "enabled",
+          providerRuntimeActivation: activation
+        }),
+      loadWorkerConfig: () =>
+        makeWorkerConfig({
+          providerRuntimeActivation: activation
+        }),
+      checkHostedRuntimeGate: async () => ({
+        ok: true,
+        diagnostics: {
+          hostedDebate: { ok: true },
+          bridgeReadiness: {
+            checks: [
+              { name: "command_store", ok: true },
+              { name: "command_outbox", ok: true },
+              { name: "worker_claim", ok: true },
+              { name: "adapter_capability", ok: true },
+              { name: "wrapper_config", ok: true },
+              { name: "wrapper_bridge_capability", ok: true },
+              { name: "session_reconciliation", ok: true },
+              { name: "approval_sender", ok: true }
+            ]
+          }
+        }
+      })
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedRuntimeBridge",
+      status: "pass",
+      code: "hosted_runtime_bridge_ready",
+      diagnostics: expect.objectContaining({
+        bridgeModes: ["agentfield.async_rest", "generic_http.async_rest"],
+        checks: expect.objectContaining({
+          wrapper_config: "pass",
+          wrapper_bridge_capability: "pass"
+        })
+      })
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.hostedBridgeReadiness",
+      status: "pass",
+      code: "hosted_debate_hosted_bridge_ready"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.r23BridgeReadiness",
+      status: "pass",
+      code: "hosted_debate_r23_bridge_ready"
+    }));
   });
 
   test("fails with provider_runtime_policy_missing and skips adapter checks when real mode activation is invalid", async () => {
