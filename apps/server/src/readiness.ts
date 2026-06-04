@@ -34,6 +34,13 @@ interface UnownedResourceCounts {
   assignments: number;
   auditEvents: number;
   quotaReservations: number;
+  debates: number;
+  debateExecutionJobs: number;
+  messages: number;
+  evidence: number;
+  childRuns: number;
+  debateArtifacts: number;
+  debateEvents: number;
 }
 
 interface ControlPlaneReadinessInput {
@@ -66,6 +73,22 @@ interface RuntimeBridgeReadinessInput {
   workerReadiness?: unknown;
 }
 
+interface HostedDebateReadinessInput {
+  enabled?: boolean;
+  debateStore?: unknown;
+  messageStore?: unknown;
+  evidenceStore?: unknown;
+  eventStore?: unknown;
+  artifactMetadataStore?: unknown;
+  artifactContentStore?: unknown;
+  debateExecutionOutbox?: unknown;
+  runQueue?: unknown;
+  ownership?: unknown;
+  quota?: unknown;
+  audit?: unknown;
+  routeAuth?: unknown;
+}
+
 type HostedRuntimeBridgeReadinessCheckName =
   | "command_store"
   | "command_outbox"
@@ -90,6 +113,7 @@ export async function probeServerReadiness(input: {
   artifactContent: ProbeableArtifactContentStore;
   controlPlane?: ControlPlaneReadinessInput;
   runtimeBridge?: RuntimeBridgeReadinessInput;
+  hostedDebate?: HostedDebateReadinessInput;
   checkSchemaCompatibility?: (handle: PostgresDatabaseHandle) => Promise<PostgresSchemaCompatibility>;
 }): Promise<ReadinessReport> {
   const checks: ReadinessReport["checks"] = {};
@@ -322,36 +346,14 @@ export async function probeServerReadiness(input: {
   }
 
   const unowned = controlPlane.unownedResources;
-  const unownedVisibleTotal = unowned
-    ? unowned.runs +
-      unowned.runEvents +
-      unowned.artifacts +
-      unowned.toolInvocations +
-      unowned.approvals +
-      unowned.placements +
-      unowned.nodes +
-      unowned.assignments +
-      unowned.auditEvents +
-      unowned.quotaReservations
-    : 0;
+  const unownedVisibleTotal = countUnownedResources(unowned);
   checks.unownedResources = strictControlPlane
     ? readinessCheck(
         unownedVisibleTotal === 0,
         "unowned_resources_present",
         unownedVisibleTotal === 0
           ? undefined
-          : redactSecrets({
-              runs: unowned?.runs ?? 0,
-              runEvents: unowned?.runEvents ?? 0,
-              artifacts: unowned?.artifacts ?? 0,
-              toolInvocations: unowned?.toolInvocations ?? 0,
-              approvals: unowned?.approvals ?? 0,
-              placements: unowned?.placements ?? 0,
-              nodes: unowned?.nodes ?? 0,
-              assignments: unowned?.assignments ?? 0,
-              auditEvents: unowned?.auditEvents ?? 0,
-              quotaReservations: unowned?.quotaReservations ?? 0
-            })
+          : buildUnownedResourceDiagnostics(unowned)
       )
     : readinessCheck(true);
 
@@ -403,8 +405,9 @@ export async function probeServerReadiness(input: {
     checks.tools = readinessCheck(true, undefined, toolDiagnostics);
   }
 
+  let bridgeReadiness: HostedRuntimeBridgeReadinessReport | undefined;
   if (input.runtimeBridge?.enabled) {
-    const bridgeReadiness = getServerRuntimeBridgeReadiness({
+    bridgeReadiness = getServerRuntimeBridgeReadiness({
       commandStore: input.runtimeBridge.commandStore,
       commandOutbox: input.runtimeBridge.commandOutbox,
       approvalOwnership: input.runtimeBridge.approvalOwnership,
@@ -419,6 +422,35 @@ export async function probeServerReadiness(input: {
       bridgeReadiness.status === "ready" ? undefined : firstFailure,
       { status: bridgeReadiness.status, checks: bridgeReadiness.checks }
     );
+  }
+
+  if (shouldCheckHostedDebateReadiness(input.config, input.hostedDebate)) {
+    checks.hostedDebate = buildHostedDebateReadiness({
+      config: input.config,
+      postgres: input.postgres,
+      queueReady: checks.queue.ok,
+      objectStoreCheck: checks.objectStore,
+      hostedAllowlistCheck: checks.hostedAllowlist,
+      hostedRuntimeGateCheck: checks.hostedRuntimeGate,
+      providerRuntimeActivationCheck: checks.providerRuntimeActivation,
+      controlPlane,
+      unownedResources: unowned,
+      bridgeReadiness: bridgeReadiness ?? (
+        requiresRuntimeBridge(input.config.hostedRuntimeAllowlist) && input.runtimeBridge
+          ? getServerRuntimeBridgeReadiness({
+              commandStore: input.runtimeBridge.commandStore,
+              commandOutbox: input.runtimeBridge.commandOutbox,
+              approvalOwnership: input.runtimeBridge.approvalOwnership,
+              quota: input.runtimeBridge.quota,
+              audit: input.runtimeBridge.audit,
+              routeAuth: input.runtimeBridge.routeAuth,
+              workerReadiness: input.runtimeBridge.workerReadiness
+            })
+          : undefined
+      ),
+      hostedDebate: input.hostedDebate,
+      artifactContent: input.artifactContent
+    });
   }
 
   const ok = Object.values(checks).every((check) => check.ok);
@@ -470,6 +502,173 @@ function readinessCheck(ok: boolean, code?: string, diagnostics?: Record<string,
     out.diagnostics = diagnostics;
   }
   return out;
+}
+
+function shouldCheckHostedDebateReadiness(config: ServerConfig, input: HostedDebateReadinessInput | undefined): boolean {
+  if (typeof input?.enabled === "boolean") {
+    return input.enabled;
+  }
+  return config.deploymentMode === "staging" || config.deploymentMode === "production";
+}
+
+function buildHostedDebateReadiness(input: {
+  config: ServerConfig;
+  postgres: PostgresDatabaseHandle | undefined;
+  queueReady: boolean;
+  objectStoreCheck: ReadinessReport["checks"][string];
+  hostedAllowlistCheck: ReadinessReport["checks"][string];
+  hostedRuntimeGateCheck: ReadinessReport["checks"][string];
+  providerRuntimeActivationCheck: ReadinessReport["checks"][string];
+  controlPlane: ControlPlaneReadinessInput;
+  unownedResources: UnownedResourceCounts | undefined;
+  bridgeReadiness: HostedRuntimeBridgeReadinessReport | undefined;
+  hostedDebate: HostedDebateReadinessInput | undefined;
+  artifactContent: ProbeableArtifactContentStore;
+}): { ok: boolean; code?: string; diagnostics?: Record<string, unknown> } {
+  const hostedDebate = input.hostedDebate;
+  const dependencyStatus = {
+    debateStore: dependencyAvailable(hostedDebate, "debateStore", Boolean(input.postgres)),
+    messageStore: dependencyAvailable(hostedDebate, "messageStore", Boolean(input.postgres)),
+    evidenceStore: dependencyAvailable(hostedDebate, "evidenceStore", Boolean(input.postgres)),
+    eventStore: dependencyAvailable(hostedDebate, "eventStore", Boolean(input.postgres)),
+    artifactMetadataStore: dependencyAvailable(hostedDebate, "artifactMetadataStore", Boolean(input.postgres)),
+    artifactContentStore: dependencyAvailable(hostedDebate, "artifactContentStore", isPresent(input.artifactContent)),
+    debateExecutionOutbox: dependencyAvailable(hostedDebate, "debateExecutionOutbox", Boolean(input.postgres)),
+    runQueue: dependencyAvailable(hostedDebate, "runQueue", input.queueReady),
+    objectStore: input.objectStoreCheck.ok,
+    ownership: dependencyAvailable(hostedDebate, "ownership", input.controlPlane.storeReady),
+    quota: dependencyAvailable(hostedDebate, "quota", input.controlPlane.hasQuotaStore),
+    audit: dependencyAvailable(hostedDebate, "audit", input.controlPlane.hasAuditStore),
+    routeAuth: dependencyAvailable(hostedDebate, "routeAuth", input.controlPlane.mode === "enabled"),
+    hostedRuntimeAllowlist: input.hostedAllowlistCheck.ok,
+    hostedRuntimeGate: input.hostedRuntimeGateCheck.ok,
+    providerRuntimeActivation: input.providerRuntimeActivationCheck.ok
+  };
+  const bridgeRequired = requiresRuntimeBridge(input.config.hostedRuntimeAllowlist);
+  const bridgeReady = !bridgeRequired || input.bridgeReadiness?.status === "ready";
+  const unownedTotal = countUnownedResources(input.unownedResources);
+  const diagnostics = {
+    enabled: true,
+    dependencyStatus,
+    runtime: {
+      allowlistCount: input.config.hostedRuntimeAllowlist.length,
+      bridgeRequired,
+      bridgeReady
+    },
+    unownedResources: buildUnownedResourceDiagnostics(input.unownedResources),
+    bridge: bridgeRequired && input.bridgeReadiness
+      ? {
+          status: input.bridgeReadiness.status,
+          checks: input.bridgeReadiness.checks
+        }
+      : undefined
+  };
+
+  const storesReady = dependencyStatus.debateStore
+    && dependencyStatus.messageStore
+    && dependencyStatus.evidenceStore
+    && dependencyStatus.eventStore
+    && dependencyStatus.artifactMetadataStore;
+  if (!storesReady) {
+    return readinessCheck(false, "hosted_debate_store_unavailable", diagnostics);
+  }
+  if (!dependencyStatus.debateExecutionOutbox || !dependencyStatus.runQueue) {
+    return readinessCheck(false, "hosted_debate_queue_unavailable", diagnostics);
+  }
+  if (!dependencyStatus.routeAuth) {
+    return readinessCheck(false, "auth_required", diagnostics);
+  }
+  if (!dependencyStatus.ownership) {
+    return readinessCheck(false, "hosted_debate_ownership_attach_failed", diagnostics);
+  }
+  if (!dependencyStatus.quota) {
+    return readinessCheck(false, "quota_store_unavailable", diagnostics);
+  }
+  if (!dependencyStatus.audit) {
+    return readinessCheck(false, "hosted_debate_audit_unavailable", diagnostics);
+  }
+  if (!dependencyStatus.artifactContentStore || !dependencyStatus.objectStore) {
+    return readinessCheck(false, input.objectStoreCheck.code ?? "object_store_unavailable", diagnostics);
+  }
+  if (!dependencyStatus.hostedRuntimeAllowlist) {
+    return readinessCheck(false, input.hostedAllowlistCheck.code ?? "hosted_runtime_not_allowed", diagnostics);
+  }
+  if (!dependencyStatus.hostedRuntimeGate) {
+    return readinessCheck(false, input.hostedRuntimeGateCheck.code ?? "hosted_runtime_not_allowed", diagnostics);
+  }
+  if (!dependencyStatus.providerRuntimeActivation) {
+    return readinessCheck(false, input.providerRuntimeActivationCheck.code ?? "provider_runtime_policy_missing", diagnostics);
+  }
+  if (unownedTotal > 0) {
+    return readinessCheck(false, "unowned_resources_present", diagnostics);
+  }
+  if (!bridgeReady) {
+    const code = input.bridgeReadiness?.checks.find((check) => !check.ok)?.reasonCode
+      ?? "hosted_runtime_bridge_store_unavailable";
+    return readinessCheck(false, code, diagnostics);
+  }
+
+  return readinessCheck(true, undefined, diagnostics);
+}
+
+function dependencyAvailable(
+  input: HostedDebateReadinessInput | undefined,
+  key: keyof HostedDebateReadinessInput,
+  inferred: boolean
+): boolean {
+  if (!input || !Object.prototype.hasOwnProperty.call(input, key)) {
+    return inferred;
+  }
+  return isPresent(input[key]);
+}
+
+function requiresRuntimeBridge(allowlist: readonly string[]): boolean {
+  return allowlist.includes("claude_code.sdk") || allowlist.includes("opencode.acp");
+}
+
+function countUnownedResources(unowned: UnownedResourceCounts | undefined): number {
+  if (!unowned) {
+    return 0;
+  }
+  return unowned.runs
+    + unowned.runEvents
+    + unowned.artifacts
+    + unowned.toolInvocations
+    + unowned.approvals
+    + unowned.placements
+    + unowned.nodes
+    + unowned.assignments
+    + unowned.auditEvents
+    + unowned.quotaReservations
+    + unowned.debates
+    + unowned.debateExecutionJobs
+    + unowned.messages
+    + unowned.evidence
+    + unowned.childRuns
+    + unowned.debateArtifacts
+    + unowned.debateEvents;
+}
+
+function buildUnownedResourceDiagnostics(unowned: UnownedResourceCounts | undefined): Record<string, unknown> {
+  return {
+    runs: unowned?.runs ?? 0,
+    runEvents: unowned?.runEvents ?? 0,
+    artifacts: unowned?.artifacts ?? 0,
+    toolInvocations: unowned?.toolInvocations ?? 0,
+    approvals: unowned?.approvals ?? 0,
+    placements: unowned?.placements ?? 0,
+    nodes: unowned?.nodes ?? 0,
+    assignments: unowned?.assignments ?? 0,
+    auditEvents: unowned?.auditEvents ?? 0,
+    quotaReservations: unowned?.quotaReservations ?? 0,
+    debates: unowned?.debates ?? 0,
+    debateExecutionJobs: unowned?.debateExecutionJobs ?? 0,
+    messages: unowned?.messages ?? 0,
+    evidence: unowned?.evidence ?? 0,
+    childRuns: unowned?.childRuns ?? 0,
+    debateArtifacts: unowned?.debateArtifacts ?? 0,
+    debateEvents: unowned?.debateEvents ?? 0
+  };
 }
 
 function buildSandboxDiagnostics(config: ServerConfig): Record<string, unknown> {

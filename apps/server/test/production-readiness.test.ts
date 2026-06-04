@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { hashApiKey } from "@switchyard/core";
 import { resolveHostedSandboxConfig } from "@switchyard/core";
-import { resolveObjectStoreConfig } from "@switchyard/storage";
+import { POSTGRES_SCHEMA_VERSION, resolveObjectStoreConfig } from "@switchyard/storage";
 import { createServerApp } from "../src/app.js";
 import { loadServerConfig } from "../src/config.js";
 import { probeServerReadiness } from "../src/readiness.js";
@@ -114,6 +114,91 @@ function createProviderPolicyJson(): string {
   });
 }
 
+function createReadyQueue() {
+  return {
+    enqueue: async () => "job",
+    claim: async () => null,
+    ack: async () => {},
+    fail: async () => {},
+    retry: async () => {},
+    discard: async () => {},
+    getJob: async () => null,
+    recoverStaleClaims: async () => 0,
+    stats: async () => ({ queued: 0, claimed: 0 })
+  };
+}
+
+function createReadyArtifactContent() {
+  return {
+    writeText: async () => ({ location: "x" }),
+    writeBytes: async () => ({ location: "x" }),
+    read: async () => ({ body: Buffer.from("ok"), contentType: "application/octet-stream" }),
+    probe: async () => {}
+  };
+}
+
+function createZeroUnownedResources() {
+  return {
+    runs: 0,
+    runEvents: 0,
+    artifacts: 0,
+    toolInvocations: 0,
+    approvals: 0,
+    placements: 0,
+    nodes: 0,
+    assignments: 0,
+    auditEvents: 0,
+    quotaReservations: 0,
+    debates: 0,
+    debateExecutionJobs: 0,
+    messages: 0,
+    evidence: 0,
+    childRuns: 0,
+    debateArtifacts: 0,
+    debateEvents: 0
+  };
+}
+
+function createReadyControlPlane(unownedResources = createZeroUnownedResources()) {
+  return {
+    mode: "enabled" as const,
+    hasApiKeyPepper: true,
+    hasBootstrap: true,
+    bootstrapActiveCounts: {
+      accounts: 1,
+      tenants: 1,
+      projects: 1,
+      users: 1,
+      apiKeys: 1,
+      billingPlans: 1
+    },
+    storeReady: true,
+    hasQuotaStore: true,
+    hasAuditStore: true,
+    nodeTokenBound: true,
+    unownedResources
+  };
+}
+
+function createHostedDebateDependencies(overrides?: Record<string, unknown>) {
+  return {
+    enabled: true,
+    debateStore: {},
+    messageStore: {},
+    evidenceStore: {},
+    eventStore: {},
+    artifactMetadataStore: {},
+    artifactContentStore: {},
+    debateExecutionOutbox: {},
+    runQueue: {},
+    ownership: {},
+    quota: {},
+    audit: {},
+    routeAuth: {},
+    ...overrides
+  };
+}
+
 describe("production readiness", () => {
   it("keeps /health cheap liveness while /ready can fail", async () => {
     const app = await createServerApp({
@@ -188,7 +273,7 @@ describe("production readiness", () => {
 
     expect(report.checks.schema).toBeDefined();
     expect(report.checks.schema).toMatchObject({ ok: true, code: "postgres_schema_ready" });
-    expect(report.checks.schema?.diagnostics).toMatchObject({ expectedVersion: 22, version: 19 });
+    expect(report.checks.schema?.diagnostics).toMatchObject({ expectedVersion: POSTGRES_SCHEMA_VERSION, version: 19 });
   });
 
   it("reports migration-required schema readiness code", async () => {
@@ -226,6 +311,240 @@ describe("production readiness", () => {
 
     expect(report.ok).toBe(false);
     expect(report.checks.schema).toMatchObject({ ok: false, code: "postgres_schema_migration_required" });
+  });
+
+  it("reports hosted debate readiness with fake no-spend dependencies", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(createAuthEnabledTestEnv({ SWITCHYARD_OBJECT_STORE_BACKEND: "memory" })),
+      postgres: undefined,
+      queue: createReadyQueue(),
+      artifactContent: createReadyArtifactContent(),
+      controlPlane: createReadyControlPlane(),
+      hostedDebate: createHostedDebateDependencies()
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.checks.hostedDebate).toMatchObject({
+      ok: true,
+      diagnostics: {
+        enabled: true,
+        dependencyStatus: {
+          debateStore: true,
+          debateExecutionOutbox: true,
+          runQueue: true,
+          routeAuth: true,
+          ownership: true,
+          quota: true,
+          audit: true,
+          providerRuntimeActivation: true
+        },
+        runtime: {
+          allowlistCount: 1,
+          bridgeRequired: false,
+          bridgeReady: true
+        }
+      }
+    });
+
+    const serialized = JSON.stringify(report.checks.hostedDebate?.diagnostics ?? {});
+    expect(serialized).not.toContain(API_KEY_PEPPER);
+    expect(serialized).not.toContain(ADMIN_RAW_KEY);
+    expect(serialized).not.toContain("tenant_1");
+    expect(serialized).not.toContain("sk_sw");
+  });
+
+  it("fails hosted debate readiness closed when a debate store dependency is missing", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(createAuthEnabledTestEnv({ SWITCHYARD_OBJECT_STORE_BACKEND: "memory" })),
+      postgres: undefined,
+      queue: createReadyQueue(),
+      artifactContent: createReadyArtifactContent(),
+      controlPlane: createReadyControlPlane(),
+      hostedDebate: createHostedDebateDependencies({ debateStore: undefined })
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.hostedDebate).toMatchObject({
+      ok: false,
+      code: "hosted_debate_store_unavailable",
+      diagnostics: {
+        dependencyStatus: {
+          debateStore: false,
+          messageStore: true,
+          evidenceStore: true
+        }
+      }
+    });
+  });
+
+  it.each([
+    {
+      name: "debate execution outbox",
+      hostedDebateOverrides: { debateExecutionOutbox: undefined },
+      expectedCode: "hosted_debate_queue_unavailable"
+    },
+    {
+      name: "run queue",
+      hostedDebateOverrides: { runQueue: undefined },
+      expectedCode: "hosted_debate_queue_unavailable"
+    },
+    {
+      name: "route auth",
+      hostedDebateOverrides: { routeAuth: undefined },
+      expectedCode: "auth_required"
+    },
+    {
+      name: "quota",
+      hostedDebateOverrides: { quota: undefined },
+      expectedCode: "quota_store_unavailable"
+    },
+    {
+      name: "audit",
+      hostedDebateOverrides: { audit: undefined },
+      expectedCode: "hosted_debate_audit_unavailable"
+    },
+    {
+      name: "artifact content store",
+      hostedDebateOverrides: { artifactContentStore: undefined },
+      expectedCode: "object_store_unavailable"
+    },
+    {
+      name: "runtime policy gate",
+      configOverrides: {
+        hostedRuntimeAllowlist: ["fake.deterministic", "opencode.acp"],
+        hostedRealRuntimeExecution: "disabled" as const
+      },
+      expectedCode: "hosted_real_runtime_disabled"
+    }
+  ])("fails hosted debate readiness closed when $name is unavailable", async ({ envOverrides, configOverrides, hostedDebateOverrides, expectedCode }) => {
+    const config = loadServerConfig(createAuthEnabledTestEnv({
+      SWITCHYARD_OBJECT_STORE_BACKEND: "memory",
+      ...envOverrides
+    }));
+    const report = await probeServerReadiness({
+      config: {
+        ...config,
+        ...configOverrides
+      },
+      postgres: undefined,
+      queue: createReadyQueue(),
+      artifactContent: createReadyArtifactContent(),
+      controlPlane: createReadyControlPlane(),
+      hostedDebate: createHostedDebateDependencies(hostedDebateOverrides)
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.hostedDebate).toMatchObject({
+      ok: false,
+      code: expectedCode
+    });
+  });
+
+  it("fails hosted debate readiness with debate-derived unowned resource counts", async () => {
+    const unowned = {
+      ...createZeroUnownedResources(),
+      debates: 1,
+      debateExecutionJobs: 2,
+      messages: 3,
+      evidence: 4,
+      childRuns: 5,
+      debateArtifacts: 6,
+      debateEvents: 7
+    };
+    const report = await probeServerReadiness({
+      config: loadServerConfig(createAuthEnabledTestEnv({ SWITCHYARD_OBJECT_STORE_BACKEND: "memory" })),
+      postgres: undefined,
+      queue: createReadyQueue(),
+      artifactContent: createReadyArtifactContent(),
+      controlPlane: createReadyControlPlane(unowned),
+      hostedDebate: createHostedDebateDependencies()
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.hostedDebate).toMatchObject({
+      ok: false,
+      code: "unowned_resources_present",
+      diagnostics: {
+        unownedResources: {
+          runs: 0,
+          runEvents: 0,
+          artifacts: 0,
+          toolInvocations: 0,
+          approvals: 0,
+          placements: 0,
+          nodes: 0,
+          assignments: 0,
+          auditEvents: 0,
+          quotaReservations: 0,
+          debates: 1,
+          debateExecutionJobs: 2,
+          messages: 3,
+          evidence: 4,
+          childRuns: 5,
+          debateArtifacts: 6,
+          debateEvents: 7
+        }
+      }
+    });
+    expect(report.checks.unownedResources.diagnostics).toMatchObject({
+      debates: 1,
+      debateExecutionJobs: 2,
+      messages: 3,
+      evidence: 4,
+      childRuns: 5,
+      debateArtifacts: 6,
+      debateEvents: 7
+    });
+  });
+
+  it("fails hosted debate readiness on missing R23 bridge worker when bridge runtimes are allowlisted", async () => {
+    const report = await probeServerReadiness({
+      config: loadServerConfig(
+        createAuthEnabledTestEnv({
+          SWITCHYARD_OBJECT_STORE_BACKEND: "memory",
+          SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: "fake.deterministic,opencode.acp",
+          SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION: "enabled",
+          SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON: createProviderPolicyJson()
+        })
+      ),
+      postgres: undefined,
+      queue: createReadyQueue(),
+      artifactContent: createReadyArtifactContent(),
+      controlPlane: createReadyControlPlane(),
+      hostedDebate: createHostedDebateDependencies(),
+      runtimeBridge: {
+        enabled: true,
+        commandStore: {},
+        commandOutbox: {},
+        approvalOwnership: {},
+        quota: {},
+        audit: {},
+        routeAuth: {},
+        workerReadiness: {
+          claim: false,
+          adapterCapability: false,
+          sessionReconciliation: false,
+          approvalSender: false
+        }
+      }
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.hostedDebate).toMatchObject({
+      ok: false,
+      code: "hosted_runtime_bridge_worker_unavailable",
+      diagnostics: {
+        runtime: {
+          allowlistCount: 2,
+          bridgeRequired: true,
+          bridgeReady: false
+        }
+      }
+    });
+    expect(report.checks.hostedRuntimeBridge).toMatchObject({
+      ok: false,
+      code: "hosted_runtime_bridge_worker_unavailable"
+    });
   });
 
   it("exposes redacted sandbox diagnostics in readiness without command policy details", async () => {
