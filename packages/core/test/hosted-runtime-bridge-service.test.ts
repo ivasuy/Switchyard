@@ -14,6 +14,9 @@ import type { SessionStore } from "../src/ports/session-store.js";
 
 type HasListByRun = HostedRuntimeBridgeCommandStore extends { listByRun: (...args: never[]) => unknown } ? true : false;
 
+const BRIDGE_TEST_NOW = "2026-06-01T00:00:00.000Z";
+const BRIDGE_TEST_FUTURE_EXPIRES_AT = "2026-06-02T01:00:00.000Z";
+
 class InMemoryHostedRuntimeBridgeCommandStore implements HostedRuntimeBridgeCommandStore {
   readonly items = new Map<string, HostedRuntimeBridgeCommand>();
   readonly byIdempotency = new Map<string, string>();
@@ -553,7 +556,7 @@ describe("hosted runtime bridge service", () => {
         runtimeApprovalToken: "request_1",
         runtimeSessionId: "session_1",
         runtimeMode: "opencode.acp",
-        expiresAt: "2026-06-02T01:00:00.000Z"
+        expiresAt: BRIDGE_TEST_FUTURE_EXPIRES_AT
       },
       createdAt: "2026-06-01T00:00:00.000Z"
     });
@@ -563,7 +566,8 @@ describe("hosted runtime bridge service", () => {
       sessions,
       approvals,
       commands,
-      runtimeRunner: { sendInput: async () => undefined }
+      runtimeRunner: { sendInput: async () => undefined },
+      now: () => BRIDGE_TEST_NOW
     });
 
     const [approve, reject] = await Promise.allSettled([
@@ -907,7 +911,7 @@ describe("hosted runtime bridge service", () => {
       payload: {
         runtimeApprovalToken: "request_2",
         runtimeMode: "opencode.acp",
-        expiresAt: "2026-06-02T01:00:00.000Z"
+        expiresAt: BRIDGE_TEST_FUTURE_EXPIRES_AT
       },
       createdAt: "2026-06-01T00:00:00.000Z"
     });
@@ -938,7 +942,7 @@ describe("hosted runtime bridge service", () => {
       userId: "user_1",
       apiKeyId: "api_key_1",
       maxAttempts: 3,
-      expiresAt: "2026-06-02T01:00:00.000Z"
+      expiresAt: BRIDGE_TEST_FUTURE_EXPIRES_AT
     });
 
     const service = new HostedRuntimeBridgeService({
@@ -950,7 +954,8 @@ describe("hosted runtime bridge service", () => {
         sendInput: async (runId: string, payload: Record<string, unknown>) => {
           runnerCalls.push({ runId, payload });
         }
-      }
+      },
+      now: () => BRIDGE_TEST_NOW
     });
 
     const applied = await service.claimAndApplyNext({ workerId: "worker_a", leaseMs: 5_000 });
