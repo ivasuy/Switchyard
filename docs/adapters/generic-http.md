@@ -16,12 +16,15 @@ Generic HTTP lets Switchyard integrate custom agents and wrappers that expose ru
 - Poll terminal status with `GET /v1/runs/:id` when events are empty or `terminal=true` without terminal event.
 - Cancel execution with verified-terminal semantics (`POST /v1/runs/:id/cancel` + terminal status verification).
 - Collect artifacts and transcript with `GET /v1/runs/:id/artifacts`.
-- Reject post-start input in R4 (`adapter_protocol_failed`, reason `generic_http_input_unsupported`).
+- Bridge post-start input only to configured wrappers that advertise the R25 input capability.
+- Bridge runtime approval resolution only to configured wrappers that advertise the R25 approval request/resolution capabilities.
 
 ## Runtime Constraints
 
 - Base URL and auth token are daemon-configured only.
 - Per-run endpoint overrides are out of scope.
+- Per-run auth token/base URL overrides are out of scope.
+- Arbitrary wrapper endpoint execution is out of scope.
 - Webhook callbacks are out of scope.
 
 ## Development Guide
@@ -30,11 +33,11 @@ Generic HTTP lets Switchyard integrate custom agents and wrappers that expose ru
 
 ## Status
 
-Implemented local slice in R4 as runtime mode `generic_http.async_rest`.
+Implemented as wrapper runtime mode `generic_http.async_rest`.
 
-R24 hosted debate boundary:
+R25 hosted wrapper boundary:
 
-- Generic HTTP hosted debate bridges are unshipped.
-- Generic HTTP hosted input/approval bridges are unshipped.
-- Generic HTTP remains outside the R24 hosted debate participant allowlist.
+- Hosted input/approval bridges are conditional through the existing hosted runtime bridge and public `POST /runs/:id/input` plus approval list/get/approve/reject routes.
+- Hosted debate participants are allowed only through the existing `/debates` route family with hosted placement, `realRuntimeOptIn`, provider activation/spend gates, wrapper config/capability checks, bridge readiness, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness.
+- Hosted active cancel bridge is not shipped.
 - Public model judge routes, browser automation, generic process/PTY adapters, dashboard/TUI surfaces, and managed SaaS remain unshipped.

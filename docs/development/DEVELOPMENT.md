@@ -169,19 +169,20 @@ Fail-closed production behavior:
 - `SWITCHYARD_PUBLIC_METRICS=1` is forbidden in staging/production.
 - Fake-only remains default (`SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST=fake.deterministic`, `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`).
 - Real tools remain disabled by default (`SWITCHYARD_HOSTED_REAL_TOOLS=disabled`, `SWITCHYARD_CONNECTED_NODE_REAL_TOOLS=disabled`, `SWITCHYARD_TOOL_ADAPTER_MODE=fake`).
-- Production hosted provider activation is operator opt-in only for known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`) and requires provider policy, credential presence, and spend controls.
-- Usable hosted runtime input/approval bridges for `claude_code.sdk` and `opencode.acp` require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker.
+- Production hosted provider activation is operator opt-in only for known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, `generic_http.async_rest`) and requires provider policy, credential presence, and spend controls.
+- Usable hosted runtime input/approval bridges for `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest` require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker.
+- Wrapper hosted bridges additionally require daemon/operator wrapper config plus advertised wrapper bridge capabilities for input, approval request, and approval resolution.
 - Missing bridge command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`).
 - Worker crash/stale claimed non-idempotent provider input is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`.
 - Production hosted/connected-node tool activation is operator opt-in and requires explicit real-tool policy plus API-key auth, Postgres, Redis, object store, quota/audit readiness, worker claim readiness, and node readiness for connected-node tool placements.
 - R24 hosted debate uses only `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
 - Fake deterministic hosted debate is the default no-spend route through production canary.
-- Real debate participants require request-level `realRuntimeOptIn: true`; hosted real participants require `placement: "hosted"` and are allowed only for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` beyond fake.
+- Real debate participants require request-level `realRuntimeOptIn: true`; hosted real participants require `placement: "hosted"` and are allowed only for `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest` beyond fake.
 - Live model judge requests require `judgeConfig.mode: "model"`, `realRuntimeOptIn: true`, and `confirmLiveProviderSpend: true`.
-- Hosted debate readiness requires durable Postgres debate/message/evidence/job state, child-run idempotency, evidence ownership preauthorization, ownership, quota, audit, queue/outbox, object store, worker readiness, provider activation, and R23 bridge readiness for Claude/OpenCode when allowlisted.
+- Hosted debate readiness requires durable Postgres debate/message/evidence/job state, child-run idempotency, evidence ownership preauthorization, ownership, quota, audit, queue/outbox, object store, worker readiness, provider activation, and hosted runtime bridge readiness for Claude/OpenCode and wrapper modes when allowlisted.
 - Missing hosted debate dependencies fail closed with named codes such as `hosted_debate_store_unavailable`, `hosted_debate_queue_unavailable`, `hosted_debate_worker_unavailable`, `hosted_debate_quota_exceeded`, `hosted_debate_audit_unavailable`, `hosted_debate_artifact_write_failed`, `provider_runtime_policy_missing`, or `hosted_runtime_bridge_store_unavailable`.
 
-R24 non-goals reminder:
+R25 non-goals reminder:
 
 - No managed SaaS/public signup, payments/webhooks, OAuth/OIDC/SAML/SSO/SCIM, dashboard, or TUI setup is shipped here.
 - does not ship generic process/pty runtime adapters.
@@ -189,11 +190,12 @@ R24 non-goals reminder:
 - does not ship hosted browser automation.
 - does not ship hosted `repo` execution.
 - does not ship public model judge routes (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family).
-- hosted bridges remain unshipped for `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, and `generic_http.async_rest`.
+- hosted input/approval bridges remain unsupported for `codex.exec_json` and hosted `codex.interactive`; wrapper bridge support for `agentfield.async_rest` and `generic_http.async_rest` is conditional and uses only existing run input and approval routes.
 - hosted `codex.interactive` remains local-only and unshipped.
 - hosted live-resume guarantees are not shipped.
 - does not ship hosted terminal bridge.
 - No public `/exec`/`/sandbox`/`/terminal`/`/pty`/`/shell`/`/process`/`/command` routes are shipped here.
+- No arbitrary wrapper endpoint execution, per-run wrapper URL/auth overrides, hosted browser automation, hosted `repo` execution, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM.
 - R22 shipped real tools are exact-only: hosted worker `fetch/web_search/github/shell` and connected-node `fetch/web_search/github/repo/shell`.
 
 Rollback order:
@@ -298,10 +300,12 @@ curl -s -X POST "$BASE/runs?wait=1" \
   | python3 -m json.tool
 ```
 
-R4 Generic HTTP boundaries:
+Generic HTTP boundaries:
 
-- No post-start input (`POST /runs/:id/input` returns `409 adapter_protocol_failed`).
+- Post-start input is supported only for active sessions whose configured wrapper advertises bridge input capability; hosted use goes through the existing hosted runtime bridge and `POST /runs/:id/input`.
+- Runtime approval resolution reuses approval list/get/approve/reject routes; hosted `POST /approvals` is not exposed.
 - No per-run base URL override; endpoint config is daemon env only.
+- No per-run auth override and no arbitrary wrapper endpoint execution.
 - No webhooks and no remote artifact URL fetching.
 
 ## AgentField Local Smoke
@@ -336,11 +340,13 @@ curl -s -X POST "$BASE/runs?wait=1" \
   | python3 -m json.tool
 ```
 
-R6 AgentField boundaries:
+AgentField boundaries:
 
-- No post-start input (`POST /runs/:id/input` returns `409 adapter_protocol_failed` with `reasonCode: agentfield_input_unsupported`).
+- Post-start input is supported only for active sessions whose configured wrapper advertises bridge input capability; hosted use goes through the existing hosted runtime bridge and `POST /runs/:id/input`.
+- Runtime approval resolution reuses approval list/get/approve/reject routes; hosted `POST /approvals` is not exposed.
 - Active cancel is unsupported (`POST /runs/:id/cancel` returns `409 adapter_protocol_failed` with `reasonCode: agentfield_cancel_unsupported`).
 - No per-run base URL/API key/target overrides; endpoint and target config are daemon env only.
+- No arbitrary AgentField endpoint execution.
 - No webhooks and no AgentField control-plane proxying for memory/admin/node lifecycle APIs.
 
 ## Claude Code Local Smoke
@@ -582,13 +588,14 @@ Expected:
 - `debate.messageIds`, `debate.eventIds`, `debate.judge`, and `debate.stopReason` are populated.
 - Final report artifact metadata is present in inspect output.
 
-R24 async hosted debate behavior:
+R24/R25 async hosted debate behavior:
 
 - `POST /debates` returns `202 { debate }` and executes asynchronously.
 - Hosted/server-safe debate uses only `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
 - `POST /debates?wait=1` is supported only for fake deterministic no-spend debates.
 - Real participants require `realRuntimeOptIn: true`; hosted real participants also require `placement: "hosted"`.
-- Allowed debate participant runtime modes are `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- Allowed debate participant runtime modes are `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`.
+- Wrapper hosted debate participants require hosted placement, `realRuntimeOptIn`, provider activation/spend gates, wrapper config/capability checks, bridge readiness, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness.
 - Live model judge requests use `judgeConfig.mode: "model"` and require `realRuntimeOptIn: true` plus `confirmLiveProviderSpend: true`.
 - Debate participant and judge execution use existing run/runtime contracts and preserve run/message/event/artifact traceability.
 

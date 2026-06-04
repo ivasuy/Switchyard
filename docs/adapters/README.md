@@ -10,8 +10,8 @@ This directory records runtime adapter facts before implementation and tracks im
 | Claude Code | SDK or stream-json CLI | Shipped local + hosted bridge slice | Hosted debate use depends on the R23 hosted runtime bridge command/payload stores. |
 | Codex | `codex exec --json` | Shipped one-shot slice | `codex.exec_json` remains one-shot; hosted `codex.interactive` and hosted Codex live-resume remain unshipped. |
 | Cursor Agent | stream-json CLI | Deferred | CLI is installed, but local status check hit credential/keychain failure. |
-| AgentField | async REST / CLI | Shipped local wrapper slice | Hosted input/approval and hosted debate bridges remain unshipped. |
-| Generic HTTP | HTTP async REST | Shipped local wrapper slice | Runtime mode `generic_http.async_rest` is implemented locally; hosted input/approval and hosted debate bridges remain unshipped. |
+| AgentField | async REST / CLI | Shipped local + conditional hosted wrapper bridge slice | Hosted input/approval and debate participant bridges require hosted placement, provider activation, wrapper config/capability, bridge stores, queue, object store, ownership, quota, audit, and worker readiness. |
+| Generic HTTP | HTTP async REST | Shipped local + conditional hosted wrapper bridge slice | Runtime mode `generic_http.async_rest` is implemented locally; hosted input/approval and debate participant bridges use the same conditional wrapper gate set. |
 | OpenClaw | HTTP/acpx wrapper | Deferred | API boundary should be verified before implementation. |
 | Paperclip | HTTP wrapper | Deferred | API/source boundary should be verified before implementation. |
 
@@ -29,7 +29,7 @@ R17 ships local-daemon tool adapters behind `POST /tools/invocations` only.
 | `shell` | Shipped (local daemon) | command-catalog only (`commandId`), no raw shell strings/interpolation |
 | `browser` | Unshipped in R17 | policy-denied (`browser_tool_unshipped`) |
 
-Current unshipped adapter/tool surfaces: generic process/PTY execution adapters, Cursor/OpenClaw/Paperclip adapters, browser automation, hosted `repo` execution, AgentField/Generic HTTP hosted debate bridges, hosted Codex interactive, dashboard/TUI surfaces, and public `/exec`/`/terminal`/`/pty`/`/sandbox`/`/tools/search` execution surfaces.
+Current unshipped adapter/tool surfaces: generic process/PTY execution adapters, Cursor/OpenClaw/Paperclip adapters, browser automation, hosted `repo` execution, hosted Codex interactive, dashboard/TUI surfaces, managed SaaS/billing/OAuth/SSO/SCIM, public model judge routes, and public `/exec`/`/terminal`/`/pty`/`/sandbox`/`/tools/search` execution surfaces.
 
 ## Implementation Rule
 
@@ -54,11 +54,13 @@ Current shipped runtime modes are:
 - `agentfield.async_rest`
 - `opencode.acp`
 
-R24 hosted debate participant runtime modes are limited to:
+R25 hosted debate participant runtime modes are limited to:
 
 - `fake.deterministic`
 - `codex.exec_json` (one-shot)
 - `claude_code.sdk` (R23 hosted bridge store required)
 - `opencode.acp` (R23 hosted bridge store required)
+- `agentfield.async_rest` (R25 wrapper bridge gates required)
+- `generic_http.async_rest` (R25 wrapper bridge gates required)
 
-AgentField and Generic HTTP hosted debate bridges are not shipped.
+Wrapper-hosted AgentField and Generic HTTP participants are not arbitrary endpoint execution. They require hosted placement, `realRuntimeOptIn`, provider activation/spend gates, daemon/operator wrapper config, advertised input/approval bridge capabilities, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness.

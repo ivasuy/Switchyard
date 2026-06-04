@@ -24,9 +24,10 @@ R24 hosted boundary note:
 - does not ship hosted `repo` execution.
 - hosted/server-safe debate ships only through `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
 - fake deterministic hosted debate is the default no-spend path.
-- opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`.
 - live model judging is internal to `POST /debates` and requires request opt-in plus `confirmLiveProviderSpend: true`; no public model judge route is shipped.
-- does not ship hosted `codex.interactive`, AgentField/Generic HTTP hosted debate bridges, hosted terminal bridge, public model judge routes, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM.
+- wrapper hosted debate participants require hosted placement, `realRuntimeOptIn`, provider activation/spend gates, wrapper config/capability checks, bridge readiness, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness.
+- does not ship hosted `codex.interactive`, hosted terminal bridge, public model judge routes, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM.
 
 ## R19 Production Hosted Deployment Readiness
 
@@ -147,7 +148,7 @@ Current implementation status:
 - Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), local-daemon real tool invocation routing for configured `fetch`/`web_search`/`github`/`repo`/command-catalog `shell` (deny-by-default, approval-by-default), and hosted/server-safe debate routes (`POST /debates`, `GET /debates/:id`, `GET /debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex one-shot (`codex.exec_json`), local Codex interactive (`codex.interactive`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
-- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service/signup, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public `/exec`/`/shell`/`/process`/`/command`/`/sandbox`/`/pty`/`/terminal` APIs, hosted interactive Codex bridge, hosted post-start input bridge for `codex.exec_json`/`codex.interactive`/AgentField/Generic HTTP, hosted approval bridge for `codex.exec_json`/`codex.interactive`/AgentField/Generic HTTP, per-run HTTP base URL overrides, remote artifact URL fetching, browser automation, hosted `repo` execution, Cursor/OpenClaw/Paperclip adapters, hosted runtime expansion beyond known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`), AgentField/Generic HTTP hosted debate bridges, and public model judge routes.
+- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service/signup, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public `/exec`/`/shell`/`/process`/`/command`/`/sandbox`/`/pty`/`/terminal` APIs, hosted interactive Codex bridge, hosted post-start input bridge for `codex.exec_json`/`codex.interactive`, hosted approval bridge for `codex.exec_json`/`codex.interactive`, hosted active cancel bridge, per-run HTTP base URL/auth/target overrides, arbitrary wrapper endpoint execution, remote artifact URL fetching, browser automation, hosted `repo` execution, Cursor/OpenClaw/Paperclip adapters, hosted runtime expansion beyond known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, `generic_http.async_rest`), and public model judge routes.
 
 ## Error Contract
 
@@ -281,17 +282,17 @@ Tool invocation request/response envelope:
 - No public model judge route is shipped: no `/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family.
 - Exactly two participants are required per debate.
 - Fake deterministic debate is the default no-spend path. Fake participants default to `runtime: "fake"`, `provider: "test"`, `model: "test-model"`, `adapterType: "process"`, and `runtimeMode: "fake.deterministic"`.
-- Opt-in debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- Opt-in debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`.
 - Non-fake participant runtimes require `realRuntimeOptIn: true`; otherwise creation fails with `400 debate_real_participant_opt_in_required` before provider side effects.
 - Hosted real participants require `placement: "hosted"`; otherwise creation fails with `400 debate_participant_placement_required`.
 - Hosted debate participant execution uses existing hosted run/runtime contracts and preserves child run ids, message ids, event ids, evidence ids, and artifact ids.
 - `codex.exec_json` remains one-shot. Hosted `codex.interactive` debate execution is unshipped.
-- AgentField and Generic HTTP hosted debate bridges are unshipped.
+- Wrapper hosted debate participants (`agentfield.async_rest` and `generic_http.async_rest`) are allowed only when hosted placement, `realRuntimeOptIn`, provider activation/spend gates, wrapper config/capability checks, bridge readiness, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness all pass.
 - `judgeConfig` defaults to `{ "mode": "deterministic" }` and uses the internal bounded deterministic judge.
 - `judgeConfig.mode: "model"` is a live model judge request and requires `realRuntimeOptIn: true` plus `confirmLiveProviderSpend: true`; otherwise creation fails with `400 debate_judge_live_spend_unconfirmed`.
 - `POST /debates?wait=1` is supported only for fake deterministic no-spend debates. Real participant or live judge requests with `wait=1` fail with `409 debate_wait_real_runtime_unsupported` before provider side effects.
 - `evidenceIds` are validated before debate creation; unknown local evidence returns `404 evidence_not_found`, and hosted missing/denied evidence returns `404 debate_evidence_not_found_or_denied`, with no provider side effects.
-- Hosted debate requires durable Postgres debate/message/evidence/job state, child-run idempotency, ownership preauthorization and attachment, quota, audit, queue/outbox, object store, worker readiness, provider activation, and R23 bridge readiness where applicable.
+- Hosted debate requires durable Postgres debate/message/evidence/job state, child-run idempotency, ownership preauthorization and attachment, quota, audit, queue/outbox, object store, worker readiness, provider activation, and hosted runtime bridge readiness where applicable.
 - `POST /debates` returns `202 { debate }` after creation and executes asynchronously unless `wait=1` fake/no-spend mode is used.
 - `GET /debates/:id` returns `{ debate, events, messages, evidence, artifacts }`.
 - `GET /debates/:id/events` supports replay-only, `live=1`, `live=1&stopAfter=N`, and `Last-Event-ID` / `lastEventId`.
@@ -898,7 +899,9 @@ Mode behavior:
 
 - `claude_code.sdk`: supports post-start input while run/session are active.
 - `codex.interactive`: supports post-start text input while the run/session are active, with `runtime_input_in_flight` conflict protection per runtime session.
-- `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`: return `409 adapter_protocol_failed` for post-start input.
+- `codex.exec_json` remains one-shot and returns `409 adapter_protocol_failed` for post-start input.
+- `agentfield.async_rest` and `generic_http.async_rest`: support post-start input only for active sessions when the configured wrapper advertises bridge capability; hosted use is admitted through the existing hosted runtime bridge and `POST /runs/:id/input`.
+- `opencode.acp`: returns `409 adapter_protocol_failed` for post-start input.
 
 Core protocol safeguards (when REST validation is bypassed) include `runtime_input_not_active`, `runtime_session_missing`, `runtime_input_empty`, `runtime_input_too_large`, and `runtime_input_in_flight`.
 
@@ -909,7 +912,7 @@ Codex interactive input/stream/approval reason codes exposed through `409 adapte
 - `codex_stream_malformed`
 - `codex_approval_bridge_unsupported`
 - `runtime_input_in_flight`
-- `hosted_input_unsupported` (hosted real-run boundary; no hosted post-start input bridge)
+- `hosted_input_unsupported` (unsupported hosted runtime boundary, including `codex.exec_json` and hosted `codex.interactive`)
 
 For OpenCode input failures, response details include `reasonCode: opencode_input_unsupported`.
 
@@ -938,6 +941,8 @@ curl -s -X POST "http://127.0.0.1:4545/approvals/$APPROVAL_ID/reject" \
 Notes:
 
 - `answers` is optional and forwarded for runtime-linked approvals.
+- Hosted runtime approvals reuse `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, and `POST /approvals/:id/reject`; hosted `POST /approvals` is not exposed.
+- Wrapper runtime approval resolution for `agentfield.async_rest` and `generic_http.async_rest` is conditional on hosted bridge readiness and wrapper-advertised approval capabilities.
 - If runtime callback delivery fails with an adapter protocol reason, REST returns `409 adapter_protocol_failed` with `reasonCode` details.
 - Approval records remain one-shot: resolving an already-resolved approval returns `409 approval_not_pending`.
 - Expired runtime approvals resolve to terminal `expired` status and later approve/reject attempts return `409 approval_not_pending`.
@@ -960,7 +965,8 @@ Cancellation semantics:
 - Unverified or failed cancellation returns `409 adapter_protocol_failed` and keeps the previous run state.
 - `agentfield.async_rest` active cancel returns `409 adapter_protocol_failed` with reason `agentfield_cancel_unsupported`; timeout handling remains Switchyard-owned.
 - OpenCode unverified cancel uses `reasonCode: acp_cancel_unverified`.
-- Hosted real runs remain worker-owned start-to-terminal jobs; hosted cancel/input/approval bridges are not shipped (`hosted_cancel_unsupported`, `hosted_input_unsupported`).
+- Hosted cancel remains unsupported for active hosted real runs (`hosted_cancel_unsupported`).
+- Hosted input and approval bridges are available only for the supported runtime modes admitted by the hosted runtime bridge; unsupported modes still fail visibly with `hosted_input_unsupported` or `hosted_runtime_approval_bridge_unshipped`.
 
 Runtime transcript/result artifacts are exposed through the existing artifact APIs. This includes AgentField transcript/result artifacts, Generic HTTP transcripts, and OpenCode ACP transcripts:
 

@@ -14,17 +14,17 @@ Implemented:
 - Transcript artifact capture at `runs/<runId>/agentfield-transcript.jsonl`.
 - Terminal result payload artifact capture at `runs/<runId>/agentfield-result.json`.
 - Named failure mapping for upstream failed/cancelled/timeout statuses and malformed responses.
+- Conditional R25 hosted input/approval bridge support through existing hosted runtime bridge command/payload stores when wrapper config and advertised bridge capabilities are ready.
 
 Not shipped:
 
 - Per-run base URL/API key/target overrides.
-- Post-start input.
-- Hosted post-start input bridge.
-- Hosted runtime approval bridge.
+- Arbitrary AgentField endpoint execution.
+- Hosted active cancel bridge.
 - Verified upstream cancellation endpoint support.
 - Webhook callbacks.
 - AgentField memory/admin/node lifecycle/permissions/Agentic APIs via Switchyard.
-- OpenClaw, Paperclip, hosted workers, debate/memory/tool expansion, SDK/CLI/TUI/dashboard.
+- OpenClaw, Paperclip, AgentField memory/admin/tool expansion, TUI, and dashboard.
 
 ## Environment Variables
 
@@ -46,18 +46,23 @@ Security rule: API keys are never persisted in doctor output, diagnostics, trans
 Expected AgentField endpoints:
 
 - `GET /api/v1/health`
-- `GET /api/v1/discovery/capabilities?format=compact` (optional diagnostic)
+- `GET /api/v1/discovery/capabilities?format=compact` (diagnostic plus R25 bridge capability discovery)
 - `POST /api/v1/execute/async/{target}`
 - `GET /api/v1/executions/{executionId}`
+- `POST /api/v1/executions/{executionId}/input` (required for R25 input bridge readiness)
+- `POST /api/v1/executions/{executionId}/approvals/{runtimeApprovalToken}/resolve` (required for R25 approval bridge readiness)
 
-Runtime checks only call health/discovery. Checks do not execute prompts and do not create executions.
+Runtime checks only call health/discovery. Checks do not execute prompts and do not create executions. Hosted bridge readiness requires discovery to advertise `switchyard_bridge.input`, `switchyard_bridge.approval_request`, and `switchyard_bridge.approval_resolution`.
 
 ## Cancel And Input Semantics
 
-- `POST /runs/:id/input` returns `409 adapter_protocol_failed` with `reasonCode: agentfield_input_unsupported`.
+- `POST /runs/:id/input` is accepted only for active sessions whose configured AgentField wrapper advertises bridge input capability. Hosted calls are admitted through the hosted runtime bridge and return a bridge command id.
+- AgentField runtime approval resolution reuses `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, and `POST /approvals/:id/reject`; hosted `POST /approvals` is not exposed.
 - Active `POST /runs/:id/cancel` returns `409 adapter_protocol_failed` with `reasonCode: agentfield_cancel_unsupported`.
 - Terminal runs still accept idempotent cancel (run state unchanged).
 - Switchyard timeout still marks runs `timeout` even when AgentField cancel is unsupported.
+- Hosted active cancel remains unsupported with `hosted_cancel_unsupported`.
+- Per-run URL, target, endpoint, and auth overrides are never accepted for input or approval bridge calls.
 
 ## Bounded Response And Failure Mapping
 
@@ -67,6 +72,7 @@ Common reason codes:
 
 - Config and doctor: `agentfield_config_missing`, `agentfield_config_invalid`, `agentfield_auth_missing`, `agentfield_target_missing`, `agentfield_health_unavailable`, `agentfield_health_degraded`, `agentfield_discovery_unavailable`, `agentfield_target_not_found`, `check_timeout`, `check_output_too_large`.
 - Start and polling: `agentfield_start_failed`, `agentfield_invalid_start_response`, `agentfield_start_response_too_large`, `agentfield_status_failed`, `agentfield_upstream_cancelled`, `agentfield_upstream_timeout`, `agentfield_unknown_status`, `agentfield_invalid_status_response`, `agentfield_status_response_too_large`, `agentfield_request_failed`.
+- Bridge: `agentfield_bridge_config_missing`, `agentfield_bridge_capability_missing`, `runtime_input_empty`, `runtime_input_too_large`, `agentfield_input_failed`, `agentfield_invalid_input_response`, `agentfield_input_response_too_large`, `agentfield_approval_request_invalid`, `agentfield_approval_resolution_failed`, `agentfield_invalid_approval_response`, `agentfield_approval_response_too_large`.
 
 ## Local Fake Smoke
 

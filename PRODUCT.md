@@ -47,39 +47,40 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `agent/phase-23-r24-hosted-real-debate` through commit `d0887dc`.
+Snapshot source: `agent/phase-24-r25-hosted-wrapper-bridges` after R25 code went green.
 
-Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and real/fake tool invocations; shipped local deterministic Debate V1; shipped hosted worker and connected-node execution foundations; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; shipped S3/R2-compatible object-store client wiring for hosted artifact content; shipped the R18 API-first hosted/server enterprise control-plane foundation; shipped R19 production hosted deployment readiness; shipped R20 internal production subprocess/PTY sandbox foundation plus production ops gates; shipped R21 production hosted provider activation for the known provider set `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`; shipped R22 hosted/connected-node real-tool execution for the exact R22 set with policy-first fail-closed checks; shipped R23 hosted runtime input/approval bridges for worker-owned `claude_code.sdk` and structured `opencode.acp`; and shipped R24 hosted/server-safe debate through the existing `/debates` route family only: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and real/fake tool invocations; shipped local deterministic Debate V1; shipped hosted worker and connected-node execution foundations; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; shipped S3/R2-compatible object-store client wiring for hosted artifact content; shipped the R18 API-first hosted/server enterprise control-plane foundation; shipped R19 production hosted deployment readiness; shipped R20 internal production subprocess/PTY sandbox foundation plus production ops gates; shipped R21 production hosted provider activation for the known provider set `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`; shipped R22 hosted/connected-node real-tool execution for the exact R22 set with policy-first fail-closed checks; shipped R23 hosted runtime input/approval bridges for worker-owned `claude_code.sdk` and structured `opencode.acp`; shipped R24 hosted/server-safe debate through the existing `/debates` route family only: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`; and shipped R25 conditional hosted runtime input/approval bridges plus hosted debate participant bridges for wrapper modes `agentfield.async_rest` and `generic_http.async_rest`.
 
-R24 keeps fake deterministic hosted debate as the default no-spend path; fake-only remains default. Opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`. Real participant runs require request-level `realRuntimeOptIn: true`; hosted real participants require `placement: "hosted"` plus the existing hosted provider activation, policy, quota, ownership, audit, queue, object-store, and worker readiness gates. `POST /debates?wait=1` remains supported only for fake deterministic no-spend debates and rejects real participant or live judge requests before provider side effects.
+R25 keeps fake deterministic hosted debate as the default no-spend path; fake-only remains default. Opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`. Real participant runs require request-level `realRuntimeOptIn: true`; hosted real participants require `placement: "hosted"` plus existing hosted provider activation/spend gates, wrapper configuration and bridge capability checks for wrapper modes, bridge readiness, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness. `POST /debates?wait=1` remains supported only for fake deterministic no-spend debates and rejects real participant or live judge requests before provider side effects.
 
 The R24 judge runner is internal and bounded. The default judge is deterministic and no-spend. A live model judge is allowed only through `judgeConfig.mode: "model"` inside `POST /debates`, with request opt-in and `confirmLiveProviderSpend: true`; there is no public model judge route. Debate participant and judge execution use existing run/runtime contracts and preserve run/message/event/artifact traceability, including participant run ids, judge run id when present, message ids, event ids, evidence ids, and final report artifact metadata.
 
-Hosted debate requires durable Postgres debate, message, evidence, event, artifact, and job/outbox state; child-run idempotency; evidence ownership preauthorization before side effects; ownership attachment; quota and audit stores; queue/outbox readiness; object-store readiness; worker readiness; provider activation; and R23 bridge readiness where `claude_code.sdk` or `opencode.acp` are allowlisted. Usable hosted runtime bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker. Missing command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`). Stale claimed non-idempotent provider input after worker crash is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`. Fake/no-spend remains default for required tests, smoke, preflight, and default canary. Production live probes remain explicit opt-in only.
+Hosted debate requires durable Postgres debate, message, evidence, event, artifact, and job/outbox state; child-run idempotency; evidence ownership preauthorization before side effects; ownership attachment; quota and audit stores; queue/outbox readiness; object-store readiness; worker readiness; provider activation; R23 bridge readiness where `claude_code.sdk` or `opencode.acp` are allowlisted; and R25 wrapper bridge readiness where `agentfield.async_rest` or `generic_http.async_rest` are allowlisted. Usable hosted runtime bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker. Wrapper modes additionally require daemon/operator wrapper config and explicit advertised bridge capabilities for input, approval request, and approval resolution. Missing command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`). Stale claimed non-idempotent provider input after worker crash is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`. Fake/no-spend remains default for required tests, smoke, preflight, and default canary. Production live provider canaries remain explicit opt-in only and require spend confirmation.
 
-The product is usable locally for one-shot agent runs, bounded Claude Code interaction, local fake deterministic debate execution, R24 hosted fake deterministic debate, opt-in hosted debate participant runs for the known runtime set, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, the R12 self-hosted staging deployment foundation, the R18 hosted enterprise auth/tenant/quota/audit control-plane baseline, the R19 production hosted deployment operability workflow (`production:preflight`, `production:migrate`, `production:canary`), the R20 production sandbox operability smoke (`production:sandbox-smoke`), and the R24 no-spend hosted debate preflight/canary workflow. It is not a managed hosted platform. Hosted real-provider production execution is shipped only for the known provider set and remains gated behind explicit operator activation and spend controls.
+The product is usable locally for one-shot agent runs, bounded Claude Code interaction, local fake deterministic debate execution, R24 hosted fake deterministic debate, opt-in hosted debate participant runs for the known runtime set, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, the R12 self-hosted staging deployment foundation, the R18 hosted enterprise auth/tenant/quota/audit control-plane baseline, the R19 production hosted deployment operability workflow (`production:preflight`, `production:migrate`, `production:canary`), the R20 production sandbox operability smoke (`production:sandbox-smoke`), and the R24/R25 no-spend hosted debate and wrapper-bridge preflight/canary workflow. It is not a managed hosted platform. Hosted real-provider production execution is shipped only for the known provider set and remains gated behind explicit operator activation and spend controls.
 
 Important runtime wording: `codex.exec_json` remains the default inferred Codex one-shot mode. `codex.interactive` is a separate explicit local-only mode for bounded post-start input and resume/session-state flows.
 
-R24 production hosted boundary wording:
+R25 production hosted boundary wording:
 
 - Hosted/server APIs require API key auth in staging/production fail-closed mode.
 - Hosted `/metrics` remains global operator/admin telemetry (`metrics:read` plus `admin:read`) and is not tenant-scoped in R20.
 - Production readiness includes named schema compatibility codes and diagnostics (`checks.schema`), sandbox diagnostics (`checks.sandbox`), provider activation diagnostics (`checks.hostedRuntimeGate`), and hosted debate readiness diagnostics with deterministic no-spend smoke and spend-gated canary verification.
 - R20 sandbox execution remains a worker-internal substrate only. It is policy-first, deny-by-default, and fail-closed when real execution is enabled without policy.
-- R21 hosted provider activation is known provider only (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`) and remains fake-only by default unless explicit operator opt-in is configured.
+- R21/R25 hosted provider activation is known provider only (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, `generic_http.async_rest`) and remains fake-only by default unless explicit operator opt-in is configured.
 - Local daemon defaults remain no-auth and backwards compatible for local fake runs, SDK usage, CLI fake runs, and local OpenAPI export.
 - R22 ships hosted worker tools for `fetch`, `web_search`, `github`, and command-catalog `shell`.
 - R22 ships connected-node tools for `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell`.
-- R23 hosted runtime bridge support is shipped only for `claude_code.sdk` and `opencode.acp`.
+- R23 hosted runtime bridge support is shipped for `claude_code.sdk` and `opencode.acp`; R25 extends the same hosted runtime bridge family conditionally to `agentfield.async_rest` and `generic_http.async_rest`.
 - Usable hosted runtime bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker claim/apply flow.
+- R25 wrapper bridges use only existing public routes: `POST /runs/:id/input`, `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, and `POST /approvals/:id/reject`.
+- Wrapper bridge support requires provider activation/spend gates, wrapper config, advertised wrapper bridge capabilities, bridge readiness, durable command/payload stores, queue, object store, ownership, quota, audit, and worker readiness.
 - Missing bridge command/payload stores fail closed in preflight/readiness/admission with named store errors (for example `hosted_runtime_bridge_store_unavailable`).
 - Stale claimed non-idempotent provider input after worker crash fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked` (no blind provider-input retries).
 - `codex.exec_json` remains one-shot with hosted input and approval bridges explicitly unsupported.
 - `codex.interactive` remains explicit local-only and unshipped for hosted placement.
-- AgentField and Generic HTTP hosted bridges remain unshipped pending durable callback contracts.
-- R24 hosted/server-safe debate ships only through `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`; no `/debates/judge`, `/model-judge`, `/judging`, or public arbitrary model judging route is shipped.
-- No dashboard/TUI, no public arbitrary `/exec`/`/shell`/`/process`/`/command`/`/pty`/`/terminal`/`/sandbox` routes, no hosted browser automation, no hosted `repo` execution, no generic process/PTY adapters, and no managed SaaS/billing/OAuth/SSO/SCIM ship in R24.
+- R24/R25 hosted/server-safe debate ships only through `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`; no `/debates/judge`, `/model-judge`, `/judging`, or public arbitrary model judging route is shipped.
+- No dashboard/TUI, no public arbitrary `/exec`/`/shell`/`/process`/`/command`/`/pty`/`/terminal`/`/sandbox` routes, no hosted browser automation, no hosted `repo` execution, no generic process/PTY adapters, and no managed SaaS/billing/OAuth/SSO/SCIM ship in R25.
 - R21 rollback to fake-only is operator-controlled by config change + restart (`SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`, allowlist reset to `fake.deterministic`).
 
 ## What Exists Today
@@ -222,7 +223,7 @@ The full current endpoint contract lives in `docs/development/API.md`.
 
 ### Debates
 
-R24 ships hosted/server-safe debate through the existing debate route family only:
+R24/R25 ships hosted/server-safe debate through the existing debate route family only:
 
 - `POST /debates`
 - `GET /debates/:id`
@@ -234,12 +235,12 @@ Debate behavior:
 - `POST /debates?wait=1` is supported only for fake deterministic no-spend debates.
 - Real participant debate runs require request-level `realRuntimeOptIn: true`.
 - Hosted real participant debate runs require `placement: "hosted"`.
-- Allowed debate participant runtime modes are exactly `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- Allowed debate participant runtime modes are exactly `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`.
 - `codex.exec_json` remains one-shot; each debate turn is a normal bounded child run, not a resumed interactive session.
 - Hosted `codex.interactive` debate execution is not shipped.
-- AgentField and Generic HTTP hosted debate bridges are not shipped.
+- Wrapper hosted debate participants (`agentfield.async_rest` and `generic_http.async_rest`) are allowed only with hosted placement, `realRuntimeOptIn`, provider activation and spend gates, wrapper config/capability checks, bridge readiness, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness.
 - Debate participant and judge work use existing run/runtime contracts and preserve run/message/event/artifact traceability.
-- Hosted debate requires durable Postgres debate/message/evidence/job state, child-run idempotency, evidence ownership preauthorization, ownership, quota, audit, queue/outbox, object store, worker readiness, provider activation, and R23 bridge readiness where applicable.
+- Hosted debate requires durable Postgres debate/message/evidence/job state, child-run idempotency, evidence ownership preauthorization, ownership, quota, audit, queue/outbox, object store, worker readiness, provider activation, and hosted runtime bridge readiness where applicable.
 
 Judge behavior:
 
@@ -326,8 +327,8 @@ These are planned or designed in docs, but not shipped product:
 - Generic process adapter is not shipped.
 - PTY adapter is not shipped.
 - Public model judge routes are not shipped (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family).
-- Hosted/runtime-specific input or approval bridges remain unshipped for `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, and `generic_http.async_rest`.
-- Hosted debate participant bridges remain unshipped for `agentfield.async_rest` and `generic_http.async_rest`.
+- Hosted/runtime-specific input or approval bridges remain unsupported for `codex.exec_json` and `codex.interactive`; `agentfield.async_rest` and `generic_http.async_rest` use the conditional R25 hosted wrapper bridge path only.
+- Hosted debate participant bridges for `agentfield.async_rest` and `generic_http.async_rest` are conditional wrapper bridges, not arbitrary endpoint execution.
 - Browser automation is not shipped and remains denied with `browser_tool_unshipped`.
 - Hosted `repo` execution is not shipped and remains denied with `repo_hosted_unshipped`.
 - R22 ships hosted worker real tools (`fetch`, `web_search`, `github`, command-catalog `shell`) and connected-node real tools (`fetch`, `web_search`, `github`, `repo`, command-catalog `shell`) through the same policy/approval contract.
@@ -682,7 +683,7 @@ Local verification:
 - AgentField doctor reports configured/unconfigured states clearly.
 - fake AgentField flow passes CI without uncontrolled model spend.
 - local fake smoke can create an execution, poll it, normalize completion/failure, and retrieve transcript/result artifacts.
-- active cancel returns `agentfield_cancel_unsupported`; post-start input returns `agentfield_input_unsupported`.
+- active cancel returns `agentfield_cancel_unsupported`; R25 later adds conditional wrapper input/approval bridges for bridge-ready AgentField sessions.
 - Switchyard timeout persists `timeout` even though upstream cancellation is unsupported.
 
 Promotion criteria:
@@ -1289,7 +1290,7 @@ Shipped in this phase:
 Explicitly not shipped in R21:
 
 - Hosted `codex.interactive`.
-- AgentField or Generic HTTP hosted bridges.
+- Wrapper hosted bridges for `agentfield.async_rest` and `generic_http.async_rest`; R25 later adds these conditionally.
 - Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
 - Generic process/PTY product adapters, browser automation, hosted `repo` execution, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM are not shipped in R21.
 
@@ -1321,7 +1322,7 @@ Explicitly not shipped in R23:
 
 - `codex.exec_json` input or approval bridges; it remains one-shot.
 - Hosted `codex.interactive`.
-- AgentField or Generic HTTP hosted input/approval bridges.
+- Wrapper hosted input/approval bridges for `agentfield.async_rest` and `generic_http.async_rest`; R25 later adds these conditionally.
 - Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
 - Generic process/PTY product adapters, browser automation, hosted `repo` execution, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM are not shipped in R23.
 
@@ -1341,10 +1342,29 @@ Explicitly not shipped in R24:
 
 - Public model judge routes are not shipped: no `/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family.
 - Hosted `codex.interactive`; `codex.exec_json` remains one-shot.
-- AgentField and Generic HTTP hosted debate bridges.
+- Wrapper hosted debate support for `agentfield.async_rest` and `generic_http.async_rest`; R25 supersedes this with conditional wrapper hosted debate participant bridges.
 - Browser automation.
 - Hosted `repo` execution.
 - Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
 - Generic process/PTY product adapters are not shipped.
 - Dashboard/TUI is not shipped.
 - Managed SaaS, public signup, billing, OAuth, SSO, or SCIM.
+
+## R25 Hosted Wrapper Runtime Bridges (Shipped Conditional Wrapper Bridge Slice)
+
+Shipped in this phase:
+
+- Conditional hosted runtime input/approval bridges for `agentfield.async_rest` and `generic_http.async_rest` through the existing hosted runtime bridge command/payload stores.
+- Existing public route reuse only: `POST /runs/:id/input`, `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, and `POST /approvals/:id/reject`.
+- Conditional hosted debate participant bridges for wrapper modes through the existing `/debates` route family only.
+- Wrapper bridge readiness checks for operator wrapper config and advertised input, approval request, and approval resolution capabilities.
+- Fail-closed provider activation/spend gates, durable bridge command/payload stores, queue/outbox, object-store, ownership, quota, audit, and worker readiness before hosted wrapper side effects.
+- Default fake deterministic no-spend canary posture remains unchanged; live provider canary probes require explicit spend confirmation.
+
+Explicitly not shipped in R25:
+
+- Hosted `codex.interactive`; `codex.exec_json` remains one-shot and has no hosted input/approval bridge.
+- Hosted active cancel bridge for wrapper runs; hosted cancel remains unsupported.
+- Per-run wrapper base URL, target, endpoint, or auth overrides.
+- Arbitrary wrapper endpoint execution, generic process/PTY adapters, public `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` APIs.
+- Public model judge routes, browser automation, hosted `repo` execution, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM.

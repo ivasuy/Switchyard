@@ -13,16 +13,17 @@ Implemented:
 - Runtime mode check strategy `http_health`.
 - Transcript artifact capture at `runs/<runId>/generic-http-transcript.jsonl`.
 - Verified-terminal cancellation semantics.
+- Conditional R25 hosted input/approval bridge support through existing hosted runtime bridge command/payload stores when wrapper config and advertised bridge capabilities are ready.
 
 Not shipped:
 
 - Per-run base URL overrides.
-- Post-start input.
-- Hosted post-start input bridge.
-- Hosted runtime approval bridge.
+- Per-run auth token overrides.
+- Arbitrary wrapper endpoint execution.
+- Hosted active cancel bridge.
 - Webhook callbacks.
 - Remote artifact URL fetching.
-- ACP, PTY, hosted execution, interactive Codex, debate, memory, tool expansion.
+- ACP, PTY, interactive Codex, memory, tool expansion, TUI, and dashboard.
 
 ## Environment Variables
 
@@ -48,8 +49,19 @@ Expected wrapper endpoints:
 - `GET /v1/runs/:externalRunId/events?cursor=...`
 - `POST /v1/runs/:externalRunId/cancel`
 - `GET /v1/runs/:externalRunId/artifacts`
+- `POST /v1/runs/:externalRunId/input` (required for R25 input bridge readiness)
+- `POST /v1/runs/:externalRunId/approvals/:runtimeApprovalToken/resolve` (required for R25 approval bridge readiness)
 
 The daemon does not support metadata-based endpoint overrides. Base URL comes only from daemon env.
+
+Wrapper health/capability discovery must advertise `input`, `approval_request`, and `approval_resolution` before hosted wrapper bridges are admitted. Ordinary run start can remain available when these bridge capabilities are absent, but hosted input/approval bridge readiness fails closed.
+
+## Input And Approval Bridge Semantics
+
+- `POST /runs/:id/input` is accepted only for active sessions whose configured Generic HTTP wrapper advertises bridge input capability. Hosted calls are admitted through the hosted runtime bridge and return a bridge command id.
+- Runtime approval resolution reuses `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, and `POST /approvals/:id/reject`; hosted `POST /approvals` is not exposed.
+- Per-run URL, endpoint, and auth overrides are never accepted for input or approval bridge calls.
+- Hosted active cancel remains unsupported with `hosted_cancel_unsupported`.
 
 ## Verified Cancel Semantics
 
@@ -69,6 +81,7 @@ Reason codes:
 - Events: `generic_http_events_response_too_large`
 - Cancel: `generic_http_cancel_response_too_large`
 - Artifacts: `generic_http_artifacts_response_too_large`
+- Bridge: `generic_http_bridge_config_missing`, `generic_http_bridge_capability_missing`, `runtime_input_empty`, `runtime_input_too_large`, `generic_http_input_failed`, `generic_http_invalid_input_response`, `generic_http_input_response_too_large`, `generic_http_approval_request_invalid`, `generic_http_approval_resolution_failed`, `generic_http_invalid_approval_response`, `generic_http_approval_response_too_large`
 
 Logs/transcripts record method/path/status/byte-count/reason only, never full oversized bodies.
 
