@@ -10,6 +10,7 @@ import type {
 } from "@switchyard/contracts";
 import { ContextBuilder } from "../src/services/context-builder.js";
 import { DebateService } from "../src/services/debate-service.js";
+import { buildDebateChildRunKey } from "../src/services/debate-runtime-matrix.js";
 import { EventBus } from "../src/services/event-bus.js";
 import { MessageRouter } from "../src/services/message-router.js";
 import type { ArtifactStore } from "../src/ports/artifact-store.js";
@@ -615,6 +616,44 @@ describe("debate service", () => {
     expect(typeof run.metadata["debateChildRunKey"]).toBe("string");
   });
 
+  it("fails closed when an existing child run cannot be relinked", async () => {
+    const debateExecution = new InMemoryDebateExecutionStore();
+    const harness = createHarness({ debateExecution });
+    const created = await harness.service.create({
+      topic: "Existing child relink",
+      participants: [{ role: "affirmative" }, { role: "skeptic" }]
+    });
+    const job = [...debateExecution.jobs.values()][0]!;
+    const participant = created.debate.participants[0]!;
+    const childRunKey = buildDebateChildRunKey({
+      debateId: created.debate.id,
+      participantId: participant.id,
+      debateRound: job.debateRound,
+      debatePhase: job.debatePhase,
+      debateRunKind: "participant"
+    });
+    await harness.runs.create({
+      ...makeRun("run_existing"),
+      metadata: {
+        debateId: created.debate.id,
+        participantId: participant.id,
+        debateRound: job.debateRound,
+        debatePhase: job.debatePhase,
+        debateRunKind: "participant",
+        debateChildRunKey: childRunKey
+      }
+    });
+    debateExecution.failNextLink = true;
+
+    const result = await harness.service.processExecutionJob(job);
+
+    expect(result).toMatchObject({
+      action: "fail",
+      reasonCode: "debate_child_run_link_failed"
+    });
+    expect(harness.runs.items.size).toBe(1);
+  });
+
   it("routes bounded participant runtime.output only while debate is nonterminal", async () => {
     const debateExecution = new InMemoryDebateExecutionStore();
     const harness = createHarness({ debateExecution });
@@ -685,6 +724,64 @@ describe("debate service", () => {
     expect(result.action).toBe("complete");
     expect(debate?.status).toBe("failed");
     expect(debate?.messageIds).toHaveLength(0);
+  });
+
+  it("keeps judgeRunId in failure report metadata when model judge output is invalid", async () => {
+    const debateExecution = new InMemoryDebateExecutionStore();
+    const harness = createHarness({ debateExecution });
+    const created = await harness.service.create({
+      topic: "Judge failure metadata",
+      participants: [{ role: "affirmative" }, { role: "skeptic" }],
+      judgeConfig: {
+        mode: "model",
+        runtimeMode: "codex.exec_json",
+        placement: "hosted",
+        realRuntimeOptIn: true,
+        confirmLiveProviderSpend: true,
+        model: "gpt"
+      }
+    });
+    const judgeJob = await debateExecution.enqueue({
+      debateId: created.debate.id,
+      stage: "judging",
+      debateRound: 1,
+      debatePhase: "judging"
+    });
+
+    const pending = await harness.service.processExecutionJob(judgeJob);
+    expect(pending.action).toBe("requeue");
+    const judgeRun = [...harness.runs.items.values()].find((run) => run.metadata["debateRunKind"] === "judge")!;
+    await harness.runs.update({
+      ...judgeRun,
+      status: "completed",
+      endedAt: "2026-05-30T00:00:02.000Z"
+    });
+    await harness.events.append({
+      id: "event_judge_output_invalid",
+      type: "runtime.output",
+      runId: judgeRun.id,
+      debateId: created.debate.id,
+      sequence: 1,
+      payload: {
+        text: "{",
+        debateId: created.debate.id,
+        debateChildRunKey: judgeRun.metadata["debateChildRunKey"]
+      },
+      createdAt: "2026-05-30T00:00:02.000Z"
+    });
+
+    const failed = await harness.service.processExecutionJob(judgeJob);
+    const debate = await harness.debates.get(created.debate.id);
+    const artifact = debate?.finalReportArtifactId
+      ? await harness.artifacts.get(debate.finalReportArtifactId)
+      : undefined;
+
+    expect(failed).toMatchObject({
+      action: "fail",
+      reasonCode: "debate_judge_output_invalid"
+    });
+    expect(debate?.status).toBe("failed");
+    expect(artifact?.metadata["judgeRunId"]).toBe(judgeRun.id);
   });
 
   it("rejects unknown evidence with evidence_not_found and no side effects", async () => {

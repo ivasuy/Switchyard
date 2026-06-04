@@ -527,6 +527,9 @@ export class DebateService {
     if (run.status !== "completed") {
       throw new DebateServiceError("debate_judge_run_failed", `Judge run did not complete: ${run.status}`);
     }
+    (debate as DebateWithRuntimeConfig & { judgeRunId?: string }).judgeRunId = run.id;
+    debate.updatedAt = new Date().toISOString();
+    await this.deps.debates.update(debate);
 
     const childRunKey = buildDebateChildRunKey({
       debateId: debate.id,
@@ -553,7 +556,6 @@ export class DebateService {
     }
 
     debate.judge = this.judgeRunner.parseModelJudgeOutput(output.text, { maxBytes: MAX_JUDGE_OUTPUT_BYTES, debate });
-    (debate as DebateWithRuntimeConfig & { judgeRunId?: string }).judgeRunId = run.id;
     await this.finishJudgingAndReport(debate, evidence, judgeConfig, run.id);
     const completed = await this.requireDebate(debate.id);
     return {
@@ -602,7 +604,10 @@ export class DebateService {
 
     const existing = await this.deps.runs.findByDebateChildRunKey?.(childRunKey);
     if (existing) {
-      await this.linkPendingRun(input.job, childRunKey, existing.id);
+      const link = await this.linkPendingRun(input.job, childRunKey, existing.id);
+      if (!link.ok) {
+        throw new DebateServiceError("debate_child_run_link_failed", `Could not link existing child run: ${link.reason}`);
+      }
       return existing;
     }
 
