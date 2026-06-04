@@ -1060,6 +1060,7 @@ describe("hosted runtime bridge service", () => {
     });
     const command = await commands.getByIdempotencyKey("idem_expire_durable");
     commands.items.set(command!.id, { ...command!, expiresAt: "2026-05-31T23:59:00.000Z" });
+    expect(await payloads.get(command!.id)).toBeDefined();
 
     const worker = new HostedRuntimeBridgeService({
       runs,
@@ -1079,6 +1080,7 @@ describe("hosted runtime bridge service", () => {
       { reservationId: "a_expire", outcome: "released", reasonCode: "hosted_runtime_bridge_command_expired" },
       { reservationId: "h_expire", outcome: "consumed", reasonCode: "hosted_runtime_bridge_command_expired" }
     ]);
+    expect(await payloads.get(command!.id)).toBeUndefined();
   });
 
   it("reconciles persisted quota reservations for stale claimed commands across instances", async () => {

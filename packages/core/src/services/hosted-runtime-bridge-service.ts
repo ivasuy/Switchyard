@@ -509,6 +509,7 @@ export class HostedRuntimeBridgeService {
       now,
       reasonCode: "hosted_runtime_bridge_command_expired"
     });
+    await this.deletePayloadsForReconciledCommands(now);
     const command = await this.deps.commands.claimNext({
       workerId: input.workerId,
       leaseMs: input.leaseMs ?? DEFAULT_LEASE_MS,
