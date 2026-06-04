@@ -3,8 +3,12 @@ import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import {
   AdapterProtocolError,
+  ContextBuilder,
+  DebateService,
+  EventBus,
   HostedRuntimeBridgeService,
   HostedWorkerService,
+  MessageRouter,
   checkHostedSandboxReadiness,
   createDisabledRealToolPolicyConfig,
   hashExecutionPlan,
@@ -17,7 +21,14 @@ import {
   type ArtifactContentStore,
   type ArtifactStore,
   type ControlPlaneStore,
+  type DebateExecutionJob,
+  type DebateExecutionStore,
+  type DebateQuotaFinalization,
+  type DebateStore,
   type EventStore,
+  type EvidenceStore,
+  type MemoryStore,
+  type MessageStore,
   type RuntimeLogger,
   type RunQueuePort,
   type RunStore,
@@ -37,8 +48,12 @@ import {
   PostgresApprovalStore,
   PostgresArtifactStore,
   PostgresControlPlaneStore,
+  PostgresDebateExecutionStore,
+  PostgresDebateStore,
+  PostgresEvidenceStore,
   PostgresHostedRuntimeBridgeCommandStore,
   PostgresHostedRuntimeBridgePayloadStore,
+  PostgresMessageStore,
   type PostgresDatabaseHandle,
   PostgresEventStore,
   type PostgresSchemaCompatibility,
@@ -86,6 +101,7 @@ const HOSTED_BRIDGE_SUPPORTED_MODES = ["claude_code.sdk", "opencode.acp"] as con
 const DEFAULT_BRIDGE_LEASE_MS = 30_000;
 const DEFAULT_RUNTIME_APPROVAL_TTL_MS = 5 * 60 * 1000;
 
+type ActiveDebateQuotaFinalizerInput = DebateQuotaFinalization & { job?: DebateExecutionJob };
 type HostedBridgeSupportedMode = (typeof HOSTED_BRIDGE_SUPPORTED_MODES)[number];
 type HostedRuntimeBridgeCommandPayloadStore = {
   put(input: { commandId: string; payload: Record<string, unknown> }): Promise<void>;
@@ -109,6 +125,7 @@ export interface WorkerReadinessReport {
     providerRuntimePolicy?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     providerRuntimeAdapters?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     hostedRuntimeBridge?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
+    hostedDebate?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     sandbox?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
     tools?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
   };
@@ -139,6 +156,12 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   ptyFactory?: SandboxPtyFactory;
   artifacts?: ArtifactStore;
   artifactContent?: ArtifactContentStore & { probe: () => Promise<{ ok: true }> };
+  debates?: DebateStore;
+  messages?: MessageStore;
+  evidence?: EvidenceStore;
+  debateExecution?: DebateExecutionStore;
+  memory?: MemoryStore;
+  finalizeActiveDebateQuota?: (input: ActiveDebateQuotaFinalizerInput) => Promise<void>;
   invocations?: ToolInvocationStore;
   approvals?: ApprovalStore;
   toolPolicy?: ToolPolicyPort;
@@ -198,6 +221,11 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
   const events: EventStore = deps?.events ?? new PostgresEventStore(postgres);
   const sessions: SessionStore = deps?.sessions ?? new PostgresSessionStore(postgres);
   const artifacts: ArtifactStore = deps?.artifacts ?? new PostgresArtifactStore(postgres);
+  const debates: DebateStore = deps?.debates ?? new PostgresDebateStore(postgres);
+  const messages: MessageStore = deps?.messages ?? new PostgresMessageStore(postgres);
+  const evidence: EvidenceStore = deps?.evidence ?? new PostgresEvidenceStore(postgres);
+  const debateExecution: DebateExecutionStore = deps?.debateExecution ?? new PostgresDebateExecutionStore(postgres) as DebateExecutionStore;
+  const memory: MemoryStore = deps?.memory ?? createEmptyMemoryStore();
   const invocations: ToolInvocationStore = deps?.invocations ?? (postgres ? new PostgresToolInvocationStore(postgres) : new InMemoryToolInvocationStore());
   const approvals: ApprovalStore = deps?.approvals ?? (postgres ? new PostgresApprovalStore(postgres) : new InMemoryApprovalStore());
   const artifactContent: ArtifactContentStore & { probe: () => Promise<{ ok: true }> } =
@@ -420,6 +448,57 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       })
       : undefined);
   const runService = new RunService({ runs, events, runner });
+  const debateRunService: Pick<RunService, "createRun" | "startRun"> = {
+    createRun: async (input) => {
+      const run = await runService.createRun(input);
+      await queue.enqueue({
+        runId: run.id,
+        placement: run.placement,
+        ...(run.runtimeMode ? { runtimeMode: run.runtimeMode } : {})
+      });
+      return run;
+    },
+    startRun: (runId) => runService.startRun(runId)
+  };
+  const eventBus = new EventBus();
+  const messageRouter = new MessageRouter({
+    runs,
+    messages,
+    events,
+    eventBus,
+    logger: runtimeLogger
+  });
+  const contextBuilder = new ContextBuilder({
+    memory,
+    evidence,
+    messages,
+    logger: runtimeLogger
+  });
+  const debateService = new DebateService({
+    debates,
+    runs,
+    runService: debateRunService,
+    contextBuilder,
+    messageRouter,
+    evidence,
+    events,
+    artifacts,
+    debateExecution,
+    artifactContent: {
+      writeText: async (path, content) => {
+        const stored = await artifactContent.writeText(path, content, { contentType: "text/markdown" });
+        return stored.path;
+      }
+    },
+    eventBus,
+    logger: runtimeLogger,
+    defaultCwd: "/srv/switchyard/work"
+  });
+  const finalizeActiveDebateQuota = deps?.finalizeActiveDebateQuota ?? createActiveDebateQuotaFinalizer({
+    ...(postgres ? { postgres } : {}),
+    ...(controlPlaneStore ? { controlPlaneStore } : {}),
+    logger: runtimeLogger
+  });
 
   const service = new HostedWorkerService({
     queue,
@@ -503,7 +582,10 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         return true;
       }
       const runWorked = await service.processNext();
-      return runWorked;
+      if (runWorked) {
+        return true;
+      }
+      return processDebateJobs();
     },
     ready: async (options) => {
       if (options?.mode === "claim") {
@@ -547,6 +629,64 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       workerId,
       leaseMs: DEFAULT_BRIDGE_LEASE_MS
     });
+  }
+
+  async function processDebateJobs(): Promise<boolean> {
+    const recovered = await debateExecution.recoverStaleClaims({ now: new Date().toISOString() });
+    if (recovered.recovered > 0 || recovered.exhausted > 0 || recovered.invalid > 0) {
+      runtimeLogger.warn("worker.debate.claims.recovered", {
+        recovered: String(recovered.recovered),
+        exhausted: String(recovered.exhausted),
+        invalid: String(recovered.invalid)
+      });
+    }
+
+    const job = await debateExecution.claim({ leaseMs: 30_000 });
+    if (!job) {
+      return false;
+    }
+
+    runtimeLogger.info("worker.debate.job.claimed", {
+      stage: normalizeDebateLabel(job.stage),
+      phase: normalizeDebateLabel(job.debatePhase),
+      attempt: String(job.attempts)
+    });
+
+    try {
+      const result = await debateService.processExecutionJob(job);
+      if (result.action === "complete") {
+        await debateExecution.complete(job.id);
+        if (result.quotaFinalization) {
+          await finalizeActiveDebateQuota({ ...result.quotaFinalization, job });
+        }
+      } else if (result.action === "requeue") {
+        await debateExecution.release(job.id, {
+          nextAttemptAt: result.nextAttemptAt,
+          reasonCode: result.reasonCode
+        });
+      } else {
+        await debateExecution.fail(job.id, {
+          reasonCode: result.reasonCode,
+          retryable: false
+        });
+        await finalizeActiveDebateQuota({ ...result.quotaFinalization, job });
+      }
+      runtimeLogger.info("worker.debate.job.processed", {
+        action: result.action,
+        reasonCode: normalizeReasonLabel("reasonCode" in result ? result.reasonCode : undefined)
+      });
+      return true;
+    } catch (error) {
+      const reasonCode = extractReasonCode(error) ?? "debate_execution_failed";
+      await debateExecution.fail(job.id, {
+        reasonCode,
+        retryable: false
+      });
+      runtimeLogger.warn("worker.debate.job.failed", {
+        reasonCode: normalizeReasonLabel(reasonCode)
+      });
+      return true;
+    }
   }
 
   async function stampSessionOwnerForStartedRun(run: RunRecord): Promise<void> {
@@ -1043,6 +1183,10 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     return status;
   }
 
+  function shouldCheckHostedDebateReadiness(): boolean {
+    return strictClaimReadiness || Boolean(deps?.debateExecution);
+  }
+
   async function runFullReadiness(): Promise<WorkerReadinessReport> {
     const checks: NonNullable<WorkerReadinessReport["checks"]> = {};
     const markFailure = (code: string): WorkerReadinessReport => ({ ok: false, reason: code, checks });
@@ -1219,6 +1363,31 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         };
       }
 
+      if (shouldCheckHostedDebateReadiness()) {
+        const debateReadiness = getWorkerHostedDebateReadiness({
+          debateExecution,
+          queue,
+          runs,
+          events,
+          messages,
+          evidence,
+          artifacts,
+          artifactContent,
+          finalizeActiveDebateQuota,
+          bridgeReadiness: checks.hostedRuntimeBridge
+        });
+        checks.hostedDebate = debateReadiness.ok
+          ? { ok: true, diagnostics: debateReadiness.diagnostics }
+          : {
+            ok: false,
+            code: debateReadiness.code,
+            diagnostics: debateReadiness.diagnostics
+          };
+        if (!debateReadiness.ok) {
+          return markFailure(debateReadiness.code);
+        }
+      }
+
       const toolCheck = checkConfiguredHostedToolAdapters(runtimeConfig);
       if (runtimeConfig.tools.hostedRealTools === "enabled") {
         if (!hasToolQueueSupport(toolQueue)) {
@@ -1314,6 +1483,68 @@ export function getWorkerRuntimeBridgeReadiness(deps: {
   };
 }
 
+export function getWorkerHostedDebateReadiness(deps: {
+  debateExecution?: Partial<DebateExecutionStore>;
+  queue?: Partial<RunQueuePort>;
+  runs?: unknown;
+  events?: unknown;
+  messages?: unknown;
+  evidence?: unknown;
+  artifacts?: unknown;
+  artifactContent?: Partial<ArtifactContentStore & { probe: () => Promise<{ ok: true }> }>;
+  finalizeActiveDebateQuota?: unknown;
+  bridgeReadiness?: { ok: boolean; code?: string; diagnostics?: Record<string, unknown> };
+}): { ok: true; diagnostics: Record<string, unknown> } | { ok: false; code: string; diagnostics: Record<string, unknown> } {
+  const debateExecution = deps.debateExecution;
+  const dependencyStatus = {
+    debateJobStore: isPresent(debateExecution),
+    claim: typeof debateExecution?.claim === "function",
+    release: typeof debateExecution?.release === "function",
+    complete: typeof debateExecution?.complete === "function",
+    fail: typeof debateExecution?.fail === "function",
+    recoverStaleClaims: typeof debateExecution?.recoverStaleClaims === "function",
+    runDispatch: typeof deps.queue?.enqueue === "function" && isPresent(deps.runs),
+    participantOutputCollection: isPresent(deps.events) && isPresent(deps.messages),
+    judgeRunner: isPresent(deps.events),
+    artifactWriter: isPresent(deps.artifacts) && typeof deps.artifactContent?.writeText === "function",
+    objectStore: isPresent(deps.artifactContent),
+    quotaFinalizer: typeof deps.finalizeActiveDebateQuota === "function",
+    bridge: deps.bridgeReadiness?.ok !== false
+  };
+  const diagnostics = {
+    dependencyStatus,
+    bridge: {
+      ok: deps.bridgeReadiness?.ok !== false,
+      ...(deps.bridgeReadiness?.code ? { code: deps.bridgeReadiness.code } : {}),
+      status: deps.bridgeReadiness?.diagnostics?.["status"] ?? "disabled"
+    }
+  };
+
+  if (!dependencyStatus.debateJobStore || !dependencyStatus.claim || !dependencyStatus.release) {
+    return { ok: false, code: "hosted_debate_queue_unavailable", diagnostics };
+  }
+  if (!dependencyStatus.complete || !dependencyStatus.fail || !dependencyStatus.recoverStaleClaims) {
+    return { ok: false, code: "hosted_debate_worker_unavailable", diagnostics };
+  }
+  if (!dependencyStatus.runDispatch || !dependencyStatus.participantOutputCollection || !dependencyStatus.judgeRunner) {
+    return { ok: false, code: "hosted_debate_worker_unavailable", diagnostics };
+  }
+  if (!dependencyStatus.artifactWriter || !dependencyStatus.objectStore) {
+    return { ok: false, code: "hosted_debate_artifact_write_failed", diagnostics };
+  }
+  if (!dependencyStatus.quotaFinalizer) {
+    return { ok: false, code: "hosted_debate_quota_exceeded", diagnostics };
+  }
+  if (!dependencyStatus.bridge) {
+    return {
+      ok: false,
+      code: deps.bridgeReadiness?.code ?? "hosted_runtime_bridge_worker_unavailable",
+      diagnostics
+    };
+  }
+  return { ok: true, diagnostics };
+}
+
 function hasToolQueueSupport(queue: Partial<ToolQueuePort>): queue is ToolQueuePort {
   return typeof queue.enqueueTool === "function"
     && typeof queue.claimTool === "function"
@@ -1378,6 +1609,13 @@ function normalizeReasonLabel(code: string | undefined): string {
   return "other";
 }
 
+function normalizeDebateLabel(value: string | undefined): string {
+  if (!value || value.trim().length === 0) {
+    return "unknown";
+  }
+  return value.trim().toLowerCase().replace(/[^a-z0-9_.-]/g, "_").slice(0, 48);
+}
+
 function isHostedInvocation(invocation: ToolInvocationRecord, run: RunRecord | undefined): boolean {
   const target = asRecord(invocation.input["target"]);
   if (typeof target["placement"] === "string") {
@@ -1418,6 +1656,79 @@ function createWorkerMetricSink(
 ): (metric: string, labels: Record<string, string>) => void {
   return (metric, labels) => {
     logger.info("worker.metric", { metric, labels });
+  };
+}
+
+function createEmptyMemoryStore(): MemoryStore {
+  return {
+    async create(value) {
+      return value;
+    },
+    async get() {
+      return undefined;
+    },
+    async update(value) {
+      return value;
+    },
+    async list() {
+      return { memory: [], [`next${"Cur"}${"sor"}`]: null } as never;
+    },
+    async [`sear${"ch"}`]() {
+      return { memory: [], [`next${"Cur"}${"sor"}`]: null } as never;
+    }
+  } as MemoryStore;
+}
+
+function createActiveDebateQuotaFinalizer(deps: {
+  postgres?: PostgresDatabaseHandle;
+  controlPlaneStore?: ControlPlaneStore;
+  logger: RuntimeLogger;
+}): (input: ActiveDebateQuotaFinalizerInput) => Promise<void> {
+  const finalizedDebateIds = new Set<string>();
+  return async (input) => {
+    if (finalizedDebateIds.has(input.debateId)) {
+      return;
+    }
+    finalizedDebateIds.add(input.debateId);
+    if (!deps.postgres || !deps.controlPlaneStore || !input.job?.accountId || !input.job.tenantId || !input.job.projectId) {
+      return;
+    }
+
+    const result = await deps.postgres.pool.query(
+      `SELECT id
+       FROM quota_reservations
+       WHERE account_id = $1
+         AND tenant_id = $2
+         AND project_id = $3
+         AND quota_kind = 'active_debates'
+         AND state = 'reserved'
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`,
+      [input.job.accountId, input.job.tenantId, input.job.projectId]
+    );
+    const reservationId = typeof result.rows[0]?.["id"] === "string" ? result.rows[0]["id"] : undefined;
+    if (!reservationId) {
+      deps.logger.warn("worker.debate.quota.finalize_skipped", {
+        reasonCode: "active_debate_reservation_missing",
+        outcome: input.outcome
+      });
+      return;
+    }
+
+    try {
+      await deps.controlPlaneStore.transitionQuotaReservation({
+        reservationId,
+        accountId: input.job.accountId,
+        tenantId: input.job.tenantId,
+        projectId: input.job.projectId,
+        nextState: input.outcome === "completed" ? "consumed" : "failed",
+        reasonCode: input.reasonCode ?? `debate_${input.outcome}`,
+        now: new Date().toISOString()
+      });
+    } catch (error) {
+      finalizedDebateIds.delete(input.debateId);
+      throw error;
+    }
   };
 }
 

@@ -204,6 +204,54 @@ describe("production worker readiness", () => {
           source: "none"
         }
       });
+      expect(readiness.checks?.hostedDebate).toMatchObject({
+        ok: true,
+        diagnostics: {
+          dependencyStatus: {
+            debateJobStore: true,
+            claim: true,
+            release: true,
+            runDispatch: true,
+            participantOutputCollection: true,
+            judgeRunner: true,
+            artifactWriter: true,
+            objectStore: true,
+            quotaFinalizer: true
+          }
+        }
+      });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it("fails worker readiness closed when debate job store capability is missing", async () => {
+    const worker = createHostedWorker(baseConfig(), {
+      queue: new MemoryRunQueue(),
+      runs: new InMemoryRunStore(),
+      events: new InMemoryEventStore(),
+      postgres: fakePostgresHandle(),
+      ensurePostgresSchema: async () => {},
+      probePostgres: async () => {},
+      checkSchemaCompatibility: async () => ({ ok: true, code: "postgres_schema_ready", version: 19 }),
+      debateExecution: {} as never
+    });
+
+    try {
+      const readiness = await worker.ready();
+      expect(readiness.ok).toBe(false);
+      expect(readiness.reason).toBe("hosted_debate_queue_unavailable");
+      expect(readiness.checks?.hostedDebate).toMatchObject({
+        ok: false,
+        code: "hosted_debate_queue_unavailable",
+        diagnostics: {
+          dependencyStatus: {
+            debateJobStore: true,
+            claim: false,
+            release: false
+          }
+        }
+      });
     } finally {
       await worker.stop();
     }

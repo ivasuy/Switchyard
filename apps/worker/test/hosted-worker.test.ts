@@ -4,11 +4,12 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AuthContext } from "@switchyard/contracts";
-import { HostedRuntimeBridgeService, resolveHostedSandboxConfig } from "@switchyard/core";
+import { HostedRuntimeBridgeService, resolveHostedSandboxConfig, type DebateExecutionStore } from "@switchyard/core";
 import { MemoryRunQueue } from "@switchyard/queue";
 import {
+  PostgresDebateExecutionStore,
   PostgresHostedRuntimeBridgeCommandStore,
   PostgresHostedRuntimeBridgePayloadStore,
   resolveObjectStoreConfig,
@@ -18,7 +19,11 @@ import {
   createFakeAcpProcessFactory,
   createFakeClaudeCodeClient,
   InMemoryApprovalStore,
+  InMemoryArtifactStore,
+  InMemoryDebateStore,
   InMemoryEventStore,
+  InMemoryEvidenceStore,
+  InMemoryMessageStore,
   InMemoryRunStore,
   InMemorySessionStore
 } from "@switchyard/testkit";
@@ -31,6 +36,10 @@ import { createHostedWorker, getWorkerRuntimeBridgeReadiness } from "../src/work
 const defaultSandbox = () => resolveHostedSandboxConfig({ deploymentMode: "test", env: {} });
 
 class GuardedInMemoryRunStore extends InMemoryRunStore {
+  async findByDebateChildRunKey(key: string) {
+    return [...this.items.values()].find((run) => run.metadata?.["debateChildRunKey"] === key);
+  }
+
   async updatePreparedMetadataIfMatch(input: any) {
     const current = await this.get(input.expected.id);
     if (!current) {
@@ -83,6 +92,309 @@ describe("hosted worker app", () => {
     expect(worked).toBe(true);
     expect((await runs.get("run_worker_1"))?.status).toBe("completed");
     await worker.stop();
+  });
+
+  it("claims one debate job and enqueues a child run without blocking for completion", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-02T00:00:00.000Z"));
+    const queue = new MemoryRunQueue({ now: () => new Date().toISOString() });
+    const runs = new GuardedInMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const debates = new InMemoryDebateStore();
+    const messages = new InMemoryMessageStore();
+    const evidence = new InMemoryEvidenceStore();
+    const artifacts = new InMemoryArtifactStore();
+    const debateExecution: DebateExecutionStore = new PostgresDebateExecutionStore() as DebateExecutionStore;
+    await debates.create(fakeDebate());
+    const job = await debateExecution.enqueue({
+      id: "debate_job_worker_1",
+      debateId: "debate_worker_1",
+      stage: "participant_turn",
+      debateRound: 1,
+      debatePhase: "arguing",
+      participantIndex: 0,
+      maxAttempts: 3,
+      nextAttemptAt: "2026-06-02T00:00:00.000Z"
+    });
+
+    const worker = createHostedWorker(baseConfig(), {
+      queue,
+      runs,
+      events,
+      debates,
+      messages,
+      evidence,
+      artifacts,
+      debateExecution
+    });
+
+    try {
+      await expect(worker.tick()).resolves.toBe(true);
+      expect((await debateExecution.get(job.id))?.state).toBe("queued");
+      expect((await debateExecution.get(job.id))?.reasonCode).toBe("debate_child_run_pending");
+      expect((await queue.stats()).queued).toBe(1);
+      const childRuns = [...runs.items.values()];
+      expect(childRuns).toHaveLength(1);
+      expect(childRuns[0]?.metadata).toMatchObject({
+        debateId: "debate_worker_1",
+        debateRunKind: "participant",
+        debateChildRunKey: expect.any(String)
+      });
+    } finally {
+      await worker.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("prioritizes pending child runs before due debate retries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-02T00:00:00.000Z"));
+    const queue = new MemoryRunQueue({ now: () => new Date().toISOString() });
+    const runs = new GuardedInMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const debates = new InMemoryDebateStore();
+    const debateExecution: DebateExecutionStore = new PostgresDebateExecutionStore() as DebateExecutionStore;
+    await debates.create(fakeDebate());
+    const job = await debateExecution.enqueue({
+      id: "debate_job_starvation_1",
+      debateId: "debate_worker_1",
+      stage: "participant_turn",
+      debateRound: 1,
+      debatePhase: "arguing",
+      participantIndex: 0,
+      nextAttemptAt: "2026-06-02T00:00:00.000Z"
+    });
+
+    const worker = createHostedWorker(baseConfig(), {
+      queue,
+      runs,
+      events,
+      debates,
+      messages: new InMemoryMessageStore(),
+      evidence: new InMemoryEvidenceStore(),
+      artifacts: new InMemoryArtifactStore(),
+      debateExecution
+    });
+
+    try {
+      await worker.tick();
+      vi.setSystemTime(new Date("2026-06-02T00:00:02.000Z"));
+      await worker.tick();
+      expect([...runs.items.values()][0]?.status).toBe("completed");
+      expect((await debateExecution.get(job.id))?.state).toBe("queued");
+    } finally {
+      await worker.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("advances a completed child run from persisted debate output without duplicate child runs", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-02T00:00:00.000Z"));
+    const queue = new MemoryRunQueue({ now: () => new Date().toISOString() });
+    const runs = new GuardedInMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const debateExecution: DebateExecutionStore = new PostgresDebateExecutionStore() as DebateExecutionStore;
+    const debates = new InMemoryDebateStore();
+    const messages = new InMemoryMessageStore();
+    await debates.create(fakeDebate());
+    const job = await debateExecution.enqueue({
+      id: "debate_job_output_1",
+      debateId: "debate_worker_1",
+      stage: "participant_turn",
+      debateRound: 1,
+      debatePhase: "arguing",
+      participantIndex: 0,
+      nextAttemptAt: "2026-06-02T00:00:00.000Z"
+    });
+    const worker = createHostedWorker(baseConfig(), {
+      queue,
+      runs,
+      events,
+      debates,
+      messages,
+      evidence: new InMemoryEvidenceStore(),
+      artifacts: new InMemoryArtifactStore(),
+      debateExecution
+    });
+
+    try {
+      await worker.tick();
+      const childRun = [...runs.items.values()][0]!;
+      const queuedChild = await queue.claim();
+      if (queuedChild) {
+        await queue.ack(queuedChild.id);
+      }
+      await runs.update({ ...childRun, status: "completed", endedAt: "2026-06-02T00:00:00.500Z" });
+      await events.append({
+        id: "event_debate_output_1",
+        runId: childRun.id,
+        debateId: "debate_worker_1",
+        type: "runtime.output",
+        sequence: 1,
+        payload: {
+          text: "participant output",
+          debateId: "debate_worker_1",
+          debateChildRunKey: childRun.metadata["debateChildRunKey"]
+        },
+        createdAt: "2026-06-02T00:00:00.500Z"
+      });
+
+      vi.setSystemTime(new Date("2026-06-02T00:00:02.000Z"));
+      await worker.tick();
+      expect((await debateExecution.get(job.id))?.state).toBe("completed");
+      expect([...runs.items.values()]).toHaveLength(1);
+      expect(messages.items.size).toBe(1);
+      expect((await debateExecution.stats()).queued).toBe(1);
+    } finally {
+      await worker.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers stale debate claims and exhausts max-attempt claims", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-02T00:00:00.000Z"));
+    const debateExecution: DebateExecutionStore = new PostgresDebateExecutionStore() as DebateExecutionStore;
+    await debateExecution.enqueue({
+      id: "debate_job_stale_1",
+      debateId: "debate_worker_1",
+      stage: "participant_turn",
+      maxAttempts: 1,
+      nextAttemptAt: "2026-06-02T00:00:00.000Z"
+    });
+    await debateExecution.claim({ leaseMs: 10 });
+    vi.setSystemTime(new Date("2026-06-02T00:00:00.050Z"));
+    const worker = createHostedWorker(baseConfig(), {
+      queue: new MemoryRunQueue({ now: () => new Date().toISOString() }),
+      runs: new GuardedInMemoryRunStore(),
+      events: new InMemoryEventStore(),
+      debates: new InMemoryDebateStore(),
+      messages: new InMemoryMessageStore(),
+      evidence: new InMemoryEvidenceStore(),
+      artifacts: new InMemoryArtifactStore(),
+      debateExecution
+    });
+
+    try {
+      await worker.tick();
+      expect((await debateExecution.get("debate_job_stale_1"))?.state).toBe("exhausted");
+      expect((await debateExecution.get("debate_job_stale_1"))?.reasonCode).toBe("debate_execution_attempts_exhausted");
+    } finally {
+      await worker.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("finalizes active debate quota once for terminal success and failure", async () => {
+    const runTerminalJob = async (status: "completed" | "failed") => {
+      const debateExecution: DebateExecutionStore = new PostgresDebateExecutionStore() as DebateExecutionStore;
+      const debates = new InMemoryDebateStore();
+      await debates.create({
+        ...fakeDebate(`debate_terminal_${status}`),
+        status,
+        stopReason: status === "completed" ? "completed" : "failed",
+        ...(status === "failed" ? { error: { code: "debate_failed", message: "failed" } } : {})
+      });
+      await debateExecution.enqueue({
+        id: `debate_job_terminal_${status}`,
+        debateId: `debate_terminal_${status}`,
+        stage: "judging",
+        nextAttemptAt: "2026-06-02T00:00:00.000Z"
+      });
+      const finalized: string[] = [];
+      const worker = createHostedWorker(baseConfig(), {
+        queue: new MemoryRunQueue(),
+        runs: new GuardedInMemoryRunStore(),
+        events: new InMemoryEventStore(),
+        debates,
+        messages: new InMemoryMessageStore(),
+        evidence: new InMemoryEvidenceStore(),
+        artifacts: new InMemoryArtifactStore(),
+        debateExecution,
+        finalizeActiveDebateQuota: async (input) => {
+          finalized.push(`${input.debateId}:${input.outcome}:${input.reasonCode ?? ""}`);
+        }
+      });
+      try {
+        await worker.tick();
+        await worker.tick();
+        return finalized;
+      } finally {
+        await worker.stop();
+      }
+    };
+
+    expect(await runTerminalJob("completed")).toEqual(["debate_terminal_completed:completed:completed"]);
+    expect(await runTerminalJob("failed")).toEqual(["debate_terminal_failed:failed:debate_failed"]);
+  });
+
+  it("does not reopen a terminal debate when late provider output arrives", async () => {
+    const runs = new GuardedInMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const debates = new InMemoryDebateStore();
+    const debateExecution: DebateExecutionStore = new PostgresDebateExecutionStore() as DebateExecutionStore;
+    const debate = fakeDebate("debate_late_1");
+    await debates.create({
+      ...debate,
+      status: "completed",
+      stopReason: "completed",
+      participants: [{ ...debate.participants[0]!, runId: "run_late_1", runIds: ["run_late_1"] }, debate.participants[1]!]
+    });
+    await runs.create({
+      id: "run_late_1",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "late",
+      status: "completed",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: { debateId: "debate_late_1", debateChildRunKey: "late_key" },
+      runtimeMode: "fake.deterministic",
+      createdAt: "2026-06-02T00:00:00.000Z"
+    });
+    await events.append({
+      id: "event_late_output_1",
+      runId: "run_late_1",
+      debateId: "debate_late_1",
+      type: "runtime.output",
+      sequence: 1,
+      payload: { text: "too late", debateId: "debate_late_1", debateChildRunKey: "late_key" },
+      createdAt: "2026-06-02T00:00:01.000Z"
+    });
+    await debateExecution.enqueue({
+      id: "debate_job_late_1",
+      debateId: "debate_late_1",
+      stage: "participant_turn",
+      debateRound: 1,
+      debatePhase: "arguing",
+      participantIndex: 0,
+      pendingRunId: "run_late_1",
+      pendingChildRunKey: "late_key",
+      nextAttemptAt: "2026-06-02T00:00:00.000Z"
+    });
+    const worker = createHostedWorker(baseConfig(), {
+      queue: new MemoryRunQueue(),
+      runs,
+      events,
+      debates,
+      messages: new InMemoryMessageStore(),
+      evidence: new InMemoryEvidenceStore(),
+      artifacts: new InMemoryArtifactStore(),
+      debateExecution
+    });
+
+    try {
+      await worker.tick();
+      expect((await debates.get("debate_late_1"))?.status).toBe("completed");
+      expect((await debateExecution.get("debate_job_late_1"))?.state).toBe("completed");
+    } finally {
+      await worker.stop();
+    }
   });
 
   it("builds production sandbox service with injected process factory", async () => {
@@ -761,6 +1073,66 @@ describe("hosted worker app", () => {
     }
   });
 });
+
+function fakeDebate(id = "debate_worker_1") {
+  return {
+    id,
+    topic: "Ship hosted debate worker execution",
+    mode: "same_provider_model_debate" as const,
+    status: "created" as const,
+    participants: [
+      {
+        id: "participant_worker_a",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        role: "affirmative",
+        status: "created" as const,
+        turnsUsed: 0,
+        runIds: [],
+        adapterType: "process",
+        runtimeMode: "fake.deterministic",
+        placement: "hosted"
+      },
+      {
+        id: "participant_worker_b",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        role: "negative",
+        status: "created" as const,
+        turnsUsed: 0,
+        runIds: [],
+        adapterType: "process",
+        runtimeMode: "fake.deterministic",
+        placement: "hosted"
+      }
+    ],
+    limits: {
+      maxRounds: 1,
+      maxTurnsPerAgent: 1,
+      maxSearchesPerAgent: 0,
+      maxTotalMessages: 2,
+      maxDurationSeconds: 30,
+      maxCostUsd: 0,
+      requireCitations: false,
+      requireDisagreementSummary: true,
+      stopOnConsensus: false,
+      stopOnLowNewInformation: false,
+      humanStopAllowed: false
+    },
+    evidenceIds: [],
+    messageIds: [],
+    eventIds: [],
+    budget: {
+      status: "within_budget" as const,
+      maxCostUsd: 0,
+      spentCostUsd: 0
+    },
+    createdAt: "2026-06-02T00:00:00.000Z",
+    updatedAt: "2026-06-02T00:00:00.000Z"
+  };
+}
 
 function baseConfig() {
   return {
