@@ -435,8 +435,15 @@ describe("openapi generation", () => {
     expect(developerDocs).toMatch(/fake[-/ ]only remains default|fake\/no-spend remains default/i);
     expect(developerDocs).toMatch(/does not ship generic process\/pty runtime adapters/i);
     expect(developerDocs).toMatch(/does not ship cursor\/openclaw\/paperclip/i);
-    expect(developerDocs).toMatch(/does not ship hosted browser\/search\/github\/fetch\/repo tools/i);
-    expect(developerDocs).toMatch(/does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge/i);
+    expect(developerDocs).toMatch(/hosted worker tools: `fetch`, `web_search`, `github`, command-catalog `shell`/i);
+    expect(developerDocs).toMatch(/does not ship hosted browser automation/i);
+    expect(developerDocs).toMatch(/does not ship hosted `repo` execution|hosted `repo` remains denied/i);
+    expect(developerDocs).toMatch(
+      /R23 adds hosted runtime bridge support only for worker-owned `claude_code\.sdk` and structured `opencode\.acp`/i
+    );
+    expect(developerDocs).toMatch(/`codex\.exec_json` remains one-shot with hosted input\/approval unsupported/i);
+    expect(developerDocs).toMatch(/AgentField\/Generic HTTP input, approval, or debate bridges/i);
+    expect(developerDocs).toMatch(/does not ship hosted terminal bridge/i);
   });
 
   it("documents tool invocation create/get/list envelopes with invocation field names", () => {
