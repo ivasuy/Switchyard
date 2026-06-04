@@ -213,7 +213,14 @@ async function runDependencyPreflight(deps: Record<string, unknown>): Promise<Aw
         queueStats: async () => undefined,
         probeObjectStore: async () => undefined,
         checkControlPlane: async () => ({ checks: [] }),
-        checkHostedRuntimeGate: async () => ({ ok: true }),
+        checkHostedRuntimeGate: async () => ({
+          ok: true,
+          diagnostics: {
+            hostedDebate: {
+              ok: true
+            }
+          }
+        }),
         ...deps
       }
     });
@@ -657,6 +664,24 @@ describe("runProductionPreflight", () => {
       name: "hostedDebate.workerReadiness",
       status: "pass",
       code: "hosted_debate_worker_ready"
+    }));
+  });
+
+  test("fails hosted debate worker readiness closed when readiness diagnostics are missing", async () => {
+    const result = await runDependencyPreflight({
+      checkHostedRuntimeGate: async () => ({ ok: true })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.workerReadiness",
+      status: "fail",
+      code: "hosted_debate_worker_unavailable"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate",
+      status: "fail",
+      code: "hosted_debate_worker_unavailable"
     }));
   });
 

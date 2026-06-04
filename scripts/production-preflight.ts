@@ -1268,9 +1268,12 @@ function readWorkerHostedDebateReadiness(checks: ProductionPreflightCheck[]): { 
       const code = typeof nested["code"] === "string" ? nested["code"] : "hosted_debate_worker_unavailable";
       return { ok: false, code };
     }
+    if (isRecord(nested) && nested["ok"] === true) {
+      return { ok: true };
+    }
   }
 
-  return { ok: true };
+  return { ok: false, code: "hosted_debate_worker_unavailable" };
 }
 
 async function defaultHostedRuntimeGateCheck(input: {
