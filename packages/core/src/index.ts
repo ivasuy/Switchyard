@@ -33,6 +33,7 @@ export * from "./services/approval-service.js";
 export * from "./services/artifact-service.js";
 export * from "./services/context-builder.js";
 export * from "./services/debate-service.js";
+export * from "./services/debate-judge-runner.js";
 export * from "./services/debate-runtime-matrix.js";
 export * from "./services/debate-output.js";
 export * from "./services/event-service.js";

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
   Artifact,
+  AuthContext,
   Debate,
   EvidenceItem,
   RoutedMessage,
@@ -12,6 +13,7 @@ import { DebateService } from "../src/services/debate-service.js";
 import { EventBus } from "../src/services/event-bus.js";
 import { MessageRouter } from "../src/services/message-router.js";
 import type { ArtifactStore } from "../src/ports/artifact-store.js";
+import type { DebateExecutionJob, DebateExecutionStore, EnqueueDebateExecutionJobInput, LinkPendingRunResult, PendingRunLink } from "../src/ports/debate-execution-store.js";
 import type { DebateStore } from "../src/ports/debate-store.js";
 import type { EventStore } from "../src/ports/event-store.js";
 import type { EvidenceStore, ListEvidenceFilter, ListEvidenceResult } from "../src/ports/evidence-store.js";
@@ -69,6 +71,14 @@ class InMemoryRunStore implements RunStore {
     this.items.set(run.id, structuredClone(run));
     return run;
   }
+  async findByDebateChildRunKey(key: string): Promise<Run | undefined> {
+    for (const run of this.items.values()) {
+      if (run.metadata["debateChildRunKey"] === key) {
+        return structuredClone(run);
+      }
+    }
+    return undefined;
+  }
   async list(): Promise<never> {
     throw new Error("unused");
   }
@@ -123,12 +133,14 @@ class InMemoryMessageStore implements MessageStore {
 
 class InMemoryEvidenceStore implements EvidenceStore {
   readonly items = new Map<string, EvidenceItem>();
+  getCalls = 0;
 
   async create(value: EvidenceItem): Promise<EvidenceItem> {
     this.items.set(value.id, structuredClone(value));
     return value;
   }
   async get(id: string): Promise<EvidenceItem | undefined> {
+    this.getCalls += 1;
     const value = this.items.get(id);
     return value ? structuredClone(value) : undefined;
   }
@@ -138,6 +150,93 @@ class InMemoryEvidenceStore implements EvidenceStore {
   }
   async list(_filter: ListEvidenceFilter): Promise<ListEvidenceResult> {
     return { evidence: [...this.items.values()].map((item) => structuredClone(item)), nextCursor: null };
+  }
+}
+
+class InMemoryDebateExecutionStore implements DebateExecutionStore {
+  readonly jobs = new Map<string, DebateExecutionJob>();
+  failNextLink = false;
+
+  async enqueue(input: EnqueueDebateExecutionJobInput): Promise<DebateExecutionJob> {
+    const now = input.now ?? "2026-05-30T00:00:00.000Z";
+    const job: DebateExecutionJob = {
+      id: input.id ?? `job_${this.jobs.size + 1}`,
+      debateId: input.debateId,
+      stage: input.stage,
+      debateRound: input.debateRound ?? 1,
+      debatePhase: input.debatePhase ?? "arguing",
+      state: "queued",
+      attempts: 0,
+      maxAttempts: input.maxAttempts ?? 3,
+      nextAttemptAt: input.nextAttemptAt ?? now,
+      createdAt: now,
+      updatedAt: now,
+      ...(input.participantIndex !== undefined ? { participantIndex: input.participantIndex } : {}),
+      ...(input.pendingRunId ? { pendingRunId: input.pendingRunId } : {}),
+      ...(input.pendingJudgeRunId ? { pendingJudgeRunId: input.pendingJudgeRunId } : {}),
+      ...(input.pendingChildRunKey ? { pendingChildRunKey: input.pendingChildRunKey } : {})
+    };
+    this.jobs.set(job.id, structuredClone(job));
+    return job;
+  }
+  async claim(): Promise<DebateExecutionJob | undefined> {
+    return [...this.jobs.values()][0];
+  }
+  async release(): Promise<void> {}
+  async complete(jobId: string): Promise<void> {
+    const job = this.jobs.get(jobId);
+    if (job) {
+      job.state = "completed";
+    }
+  }
+  async fail(jobId: string): Promise<void> {
+    const job = this.jobs.get(jobId);
+    if (job) {
+      job.state = "failed";
+    }
+  }
+  async recoverStaleClaims(): Promise<{ recovered: number; exhausted: number; invalid: number }> {
+    return { recovered: 0, exhausted: 0, invalid: 0 };
+  }
+  async get(id: string): Promise<DebateExecutionJob | undefined> {
+    const job = this.jobs.get(id);
+    return job ? structuredClone(job) : undefined;
+  }
+  async stats(): Promise<{ queued: number; claimed: number; failed: number; exhausted: number }> {
+    return { queued: 0, claimed: 0, failed: 0, exhausted: 0 };
+  }
+  async linkPendingRun(jobId: string, key: string, runId: string, expectedStage: string): Promise<LinkPendingRunResult> {
+    const job = this.jobs.get(jobId);
+    if (!job || job.stage !== expectedStage) {
+      return { ok: false, reason: "not_found" };
+    }
+    if (this.failNextLink) {
+      this.failNextLink = false;
+      return { ok: false, reason: "link_conflict", job: structuredClone(job) };
+    }
+    job.pendingChildRunKey = key;
+    if (job.stage === "judging") {
+      job.pendingJudgeRunId = runId;
+    } else {
+      job.pendingRunId = runId;
+    }
+    return { ok: true, job: structuredClone(job) };
+  }
+  async findPendingRunByKey(key: string): Promise<PendingRunLink | undefined> {
+    for (const job of this.jobs.values()) {
+      if (job.pendingChildRunKey === key && (job.pendingRunId || job.pendingJudgeRunId)) {
+        return {
+          jobId: job.id,
+          debateId: job.debateId,
+          runId: job.pendingRunId ?? job.pendingJudgeRunId!,
+          stage: job.stage,
+          debateRound: job.debateRound,
+          debatePhase: job.debatePhase,
+          ...(job.participantIndex !== undefined ? { participantIndex: job.participantIndex } : {})
+        };
+      }
+    }
+    return undefined;
   }
 }
 
@@ -249,6 +348,8 @@ interface CreateHarnessOptions {
     router: MessageRouter
   ) => Pick<ConstructorParameters<typeof DebateService>[0]["messageRouter"], "createWithEvent" | "get">;
   artifactContent?: { writeText(path: string, content: string): Promise<string> } | undefined;
+  debateExecution?: InMemoryDebateExecutionStore;
+  hosted?: ConstructorParameters<typeof DebateService>[0]["hosted"];
 }
 
 function createHarness(options: CreateHarnessOptions = {}) {
@@ -258,6 +359,7 @@ function createHarness(options: CreateHarnessOptions = {}) {
   const messages = new InMemoryMessageStore();
   const evidence = new InMemoryEvidenceStore();
   const artifacts = new InMemoryArtifactStore();
+  const debateExecution = options.debateExecution;
   const eventBus = new EventBus();
   const baseMessageRouter = new MessageRouter({ runs, messages, events, eventBus });
   const messageRouter = options.wrapMessageRouter?.(baseMessageRouter) ?? baseMessageRouter;
@@ -281,6 +383,8 @@ function createHarness(options: CreateHarnessOptions = {}) {
     evidence,
     events,
     artifacts,
+    ...(debateExecution ? { debateExecution } : {}),
+    ...(options.hosted ? { hosted: options.hosted } : {}),
     eventBus,
     defaultCwd: "/repo"
   };
@@ -289,7 +393,51 @@ function createHarness(options: CreateHarnessOptions = {}) {
   }
   const service = new DebateService(serviceOptions);
 
-  return { service, debates, runs, events, messages, evidence, artifacts, artifactWrites, baseMessageRouter };
+  return { service, debates, runs, events, messages, evidence, artifacts, debateExecution, artifactWrites, baseMessageRouter };
+}
+
+function makeAuth(): AuthContext {
+  return {
+    account: { id: "account_1", slug: "account", displayName: "Account", status: "active", createdAt: "2026-05-30T00:00:00.000Z" },
+    tenant: { id: "tenant_1", accountId: "account_1", slug: "tenant", displayName: "Tenant", status: "active", createdAt: "2026-05-30T00:00:00.000Z" },
+    project: { id: "project_1", tenantId: "tenant_1", slug: "project", displayName: "Project", status: "active", createdAt: "2026-05-30T00:00:00.000Z" },
+    user: { id: "user_1", accountId: "account_1", email: "user@example.com", displayName: "User", status: "active", createdAt: "2026-05-30T00:00:00.000Z" },
+    apiKey: { id: "api_key_1", keyPrefix: "sk_sw", scopes: ["runs:write"], status: "active", createdAt: "2026-05-30T00:00:00.000Z" },
+    entitlement: {
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      planId: "plan_1",
+      planSlug: "plan",
+      planDisplayName: "Plan",
+      planStatus: "active",
+      entitlements: {
+        allowedPlacements: ["local", "hosted", "connected_local_node"],
+        allowedRuntimeModes: ["fake.deterministic", "codex.exec_json", "claude_code.sdk", "opencode.acp"],
+        allowHostedRealRuntime: true,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowAuditRead: true,
+        allowMetricsRead: true,
+        allowToolExecution: true
+      },
+      quotas: {
+        maxRunsPerHour: 100,
+        maxActiveRuns: 10,
+        maxRunTimeoutSeconds: 60,
+        maxConnectedNodes: 10,
+        maxArtifactContentReadBytesPerHour: 1000,
+        maxToolInvocationsPerHour: 100,
+        maxActiveToolInvocations: 10,
+        maxToolArtifactBytesPerHour: 1000,
+        maxRuntimeBridgeCommandsPerHour: 100,
+        maxActiveRuntimeBridgeCommands: 10
+      },
+      scopes: ["runs:write"],
+      capturedAt: "2026-05-30T00:00:00.000Z"
+    },
+    authenticatedAt: "2026-05-30T00:00:00.000Z"
+  };
 }
 
 describe("debate service", () => {
@@ -318,6 +466,13 @@ describe("debate service", () => {
     expect(result.debate.messageIds.length).toBeGreaterThan(0);
     expect(result.debate.judge?.consensus).toBe("no_consensus");
     expect(result.finalReportArtifact?.type).toBe("summary");
+    expect(result.finalReportArtifact?.metadata).toMatchObject({
+      debateId: result.debate.id,
+      participantIds: result.debate.participants.map((participant) => participant.id),
+      evidenceIds: [evidence.id],
+      messageIds: result.debate.messageIds,
+      judgeSummary: result.debate.judge?.summary
+    });
     const replay = await harness.service.listEvents(result.debate.id);
     expect(new Set(result.debate.eventIds)).toEqual(new Set(replay.map((event) => event.id)));
     expect(replay.some((event) => event.type === "debate.round.started")).toBe(true);
@@ -350,13 +505,186 @@ describe("debate service", () => {
           { role: "skeptic" }
         ]
       }, { wait: true })
-    ).rejects.toMatchObject({ code: "invalid_input" });
+    ).rejects.toMatchObject({ code: "debate_runtime_unsupported" });
 
     expect(harness.debates.items.size).toBe(0);
     expect(harness.runs.items.size).toBe(0);
     expect(harness.messages.items.size).toBe(0);
     expect(harness.events.items.length).toBe(0);
     expect(harness.artifacts.items.size).toBe(0);
+  });
+
+  it("preauthorizes hosted evidence before evidence lookup or side effects", async () => {
+    const deniedIds: string[] = [];
+    const harness = createHarness({
+      hosted: {
+        async authorizeEvidence(input) {
+          deniedIds.push(input.evidenceId);
+          throw new Error("denied");
+        }
+      }
+    });
+
+    await expect(
+      harness.service.create({
+        topic: "Hosted evidence",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }],
+        evidenceIds: ["evidence_unknown"]
+      }, { auth: makeAuth(), requestId: "req_1" })
+    ).rejects.toMatchObject({ code: "debate_evidence_not_found_or_denied" });
+
+    expect(deniedIds).toEqual(["evidence_unknown"]);
+    expect(harness.evidence.getCalls).toBe(0);
+    expect(harness.debates.items.size).toBe(0);
+    expect(harness.runs.items.size).toBe(0);
+    expect(harness.messages.items.size).toBe(0);
+    expect(harness.events.items.length).toBe(0);
+    expect(harness.artifacts.items.size).toBe(0);
+  });
+
+  it("uses the same no-leak hosted evidence error for authorized but missing evidence", async () => {
+    const harness = createHarness({
+      hosted: {
+        async authorizeEvidence() {}
+      }
+    });
+
+    await expect(
+      harness.service.create({
+        topic: "Hosted evidence",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }],
+        evidenceIds: ["evidence_missing"]
+      }, { auth: makeAuth() })
+    ).rejects.toMatchObject({ code: "debate_evidence_not_found_or_denied" });
+
+    expect(harness.evidence.getCalls).toBe(1);
+    expect(harness.debates.items.size).toBe(0);
+    expect(harness.runs.items.size).toBe(0);
+  });
+
+  it("rejects real participants and live judges with wait before child run creation", async () => {
+    const realHarness = createHarness();
+    await expect(
+      realHarness.service.create({
+        topic: "Real wait",
+        participants: [
+          { role: "affirmative", runtimeMode: "claude_code.sdk", placement: "hosted", realRuntimeOptIn: true, model: "claude" },
+          { role: "skeptic" }
+        ]
+      }, { wait: true })
+    ).rejects.toMatchObject({ code: "debate_wait_real_runtime_unsupported" });
+    expect(realHarness.runs.items.size).toBe(0);
+
+    const judgeHarness = createHarness();
+    await expect(
+      judgeHarness.service.create({
+        topic: "Live judge wait",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }],
+        judgeConfig: {
+          mode: "model",
+          runtimeMode: "codex.exec_json",
+          placement: "hosted",
+          realRuntimeOptIn: true,
+          confirmLiveProviderSpend: true,
+          model: "gpt"
+        }
+      }, { wait: true })
+    ).rejects.toMatchObject({ code: "debate_wait_real_runtime_unsupported" });
+    expect(judgeHarness.runs.items.size).toBe(0);
+  });
+
+  it("reuses a child run after pending-link failure and stale retry", async () => {
+    const debateExecution = new InMemoryDebateExecutionStore();
+    const harness = createHarness({ debateExecution });
+    const created = await harness.service.create({
+      topic: "Async duplicate guard",
+      participants: [{ role: "affirmative" }, { role: "skeptic" }]
+    });
+    const job = [...debateExecution.jobs.values()][0]!;
+    debateExecution.failNextLink = true;
+
+    const first = await harness.service.processExecutionJob(job);
+    const second = await harness.service.processExecutionJob(job);
+
+    expect(first.action).toBe("requeue");
+    expect(second.action).toBe("requeue");
+    expect(harness.runs.items.size).toBe(1);
+    const run = [...harness.runs.items.values()][0]!;
+    expect(run.metadata["debateId"]).toBe(created.debate.id);
+    expect(run.metadata["debateRunKind"]).toBe("participant");
+    expect(typeof run.metadata["debateChildRunKey"]).toBe("string");
+  });
+
+  it("routes bounded participant runtime.output only while debate is nonterminal", async () => {
+    const debateExecution = new InMemoryDebateExecutionStore();
+    const harness = createHarness({ debateExecution });
+    const created = await harness.service.create({
+      topic: "Async output",
+      participants: [{ role: "affirmative" }, { role: "skeptic" }]
+    });
+    const job = [...debateExecution.jobs.values()][0]!;
+    await harness.service.processExecutionJob(job);
+    const run = [...harness.runs.items.values()][0]!;
+    await harness.runs.update({ ...run, status: "completed", endedAt: "2026-05-30T00:00:02.000Z" });
+    await harness.events.append({
+      id: "event_runtime_output_1",
+      type: "runtime.output",
+      runId: run.id,
+      debateId: created.debate.id,
+      sequence: 1,
+      payload: {
+        text: "persisted participant answer",
+        debateId: created.debate.id,
+        debateChildRunKey: run.metadata["debateChildRunKey"]
+      },
+      createdAt: "2026-05-30T00:00:02.000Z"
+    });
+
+    const result = await harness.service.processExecutionJob(job);
+    const debate = await harness.debates.get(created.debate.id);
+
+    expect(result.action).toBe("complete");
+    expect(debate?.messageIds).toHaveLength(1);
+    expect([...harness.messages.items.values()][0]?.content).toBe("persisted participant answer");
+  });
+
+  it("ignores late participant output without reopening terminal debate", async () => {
+    const debateExecution = new InMemoryDebateExecutionStore();
+    const harness = createHarness({ debateExecution });
+    const created = await harness.service.create({
+      topic: "Late output",
+      participants: [{ role: "affirmative" }, { role: "skeptic" }]
+    });
+    const job = [...debateExecution.jobs.values()][0]!;
+    await harness.service.processExecutionJob(job);
+    const run = [...harness.runs.items.values()][0]!;
+    await harness.runs.update({ ...run, status: "completed", endedAt: "2026-05-30T00:00:02.000Z" });
+    await harness.debates.update({
+      ...created.debate,
+      status: "failed",
+      stopReason: "failed",
+      error: { code: "manual_failure", message: "failed before output" }
+    });
+    await harness.events.append({
+      id: "event_late_runtime_output",
+      type: "runtime.output",
+      runId: run.id,
+      debateId: created.debate.id,
+      sequence: 1,
+      payload: {
+        text: "late answer",
+        debateId: created.debate.id,
+        debateChildRunKey: run.metadata["debateChildRunKey"]
+      },
+      createdAt: "2026-05-30T00:00:02.000Z"
+    });
+
+    const result = await harness.service.processExecutionJob(job);
+    const debate = await harness.debates.get(created.debate.id);
+
+    expect(result.action).toBe("complete");
+    expect(debate?.status).toBe("failed");
+    expect(debate?.messageIds).toHaveLength(0);
   });
 
   it("rejects unknown evidence with evidence_not_found and no side effects", async () => {
