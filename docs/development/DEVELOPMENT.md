@@ -93,7 +93,7 @@ pnpm --filter @switchyard/contracts openapi:generate:hosted
 pnpm --filter @switchyard/contracts openapi:check:hosted
 ```
 
-## R23 Production Operator Commands
+## R24 Production Operator Commands
 
 Preflight (required before deploy):
 
@@ -107,13 +107,14 @@ Migrate (required before traffic):
 pnpm production:migrate -- --env-file deploy/production/.env
 ```
 
-Canary (required after server+worker are healthy):
+Canary (required after server+worker are healthy; default is fake hosted debate and no-spend):
 
 ```bash
 pnpm production:canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --timeout-ms 30000
 ```
 
 Canary supports `SWITCHYARD_CANARY_API_KEY` as an alternative to `--api-key`.
+The default canary creates a fake hosted debate through `POST /debates`, polls `GET /debates/:id`, checks `GET /debates/:id/events`, verifies final report artifact metadata, and records live participant/live judge probes as skipped.
 For optional live external-tool probes use the spend-gated canary command with explicit env + flag confirmation:
 
 ```bash
@@ -125,6 +126,15 @@ Optional live hosted-provider bridge probes are explicitly spend-gated and skipp
 ```bash
 SWITCHYARD_CONFIRM_LIVE_PROVIDER_BRIDGE_CANARY=1 pnpm production:canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --live-provider-bridges --confirm-live-provider-spend
 ```
+
+Optional live debate participant and live judge canary probes are explicitly spend-gated and skipped by default:
+
+```bash
+pnpm production:canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --live-debate-runtimes --confirm-live-provider-spend
+pnpm production:canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --live-debate-judge --confirm-live-provider-spend
+```
+
+Supplying `--live-debate-runtimes` or `--live-debate-judge` without `--confirm-live-provider-spend` fails before provider dispatch with `debate_live_canary_spend_unconfirmed`.
 
 Sandbox smoke (required before enabling worker claims in production posture):
 
@@ -138,7 +148,7 @@ Safe default sandbox env posture (required unless an operator intentionally enab
 - `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` unset when real execution is disabled.
 - If `SWITCHYARD_SANDBOX_REAL_EXECUTION=enabled`, `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` must be present and valid or readiness fails closed (`sandbox_policy_missing`/`sandbox_policy_invalid`).
 
-## R23 Hosted Rollout / Rollback
+## R24 Hosted Rollout / Rollback
 
 Rollout order (required):
 
@@ -164,29 +174,27 @@ Fail-closed production behavior:
 - Missing bridge command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`).
 - Worker crash/stale claimed non-idempotent provider input is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`.
 - Production hosted/connected-node tool activation is operator opt-in and requires explicit real-tool policy plus API-key auth, Postgres, Redis, object store, quota/audit readiness, worker claim readiness, and node readiness for connected-node tool placements.
+- R24 hosted debate uses only `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
+- Fake deterministic hosted debate is the default no-spend route through production canary.
+- Real debate participants require request-level `realRuntimeOptIn: true`; hosted real participants require `placement: "hosted"` and are allowed only for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` beyond fake.
+- Live model judge requests require `judgeConfig.mode: "model"`, `realRuntimeOptIn: true`, and `confirmLiveProviderSpend: true`.
+- Hosted debate readiness requires durable Postgres debate/message/evidence/job state, child-run idempotency, evidence ownership preauthorization, ownership, quota, audit, queue/outbox, object store, worker readiness, provider activation, and R23 bridge readiness for Claude/OpenCode when allowlisted.
+- Missing hosted debate dependencies fail closed with named codes such as `hosted_debate_store_unavailable`, `hosted_debate_queue_unavailable`, `hosted_debate_worker_unavailable`, `hosted_debate_quota_exceeded`, `hosted_debate_audit_unavailable`, `hosted_debate_artifact_write_failed`, `provider_runtime_policy_missing`, or `hosted_runtime_bridge_store_unavailable`.
 
-R23 non-goals reminder:
+R24 non-goals reminder:
 
 - No managed SaaS/public signup, payments/webhooks, OAuth/OIDC/SAML/SSO/SCIM, dashboard, or TUI setup is shipped here.
 - does not ship generic process/pty runtime adapters.
 - does not ship cursor/openclaw/paperclip.
 - does not ship hosted browser automation.
 - does not ship hosted `repo` execution.
-- does not ship hosted debate real participants or hosted model judging.
+- does not ship public model judge routes (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family).
 - hosted bridges remain unshipped for `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, and `generic_http.async_rest`.
 - hosted `codex.interactive` remains local-only and unshipped.
 - hosted live-resume guarantees are not shipped.
 - does not ship hosted terminal bridge.
 - No public `/exec`/`/sandbox`/`/terminal`/`/pty`/`/shell`/`/process`/`/command` routes are shipped here.
 - R22 shipped real tools are exact-only: hosted worker `fetch/web_search/github/shell` and connected-node `fetch/web_search/github/repo/shell`.
-
-R21 historical non-goal wording (kept for compatibility with previous release checks):
-
-- does not ship generic process/pty runtime adapters.
-- does not ship cursor/openclaw/paperclip.
-- does not ship hosted browser/search/github/fetch/repo tools.
-- does not ship hosted debate real participants or hosted model judging.
-- does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
 
 Rollback order:
 
@@ -548,7 +556,7 @@ R17 middleware and tool boundaries:
 - Browser automation and hosted `repo` execution remain unshipped and denied (`browser_tool_unshipped`, `repo_hosted_unshipped`).
 - Public `/sandbox`/`/exec`/`/pty`/`/terminal`/`/process`/`/shell`/`/command`/`/browser` routes and top-level tool-search execution routes remain unshipped.
 
-## R9 Debate Smoke (No Spend)
+## R24 Debate Smoke (No Spend)
 
 ```bash
 BASE=http://127.0.0.1:4545
@@ -570,18 +578,44 @@ curl -N "$BASE/debates/$DEBATE_ID/events?live=1&stopAfter=20"
 Expected:
 
 - Debate reaches terminal fake deterministic state (`no_consensus` by default).
-- Exactly two participant seed runs are present in `debate.participants[*].runId`.
+- Participant run ids are present in the debate inspect response.
 - `debate.messageIds`, `debate.eventIds`, `debate.judge`, and `debate.stopReason` are populated.
 - Final report artifact metadata is present in inspect output.
 
-## R9 Negative Smoke
+R24 async hosted debate behavior:
 
-Unsupported runtime:
+- `POST /debates` returns `202 { debate }` and executes asynchronously.
+- Hosted/server-safe debate uses only `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
+- `POST /debates?wait=1` is supported only for fake deterministic no-spend debates.
+- Real participants require `realRuntimeOptIn: true`; hosted real participants also require `placement: "hosted"`.
+- Allowed debate participant runtime modes are `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- Live model judge requests use `judgeConfig.mode: "model"` and require `realRuntimeOptIn: true` plus `confirmLiveProviderSpend: true`.
+- Debate participant and judge execution use existing run/runtime contracts and preserve run/message/event/artifact traceability.
+
+## R24 Debate Negative Smoke
+
+Real participant missing opt-in:
 
 ```bash
 curl -s -X POST "$BASE/debates?wait=1" \
   -H 'content-type: application/json' \
   -d '{"topic":"bad runtime","participants":[{"role":"affirmative","runtime":"codex"},{"role":"skeptic"}]}'
+```
+
+Real participant with `wait=1`:
+
+```bash
+curl -s -X POST "$BASE/debates?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"topic":"real wait unsupported","participants":[{"role":"affirmative","runtimeMode":"codex.exec_json","placement":"hosted","realRuntimeOptIn":true,"model":"gpt-5"},{"role":"skeptic","runtimeMode":"fake.deterministic"}]}'
+```
+
+Live judge without spend confirmation:
+
+```bash
+curl -s -X POST "$BASE/debates" \
+  -H 'content-type: application/json' \
+  -d '{"topic":"judge spend gate","participants":[{"role":"affirmative"},{"role":"skeptic"}],"judgeConfig":{"mode":"model","runtimeMode":"codex.exec_json","placement":"hosted","realRuntimeOptIn":true,"model":"gpt-5"}}'
 ```
 
 Unknown evidence id:
@@ -603,7 +637,9 @@ curl -s -X POST "$BASE/debates?wait=1" \
 
 Expected:
 
-- Unsupported runtime returns `400 invalid_input` with no debate side effects.
+- Missing real participant opt-in returns `400 debate_real_participant_opt_in_required` with no provider side effects.
+- Real participant or live judge requests with `wait=1` return `409 debate_wait_real_runtime_unsupported` with no provider side effects.
+- Live judge requests without spend confirmation return `400 debate_judge_live_spend_unconfirmed` with no provider side effects.
 - Unknown evidence id returns `404 evidence_not_found` with no debate side effects.
 - `maxTotalMessages: 1` returns terminal debate state with one routed message and `stopReason: "max_total_messages"`.
 
@@ -811,7 +847,7 @@ R15 non-goals reminder:
 - No hosted browser/search/repo/GitHub/fetch tooling.
 - No public `/sandbox`, `/exec`, `/pty`, or `/terminal` execution API.
 - No hosted interactive Codex session bridge, hosted post-start input bridge, or hosted approval bridge.
-- No hosted debate participant execution or model judging.
+- R15 did not ship hosted debate participant execution or model judging; R24 supersedes that for the current hosted/server-safe `/debates` route family only.
 
 R13 object-store smoke posture:
 

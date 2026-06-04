@@ -23,4 +23,11 @@ AgentField should be treated as a wrapper/runtime target that can execute async 
 
 ## Status
 
-Good early wrapper adapter candidate after Generic HTTP exists.
+Implemented as local wrapper runtime mode `agentfield.async_rest`.
+
+R24 hosted debate boundary:
+
+- AgentField hosted debate bridges are unshipped.
+- AgentField hosted input/approval bridges are unshipped.
+- AgentField remains outside the R24 hosted debate participant allowlist.
+- Public model judge routes, browser automation, generic process/PTY adapters, dashboard/TUI surfaces, and managed SaaS remain unshipped.

@@ -31,3 +31,10 @@ Generic HTTP lets Switchyard integrate custom agents and wrappers that expose ru
 ## Status
 
 Implemented local slice in R4 as runtime mode `generic_http.async_rest`.
+
+R24 hosted debate boundary:
+
+- Generic HTTP hosted debate bridges are unshipped.
+- Generic HTTP hosted input/approval bridges are unshipped.
+- Generic HTTP remains outside the R24 hosted debate participant allowlist.
+- Public model judge routes, browser automation, generic process/PTY adapters, dashboard/TUI surfaces, and managed SaaS remain unshipped.

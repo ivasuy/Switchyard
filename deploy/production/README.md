@@ -1,4 +1,4 @@
-# Switchyard Production Manifest Pack (R22)
+# Switchyard Production Manifest Pack (R24)
 
 This directory contains a production operator manifest pack for hosted server, hosted worker, and optional connected node. It is API/ops-only and keeps the checked-in default fake-only (`fake.deterministic`) and no-spend.
 
@@ -33,7 +33,7 @@ Generate unique high-entropy values for at least:
 - Object-store credentials
 - Bootstrap API key and node token records
 
-## Runtime + Tool Boundary (R22)
+## Runtime, Tool, And Debate Boundary (R24)
 
 Checked-in production defaults are fake-only:
 
@@ -41,7 +41,7 @@ Checked-in production defaults are fake-only:
 - `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`
 - `SWITCHYARD_SANDBOX_REAL_EXECUTION=disabled` (safe default)
 
-R22 keeps hosted runtime defaults fake-only and allows explicit provider opt-in for exactly:
+R24 keeps hosted runtime defaults fake-only and allows explicit provider opt-in for exactly:
 - `codex.exec_json`
 - `claude_code.sdk`
 - `opencode.acp`
@@ -59,17 +59,38 @@ R22 hosted/connected-node real-tool execution ships only for:
 - hosted worker tools: `fetch`, `web_search`, `github`, command-catalog `shell`
 - connected-node tools: `fetch`, `web_search`, `github`, `repo`, command-catalog `shell`
 
-R22 still does not ship:
+R24 hosted debate ships through the existing route family only:
+
+- `POST /debates`
+- `GET /debates/:id`
+- `GET /debates/:id/events`
+
+Fake deterministic hosted debate is the default no-spend path for production preflight and canary. Opt-in live debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`. Live debate participants require request-level `realRuntimeOptIn: true`; hosted live participants require `placement: "hosted"` plus provider activation. The internal bounded judge runner defaults to deterministic no-spend judging; live model judging requires request opt-in and `confirmLiveProviderSpend: true`.
+
+Hosted debate readiness requires:
+
+- API-key auth and tenant/project ownership.
+- Durable Postgres debate/message/evidence/job state.
+- Child-run idempotency and evidence ownership preauthorization.
+- Ownership, quota, and audit stores.
+- Queue/outbox and worker readiness.
+- Object-store readiness for final report artifacts.
+- Provider activation for live participant or live judge probes.
+- R23 bridge command/payload stores when `claude_code.sdk` or `opencode.acp` are allowlisted.
+
+R24 still does not ship:
 
 - browser automation (`browser_tool_unshipped`)
 - hosted `repo` execution (`repo_hosted_unshipped`)
 - generic `/exec` `/shell` `/process` `/command` `/pty` `/terminal` `/sandbox` public routes
-- dashboard or TUI surfaces
-- generic process/PTY adapters
-- hosted runtime approval/input/terminal bridges
+- dashboard or TUI surfaces are not shipped
+- generic process/PTY adapters are not shipped
+- hosted runtime approval/input/terminal bridges outside the R23 `claude_code.sdk` and `opencode.acp` bridge boundary
 - Cursor/OpenClaw/Paperclip adapters
-- hosted debate real participants
-- hosted model judging
+- hosted `codex.interactive`
+- AgentField/Generic HTTP hosted debate bridges
+- public model judge routes are not shipped (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family)
+- managed SaaS/public signup, billing, OAuth, SSO, or SCIM are not shipped
 
 ## Rollout Order
 
@@ -86,7 +107,7 @@ R22 still does not ship:
 8. Deploy worker.
 9. Optionally deploy node:
    - `docker compose -f deploy/production/docker-compose.yml --profile optional-node up -d node`
-10. Run default R22 canary (deterministic/no-spend):
+10. Run default R24 canary (fake hosted debate, deterministic/no-spend):
     - `pnpm tsx scripts/production-canary.ts --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key`
 11. Run production sandbox smoke:
     - `pnpm production:sandbox-smoke`
@@ -94,6 +115,12 @@ R22 still does not ship:
     - `pnpm hosted-real-runtime:smoke`
 13. Optional live external-tool canary (requires explicit env + flag confirmation):
     - `SWITCHYARD_CONFIRM_LIVE_TOOL_CANARY=1 pnpm production:live-tool-canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --live-external-tools --confirm-live-tool-spend`
+14. Optional live debate participant canary (requires explicit spend confirmation; skipped by default):
+    - `pnpm production:canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --live-debate-runtimes --confirm-live-provider-spend`
+15. Optional live debate judge canary (requires explicit spend confirmation; skipped by default):
+    - `pnpm production:canary -- --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key --live-debate-judge --confirm-live-provider-spend`
+
+If `--live-debate-runtimes` or `--live-debate-judge` is supplied without `--confirm-live-provider-spend`, canary fails before provider dispatch with `debate_live_canary_spend_unconfirmed`.
 
 ## Rollback Order
 
@@ -111,12 +138,12 @@ R22 still does not ship:
 ## Readiness and Metrics Interpretation
 
 - `/health`: liveness only.
-- `/ready`: dependency + control-plane + schema + queue + object-store + runtime gate.
+- `/ready`: dependency + control-plane + schema + queue + object-store + runtime gate + hosted debate readiness.
 - `/metrics`: must be accessed with API key that includes both `metrics:read` and `admin:read`.
 
 ## Canary Record Retention
 
-Canary runs are expected durable evidence in production. Query them by canary metadata/tag and retain them for audit and rollback diagnostics.
+Canary runs and default fake hosted debate records are expected durable evidence in production. Query them by canary metadata/tag and retain them for audit and rollback diagnostics.
 
 ## Provider Policy Example (Opt-In Only)
 

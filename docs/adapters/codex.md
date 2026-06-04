@@ -2,13 +2,13 @@
 
 ## Target
 
-Codex should support coding/repo tasks through a structured headless path before any PTY fallback.
+Codex should support coding/repo tasks through a structured headless path; PTY fallback is not shipped.
 
 ## Preferred Protocol
 
-- Primary: `codex exec --json` through the local process adapter.
+- Primary: `codex exec --json` through the process adapter. This is `codex.exec_json` and remains one-shot.
 - Secondary (shipped in R16): explicit local-only `codex.interactive` mode under the same runtime adapter contract.
-- Last resort: PTY, local-only by policy.
+- Last resort: PTY is not shipped; no public PTY/terminal route exists.
 
 ## Verified Local Facts
 
@@ -34,10 +34,17 @@ Codex should support coding/repo tasks through a structured headless path before
 - Run-level `timeoutSeconds` is enforced by the runner so a process that never emits JSONL is terminalized as `timeout` instead of remaining `running`.
 - CI-safe tests use fake process fixtures and do not call the real Codex CLI.
 
+## Hosted Debate Boundary
+
+- R24 allows `codex.exec_json` as an opt-in local/hosted debate participant runtime.
+- `codex.exec_json` remains one-shot; each debate turn is a normal bounded child run, not a resumed interactive session.
+- Hosted input and approval bridges are unsupported for `codex.exec_json`.
+- Hosted `codex.interactive`, hosted Codex live-resume, public PTY/terminal routes, and PTY/TUI automation remain unshipped.
+
 ## Local Development
 
 For prebuilt local curls, focused verification commands, PID checks, SQLite queries, and stuck-state interpretation, see [Codex Adapter Local Development](../development/adapters/CODEX.md).
 
 ## Status
 
-Implemented for local `codex.exec_json` one-shot runs and explicit local-only `codex.interactive` runs. Hosted interactive bridges, hosted post-start input, public PTY/terminal routes, PTY/TUI automation, and managed hosted Codex execution remain unshipped.
+Implemented for `codex.exec_json` one-shot runs and explicit local-only `codex.interactive` runs. R24 hosted debate may use `codex.exec_json` only as an opt-in one-shot participant. Hosted `codex.interactive`, hosted Codex live-resume, hosted post-start input/approval for Codex, public PTY/terminal routes, PTY/TUI automation, and managed hosted Codex execution remain unshipped.

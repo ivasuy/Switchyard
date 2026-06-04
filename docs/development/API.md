@@ -16,14 +16,17 @@ R19 scope note: production hosted deployment readiness is shipped for the existi
 
 R20 boundary note: production subprocess/PTY sandboxing is an internal hosted-worker substrate only. There is still no public arbitrary execution API on either local or hosted surfaces: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` route exists.
 
-R22 hosted boundary note:
+R24 hosted boundary note:
 
 - does not ship generic process/pty runtime adapters.
 - does not ship cursor/openclaw/paperclip.
 - does not ship hosted browser automation.
 - does not ship hosted `repo` execution.
-- does not ship hosted debate real participants or hosted model judging.
-- does not ship hosted approval bridge, hosted input bridge, or hosted terminal bridge.
+- hosted/server-safe debate ships only through `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
+- fake deterministic hosted debate is the default no-spend path.
+- opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- live model judging is internal to `POST /debates` and requires request opt-in plus `confirmLiveProviderSpend: true`; no public model judge route is shipped.
+- does not ship hosted `codex.interactive`, AgentField/Generic HTTP hosted debate bridges, hosted terminal bridge, public model judge routes, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM.
 
 ## R19 Production Hosted Deployment Readiness
 
@@ -38,7 +41,7 @@ Shipped hosted/server production-readiness capabilities:
 - Hosted `/metrics` requires authenticated operator/admin scope (`metrics:read` plus `admin:read`); `/health` and `/ready` remain public on hosted surface.
 - Production preflight command (`pnpm production:preflight -- --env-file <path>`) validates env/manifest/config/schema/queue/object-store/control-plane/runtime-gate posture with redacted diagnostics.
 - Production migration command (`pnpm production:migrate -- --env-file <path>`) runs additive Postgres schema migration with named status codes.
-- Production canary command (`pnpm production:canary -- --base-url <https-url> --api-key <key>`) verifies authenticated ready/run/events/artifacts/metrics/audit on fake-only hosted execution (`fake.deterministic`).
+- Production canary command (`pnpm production:canary -- --base-url <https-url> --api-key <key>`) now defaults to authenticated ready/debate/events/artifacts/metrics/audit on fake deterministic hosted debate (`fake.deterministic`), with live debate probes skipped unless spend is explicitly confirmed.
 - Production hosted real-runtime execution remains forbidden in R19.
 
 Named production readiness and migration codes used by `/ready` and production operator workflows:
@@ -99,7 +102,7 @@ Safety boundaries in this shipped slice:
 - Hosted worker revalidates queue payload and durable run rows before adapter start (placement/status/runtime/provider/adapterType/runtimeMode/gate/allowlist/safety metadata).
 - Production hosted real-runtime execution is forbidden in R15 and must fail closed at config/readiness/claim validation.
 - R14 adds a hosted sandbox substrate that is internal-only and fake/no-spend (`switchyard.fake.*` command ids only); it is not a public execution API.
-- No hosted arbitrary subprocess/PTY execution, public sandbox execution route, hosted browser/search/repo/GitHub/fetch tooling, hosted debate participant execution, or model judging is shipped.
+- In the R10-R15 safe slice, no hosted arbitrary subprocess/PTY execution, public sandbox execution route, hosted browser/search/repo/GitHub/fetch tooling, hosted debate participant execution, or model judging was shipped. R24 supersedes the debate item only through the existing `/debates` route family described below; public model judge routes remain unshipped.
 
 R14 diagnostics additions:
 
@@ -141,10 +144,10 @@ http://127.0.0.1:4545
 
 Current implementation status:
 
-- Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), local-daemon real tool invocation routing for configured `fetch`/`web_search`/`github`/`repo`/command-catalog `shell` (deny-by-default, approval-by-default), and fake deterministic debate routes (`/debates`, `/debates/:id`, `/debates/:id/events`).
+- Implemented: health, metrics, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing), runtime-mode/doctor checks, middleware foundation routes (messages, memory, evidence, context, approvals, tools), local-daemon real tool invocation routing for configured `fetch`/`web_search`/`github`/`repo`/command-catalog `shell` (deny-by-default, approval-by-default), and hosted/server-safe debate routes (`POST /debates`, `GET /debates/:id`, `GET /debates/:id/events`).
 - Implemented runtimes: fake test runtime (`fake.deterministic`), local Claude Code structured runtime (`claude_code.sdk`, stream-json CLI client path), local Codex one-shot (`codex.exec_json`), local Codex interactive (`codex.interactive`), AgentField async REST wrapper (`agentfield.async_rest`), Generic HTTP async REST wrapper (`generic_http.async_rest`), and local OpenCode ACP (`opencode.acp`).
 - Implemented packaging/hardening surfaces: `@switchyard/sdk`, `@switchyard/cli`, deterministic OpenAPI export/check in `@switchyard/contracts`, SQLite schema metadata/migration policy checks, and adapter compatibility matrix generation in no-spend mode.
-- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service/signup, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public `/exec`/`/shell`/`/process`/`/command`/`/sandbox`/`/pty`/`/terminal` APIs, hosted interactive Codex bridge, hosted post-start input bridge, hosted approval bridge, per-run HTTP base URL overrides, remote artifact URL fetching, browser automation, hosted `repo` execution, Cursor/OpenClaw/Paperclip adapters, hosted runtime expansion beyond known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`), real debate participant runtimes, and model-based debate judging.
+- Not implemented yet: trace endpoint, dashboards, TUI, payment provider integration (invoices/checkout/webhooks), managed production hosting platform, public tenant self-service/signup, OAuth/OIDC/SAML/SSO/SCIM login flows, rate limiting, public `/exec`/`/shell`/`/process`/`/command`/`/sandbox`/`/pty`/`/terminal` APIs, hosted interactive Codex bridge, hosted post-start input bridge for `codex.exec_json`/`codex.interactive`/AgentField/Generic HTTP, hosted approval bridge for `codex.exec_json`/`codex.interactive`/AgentField/Generic HTTP, per-run HTTP base URL overrides, remote artifact URL fetching, browser automation, hosted `repo` execution, Cursor/OpenClaw/Paperclip adapters, hosted runtime expansion beyond known provider modes (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`), AgentField/Generic HTTP hosted debate bridges, and public model judge routes.
 
 ## Error Contract
 
@@ -171,6 +174,7 @@ Closed code set:
 | --- | --- | --- |
 | `run_not_found` | 404 | Unknown run id. |
 | `debate_not_found` | 404 | Unknown debate id. |
+| `debate_evidence_not_found_or_denied` | 404 | Debate evidence is missing or not owned by the caller. |
 | `artifact_not_found` | 404 | Unknown artifact id. |
 | `missing_artifact_content` | 404 | Artifact exists, content unavailable. |
 | `provider_not_found` | 404 | Unknown provider id or slug. |
@@ -182,6 +186,38 @@ Closed code set:
 | `evidence_not_found` | 404 | Unknown evidence id. |
 | `approval_not_found` | 404 | Unknown approval id. |
 | `tool_invocation_not_found` | 404 | Unknown tool invocation id. |
+| `debate_real_participant_opt_in_required` | 400 | Non-fake debate participant requested without real runtime opt-in. |
+| `debate_runtime_unsupported` | 409 | Debate participant runtime is not in the allowed R24 set. |
+| `debate_wait_real_runtime_unsupported` | 409 | `wait=1` was requested for real participant or live judge debate work. |
+| `debate_participant_count_invalid` | 400 | Debate participant count is invalid. |
+| `debate_participant_placement_required` | 400 | Real hosted debate participant did not explicitly request hosted placement. |
+| `debate_participant_run_missing` | 409 | Debate participant child run is missing. |
+| `debate_participant_run_failed` | 409 | Debate participant child run failed. |
+| `debate_participant_run_timeout` | 409 | Debate participant child run timed out. |
+| `debate_participant_output_missing` | 409 | Participant run produced no usable runtime output event. |
+| `debate_participant_output_empty` | 409 | Participant run output was blank after trimming. |
+| `debate_participant_output_too_large` | 409 | Participant output exceeded the debate extraction bound. |
+| `debate_runtime_approval_expired` | 409 | Debate runtime approval expired before the participant or judge could continue. |
+| `debate_child_run_link_failed` | 503 | Debate child run idempotency/ownership link failed. |
+| `debate_judge_config_invalid` | 400 | `judgeConfig` is malformed. |
+| `debate_judge_runtime_unsupported` | 409 | Requested live judge runtime is not allowed. |
+| `debate_judge_live_spend_unconfirmed` | 400 | Live model judge requested without spend confirmation. |
+| `debate_judge_run_failed` | 409 | Live judge child run failed. |
+| `debate_judge_timeout` | 409 | Live judge child run timed out. |
+| `debate_judge_output_missing` | 409 | Live judge produced no usable runtime output event. |
+| `debate_judge_output_empty` | 409 | Live judge output was blank after trimming. |
+| `debate_judge_output_invalid` | 409 | Live judge output could not be parsed into the bounded judge shape. |
+| `debate_judge_output_too_large` | 409 | Live judge output exceeded the judge extraction bound. |
+| `hosted_debate_store_unavailable` | 503 | Hosted durable debate store is unavailable. |
+| `hosted_debate_queue_unavailable` | 503 | Hosted debate queue/outbox is unavailable. |
+| `hosted_debate_worker_unavailable` | 503 | Hosted debate worker readiness failed. |
+| `hosted_debate_ownership_attach_failed` | 503 | Hosted debate ownership attachment failed. |
+| `hosted_debate_quota_exceeded` | 429 | Hosted debate quota was exceeded. |
+| `hosted_debate_audit_unavailable` | 503 | Hosted debate audit store is unavailable. |
+| `hosted_debate_artifact_write_failed` | 503 | Hosted debate final report artifact write failed. |
+| `hosted_debate_event_persist_failed` | 503 | Hosted debate event persistence failed. |
+| `debate_live_canary_spend_unconfirmed` | 400 | Production live debate canary requested without spend confirmation. |
+| `debate_fake_canary_failed` | 503 | Production fake hosted debate canary failed. |
 | `invalid_input` | 400 | Malformed body. |
 | `invalid_query` | 400 | Malformed or out-of-range query parameter. |
 | `tool_policy_denied` | 403 | Policy denied known real tools or denied risky action. |
@@ -239,20 +275,24 @@ Tool invocation request/response envelope:
 - List: `GET /tools/invocations` returns `{ invocations, nextCursor }`.
 - Get: `GET /tools/invocations/:id` returns `{ invocation }`.
 
-## R9 Debate V1 Constraints
+## R24 Debate Constraints
 
-- Debate V1 is fake-first and deterministic only.
+- Debate routes are limited to the existing family: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
+- No public model judge route is shipped: no `/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family.
 - Exactly two participants are required per debate.
-- Participant runtime fields are optional; when supplied they must match:
-  - `runtime: "fake"`
-  - `provider: "test"`
-  - `model: "test-model"`
-  - `adapterType: "process"`
-  - `runtimeMode: "fake.deterministic"`
-- Real participant runtimes (Codex/Claude/OpenCode/HTTP/AgentField) are rejected with `400 invalid_input`.
-- `evidenceIds` are validated before debate creation; unknown ids return `404 evidence_not_found` with no side effects.
-- `POST /debates?wait=1` executes a bounded local debate and returns `{ debate, events, finalReportArtifact }`.
-- `POST /debates` returns `202 { debate }` after creation and executes asynchronously.
+- Fake deterministic debate is the default no-spend path. Fake participants default to `runtime: "fake"`, `provider: "test"`, `model: "test-model"`, `adapterType: "process"`, and `runtimeMode: "fake.deterministic"`.
+- Opt-in debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- Non-fake participant runtimes require `realRuntimeOptIn: true`; otherwise creation fails with `400 debate_real_participant_opt_in_required` before provider side effects.
+- Hosted real participants require `placement: "hosted"`; otherwise creation fails with `400 debate_participant_placement_required`.
+- Hosted debate participant execution uses existing hosted run/runtime contracts and preserves child run ids, message ids, event ids, evidence ids, and artifact ids.
+- `codex.exec_json` remains one-shot. Hosted `codex.interactive` debate execution is unshipped.
+- AgentField and Generic HTTP hosted debate bridges are unshipped.
+- `judgeConfig` defaults to `{ "mode": "deterministic" }` and uses the internal bounded deterministic judge.
+- `judgeConfig.mode: "model"` is a live model judge request and requires `realRuntimeOptIn: true` plus `confirmLiveProviderSpend: true`; otherwise creation fails with `400 debate_judge_live_spend_unconfirmed`.
+- `POST /debates?wait=1` is supported only for fake deterministic no-spend debates. Real participant or live judge requests with `wait=1` fail with `409 debate_wait_real_runtime_unsupported` before provider side effects.
+- `evidenceIds` are validated before debate creation; unknown local evidence returns `404 evidence_not_found`, and hosted missing/denied evidence returns `404 debate_evidence_not_found_or_denied`, with no provider side effects.
+- Hosted debate requires durable Postgres debate/message/evidence/job state, child-run idempotency, ownership preauthorization and attachment, quota, audit, queue/outbox, object store, worker readiness, provider activation, and R23 bridge readiness where applicable.
+- `POST /debates` returns `202 { debate }` after creation and executes asynchronously unless `wait=1` fake/no-spend mode is used.
 - `GET /debates/:id` returns `{ debate, events, messages, evidence, artifacts }`.
 - `GET /debates/:id/events` supports replay-only, `live=1`, `live=1&stopAfter=N`, and `Last-Event-ID` / `lastEventId`.
 - Final report artifacts use `type: "summary"` and are written at `debates/<debateId>/final-report.md` when artifact content storage is configured.

@@ -25,6 +25,8 @@ GET  /runs/:id
 GET  /runs/:id/events
 GET  /metrics
 POST /debates
+GET  /debates/:id
+GET  /debates/:id/events
 POST /runs/:id/approve
 GET  /runs/:id/artifacts
 GET  /artifacts/:id
@@ -46,17 +48,19 @@ Production fake-only/no-spend remains the default posture for tests, smoke, pref
 
 R23 adds hosted runtime bridge support only for worker-owned `claude_code.sdk` and structured `opencode.acp` through existing `POST /runs/:id/input` and hosted approval resolution routes. Usable hosted bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker. Missing bridge command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`). Stale claimed non-idempotent provider input after worker crash is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`. `codex.exec_json` remains one-shot with hosted input/approval unsupported. `codex.interactive` remains local-only and unshipped for hosted.
 
-R23 boundary non-goals remain explicit:
+R24 ships hosted/server-safe debate through the existing `/debates` route family only: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`. Fake deterministic hosted debate is the default no-spend path. Opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`. The internal bounded judge runner defaults to deterministic no-spend judging; live model judging is available only through request opt-in and spend confirmation inside `POST /debates`, not through a public judge route.
+
+R24 boundary non-goals remain explicit:
 
 - does not ship generic process/pty runtime adapters.
 - does not ship cursor/openclaw/paperclip.
 - does not ship hosted browser automation.
 - does not ship hosted `repo` execution.
-- does not ship hosted debate real participants or hosted model judging.
 - does not ship any public arbitrary execution route (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`).
 - does not ship hosted `codex.interactive`.
 - does not ship hosted Codex live-resume guarantees.
-- does not ship hosted AgentField/Generic HTTP input or approval bridges.
+- does not ship hosted AgentField/Generic HTTP input, approval, or debate bridges.
+- does not ship public model judge routes (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family).
 - does not ship hosted terminal bridge, PTY/TUI automation, or dashboard/TUI surfaces.
 - no managed SaaS/public signup, no payment-provider integration (invoices/checkout/webhooks), no OAuth/OIDC/SAML/SSO/SCIM, no dashboard, and no TUI.
 
@@ -70,7 +74,7 @@ Agent runtimes are becoming the worker layer for software work, research, automa
 - Some speak ACP/acpx.
 - Some are HTTP wrappers.
 - Some are CLIs.
-- Some require an interactive PTY.
+- Some require interactive terminal behavior; Switchyard PTY/TUI automation remains unshipped.
 - Some can run hosted.
 - Some must run locally because they depend on local credentials, local repos, or local filesystem access.
 
@@ -96,7 +100,7 @@ It provides:
 
 - One API for many runtimes.
 - One event model for many output formats.
-- One adapter contract for native APIs, acpx, HTTP, subprocess, and PTY.
+- One adapter contract for shipped native APIs, acpx, HTTP, and bounded subprocess modes; PTY adapters remain unshipped.
 - One debate engine for cross-provider and same-provider multi-model deliberation.
 - One artifact model for transcripts, diffs, logs, screenshots, evidence packs, and proof reports.
 - One approval and policy layer for risky actions.
@@ -130,7 +134,7 @@ and controls risky actions with approvals.
 
 Switchyard is designed for:
 
-- Web dashboards that need to run agent sessions.
+- Web applications that need to run agent sessions; Switchyard's own dashboard/TUI surfaces remain unshipped.
 - SaaS backends that want agent execution as an internal service.
 - CLI tools that want a stable run/debate API.
 - GitHub bots and CI pipelines.
@@ -184,14 +188,14 @@ Example:
 {
   "topic": "Should we use JWT or sessions?",
   "participants": [
-    {"provider": "claude", "model": "opus", "role": "architect"},
-    {"provider": "codex", "model": "gpt-5.5", "role": "skeptic"},
-    {"provider": "codex", "model": "gpt-5.3", "role": "implementer"}
-  ]
+    { "role": "affirmative", "runtimeMode": "fake.deterministic" },
+    { "role": "skeptic", "runtimeMode": "fake.deterministic" }
+  ],
+  "judgeConfig": { "mode": "deterministic" }
 }
 ```
 
-Debates have hard limits: max rounds, max turns, max messages, max duration, max cost, tool/search budgets, and stop conditions. Unresolved disagreement is allowed.
+Debates have hard limits: max rounds, max turns, max messages, max duration, max cost, and stop conditions. Fake deterministic debate is the default no-spend path. Real participant debate runs require explicit request opt-in; hosted real participants also require `placement: "hosted"` and hosted provider readiness. `POST /debates?wait=1` is fake/no-spend only. There is no public model judge route.
 
 ### Registry
 
@@ -221,13 +225,15 @@ Shipped runtime interfaces:
 - AgentField async REST wrapper
 - Generic HTTP async REST wrapper
 
-Not shipped in R22:
+Not shipped in R24:
 
 - Cursor
 - OpenClaw
 - Paperclip
 - Hosted browser automation
 - Hosted `repo` tool execution
+- Generic process/PTY adapters are not shipped.
+- Dashboard/TUI surfaces are not shipped.
 
 Switchyard treats them through the same lifecycle:
 
@@ -304,7 +310,7 @@ Switchyard Local Gateway
  │   ├── Codex
  │   └── OpenCode
  │
- ├── Local PTY sessions
+ ├── Local PTY sessions (unshipped)
  ├── Local HTTP wrappers
  └── Local acpx runtimes
 
@@ -325,13 +331,16 @@ Switchyard Hosted Gateway
  ▼
 Workers
  │
- └── fake.deterministic (shipped hosted-safe runtime)
+ ├── fake.deterministic (default no-spend runtime)
+ ├── codex.exec_json (opt-in one-shot hosted provider runtime)
+ ├── claude_code.sdk (opt-in hosted provider runtime; R23 bridge store required)
+ └── opencode.acp (opt-in hosted provider runtime; R23 bridge store required)
 
 Storage:
   Postgres + Redis/BullMQ + local object volume or S3/R2-compatible object store
 ```
 
-Best for teams that need hosted orchestration while keeping the shipped hosted execution boundary fake-only.
+Best for teams that need hosted orchestration with fake/no-spend defaults and tightly gated known-provider execution.
 
 ### Hybrid Mode
 
@@ -344,7 +353,7 @@ Hosted Switchyard
  ├── shared state
  ├── users/orgs
  ├── approvals
- ├── dashboards
+ ├── operator interfaces (dashboard/TUI surfaces unshipped)
  └── cloud workflows
  │
  ▼
@@ -355,7 +364,7 @@ Local Switchyard Node
  ├── OpenCode
  ├── local repo
  ├── local shell
- └── PTY sessions
+ └── PTY sessions (unshipped)
 
 Shared:
   state
