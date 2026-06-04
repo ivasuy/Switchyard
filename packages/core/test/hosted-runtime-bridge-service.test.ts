@@ -78,6 +78,12 @@ class InMemoryHostedRuntimeBridgeCommandStore implements HostedRuntimeBridgeComm
     return id ? this.items.get(id) : undefined;
   }
 
+  async listByRun(runId: string): Promise<HostedRuntimeBridgeCommand[]> {
+    return [...this.items.values()]
+      .filter((entry) => entry.runId === runId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  }
+
   async claimNext(input: { workerId: string; leaseMs: number; now?: string }): Promise<HostedRuntimeBridgeCommand | undefined> {
     const now = input.now ?? "2026-06-01T00:00:00.000Z";
     const candidate = [...this.items.values()]
@@ -1109,6 +1115,7 @@ describe("hosted runtime bridge service", () => {
     });
     const claimed = await commands.getByIdempotencyKey("idem_stale_durable");
     commands.items.set(claimed!.id, { ...claimed!, leaseUntil: "2026-05-31T23:59:00.000Z", status: "claimed" });
+    expect(await payloads.get(claimed!.id)).toBeDefined();
 
     const worker = new HostedRuntimeBridgeService({
       runs,
@@ -1127,6 +1134,7 @@ describe("hosted runtime bridge service", () => {
       { reservationId: "a_stale", outcome: "released", reasonCode: "hosted_runtime_bridge_non_idempotent_retry_blocked" },
       { reservationId: "h_stale", outcome: "consumed", reasonCode: "hosted_runtime_bridge_non_idempotent_retry_blocked" }
     ]);
+    expect(await payloads.get(claimed!.id)).toBeUndefined();
   });
 
   it("worker re-reads approval state for approval resolution commands before dispatch", async () => {

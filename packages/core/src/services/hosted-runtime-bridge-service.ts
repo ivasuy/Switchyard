@@ -12,6 +12,10 @@ import type { SessionStore } from "../ports/session-store.js";
 
 const ACTIVE_RUN_STATUSES = new Set<Run["status"]>(["running", "waiting_for_input", "waiting_for_approval", "starting"]);
 const TERMINAL_RUN_STATUSES = new Set<Run["status"]>(["completed", "failed", "cancelled", "timeout"]);
+const RECONCILED_PAYLOAD_DELETE_REASONS = new Set([
+  "hosted_runtime_bridge_command_expired",
+  "hosted_runtime_bridge_non_idempotent_retry_blocked"
+]);
 const DEFAULT_COMMAND_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_LEASE_MS = 30_000;
@@ -640,6 +644,7 @@ export class HostedRuntimeBridgeService {
       now,
       reasonCode: "hosted_runtime_bridge_non_idempotent_retry_blocked"
     });
+    await this.deletePayloadsForReconciledCommands(now);
 
     let reconciled = recovered.recovered;
     let failed = recovered.failed;
@@ -672,6 +677,41 @@ export class HostedRuntimeBridgeService {
     }
 
     return { reconciled, failed };
+  }
+
+  private async deletePayloadsForReconciledCommands(now: string): Promise<void> {
+    if (!this.deps.commandPayloads) {
+      return;
+    }
+    const commandsWithListByRun = this.deps.commands as HostedRuntimeBridgeCommandStore & {
+      listByRun?: (runId: string) => Promise<HostedRuntimeBridgeCommand[]>;
+    };
+    if (!commandsWithListByRun.listByRun) {
+      return;
+    }
+
+    let before: { createdAt: string; id: string } | undefined;
+    do {
+      const page = await this.deps.runs.list({
+        placement: ["hosted"],
+        limit: 1000,
+        ...(before ? { before } : {})
+      });
+      for (const run of page.runs) {
+        const commands = await commandsWithListByRun.listByRun(run.id);
+        for (const command of commands) {
+          if (
+            (command.status === "failed" || command.status === "expired") &&
+            command.updatedAt === now &&
+            command.reasonCode &&
+            RECONCILED_PAYLOAD_DELETE_REASONS.has(command.reasonCode)
+          ) {
+            await this.deps.commandPayloads.delete(command.id);
+          }
+        }
+      }
+      before = page.nextCursor ?? undefined;
+    } while (before);
   }
 
   async terminalizePendingRuntimeApprovalsForRun(input: {
