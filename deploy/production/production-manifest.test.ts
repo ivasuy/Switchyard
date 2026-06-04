@@ -21,6 +21,11 @@ interface ProductionManifest {
     approvalDefault: "required";
     adapterMode: "fake_for_smoke" | "real_explicit";
   };
+  canary?: {
+    defaultMode: string;
+    allowedPaths: string[];
+    liveProviderSpend: string;
+  };
   services: {
     server: ServiceManifest;
     worker: ServiceManifest;
@@ -108,6 +113,21 @@ describe("production manifest pack", () => {
       "/dashboard",
       "/tui"
     ]));
+  });
+
+  it("declares hosted debate no-spend canary routes only through public debate APIs", () => {
+    const manifest = parseManifestJson(readFileSync(deployPath("manifest.json"), "utf8"));
+
+    expect(manifest.canary).toMatchObject({
+      defaultMode: "hosted_debate_fake_no_spend",
+      liveProviderSpend: "requires --confirm-live-provider-spend"
+    });
+    expect(manifest.canary?.allowedPaths).toEqual(expect.arrayContaining([
+      "POST /debates",
+      "GET /debates/:id",
+      "GET /debates/:id/events"
+    ]));
+    expect(manifest.canary?.allowedPaths.join("\n")).not.toMatch(/\/runs|\/debates\/participants\/real|\/debates\/judge|\/model-judge/);
   });
 
   it("uses built production commands only", () => {

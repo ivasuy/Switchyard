@@ -21,7 +21,12 @@ type CanaryCode =
   | "tool_canary_denied"
   | "approval_canary_failed"
   | "tool_live_canary_config_missing"
-  | "provider_bridge_live_canary_config_missing";
+  | "provider_bridge_live_canary_config_missing"
+  | "debate_live_canary_spend_unconfirmed"
+  | "debate_create_denied"
+  | "debate_timeout"
+  | "debate_trace_missing"
+  | "debate_artifact_missing";
 
 interface CanaryStep {
   name: string;
@@ -37,6 +42,7 @@ interface CanarySummary {
   checkedAt: string;
   elapsedMs: number;
   runId?: string;
+  debateId?: string;
   artifactId?: string;
   terminalStatus?: string;
   metricsAuthorized: boolean;
@@ -61,6 +67,9 @@ export interface ProductionCanaryOptions {
   confirmLiveToolSpend?: boolean;
   liveProviderBridges?: boolean;
   confirmLiveProviderSpend?: boolean;
+  liveDebateRuntimes?: boolean;
+  liveDebateJudge?: boolean;
+  streamDebateEvents?: boolean;
 }
 
 interface ParsedCanaryArgs {
@@ -72,6 +81,9 @@ interface ParsedCanaryArgs {
   confirmLiveToolSpend: boolean;
   liveProviderBridges: boolean;
   confirmLiveProviderSpend: boolean;
+  liveDebateRuntimes: boolean;
+  liveDebateJudge: boolean;
+  streamDebateEvents: boolean;
 }
 
 interface ParsedSse {
@@ -87,9 +99,12 @@ interface FetchState {
 
 const TERMINAL_FAILURE_STATUSES = new Set(["failed", "cancelled", "timed_out", "timeout"]);
 const RUNNING_STATUSES = new Set(["queued", "starting", "running", "waiting_for_input", "waiting_for_approval"]);
+const TERMINAL_DEBATE_STATUSES = new Set(["consensus_found", "no_consensus", "stopped_by_user", "completed", "failed"]);
+const RUNNING_DEBATE_STATUSES = new Set(["created", "context_building", "researching", "arguing", "rebuttal", "judging"]);
 const ALLOWED_CANARY_PATHS = new Set([
   "/ready",
   "/runs",
+  "/debates",
   "/metrics",
   "/auth/whoami",
   "/entitlements",
@@ -109,6 +124,12 @@ function isAllowedRunPath(pathname: string): boolean {
     return true;
   }
   if (/^\/runs\/[^/]+\/artifacts$/.test(pathname)) {
+    return true;
+  }
+  if (/^\/debates\/[^/]+$/.test(pathname)) {
+    return true;
+  }
+  if (/^\/debates\/[^/]+\/events$/.test(pathname)) {
     return true;
   }
   if (/^\/artifacts\/[^/]+\/content$/.test(pathname)) {
@@ -161,6 +182,10 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
   }
   const confirmLiveProviderSpend = options.confirmLiveProviderSpend
     || process.env["SWITCHYARD_CONFIRM_LIVE_PROVIDER_BRIDGE_CANARY"] === "1";
+  if ((options.liveDebateRuntimes || options.liveDebateJudge) && !confirmLiveProviderSpend) {
+    addStep(steps, now, startedAtMs, "input.liveDebate", "fail", "debate_live_canary_spend_unconfirmed");
+    return finalize(false, "debate_live_canary_spend_unconfirmed", steps, summary, now, startedAtMs);
+  }
   if (options.liveProviderBridges && !confirmLiveProviderSpend) {
     addStep(steps, now, startedAtMs, "input.liveProviderBridges", "fail", "provider_bridge_live_canary_config_missing");
     return finalize(false, "provider_bridge_live_canary_config_missing", steps, summary, now, startedAtMs);
@@ -205,42 +230,30 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     }
     addStep(steps, now, startedAtMs, "ready", "pass", "ready_ok", { httpStatus: ready.status });
 
-    const canaryId = `r22-tools-${randomUUID()}`;
-    const startedAtIso = new Date(startedAtMs).toISOString();
-    const createPayload = {
-      runtime: "fake",
-      provider: "test",
-      model: "test-model",
-      adapterType: "process",
-      runtimeMode: "fake.deterministic",
-      placement: "hosted",
-      cwd: "/repo",
-      task: "r22 production canary",
-      metadata: {
-        switchyardCanary: "r22-tools-production",
-        canaryId,
-        startedAt: startedAtIso
-      }
-    };
-
-    const created = await requestJson(state, "POST", "/runs", createPayload);
-    if (!created.ok) {
-      if (created.status === 403) {
-        addStep(steps, now, startedAtMs, "run.create", "fail", "run_create_denied", { httpStatus: created.status });
-        return finalize(false, "run_create_denied", steps, summary, now, startedAtMs);
-      }
-      return failFromHttp("run.create", created.status, steps, summary, now, startedAtMs, "run_create_denied");
+    const debateCanaryId = `r24-debate-${randomUUID()}`;
+    const debateProbe = await runHostedDebateProbe({
+      state,
+      steps,
+      summary,
+      now,
+      startedAtMs,
+      timeoutMs,
+      canaryId: debateCanaryId,
+      liveDebateRuntimes: Boolean(options.liveDebateRuntimes),
+      liveDebateJudge: Boolean(options.liveDebateJudge),
+      confirmLiveProviderSpend,
+      streamDebateEvents: Boolean(options.streamDebateEvents)
+    });
+    if (!debateProbe.ok) {
+      return finalize(false, debateProbe.code, steps, summary, now, startedAtMs);
     }
-
-    const runId = readRunId(created.json);
-    if (!runId) {
-      addStep(steps, now, startedAtMs, "run.create", "fail", "malformed_response", { httpStatus: created.status });
-      return finalize(false, "malformed_response", steps, summary, now, startedAtMs);
-    }
-    summary.runId = runId;
-    addStep(steps, now, startedAtMs, "run.create", "pass", "run_created", { httpStatus: created.status, details: { runId } });
 
     if (options.liveExternalTools) {
+      const runProbe = await createCanaryRun({ state, steps, summary, now, startedAtMs });
+      if (!runProbe.ok) {
+        return finalize(false, runProbe.code, steps, summary, now, startedAtMs);
+      }
+      const runId = runProbe.runId;
       const toolProbe = await runToolProbes({ state, runId, steps, now, startedAtMs });
       if (!toolProbe.ok) {
         return finalize(false, toolProbe.code, steps, summary, now, startedAtMs);
@@ -264,122 +277,6 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
       addStep(steps, now, startedAtMs, "providerBridges", "info", "provider_bridge_live_canary_enabled");
     }
 
-    const runDeadline = startedAtMs + timeoutMs;
-    let terminalStatus: string | undefined;
-    while (now() <= runDeadline) {
-      const detail = await requestJson(state, "GET", `/runs/${encodeURIComponent(runId)}`);
-      if (!detail.ok) {
-        return failFromHttp("run.poll", detail.status, steps, summary, now, startedAtMs);
-      }
-      const status = readRunStatus(detail.json);
-      if (!status) {
-        addStep(steps, now, startedAtMs, "run.poll", "fail", "malformed_response", { httpStatus: detail.status });
-        return finalize(false, "malformed_response", steps, summary, now, startedAtMs);
-      }
-      terminalStatus = status;
-      if (status === "completed") {
-        summary.terminalStatus = status;
-        addStep(steps, now, startedAtMs, "run.poll", "pass", "run_completed", {
-          httpStatus: detail.status,
-          details: { runId }
-        });
-        break;
-      }
-      if (TERMINAL_FAILURE_STATUSES.has(status)) {
-        summary.terminalStatus = status;
-        addStep(steps, now, startedAtMs, "run.poll", "fail", "unexpected_terminal_status", {
-          httpStatus: detail.status,
-          details: { runId, terminalStatus: status }
-        });
-        return finalize(false, "unexpected_terminal_status", steps, summary, now, startedAtMs);
-      }
-      if (!RUNNING_STATUSES.has(status)) {
-        summary.terminalStatus = status;
-        addStep(steps, now, startedAtMs, "run.poll", "fail", "unexpected_terminal_status", {
-          httpStatus: detail.status,
-          details: { runId, terminalStatus: status }
-        });
-        return finalize(false, "unexpected_terminal_status", steps, summary, now, startedAtMs);
-      }
-    }
-
-    if (summary.terminalStatus !== "completed") {
-      summary.terminalStatus = terminalStatus;
-      addStep(steps, now, startedAtMs, "run.poll", "fail", "worker_timeout", {
-        details: { runId }
-      });
-      return finalize(false, "worker_timeout", steps, summary, now, startedAtMs);
-    }
-
-    const sseReplay = await requestText(state, "GET", `/runs/${encodeURIComponent(runId)}/events`);
-    if (!sseReplay.ok) {
-      return failFromHttp("run.events", sseReplay.status, steps, summary, now, startedAtMs);
-    }
-
-    const parsedSse = parseSseReplay(sseReplay.text);
-    if (!parsedSse.ok || parsedSse.events.length === 0) {
-      addStep(steps, now, startedAtMs, "run.events", "fail", "malformed_sse", { httpStatus: sseReplay.status, details: { runId } });
-      return finalize(false, "malformed_sse", steps, summary, now, startedAtMs);
-    }
-    addStep(steps, now, startedAtMs, "run.events", "pass", "sse_replay_ok", {
-      httpStatus: sseReplay.status,
-      details: { runId, eventCount: parsedSse.events.length }
-    });
-
-    const artifacts = await requestJson(state, "GET", `/runs/${encodeURIComponent(runId)}/artifacts`);
-    if (!artifacts.ok) {
-      if (artifacts.status === 404) {
-        addStep(steps, now, startedAtMs, "artifact.list", "fail", "artifact_missing", { httpStatus: artifacts.status, details: { runId } });
-        return finalize(false, "artifact_missing", steps, summary, now, startedAtMs);
-      }
-      return failFromHttp("artifact.list", artifacts.status, steps, summary, now, startedAtMs);
-    }
-
-    const artifact = readFirstArtifact(artifacts.json);
-    if (!artifact) {
-      addStep(steps, now, startedAtMs, "artifact.list", "fail", "artifact_missing", { httpStatus: artifacts.status, details: { runId } });
-      return finalize(false, "artifact_missing", steps, summary, now, startedAtMs);
-    }
-
-    summary.artifactId = artifact.id;
-    addStep(steps, now, startedAtMs, "artifact.list", "pass", "artifact_found", {
-      httpStatus: artifacts.status,
-      details: { runId, artifactId: artifact.id }
-    });
-
-    const content = await requestBytes(state, "GET", `/artifacts/${encodeURIComponent(artifact.id)}/content`);
-    if (!content.ok) {
-      if (content.status === 404) {
-        addStep(steps, now, startedAtMs, "artifact.content", "fail", "artifact_missing", {
-          httpStatus: content.status,
-          details: { artifactId: artifact.id }
-        });
-        return finalize(false, "artifact_missing", steps, summary, now, startedAtMs);
-      }
-      return failFromHttp("artifact.content", content.status, steps, summary, now, startedAtMs);
-    }
-
-    if (content.bytes.byteLength === 0) {
-      addStep(steps, now, startedAtMs, "artifact.content", "fail", "artifact_content_empty", {
-        httpStatus: content.status,
-        details: { artifactId: artifact.id }
-      });
-      return finalize(false, "artifact_content_empty", steps, summary, now, startedAtMs);
-    }
-
-    if (!artifactDigestAndSizeMatch(artifact, content.bytes)) {
-      addStep(steps, now, startedAtMs, "artifact.content", "fail", "artifact_digest_mismatch", {
-        httpStatus: content.status,
-        details: { artifactId: artifact.id }
-      });
-      return finalize(false, "artifact_digest_mismatch", steps, summary, now, startedAtMs);
-    }
-
-    addStep(steps, now, startedAtMs, "artifact.content", "pass", "artifact_content_verified", {
-      httpStatus: content.status,
-      details: { artifactId: artifact.id, bytes: content.bytes.byteLength }
-    });
-
     const metrics = await requestJson(state, "GET", "/metrics");
     if (!metrics.ok) {
       if (metrics.status === 401 || metrics.status === 403) {
@@ -393,26 +290,26 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     addStep(steps, now, startedAtMs, "metrics", "pass", "metrics_ok", { httpStatus: metrics.status });
 
     const auditWindowMs = Math.max(250, Math.min(Math.floor(timeoutMs / 3), 2_000));
-    const auditDeadline = Math.min(runDeadline, now() + auditWindowMs);
+    const auditDeadline = Math.min(startedAtMs + timeoutMs, now() + auditWindowMs);
     let auditAttempts = 0;
     while (now() <= auditDeadline) {
       const audit = await requestJson(state, "GET", "/audit/events?limit=50");
       if (!audit.ok) {
         return failFromHttp("audit", audit.status, steps, summary, now, startedAtMs);
       }
-      const matched = hasAuditEvidence(audit.json, runId, canaryId);
+      const matched = hasAuditEvidence(audit.json, debateProbe.debateId, debateCanaryId);
       if (matched) {
         summary.auditEvidence = true;
         if (auditAttempts > 0) {
           summary.delayedAuditEvidence = true;
           addStep(steps, now, startedAtMs, "audit", "info", "delayed_audit_evidence", {
             httpStatus: audit.status,
-            details: { runId, attempts: auditAttempts + 1 }
+            details: { debateId: debateProbe.debateId, attempts: auditAttempts + 1 }
           });
         }
         addStep(steps, now, startedAtMs, "audit", "pass", "audit_evidence_found", {
           httpStatus: audit.status,
-          details: { runId }
+          details: { debateId: debateProbe.debateId }
         });
         return finalize(true, "canary_ok", steps, summary, now, startedAtMs);
       }
@@ -420,13 +317,252 @@ export async function runProductionCanary(options: ProductionCanaryOptions): Pro
     }
 
     addStep(steps, now, startedAtMs, "audit", "fail", "audit_lookup_failed", {
-      details: { runId }
+      details: { debateId: debateProbe.debateId }
     });
     return finalize(false, "audit_lookup_failed", steps, summary, now, startedAtMs);
   } catch {
     addStep(steps, now, startedAtMs, "canary", "fail", "malformed_response");
     return finalize(false, "malformed_response", steps, summary, now, startedAtMs);
   }
+}
+
+async function runHostedDebateProbe(input: {
+  state: FetchState;
+  steps: CanaryStep[];
+  summary: CanarySummary;
+  now: () => number;
+  startedAtMs: number;
+  timeoutMs: number;
+  canaryId: string;
+  liveDebateRuntimes: boolean;
+  liveDebateJudge: boolean;
+  confirmLiveProviderSpend: boolean;
+  streamDebateEvents: boolean;
+}): Promise<{ ok: true; debateId: string } | { ok: false; code: CanaryCode }> {
+  if (!input.liveDebateRuntimes) {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.liveParticipants", "info", "debate_live_participants_skipped_default", {
+      details: {
+        reason: "live_debate_runtimes_not_enabled",
+        enableWith: "--live-debate-runtimes --confirm-live-provider-spend"
+      }
+    });
+  }
+  if (!input.liveDebateJudge) {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.liveJudge", "info", "debate_live_judge_skipped_default", {
+      details: {
+        reason: "live_debate_judge_not_enabled",
+        enableWith: "--live-debate-judge --confirm-live-provider-spend"
+      }
+    });
+  }
+
+  const created = await requestJson(input.state, "POST", "/debates", buildDebateCanaryPayload({
+    canaryId: input.canaryId,
+    startedAtIso: new Date(input.startedAtMs).toISOString(),
+    liveDebateRuntimes: input.liveDebateRuntimes,
+    liveDebateJudge: input.liveDebateJudge,
+    confirmLiveProviderSpend: input.confirmLiveProviderSpend
+  }));
+  if (!created.ok) {
+    if (created.status === 403) {
+      addStep(input.steps, input.now, input.startedAtMs, "debate.create", "fail", "debate_create_denied", { httpStatus: created.status });
+      return { ok: false, code: "debate_create_denied" };
+    }
+    addStep(input.steps, input.now, input.startedAtMs, "debate.create", "fail", "debate_create_denied", { httpStatus: created.status });
+    return { ok: false, code: "debate_create_denied" };
+  }
+
+  const debateId = readDebateId(created.json);
+  if (!debateId) {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.create", "fail", "malformed_response", { httpStatus: created.status });
+    return { ok: false, code: "malformed_response" };
+  }
+  input.summary.debateId = debateId;
+  addStep(input.steps, input.now, input.startedAtMs, "debate.create", "pass", "debate_created", {
+    httpStatus: created.status,
+    details: { debateId }
+  });
+
+  const deadline = input.startedAtMs + input.timeoutMs;
+  let inspect: unknown | undefined;
+  let terminalStatus: string | undefined;
+  while (input.now() <= deadline) {
+    const detail = await requestJson(input.state, "GET", `/debates/${encodeURIComponent(debateId)}`);
+    if (!detail.ok) {
+      return { ok: false, code: failFromHttp("debate.inspect", detail.status, input.steps, input.summary, input.now, input.startedAtMs).code };
+    }
+    const status = readDebateStatus(detail.json);
+    if (!status) {
+      addStep(input.steps, input.now, input.startedAtMs, "debate.inspect", "fail", "malformed_response", { httpStatus: detail.status });
+      return { ok: false, code: "malformed_response" };
+    }
+    terminalStatus = status;
+    inspect = detail.json;
+    if (TERMINAL_DEBATE_STATUSES.has(status)) {
+      input.summary.terminalStatus = status;
+      addStep(input.steps, input.now, input.startedAtMs, "debate.inspect", "pass", "debate_terminal", {
+        httpStatus: detail.status,
+        details: { debateId, terminalStatus: status }
+      });
+      break;
+    }
+    if (!RUNNING_DEBATE_STATUSES.has(status)) {
+      input.summary.terminalStatus = status;
+      addStep(input.steps, input.now, input.startedAtMs, "debate.inspect", "fail", "unexpected_terminal_status", {
+        httpStatus: detail.status,
+        details: { debateId, terminalStatus: status }
+      });
+      return { ok: false, code: "unexpected_terminal_status" };
+    }
+  }
+
+  if (!inspect || !terminalStatus || !TERMINAL_DEBATE_STATUSES.has(terminalStatus)) {
+    input.summary.terminalStatus = terminalStatus;
+    addStep(input.steps, input.now, input.startedAtMs, "debate.inspect", "fail", "debate_timeout", {
+      details: { debateId, terminalStatus }
+    });
+    return { ok: false, code: "debate_timeout" };
+  }
+
+  if (terminalStatus === "failed") {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.inspect", "fail", "unexpected_terminal_status", {
+      details: { debateId, terminalStatus }
+    });
+    return { ok: false, code: "unexpected_terminal_status" };
+  }
+
+  const trace = readDebateTrace(inspect);
+  if (!trace.ok) {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.trace", "fail", "debate_trace_missing", {
+      details: { debateId, missing: trace.missing }
+    });
+    return { ok: false, code: "debate_trace_missing" };
+  }
+  addStep(input.steps, input.now, input.startedAtMs, "debate.trace", "pass", "debate_trace_verified", {
+    details: {
+      debateId,
+      participantRunIds: trace.participantRunIds.length,
+      eventIds: trace.eventIds.length,
+      messageIds: trace.messageIds.length,
+      stopReason: trace.stopReason,
+      judgeConsensus: trace.judgeConsensus
+    }
+  });
+
+  const sseReplay = await requestText(input.state, "GET", `/debates/${encodeURIComponent(debateId)}/events`);
+  if (!sseReplay.ok) {
+    return { ok: false, code: failFromHttp("debate.events", sseReplay.status, input.steps, input.summary, input.now, input.startedAtMs).code };
+  }
+  const parsedSse = parseSseReplay(sseReplay.text);
+  if (!parsedSse.ok || parsedSse.events.length === 0 || !sseEventsMatchDebate(parsedSse.events, debateId)) {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.events", "fail", "malformed_sse", {
+      httpStatus: sseReplay.status,
+      details: { debateId }
+    });
+    return { ok: false, code: "malformed_sse" };
+  }
+  addStep(input.steps, input.now, input.startedAtMs, "debate.events", "pass", "debate_sse_replay_ok", {
+    httpStatus: sseReplay.status,
+    details: { debateId, eventCount: parsedSse.events.length }
+  });
+
+  if (input.streamDebateEvents) {
+    const liveReplay = await requestText(input.state, "GET", `/debates/${encodeURIComponent(debateId)}/events?live=1&stopAfter=5`);
+    if (!liveReplay.ok) {
+      return { ok: false, code: failFromHttp("debate.events.live", liveReplay.status, input.steps, input.summary, input.now, input.startedAtMs).code };
+    }
+    const parsedLive = parseSseReplay(liveReplay.text);
+    if (!parsedLive.ok || !sseEventsMatchDebate(parsedLive.events, debateId)) {
+      addStep(input.steps, input.now, input.startedAtMs, "debate.events.live", "fail", "malformed_sse", {
+        httpStatus: liveReplay.status,
+        details: { debateId }
+      });
+      return { ok: false, code: "malformed_sse" };
+    }
+    addStep(input.steps, input.now, input.startedAtMs, "debate.events.live", "pass", "debate_sse_filter_ok", {
+      httpStatus: liveReplay.status,
+      details: { debateId, eventCount: parsedLive.events.length }
+    });
+  } else {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.events.live", "info", "debate_streaming_canary_skipped_default");
+  }
+
+  const artifact = trace.finalReportArtifact;
+  input.summary.artifactId = artifact.id;
+  const content = await requestBytes(input.state, "GET", `/artifacts/${encodeURIComponent(artifact.id)}/content`);
+  if (!content.ok) {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.artifact.content", "fail", "debate_artifact_missing", {
+      httpStatus: content.status,
+      details: { debateId, artifactId: artifact.id }
+    });
+    return { ok: false, code: "debate_artifact_missing" };
+  }
+  if (content.bytes.byteLength === 0) {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.artifact.content", "fail", "artifact_content_empty", {
+      httpStatus: content.status,
+      details: { debateId, artifactId: artifact.id }
+    });
+    return { ok: false, code: "artifact_content_empty" };
+  }
+  if (!artifactDigestAndSizeMatch(artifact, content.bytes)) {
+    addStep(input.steps, input.now, input.startedAtMs, "debate.artifact.content", "fail", "artifact_digest_mismatch", {
+      httpStatus: content.status,
+      details: { debateId, artifactId: artifact.id }
+    });
+    return { ok: false, code: "artifact_digest_mismatch" };
+  }
+  addStep(input.steps, input.now, input.startedAtMs, "debate.artifact.content", "pass", "debate_artifact_content_verified", {
+    httpStatus: content.status,
+    details: { debateId, artifactId: artifact.id, bytes: content.bytes.byteLength }
+  });
+
+  return { ok: true, debateId };
+}
+
+async function createCanaryRun(input: {
+  state: FetchState;
+  steps: CanaryStep[];
+  summary: CanarySummary;
+  now: () => number;
+  startedAtMs: number;
+}): Promise<{ ok: true; runId: string } | { ok: false; code: CanaryCode }> {
+  const canaryId = `r22-tools-${randomUUID()}`;
+  const createPayload = {
+    runtime: "fake",
+    provider: "test",
+    model: "test-model",
+    adapterType: "process",
+    runtimeMode: "fake.deterministic",
+    placement: "hosted",
+    cwd: "/repo",
+    task: "r22 production canary",
+    metadata: {
+      switchyardCanary: "r22-tools-production",
+      canaryId,
+      startedAt: new Date(input.startedAtMs).toISOString()
+    }
+  };
+
+  const created = await requestJson(input.state, "POST", "/runs", createPayload);
+  if (!created.ok) {
+    if (created.status === 403) {
+      addStep(input.steps, input.now, input.startedAtMs, "run.create", "fail", "run_create_denied", { httpStatus: created.status });
+      return { ok: false, code: "run_create_denied" };
+    }
+    return { ok: false, code: failFromHttp("run.create", created.status, input.steps, input.summary, input.now, input.startedAtMs, "run_create_denied").code };
+  }
+
+  const runId = readRunId(created.json);
+  if (!runId) {
+    addStep(input.steps, input.now, input.startedAtMs, "run.create", "fail", "malformed_response", { httpStatus: created.status });
+    return { ok: false, code: "malformed_response" };
+  }
+  input.summary.runId = runId;
+  addStep(input.steps, input.now, input.startedAtMs, "run.create", "pass", "run_created", {
+    httpStatus: created.status,
+    details: { runId }
+  });
+  return { ok: true, runId };
 }
 
 async function runToolProbes(input: {
@@ -658,7 +794,10 @@ function parseCliArgs(argv: string[]): ParsedCanaryArgs {
     liveExternalTools: false,
     confirmLiveToolSpend: false,
     liveProviderBridges: false,
-    confirmLiveProviderSpend: false
+    confirmLiveProviderSpend: false,
+    liveDebateRuntimes: false,
+    liveDebateJudge: false,
+    streamDebateEvents: false
   };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -700,6 +839,18 @@ function parseCliArgs(argv: string[]): ParsedCanaryArgs {
     }
     if (token === "--confirm-live-provider-spend") {
       parsed.confirmLiveProviderSpend = true;
+      continue;
+    }
+    if (token === "--live-debate-runtimes") {
+      parsed.liveDebateRuntimes = true;
+      continue;
+    }
+    if (token === "--live-debate-judge") {
+      parsed.liveDebateJudge = true;
+      continue;
+    }
+    if (token === "--stream-debate-events") {
+      parsed.streamDebateEvents = true;
       continue;
     }
     if (token === "--json") {
@@ -929,6 +1080,276 @@ function readRunStatus(value: unknown): string | null {
   return typeof status === "string" && status.length > 0 ? status : null;
 }
 
+function buildDebateCanaryPayload(input: {
+  canaryId: string;
+  startedAtIso: string;
+  liveDebateRuntimes: boolean;
+  liveDebateJudge: boolean;
+  confirmLiveProviderSpend: boolean;
+}): Record<string, unknown> {
+  const fakeParticipant = (role: string): Record<string, unknown> => ({
+    role,
+    runtime: "fake",
+    provider: "test",
+    model: "test-model",
+    adapterType: "process",
+    runtimeMode: "fake.deterministic",
+    placement: "hosted",
+    realRuntimeOptIn: false,
+    switchyardCanary: "r24-hosted-debate-production",
+    canaryId: input.canaryId
+  });
+  const liveParticipant = (role: string): Record<string, unknown> => ({
+    role,
+    runtime: "codex",
+    provider: "openai",
+    model: "default",
+    adapterType: "process",
+    runtimeMode: "codex.exec_json",
+    placement: "hosted",
+    realRuntimeOptIn: true,
+    confirmLiveProviderSpend: true,
+    switchyardCanary: "r24-hosted-debate-production",
+    canaryId: input.canaryId
+  });
+
+  return {
+    topic: `Switchyard production hosted debate canary ${input.canaryId}`,
+    participants: input.liveDebateRuntimes
+      ? [liveParticipant("affirmative"), liveParticipant("skeptic")]
+      : [fakeParticipant("affirmative"), fakeParticipant("skeptic")],
+    judgeConfig: input.liveDebateJudge
+      ? {
+          mode: "model",
+          runtime: "codex",
+          provider: "openai",
+          model: "default",
+          adapterType: "process",
+          runtimeMode: "codex.exec_json",
+          placement: "hosted",
+          realRuntimeOptIn: true,
+          confirmLiveProviderSpend: input.confirmLiveProviderSpend,
+          switchyardCanary: "r24-hosted-debate-production",
+          canaryId: input.canaryId
+        }
+      : { mode: "deterministic" },
+    limits: {
+      maxRounds: 1,
+      maxTurnsPerAgent: 1,
+      maxTotalMessages: 4,
+      maxDurationSeconds: 120,
+      maxCostUsd: input.liveDebateRuntimes || input.liveDebateJudge ? 1 : 0,
+      requireCitations: false,
+      requireDisagreementSummary: true,
+      stopOnConsensus: false,
+      humanStopAllowed: false
+    },
+    metadata: {
+      switchyardCanary: "r24-hosted-debate-production",
+      canaryId: input.canaryId,
+      startedAt: input.startedAtIso,
+      liveDebateRuntimes: input.liveDebateRuntimes,
+      liveDebateJudge: input.liveDebateJudge
+    }
+  };
+}
+
+function readDebateId(value: unknown): string | null {
+  const debate = readDebateRecord(value);
+  const id = debate?.["id"];
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+function readDebateStatus(value: unknown): string | null {
+  const debate = readDebateRecord(value);
+  const status = debate?.["status"];
+  return typeof status === "string" && status.length > 0 ? status : null;
+}
+
+function readDebateRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const debate = (value as Record<string, unknown>)["debate"];
+  if (!debate || typeof debate !== "object" || Array.isArray(debate)) {
+    return null;
+  }
+  return debate as Record<string, unknown>;
+}
+
+function readDebateTrace(value: unknown):
+  | {
+      ok: true;
+      participantRunIds: string[];
+      eventIds: string[];
+      messageIds: string[];
+      stopReason: string;
+      judgeConsensus: string;
+      finalReportArtifact: { id: string; metadata?: Record<string, unknown> };
+    }
+  | { ok: false; missing: string[] } {
+  const missing: string[] = [];
+  const debate = readDebateRecord(value);
+  if (!debate) {
+    return { ok: false, missing: ["debate"] };
+  }
+
+  const debateId = asString(debate["id"]);
+  const participants = Array.isArray(debate["participants"]) ? debate["participants"] : [];
+  const participantRunIds = participants.flatMap((participant) => readParticipantRunIds(participant));
+  if (participants.length !== 2 || participantRunIds.length < 2) {
+    missing.push("participantRunIds");
+  }
+
+  const eventIds = readStringArray(debate["eventIds"]);
+  const inspectEventIds = readObjectArrayIds((value as Record<string, unknown>)["events"]);
+  if (eventIds.length === 0 || !eventIds.every((id) => inspectEventIds.includes(id))) {
+    missing.push("eventIds");
+  }
+
+  const messageIds = readStringArray(debate["messageIds"]);
+  const inspectMessageIds = readObjectArrayIds((value as Record<string, unknown>)["messages"]);
+  if (messageIds.length === 0 || !messageIds.every((id) => inspectMessageIds.includes(id))) {
+    missing.push("messageIds");
+  }
+
+  const judge = debate["judge"];
+  const judgeRecord = judge && typeof judge === "object" && !Array.isArray(judge) ? judge as Record<string, unknown> : undefined;
+  const judgeConsensus = asString(judgeRecord?.["consensus"]);
+  if (!judgeRecord || !judgeConsensus || !asString(judgeRecord["summary"])) {
+    missing.push("judge");
+  }
+
+  const stopReason = asString(debate["stopReason"]);
+  if (!stopReason) {
+    missing.push("stopReason");
+  }
+
+  const finalReportArtifactId = asString(debate["finalReportArtifactId"]);
+  const artifacts = readArtifacts((value as Record<string, unknown>)["artifacts"]);
+  const finalReportArtifact = artifacts.find((artifact) => artifact.id === finalReportArtifactId)
+    ?? artifacts.find((artifact) => artifact.metadata?.["debateId"] === debateId || artifact.debateId === debateId);
+  if (!finalReportArtifactId || !finalReportArtifact) {
+    missing.push("finalReportArtifact");
+  } else if (!hasFinalReportMetadata(finalReportArtifact, debateId, messageIds)) {
+    missing.push("finalReportArtifactMetadata");
+  }
+
+  if (missing.length > 0 || !stopReason || !judgeConsensus || !finalReportArtifact) {
+    return { ok: false, missing };
+  }
+
+  return {
+    ok: true,
+    participantRunIds,
+    eventIds,
+    messageIds,
+    stopReason,
+    judgeConsensus,
+    finalReportArtifact
+  };
+}
+
+function readParticipantRunIds(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return [];
+  }
+  const participant = value as Record<string, unknown>;
+  return [
+    ...(asString(participant["runId"]) ? [asString(participant["runId"]) as string] : []),
+    ...readStringArray(participant["runIds"])
+  ];
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+function readObjectArrayIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return [];
+    }
+    const id = (entry as Record<string, unknown>)["id"];
+    return typeof id === "string" && id.length > 0 ? [id] : [];
+  });
+}
+
+function readArtifacts(value: unknown): Array<{ id: string; debateId?: string; metadata?: Record<string, unknown> }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const out: Array<{ id: string; debateId?: string; metadata?: Record<string, unknown> }> = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const id = asString(record["id"]);
+    if (!id) {
+      continue;
+    }
+    const metadata = record["metadata"] && typeof record["metadata"] === "object" && !Array.isArray(record["metadata"])
+      ? record["metadata"] as Record<string, unknown>
+      : undefined;
+    const debateId = asString(record["debateId"]);
+    out.push({
+      id,
+      ...(debateId ? { debateId } : {}),
+      ...(metadata ? { metadata } : {})
+    });
+  }
+  return out;
+}
+
+function hasFinalReportMetadata(
+  artifact: { debateId?: string; metadata?: Record<string, unknown> },
+  debateId: string | undefined,
+  messageIds: string[]
+): boolean {
+  const metadata = artifact.metadata;
+  if (!metadata || !debateId) {
+    return false;
+  }
+  const metadataDebateId = asString(metadata["debateId"]) ?? artifact.debateId;
+  if (metadataDebateId !== debateId) {
+    return false;
+  }
+  const metadataMessageIds = readStringArray(metadata["messageIds"]);
+  if (messageIds.length > 0 && !messageIds.every((id) => metadataMessageIds.includes(id))) {
+    return false;
+  }
+  const participantIds = readStringArray(metadata["participantIds"]);
+  return participantIds.length >= 2;
+}
+
+function sseEventsMatchDebate(events: unknown[], debateId: string): boolean {
+  let sawDebateEvent = false;
+  for (const event of events) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      continue;
+    }
+    const record = event as Record<string, unknown>;
+    const directDebateId = asString(record["debateId"]);
+    const payload = record["payload"];
+    const payloadDebateId = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? asString((payload as Record<string, unknown>)["debateId"])
+      : undefined;
+    const candidate = directDebateId ?? payloadDebateId;
+    if (!candidate) {
+      continue;
+    }
+    if (candidate !== debateId) {
+      return false;
+    }
+    sawDebateEvent = true;
+  }
+  return sawDebateEvent;
+}
+
 function readInvocationId(value: unknown): string | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -1144,7 +1565,7 @@ function eventMatches(value: unknown, runId: string, canaryId: string): boolean 
     return false;
   }
   const event = value as Record<string, unknown>;
-  if (event["resourceId"] === runId || event["runId"] === runId) {
+  if (event["resourceId"] === runId || event["runId"] === runId || event["debateId"] === runId) {
     return true;
   }
   if (event["resourceId"] === canaryId) {
@@ -1216,7 +1637,10 @@ async function main(): Promise<void> {
     liveExternalTools: args.liveExternalTools,
     confirmLiveToolSpend: args.confirmLiveToolSpend,
     liveProviderBridges: args.liveProviderBridges,
-    confirmLiveProviderSpend: args.confirmLiveProviderSpend
+    confirmLiveProviderSpend: args.confirmLiveProviderSpend,
+    liveDebateRuntimes: args.liveDebateRuntimes,
+    liveDebateJudge: args.liveDebateJudge,
+    streamDebateEvents: args.streamDebateEvents
   });
 
   if (args.json) {

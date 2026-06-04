@@ -7,6 +7,21 @@
     "approvalDefault": "required",
     "adapterMode": "fake_for_smoke"
   },
+  "canary": {
+    "defaultMode": "hosted_debate_fake_no_spend",
+    "allowedPaths": [
+      "GET /auth/whoami",
+      "GET /entitlements",
+      "GET /ready",
+      "POST /debates",
+      "GET /debates/:id",
+      "GET /debates/:id/events",
+      "GET /artifacts/:id/content",
+      "GET /metrics",
+      "GET /audit/events"
+    ],
+    "liveProviderSpend": "requires --confirm-live-provider-spend"
+  },
   "services": {
     "server": {
       "deploymentMode": "production",

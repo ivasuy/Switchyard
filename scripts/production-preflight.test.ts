@@ -634,6 +634,91 @@ describe("runProductionPreflight", () => {
     });
   });
 
+  test("passes fake no-spend hosted debate readiness when dependencies are ready", async () => {
+    const result = await runDependencyPreflight({});
+
+    expect(result.ok).toBe(true);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate",
+      status: "pass",
+      code: "hosted_debate_ready"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.debateStore",
+      status: "pass",
+      code: "hosted_debate_store_ready"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.debateExecutionOutbox",
+      status: "pass",
+      code: "hosted_debate_outbox_ready"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.workerReadiness",
+      status: "pass",
+      code: "hosted_debate_worker_ready"
+    }));
+  });
+
+  test("fails hosted debate preflight closed for missing auth, queue, quota, audit, object store, and worker readiness", async () => {
+    const result = await runDependencyPreflight({
+      loadServerConfig: () => makeServerConfig({ serverAuthMode: "none" }),
+      queueStats: async () => {
+        throw new Error("queue down");
+      },
+      probeObjectStore: async () => {
+        throw new Error("object_store_unavailable");
+      },
+      checkControlPlane: async () => ({
+        checks: [
+          { name: "quotaStore", ok: false, code: "quota_store_unavailable" },
+          { name: "auditStore", ok: false, code: "audit_store_unavailable" }
+        ]
+      }),
+      checkHostedRuntimeGate: async () => ({
+        ok: true,
+        diagnostics: {
+          hostedDebate: {
+            ok: false,
+            code: "hosted_debate_worker_unavailable"
+          }
+        }
+      })
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.auth",
+      status: "fail",
+      code: "hosted_debate_auth_required"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.debateExecutionOutbox",
+      status: "fail",
+      code: "hosted_debate_queue_unavailable"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.quota",
+      status: "fail",
+      code: "quota_store_unavailable"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.audit",
+      status: "fail",
+      code: "audit_store_unavailable"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.objectStore",
+      status: "fail",
+      code: "object_store_unavailable"
+    }));
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: "hostedDebate.workerReadiness",
+      status: "fail",
+      code: "hosted_debate_worker_unavailable"
+    }));
+  });
+
   test("fails closed when hosted runtime bridge dependencies are missing for Claude/OpenCode modes", async () => {
     const activation = makeProviderActivation({
       valid: true,

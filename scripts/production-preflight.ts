@@ -42,6 +42,10 @@ interface ControlPlaneCheckResult {
   checks: Array<{ name: string; ok: boolean; code: string; diagnostics?: Record<string, unknown> }>;
 }
 
+interface HostedDebateCheckResult {
+  checks: Array<{ name: string; ok: boolean; code: string; diagnostics?: Record<string, unknown> }>;
+}
+
 interface HostedRuntimeBridgeReadinessCheck {
   name:
     | "command_store"
@@ -81,6 +85,12 @@ export interface PreflightDeps {
     ok: boolean;
     modes: Record<string, { ok: boolean; code?: string }>;
   }>;
+  checkHostedDebateReadiness?: (input: {
+    serverConfig: ReturnType<typeof loadServerConfig>;
+    workerConfig: ReturnType<typeof loadWorkerConfig>;
+    postgres?: PostgresDatabaseHandle;
+    checks: ProductionPreflightCheck[];
+  }) => Promise<HostedDebateCheckResult>;
   now?: () => Date;
   timeoutMs?: number;
 }
@@ -289,7 +299,12 @@ export async function runProductionPreflight(options: {
   ).catch(() => ({ ok: false, code: "hosted_runtime_gate_failed" } as const));
 
   if (hostedRuntimeGate.ok) {
-    checks.push({ name: "hostedRuntimeGate", status: "pass", code: "hosted_runtime_gate_ready" });
+    checks.push({
+      name: "hostedRuntimeGate",
+      status: "pass",
+      code: "hosted_runtime_gate_ready",
+      ...(hostedRuntimeGate.diagnostics ? { diagnostics: redactDiagnostics(hostedRuntimeGate.diagnostics) } : {})
+    });
   } else {
     checks.push({
       name: "hostedRuntimeGate",
@@ -304,6 +319,22 @@ export async function runProductionPreflight(options: {
     serverAuthMode: serverConfig.serverAuthMode,
     hostedRuntimeGate
   });
+
+  const hostedDebateResult = await resolveWithTimeout(
+    async () => (deps.checkHostedDebateReadiness ?? defaultHostedDebateReadinessCheck)({
+      serverConfig,
+      workerConfig,
+      postgres,
+      checks
+    }),
+    timeoutMs
+  ).catch(() => ({
+    checks: [
+      { name: "hostedDebate.workerReadiness", ok: false, code: "hosted_debate_worker_unavailable" }
+    ]
+  }));
+
+  appendHostedDebateChecks(checks, hostedDebateResult);
 
   if (postgres) {
     await postgres.close().catch(() => undefined);
@@ -371,6 +402,33 @@ function appendDependencySkipChecks(checks: ProductionPreflightCheck[], code: st
   checks.push({ name: "unownedResources", status: "skip", code });
   checks.push({ name: "hostedRuntimeGate", status: "skip", code });
   checks.push({ name: "hostedRuntimeBridge", status: "skip", code });
+  checks.push({ name: "hostedDebate", status: "skip", code });
+}
+
+function appendHostedDebateChecks(checks: ProductionPreflightCheck[], result: HostedDebateCheckResult): void {
+  const failed: string[] = [];
+  for (const check of result.checks) {
+    if (!check.ok) {
+      failed.push(check.name);
+    }
+    checks.push({
+      name: check.name,
+      status: check.ok ? "pass" : "fail",
+      code: check.code,
+      ...(check.diagnostics ? { diagnostics: redactDiagnostics(check.diagnostics) } : {})
+    });
+  }
+
+  const diagnostics = redactDiagnostics({
+    failedChecks: failed,
+    checks: Object.fromEntries(result.checks.map((entry) => [entry.name.replace(/^hostedDebate\./, ""), entry.ok ? "pass" : "fail"]))
+  });
+  checks.push({
+    name: "hostedDebate",
+    status: failed.length === 0 ? "pass" : "fail",
+    code: failed.length === 0 ? "hosted_debate_ready" : result.checks.find((entry) => !entry.ok)?.code ?? "hosted_debate_worker_unavailable",
+    ...(diagnostics ? { diagnostics } : {})
+  });
 }
 
 function appendHostedRuntimeBridgeCheck(
@@ -1076,6 +1134,143 @@ async function defaultControlPlaneCheck(input: {
   }
 
   return { checks };
+}
+
+async function defaultHostedDebateReadinessCheck(input: {
+  serverConfig: ReturnType<typeof loadServerConfig>;
+  workerConfig: ReturnType<typeof loadWorkerConfig>;
+  postgres?: PostgresDatabaseHandle;
+  checks: ProductionPreflightCheck[];
+}): Promise<HostedDebateCheckResult> {
+  void input.workerConfig;
+  const failed = (name: string): ProductionPreflightCheck | undefined =>
+    input.checks.find((check) => check.name === name && check.status === "fail");
+  const passed = (name: string): boolean =>
+    input.checks.some((check) => check.name === name && check.status === "pass");
+  const dependencyCode = (name: string, fallback: string): string => failed(name)?.code ?? fallback;
+  const workerReadiness = readWorkerHostedDebateReadiness(input.checks);
+  const bridgeRequired = input.serverConfig.hostedRuntimeAllowlist.some((mode) => mode === "claude_code.sdk" || mode === "opencode.acp");
+
+  const checks: HostedDebateCheckResult["checks"] = [
+    {
+      name: "hostedDebate.auth",
+      ok: input.serverConfig.serverAuthMode === "api_key",
+      code: input.serverConfig.serverAuthMode === "api_key" ? "hosted_debate_auth_ready" : "hosted_debate_auth_required"
+    },
+    {
+      name: "hostedDebate.postgresSchema",
+      ok: Boolean(input.postgres) && passed("schema"),
+      code: Boolean(input.postgres) && passed("schema") ? "hosted_debate_postgres_schema_ready" : dependencyCode("schema", "postgres_unavailable")
+    },
+    {
+      name: "hostedDebate.debateStore",
+      ok: Boolean(input.postgres) && !failed("schema"),
+      code: Boolean(input.postgres) && !failed("schema") ? "hosted_debate_store_ready" : "hosted_debate_store_unavailable"
+    },
+    {
+      name: "hostedDebate.messageStore",
+      ok: Boolean(input.postgres) && !failed("schema"),
+      code: Boolean(input.postgres) && !failed("schema") ? "hosted_debate_message_store_ready" : "hosted_debate_message_store_unavailable"
+    },
+    {
+      name: "hostedDebate.evidenceStore",
+      ok: Boolean(input.postgres) && !failed("schema"),
+      code: Boolean(input.postgres) && !failed("schema") ? "hosted_debate_evidence_store_ready" : "hosted_debate_evidence_store_unavailable"
+    },
+    {
+      name: "hostedDebate.eventStore",
+      ok: Boolean(input.postgres) && !failed("schema"),
+      code: Boolean(input.postgres) && !failed("schema") ? "hosted_debate_event_store_ready" : "hosted_debate_event_store_unavailable"
+    },
+    {
+      name: "hostedDebate.artifactStore",
+      ok: Boolean(input.postgres) && !failed("schema") && !failed("objectStore"),
+      code: Boolean(input.postgres) && !failed("schema") && !failed("objectStore") ? "hosted_debate_artifact_store_ready" : "hosted_debate_artifact_store_unavailable"
+    },
+    {
+      name: "hostedDebate.artifactContent",
+      ok: !failed("objectStore"),
+      code: !failed("objectStore") ? "hosted_debate_artifact_content_ready" : dependencyCode("objectStore", "object_store_unavailable")
+    },
+    {
+      name: "hostedDebate.debateExecutionOutbox",
+      ok: Boolean(input.postgres) && !failed("schema") && !failed("queue"),
+      code: Boolean(input.postgres) && !failed("schema") && !failed("queue") ? "hosted_debate_outbox_ready" : "hosted_debate_queue_unavailable"
+    },
+    {
+      name: "hostedDebate.runQueue",
+      ok: !failed("queue"),
+      code: !failed("queue") ? "hosted_debate_run_queue_ready" : dependencyCode("queue", "queue_unavailable")
+    },
+    {
+      name: "hostedDebate.objectStore",
+      ok: !failed("objectStore"),
+      code: !failed("objectStore") ? "hosted_debate_object_store_ready" : dependencyCode("objectStore", "object_store_unavailable")
+    },
+    {
+      name: "hostedDebate.ownership",
+      ok: !failed("bootstrap") && !failed("unownedResources"),
+      code: !failed("bootstrap") && !failed("unownedResources") ? "hosted_debate_ownership_ready" : dependencyCode("unownedResources", dependencyCode("bootstrap", "hosted_debate_ownership_unavailable"))
+    },
+    {
+      name: "hostedDebate.quota",
+      ok: !failed("quotaStore"),
+      code: !failed("quotaStore") ? "hosted_debate_quota_ready" : dependencyCode("quotaStore", "quota_store_unavailable")
+    },
+    {
+      name: "hostedDebate.audit",
+      ok: !failed("auditStore"),
+      code: !failed("auditStore") ? "hosted_debate_audit_ready" : dependencyCode("auditStore", "audit_store_unavailable")
+    },
+    {
+      name: "hostedDebate.workerReadiness",
+      ok: workerReadiness.ok,
+      code: workerReadiness.ok ? "hosted_debate_worker_ready" : workerReadiness.code
+    },
+    {
+      name: "hostedDebate.providerActivation",
+      ok: !failed("providerRuntimePolicy") && !failed("providerCredentials") && !failed("providerSpendControls") && !failed("providerCommandResolution") && !failed("providerAdapterChecks"),
+      code: !failed("providerRuntimePolicy") && !failed("providerCredentials") && !failed("providerSpendControls") && !failed("providerCommandResolution") && !failed("providerAdapterChecks")
+        ? "hosted_debate_provider_activation_ready"
+        : dependencyCode("providerRuntimePolicy", dependencyCode("providerCredentials", dependencyCode("providerSpendControls", dependencyCode("providerCommandResolution", dependencyCode("providerAdapterChecks", "provider_runtime_policy_missing")))))
+    },
+    {
+      name: "hostedDebate.r23BridgeReadiness",
+      ok: !bridgeRequired || !failed("hostedRuntimeBridge"),
+      code: !bridgeRequired
+        ? "hosted_debate_r23_bridge_inactive"
+        : !failed("hostedRuntimeBridge")
+          ? "hosted_debate_r23_bridge_ready"
+          : dependencyCode("hostedRuntimeBridge", "hosted_runtime_bridge_worker_unavailable")
+    }
+  ];
+
+  return { checks };
+}
+
+function readWorkerHostedDebateReadiness(checks: ProductionPreflightCheck[]): { ok: true } | { ok: false; code: string } {
+  const runtimeGate = checks.find((check) => check.name === "hostedRuntimeGate");
+  const hostedDebate = runtimeGate?.diagnostics?.["hostedDebate"];
+  if (isRecord(hostedDebate)) {
+    if (hostedDebate["ok"] === false) {
+      const code = typeof hostedDebate["code"] === "string" ? hostedDebate["code"] : "hosted_debate_worker_unavailable";
+      return { ok: false, code };
+    }
+    if (hostedDebate["ok"] === true) {
+      return { ok: true };
+    }
+  }
+
+  const checksRecord = runtimeGate?.diagnostics?.["checks"];
+  if (isRecord(checksRecord)) {
+    const nested = checksRecord["hostedDebate"];
+    if (isRecord(nested) && nested["ok"] === false) {
+      const code = typeof nested["code"] === "string" ? nested["code"] : "hosted_debate_worker_unavailable";
+      return { ok: false, code };
+    }
+  }
+
+  return { ok: true };
 }
 
 async function defaultHostedRuntimeGateCheck(input: {
