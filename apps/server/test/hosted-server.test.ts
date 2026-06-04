@@ -367,6 +367,73 @@ describe("hosted server", () => {
     }
   });
 
+  it("finalizes async active debate quota and records dispatch and terminal audit events", async () => {
+    const originalReserve = PostgresControlPlaneStore.prototype.reserveQuota;
+    const originalTransition = PostgresControlPlaneStore.prototype.transitionQuotaReservation;
+    const originalAudit = PostgresControlPlaneStore.prototype.appendAuditEvent;
+    const activeReservationIds: string[] = [];
+    const finalizedActiveIds: Array<{ reservationId: string; nextState: string }> = [];
+    const auditEvents: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
+
+    const reserveSpy = vi.spyOn(PostgresControlPlaneStore.prototype, "reserveQuota");
+    reserveSpy.mockImplementation(async function mockedReserve(input) {
+      const reservation = await originalReserve.call(this, input);
+      if (input.quotaKind === "active_debates") {
+        activeReservationIds.push(reservation.id);
+      }
+      return reservation;
+    });
+    const transitionSpy = vi.spyOn(PostgresControlPlaneStore.prototype, "transitionQuotaReservation");
+    transitionSpy.mockImplementation(async function mockedTransition(input) {
+      if (activeReservationIds.includes(input.reservationId)) {
+        finalizedActiveIds.push({ reservationId: input.reservationId, nextState: input.nextState });
+      }
+      return originalTransition.call(this, input);
+    });
+    const auditSpy = vi.spyOn(PostgresControlPlaneStore.prototype, "appendAuditEvent");
+    auditSpy.mockImplementation(async function mockedAudit(input) {
+      auditEvents.push({ eventType: input.eventType, payload: input.payload });
+      return originalAudit.call(this, input);
+    });
+
+    const config = loadServerConfig(createAuthEnabledTestEnv());
+    const app = await createServerApp(config);
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/debates",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: fakeDebatePayload("Should async terminal quota finalize?")
+      });
+      expect(created.statusCode).toBe(202);
+      expect(activeReservationIds).toHaveLength(1);
+
+      const hooks = (app as unknown as {
+        hostedDebateTestHooks: {
+          processDueDebateJobs(limit?: number): Promise<Array<{ quotaFinalization?: { outcome: string } }>>;
+        };
+      }).hostedDebateTestHooks;
+      const results = await hooks.processDueDebateJobs(200);
+      expect(
+        results.some((result) => result.quotaFinalization?.outcome === "completed"),
+        JSON.stringify(results.slice(-10))
+      ).toBe(true);
+      expect(finalizedActiveIds).toContainEqual({ reservationId: activeReservationIds[0]!, nextState: "consumed" });
+
+      const operations = auditEvents.map((event) => event.payload["operation"]);
+      expect(operations).toContain("hosted.debate.participant.dispatch");
+      expect(operations).toContain("hosted.debate.judge.dispatch");
+      expect(operations).toContain("hosted.debate.terminal.success");
+      const auditPayload = JSON.stringify(auditEvents);
+      expect(auditPayload).not.toContain("Should async terminal quota finalize?");
+    } finally {
+      reserveSpy.mockRestore();
+      transitionSpy.mockRestore();
+      auditSpy.mockRestore();
+      await app.close();
+    }
+  });
+
   it("completes hosted fake debate with wait without live provider adapters", async () => {
     const config = loadServerConfig(createAuthEnabledTestEnv());
     const app = await createServerApp(config);
@@ -385,6 +452,39 @@ describe("hosted server", () => {
       expect(body.finalReportArtifact.debateId).toBe(body.debate.id);
       expect(body.debate.finalReportArtifactId).toBe(body.finalReportArtifact.id);
     } finally {
+      await app.close();
+    }
+  });
+
+  it("records redacted audit events for denied live judge spend", async () => {
+    const originalAudit = PostgresControlPlaneStore.prototype.appendAuditEvent;
+    const auditEvents: Array<{ eventType: string; reasonCode?: string; payload: Record<string, unknown> }> = [];
+    const auditSpy = vi.spyOn(PostgresControlPlaneStore.prototype, "appendAuditEvent");
+    auditSpy.mockImplementation(async function mockedAudit(input) {
+      auditEvents.push({ eventType: input.eventType, reasonCode: input.reasonCode, payload: input.payload });
+      return originalAudit.call(this, input);
+    });
+
+    const config = loadServerConfig(createAuthEnabledTestEnv());
+    const app = await createServerApp(config);
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/debates",
+        headers: { authorization: `Bearer ${ADMIN_RAW_KEY}` },
+        payload: {
+          ...fakeDebatePayload("Should denied live spend be audited?"),
+          judgeConfig: { mode: "model", confirmLiveProviderSpend: false }
+        }
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe("debate_judge_live_spend_unconfirmed");
+      const operations = auditEvents.map((event) => event.payload["operation"]);
+      expect(operations).toContain("hosted.debate.live_spend.denied");
+      expect(operations).toContain("hosted.debate.admission.denied");
+      expect(JSON.stringify(auditEvents)).not.toContain("Should denied live spend be audited?");
+    } finally {
+      auditSpy.mockRestore();
       await app.close();
     }
   });
@@ -426,12 +526,19 @@ describe("hosted server", () => {
 
   it("fails closed before disclosing debate or job ids when hosted debate ownership hooks fail", async () => {
     const originalAttach = PostgresControlPlaneStore.prototype.attachOwnership;
+    const originalAudit = PostgresControlPlaneStore.prototype.appendAuditEvent;
+    const auditEvents: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
     const attachSpy = vi.spyOn(PostgresControlPlaneStore.prototype, "attachOwnership");
     attachSpy.mockImplementation(async function mockedAttach(input) {
       if (input.resourceType === "debate") {
         throw new Error("forced_debate_attach_failure");
       }
       return originalAttach.call(this, input);
+    });
+    const auditSpy = vi.spyOn(PostgresControlPlaneStore.prototype, "appendAuditEvent");
+    auditSpy.mockImplementation(async function mockedAudit(input) {
+      auditEvents.push({ eventType: input.eventType, payload: input.payload });
+      return originalAudit.call(this, input);
     });
     const config = loadServerConfig(createAuthEnabledTestEnv());
     const app = await createServerApp(config);
@@ -447,8 +554,11 @@ describe("hosted server", () => {
       expect(created.json().debate).toBeUndefined();
       expect(created.body).not.toMatch(/debate_[0-9a-f-]{8}/);
       expect(created.body).not.toMatch(/debate_job_[0-9a-f_]{8}/);
+      expect(auditEvents.map((event) => event.payload["operation"])).toContain("hosted.debate.ownership.attach_failed");
+      expect(JSON.stringify(auditEvents)).not.toMatch(/debate_[0-9a-f-]{8}/);
     } finally {
       attachSpy.mockRestore();
+      auditSpy.mockRestore();
       await app.close();
     }
   });

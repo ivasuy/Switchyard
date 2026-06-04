@@ -88,6 +88,7 @@ type MemoryItem = Parameters<MemoryStore["create"]>[0];
 type QuotaReservation = Awaited<ReturnType<PostgresControlPlaneStore["reserveQuota"]>>;
 type Run = NonNullable<Awaited<ReturnType<RunStore["get"]>>>;
 type SwitchyardEvent = Parameters<EventStore["append"]>[0];
+type DebateExecutionJob = Parameters<DebateService["processExecutionJob"]>[0];
 
 export async function createServerApp(config: ServerConfig) {
   const serverAuthMode = config.serverAuthMode ?? "disabled";
@@ -178,6 +179,7 @@ export async function createServerApp(config: ServerConfig) {
     : undefined;
 
   const debateAuthScope = new AsyncLocalStorage<HostedDebateAuthScope>();
+  const activeDebateQuotaReservations = new Map<string, ActiveDebateQuotaReservation>();
   const baseRuns = new PostgresRunStore(postgres);
   const baseEvents = new PostgresEventStore(postgres);
   const baseArtifacts = new PostgresArtifactStore(postgres);
@@ -583,6 +585,7 @@ export async function createServerApp(config: ServerConfig) {
   });
   const debateService = wrapDebateServiceForHostedAdmission(debateServiceCore, {
     authScope: debateAuthScope,
+    activeReservations: activeDebateQuotaReservations,
     controlPlane,
     controlPlaneStore: controlPlaneStoreInstance,
     logger: app.log
@@ -963,11 +966,97 @@ export async function createServerApp(config: ServerConfig) {
     ? { ...nodeRouteDepsWithControl, sharedToken: config.nodeSharedToken }
     : nodeRouteDepsWithControl);
 
+  if (config.deploymentMode === "test") {
+    app.decorate("hostedDebateTestHooks", {
+      processDueDebateJobs: async (limit = 50) => {
+        const results: Array<Awaited<ReturnType<DebateService["processExecutionJob"]>>> = [];
+        for (let index = 0; index < limit; index += 1) {
+          const job = await debateJobs.claim({ leaseMs: 1000 });
+          if (!job) {
+            break;
+          }
+          const result = await debateService.processExecutionJob(job);
+          results.push(result);
+          if (result.action === "requeue") {
+            const runId = result.runId ?? result.judgeRunId;
+            if (runId) {
+              await completeHostedDebateTestChildRun(runId, runs, events);
+            }
+            await debateJobs.release(job.id, {
+              nextAttemptAt: new Date(0).toISOString(),
+              reasonCode: result.reasonCode
+            });
+            continue;
+          }
+          if (result.action === "complete") {
+            await debateJobs.complete(job.id);
+            continue;
+          }
+          await debateJobs.fail(job.id, { reasonCode: result.reasonCode, retryable: false });
+        }
+        return results;
+      }
+    });
+  }
+
   return app;
 }
 
+async function completeHostedDebateTestChildRun(
+  runId: string,
+  runs: RunStore,
+  events: EventStore
+): Promise<void> {
+  const run = await runs.get(runId);
+  if (!run) {
+    return;
+  }
+  const debateId = typeof run.metadata["debateId"] === "string" ? run.metadata["debateId"] : undefined;
+  const childRunKey = typeof run.metadata[DEBATE_CHILD_RUN_KEY_METADATA_FIELD] === "string"
+    ? run.metadata[DEBATE_CHILD_RUN_KEY_METADATA_FIELD]
+    : undefined;
+  if (!debateId || !childRunKey) {
+    await runServiceUnavailableTestFallback(runs, run);
+    return;
+  }
+  const existing = await events.listByRun(run.id);
+  const sequence = existing.length === 0
+    ? 0
+    : existing.reduce((max, event) => event.sequence > max ? event.sequence : max, -1) + 1;
+  const completed: Run = {
+    ...run,
+    status: "completed",
+    startedAt: run.startedAt ?? new Date().toISOString(),
+    endedAt: new Date().toISOString()
+  };
+  await runs.update(completed);
+  await events.append({
+    id: `event_${crypto.randomUUID()}`,
+    type: "runtime.output",
+    runId: run.id,
+    debateId,
+    sequence,
+    payload: {
+      text: "fake runtime output",
+      debateId,
+      [DEBATE_CHILD_RUN_KEY_METADATA_FIELD]: childRunKey
+    },
+    createdAt: new Date().toISOString()
+  });
+}
+
+async function runServiceUnavailableTestFallback(runs: RunStore, run: Run): Promise<void> {
+  await runs.update({
+    ...run,
+    status: "completed",
+    startedAt: run.startedAt ?? new Date().toISOString(),
+    endedAt: new Date().toISOString()
+  });
+}
+
 interface HostedDebateAuthScope {
-  auth: AuthContext;
+  auth?: AuthContext | undefined;
+  owner?: HostedDebateOwner | undefined;
   requestId?: string | undefined;
 }
 
@@ -1100,6 +1189,7 @@ function wrapDebateServiceForHostedAdmission(
   service: DebateService,
   deps: {
     authScope: AsyncLocalStorage<HostedDebateAuthScope>;
+    activeReservations: Map<string, ActiveDebateQuotaReservation>;
     controlPlane: ControlPlaneService | undefined;
     controlPlaneStore: PostgresControlPlaneStore | undefined;
     logger: { warn(input: Record<string, unknown>): void; info(input: Record<string, unknown>): void };
@@ -1116,6 +1206,9 @@ function wrapDebateServiceForHostedAdmission(
         try {
           const result = await service.create(input, options);
           await finalizeHostedDebateAdmissionQuota(deps.controlPlaneStore, auth, reservations, options.wait ? "wait_terminal" : "accepted_async");
+          if (!options.wait && reservations.active) {
+            deps.activeReservations.set(result.debate.id, activeReservationFromAuth(reservations.active, auth));
+          }
           await recordHostedDebateAudit(deps.controlPlane, {
             auth,
             eventType: "hosted.debate.admission.allowed",
@@ -1135,6 +1228,16 @@ function wrapDebateServiceForHostedAdmission(
           return result;
         } catch (error) {
           await failHostedDebateAdmissionQuota(deps.controlPlaneStore, auth, reservations);
+          if (errorCodeOf(error) === "debate_judge_live_spend_unconfirmed") {
+            await recordHostedDebateAudit(deps.controlPlane, {
+              auth,
+              eventType: "hosted.debate.live_spend.denied",
+              decision: "deny",
+              reasonCode: "debate_judge_live_spend_unconfirmed",
+              requestId: options.requestId,
+              payload: { code: "debate_judge_live_spend_unconfirmed" }
+            });
+          }
           await recordHostedDebateAudit(deps.controlPlane, {
             auth,
             eventType: "hosted.debate.admission.denied",
@@ -1150,7 +1253,19 @@ function wrapDebateServiceForHostedAdmission(
     execute: (debateId, options) => service.execute(debateId, options),
     inspect: (debateId) => service.inspect(debateId),
     listEvents: (debateId) => service.listEvents(debateId),
-    processExecutionJob: (job) => service.processExecutionJob(job)
+    processExecutionJob: async (job) => {
+      const result = await service.processExecutionJob(job);
+      await recordHostedDebateJobAudit(deps.controlPlaneStore, deps.activeReservations, job, result);
+      const quotaFinalization = quotaFinalizationFromResult(result);
+      if (quotaFinalization) {
+        await finalizeAsyncActiveDebateQuota(
+          deps.controlPlaneStore,
+          deps.activeReservations,
+          quotaFinalization
+        );
+      }
+      return result;
+    }
   } as DebateService;
 }
 
@@ -1181,6 +1296,18 @@ async function attachHostedDebateOwnership(
       resourceType,
       reasonCode: "ownership_attach_failed"
     });
+    await recordHostedDebateAuditToStore(deps.controlPlane, {
+      accountId: auth.account.id,
+      tenantId: auth.tenant.id,
+      projectId: auth.project.id,
+      userId: auth.user.id,
+      apiKeyId: auth.apiKey.id,
+      eventType: "hosted.debate.ownership.attach_failed",
+      decision: "error",
+      reasonCode: "ownership_attach_failed",
+      resourceType,
+      payload: { resourceType }
+    });
     throw new ControlPlaneError("hosted_debate_ownership_attach_failed", "ownership_attach_failed");
   }
 }
@@ -1203,6 +1330,23 @@ async function isDebateChildRunEvent(event: SwitchyardEvent, runs: RunStore): Pr
 interface HostedDebateQuotaReservations {
   hourly?: QuotaReservation;
   active?: QuotaReservation;
+}
+
+interface ActiveDebateQuotaReservation {
+  reservationId: string;
+  accountId: string;
+  tenantId: string;
+  projectId: string;
+  userId: string;
+  apiKeyId: string;
+}
+
+interface HostedDebateOwner {
+  accountId: string;
+  tenantId: string;
+  projectId: string;
+  userId: string;
+  apiKeyId: string;
 }
 
 async function reserveHostedDebateQuota(
@@ -1318,8 +1462,149 @@ function resolveDebateQuota(entitlement: Record<string, unknown>): {
 } {
   const snapshot = asRecord(entitlement["quotas"]) ?? entitlement;
   return {
-    maxDebatesPerHour: toPositiveNumber(snapshot["maxDebatesPerHour"]),
-    maxActiveDebates: toPositiveNumber(snapshot["maxActiveDebates"])
+    maxDebatesPerHour: toPositiveNumber(snapshot["maxDebatesPerHour"] ?? snapshot["maxRunsPerHour"]),
+    maxActiveDebates: toPositiveNumber(snapshot["maxActiveDebates"] ?? snapshot["maxActiveRuns"])
+  };
+}
+
+function activeReservationFromAuth(reservation: QuotaReservation, auth: AuthContext): ActiveDebateQuotaReservation {
+  return {
+    reservationId: reservation.id,
+    accountId: auth.account.id,
+    tenantId: auth.tenant.id,
+    projectId: auth.project.id,
+    userId: auth.user.id,
+    apiKeyId: auth.apiKey.id
+  };
+}
+
+async function finalizeAsyncActiveDebateQuota(
+  controlPlaneStore: PostgresControlPlaneStore | undefined,
+  reservations: Map<string, ActiveDebateQuotaReservation>,
+  finalization: { debateId: string; outcome: "completed" | "failed"; reasonCode?: string | undefined }
+): Promise<void> {
+  if (!controlPlaneStore) {
+    return;
+  }
+  const reservation = reservations.get(finalization.debateId);
+  if (!reservation) {
+    return;
+  }
+  await controlPlaneStore.transitionQuotaReservation({
+    reservationId: reservation.reservationId,
+    accountId: reservation.accountId,
+    tenantId: reservation.tenantId,
+    projectId: reservation.projectId,
+    nextState: finalization.outcome === "completed" ? "consumed" : "failed",
+    reasonCode: finalization.reasonCode ?? `debate_${finalization.outcome}`,
+    now: new Date().toISOString()
+  });
+  reservations.delete(finalization.debateId);
+}
+
+async function recordHostedDebateJobAudit(
+  controlPlaneStore: PostgresControlPlaneStore | undefined,
+  reservations: Map<string, ActiveDebateQuotaReservation>,
+  job: DebateExecutionJob,
+  result: Awaited<ReturnType<DebateService["processExecutionJob"]>>
+): Promise<void> {
+  const owner = ownerFromJobOrReservation(job, reservations.get(result.debateId));
+  if (!controlPlaneStore || !owner) {
+    return;
+  }
+  if (result.action === "requeue" && result.runId) {
+    await recordHostedDebateAuditToStore(controlPlaneStore, {
+      ...owner,
+      eventType: "hosted.debate.participant.dispatch",
+      decision: "allow",
+      reasonCode: result.reasonCode,
+      resourceType: "debate",
+      resourceId: result.debateId,
+      payload: { stage: job.stage, debateRound: job.debateRound, participantIndex: job.participantIndex }
+    });
+  }
+  if (job.stage === "judging") {
+    await recordHostedDebateAuditToStore(controlPlaneStore, {
+      ...owner,
+      eventType: "hosted.debate.judge.dispatch",
+      decision: "allow",
+      reasonCode: result.reasonCode ?? "judge_dispatched",
+      resourceType: "debate",
+      resourceId: result.debateId,
+      payload: { stage: job.stage, judgeRun: Boolean(runIdFromResult(result, "judgeRunId")) }
+    });
+  }
+  const quotaFinalization = quotaFinalizationFromResult(result);
+  if (quotaFinalization) {
+    await recordHostedDebateAuditToStore(controlPlaneStore, {
+      ...owner,
+      eventType: quotaFinalization.outcome === "completed"
+        ? "hosted.debate.terminal.success"
+        : "hosted.debate.terminal.failure",
+      decision: quotaFinalization.outcome === "completed" ? "allow" : "error",
+      reasonCode: quotaFinalization.reasonCode ?? quotaFinalization.outcome,
+      resourceType: "debate",
+      resourceId: quotaFinalization.debateId,
+      payload: { outcome: quotaFinalization.outcome }
+    });
+  }
+}
+
+function quotaFinalizationFromResult(
+  result: Awaited<ReturnType<DebateService["processExecutionJob"]>>
+): { debateId: string; outcome: "completed" | "failed"; reasonCode?: string | undefined } | undefined {
+  return "quotaFinalization" in result ? result.quotaFinalization : undefined;
+}
+
+function runIdFromResult(
+  result: Awaited<ReturnType<DebateService["processExecutionJob"]>>,
+  key: "runId" | "judgeRunId"
+): string | undefined {
+  const record = result as Record<string, unknown>;
+  return typeof record[key] === "string" ? record[key] : undefined;
+}
+
+function hasJobOwner(job: DebateExecutionJob): job is DebateExecutionJob & Required<Pick<
+  DebateExecutionJob,
+  "accountId" | "tenantId" | "projectId" | "userId" | "apiKeyId"
+>> {
+  return Boolean(job.accountId && job.tenantId && job.projectId && job.userId && job.apiKeyId);
+}
+
+function ownerFromJobOrReservation(
+  job: DebateExecutionJob,
+  reservation: ActiveDebateQuotaReservation | undefined
+): HostedDebateOwner | undefined {
+  if (hasJobOwner(job)) {
+    return ownerFromJob(job);
+  }
+  return reservation
+    ? {
+        accountId: reservation.accountId,
+        tenantId: reservation.tenantId,
+        projectId: reservation.projectId,
+        userId: reservation.userId,
+        apiKeyId: reservation.apiKeyId
+      }
+    : undefined;
+}
+
+function ownerFromJob(job: DebateExecutionJob & Required<Pick<
+  DebateExecutionJob,
+  "accountId" | "tenantId" | "projectId" | "userId" | "apiKeyId"
+>>): {
+  accountId: string;
+  tenantId: string;
+  projectId: string;
+  userId: string;
+  apiKeyId: string;
+} {
+  return {
+    accountId: job.accountId,
+    tenantId: job.tenantId,
+    projectId: job.projectId,
+    userId: job.userId,
+    apiKeyId: job.apiKeyId
   };
 }
 
@@ -1341,14 +1626,78 @@ async function recordHostedDebateAudit(
   }
   await controlPlane.recordAudit({
     auth: input.auth,
-    eventType: input.eventType,
+    eventType: hostedDebateAuditEventType(input.eventType, input.decision),
     decision: input.decision,
-    payload: input.payload,
+    payload: { ...input.payload, operation: input.eventType },
     ...(input.reasonCode ? { reasonCode: input.reasonCode } : {}),
-    ...(input.resourceType ? { resourceType: input.resourceType } : {}),
+    ...(input.resourceType ? { resourceType: hostedDebateAuditResourceType(input.resourceType) } : {}),
     ...(input.resourceId ? { resourceId: input.resourceId } : {}),
     ...(input.requestId ? { requestId: input.requestId } : {})
   });
+}
+
+async function recordHostedDebateAuditToStore(
+  controlPlaneStore: PostgresControlPlaneStore | undefined,
+  input: {
+    accountId: string;
+    tenantId: string;
+    projectId: string;
+    userId: string;
+    apiKeyId: string;
+    eventType: string;
+    decision: "allow" | "deny" | "error";
+    reasonCode?: string | undefined;
+    resourceType?: string | undefined;
+    resourceId?: string | undefined;
+    payload: Record<string, unknown>;
+  }
+): Promise<void> {
+  if (!controlPlaneStore) {
+    return;
+  }
+  await controlPlaneStore.appendAuditEvent({
+    accountId: input.accountId,
+    tenantId: input.tenantId,
+    projectId: input.projectId,
+    actorType: "api_key",
+    actorUserId: input.userId,
+    apiKeyId: input.apiKeyId,
+    eventType: hostedDebateAuditEventType(input.eventType, input.decision),
+    decision: input.decision,
+    payload: { ...input.payload, operation: input.eventType },
+    ...(input.reasonCode ? { reasonCode: input.reasonCode } : {}),
+    ...(input.resourceType ? { resourceType: hostedDebateAuditResourceType(input.resourceType) } : {}),
+    ...(input.resourceId ? { resourceId: input.resourceId } : {}),
+    createdAt: new Date().toISOString()
+  });
+}
+
+function hostedDebateAuditEventType(
+  operation: string,
+  decision: "allow" | "deny" | "error"
+): Parameters<PostgresControlPlaneStore["appendAuditEvent"]>[0]["eventType"] {
+  if (operation === "hosted.debate.ownership.attach_failed") {
+    return "config.fail_closed";
+  }
+  if (decision === "deny" || decision === "error") {
+    return "run.create_denied";
+  }
+  return "run.create_allowed";
+}
+
+function hostedDebateAuditResourceType(
+  resourceType: string
+): NonNullable<Parameters<PostgresControlPlaneStore["appendAuditEvent"]>[0]["resourceType"]> {
+  if (resourceType === "artifact") {
+    return "artifact";
+  }
+  if (resourceType === "quota") {
+    return "quota";
+  }
+  if (resourceType === "config") {
+    return "config";
+  }
+  return "run";
 }
 
 function errorCodeOf(error: unknown): string {
