@@ -672,6 +672,104 @@ describe("hosted worker app", () => {
     }
   });
 
+  it("does not stamp or admit wrapper bridge when wrapper capability is missing", async () => {
+    const server = await startFakeHttpRuntimeServer({ scenario: "bridge_capability_missing" });
+    const queue = new MemoryRunQueue();
+    const runs = new GuardedInMemoryRunStore();
+    const events = new InMemoryEventStore();
+    const sessions = new InMemorySessionStore();
+    const approvals = new InMemoryApprovalStore();
+    const commands = new PostgresHostedRuntimeBridgeCommandStore();
+    const payloads = createMemoryBridgePayloadStore();
+
+    await runs.create({
+      id: "run_generic_bridge_capability_missing",
+      runtime: "generic_http",
+      provider: "generic_http",
+      model: "generic-http-default",
+      adapterType: "http",
+      cwd: "/repo",
+      task: "wrapper without bridge capability",
+      status: "queued",
+      placement: "hosted",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "generic_http.async_rest",
+      createdAt: "2026-06-04T00:00:00.000Z"
+    });
+    await queue.enqueue({
+      runId: "run_generic_bridge_capability_missing",
+      placement: "hosted",
+      runtimeMode: "generic_http.async_rest"
+    });
+
+    const worker = createHostedWorker({
+      ...baseConfig(),
+      hostedRuntimeAllowlist: ["fake.deterministic", "generic_http.async_rest"],
+      hostedRealRuntimeExecution: "enabled",
+      genericHttp: {
+        ...baseConfig().genericHttp,
+        baseUrl: server.baseUrl
+      }
+    }, {
+      queue,
+      runs,
+      events,
+      sessions,
+      approvals,
+      bridgeCommandStore: commands,
+      bridgeCommandPayloads: payloads,
+      workerId: "worker_generic_missing_bridge"
+    });
+
+    try {
+      await expect(worker.tick()).resolves.toBe(true);
+      const session = await sessions.getByRunId("run_generic_bridge_capability_missing");
+      expect(session?.state).toMatchObject({
+        hostedWorkerId: "worker_generic_missing_bridge",
+        hostedRuntimeSessionId: session?.id,
+        hostedBridgeCapable: false,
+        runtimeMode: "generic_http.async_rest",
+        externalSessionKey: expect.any(String)
+      });
+      expect(server.stats().healthRequests).toBeGreaterThanOrEqual(1);
+
+      const completedRun = await runs.get("run_generic_bridge_capability_missing");
+      await runs.update({
+        ...completedRun!,
+        status: "running",
+        endedAt: undefined
+      });
+      await sessions.update({
+        ...session!,
+        status: "active",
+        state: {
+          ...session!.state,
+          hostedBridgeCapable: false
+        }
+      });
+
+      const serverBridge = new HostedRuntimeBridgeService({
+        runs,
+        sessions,
+        approvals,
+        commands,
+        commandPayloads: payloads,
+        runtimeRunner: { sendInput: async () => undefined }
+      });
+      await expect(serverBridge.createInputCommand({
+        runId: "run_generic_bridge_capability_missing",
+        body: { text: "should not admit" },
+        idempotencyKey: "generic_missing_bridge_capability",
+        auth: hostedAuth()
+      })).rejects.toMatchObject({ reasonCode: "generic_http_bridge_capability_missing" });
+    } finally {
+      await worker.stop();
+      await server.close();
+    }
+  });
+
   it("reports hosted runtime gate disabled in readiness", async () => {
     const worker = createHostedWorker({
       ...baseConfig(),
@@ -1642,7 +1740,7 @@ function hostedAuth(): AuthContext {
       planStatus: "active",
       entitlements: {
         allowedPlacements: ["local", "hosted", "connected_local_node"],
-        allowedRuntimeModes: ["claude_code.sdk", "opencode.acp"],
+        allowedRuntimeModes: ["claude_code.sdk", "opencode.acp", "agentfield.async_rest", "generic_http.async_rest"],
         allowHostedRealRuntime: true,
         allowConnectedNodes: true,
         allowArtifactContentRead: true,

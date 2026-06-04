@@ -778,7 +778,7 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
       return;
     }
     const session = await sessions.getByRunId(run.id);
-    if (!session || isTerminalSession(session.status)) {
+    if (!session) {
       return;
     }
 
@@ -794,7 +794,8 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
     const runtimeSessionId = typeof currentState["hostedRuntimeSessionId"] === "string"
       ? currentState["hostedRuntimeSessionId"].trim()
       : "";
-    if (currentWorker === workerId && bridgeCapable && runtimeSessionId === session.id) {
+    const desiredBridgeCapable = await resolveStartedRunBridgeCapability(run);
+    if (currentWorker === workerId && bridgeCapable === desiredBridgeCapable && runtimeSessionId === session.id) {
       return;
     }
 
@@ -804,12 +805,41 @@ export function createHostedWorker(config: WorkerConfig, deps?: {
         ...currentState,
         hostedWorkerId: workerId,
         hostedRuntimeSessionId: session.id,
-        hostedBridgeCapable: bridgeEnabledModes.has(run.runtimeMode as HostedBridgeSupportedMode),
+        hostedBridgeCapable: desiredBridgeCapable,
         runtimeMode: run.runtimeMode,
         ...(session.externalSessionKey ? { externalSessionKey: session.externalSessionKey } : {})
       },
       updatedAt: new Date().toISOString()
     });
+  }
+
+  async function resolveStartedRunBridgeCapability(run: RunRecord): Promise<boolean> {
+    if (!run.runtimeMode || !isBridgeSupportedMode(run.runtimeMode) || !bridgeEnabledModes.has(run.runtimeMode)) {
+      return false;
+    }
+    if (!isWrapperBridgeMode(run.runtimeMode)) {
+      return true;
+    }
+
+    const adapter = adapters.get(adapterIdForBridgeMode(run.runtimeMode));
+    if (!adapter) {
+      return false;
+    }
+    try {
+      const check = await adapter.check();
+      if (!check.ok) {
+        return false;
+      }
+      const details = check.details as Record<string, unknown> | undefined;
+      const bridge = details?.["bridge"] as Record<string, unknown> | undefined;
+      return bridge?.["canBridge"] === true;
+    } catch (error) {
+      runtimeLogger.warn("worker.runtime_bridge.wrapper_capability_check_failed", {
+        runtimeMode: run.runtimeMode,
+        reasonCode: normalizeReasonLabel(extractReasonCode(error) ?? wrapperCapabilityMissingCode(run.runtimeMode))
+      });
+      return false;
+    }
   }
 
   async function processToolJobs(): Promise<boolean> {
