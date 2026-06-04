@@ -276,7 +276,7 @@ Tool invocation request/response envelope:
 - List: `GET /tools/invocations` returns `{ invocations, nextCursor }`.
 - Get: `GET /tools/invocations/:id` returns `{ invocation }`.
 
-## R24 Debate Constraints
+## R24/R25 Debate Constraints
 
 - Debate routes are limited to the existing family: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
 - No public model judge route is shipped: no `/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family.
