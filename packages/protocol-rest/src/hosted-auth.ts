@@ -40,6 +40,10 @@ const RULES: readonly RouteRule[] = [
   { method: "POST", routeId: "runs.input", scopes: ["runs:write"], matches: param("/runs/:id/input") },
   { method: "POST", routeId: "runs.cancel", scopes: ["runs:write"], matches: param("/runs/:id/cancel") },
 
+  { method: "POST", routeId: "debates.create", scopes: ["runs:write"], matches: exact("/debates") },
+  { method: "GET", routeId: "debates.get", scopes: ["runs:read"], matches: param("/debates/:id") },
+  { method: "GET", routeId: "debates.events", scopes: ["runs:read"], matches: param("/debates/:id/events") },
+
   { method: "GET", routeId: "artifacts.get", scopes: ["artifacts:read"], matches: param("/artifacts/:id") },
   { method: "GET", routeId: "artifacts.content", scopes: ["artifacts:read"], matches: param("/artifacts/:id/content") },
 
