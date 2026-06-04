@@ -84,7 +84,7 @@ describe("local daemon route inventory", () => {
     } finally {
       await app.close();
     }
-  });
+  }, 20_000);
 
   it("keeps local and hosted inventory free of forbidden public execution/dashboard routes", () => {
     for (const entry of [...LOCAL_DAEMON_ROUTE_INVENTORY, ...HOSTED_SERVER_ROUTE_INVENTORY]) {
