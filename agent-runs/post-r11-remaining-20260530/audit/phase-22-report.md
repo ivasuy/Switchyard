@@ -123,4 +123,3 @@
 ## Merge Outcome
 
 - Audit verdict is GREEN, but no merge was performed in this audit pass per instruction. `merge_done` remains `false` for runtime handling.
-

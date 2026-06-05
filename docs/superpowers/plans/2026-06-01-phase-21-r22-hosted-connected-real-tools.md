@@ -1,8 +1,8 @@
 # Phase 21: R22 Hosted And Connected-Node Real Tool Execution - Implementation Plan
 
-**Spec:** `docs/superpowers/specs/2026-06-01-phase-21-r22-hosted-connected-real-tools.md`  
-**Branch:** `agent/phase-21-r22-hosted-connected-real-tools`  
-**Base/spec commit:** `89d86b2`  
+**Spec:** `docs/superpowers/specs/2026-06-01-phase-21-r22-hosted-connected-real-tools.md`
+**Branch:** `agent/phase-21-r22-hosted-connected-real-tools`
+**Base/spec commit:** `89d86b2`
 **Complexity:** L
 
 ## Goal

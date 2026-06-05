@@ -48,4 +48,3 @@
 ## Merge Outcome
 
 - Audit-only verdict recorded. `merge_done` remains `false`; runtime should handle merge/PR flow.
-

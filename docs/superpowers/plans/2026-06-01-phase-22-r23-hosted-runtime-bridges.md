@@ -1,8 +1,8 @@
 # Phase 22: R23 Hosted Runtime Input And Approval Bridges - Implementation Plan
 
-**Spec:** `docs/superpowers/specs/2026-06-01-phase-22-r23-hosted-runtime-bridges.md`  
-**Branch:** `agent/phase-22-r23-hosted-runtime-bridges`  
-**Base/spec commit:** `f635bbf`  
+**Spec:** `docs/superpowers/specs/2026-06-01-phase-22-r23-hosted-runtime-bridges.md`
+**Branch:** `agent/phase-22-r23-hosted-runtime-bridges`
+**Base/spec commit:** `f635bbf`
 **Complexity:** L
 
 ## Goal
