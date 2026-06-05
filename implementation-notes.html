@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>R2 Local Gateway Completeness — Implementation Notes</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         max-width: 64rem; margin: 2rem auto; padding: 0 1.25rem; color: #1b1f23; line-height: 1.55; }
+  h1, h2, h3 { color: #0d1117; }
+  h1 { border-bottom: 1px solid #d0d7de; padding-bottom: 0.35rem; }
+  h2 { margin-top: 2.25rem; border-bottom: 1px solid #eaeef2; padding-bottom: 0.25rem; }
+  h3 { margin-top: 1.5rem; }
+  code, pre { font-family: "SFMono-Regular", Menlo, Consolas, monospace; }
+  pre { background: #f6f8fa; padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
+  code { background: #f6f8fa; padding: 0.05rem 0.35rem; border-radius: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: 0.75rem 0 1.25rem; }
+  th, td { border: 1px solid #d0d7de; padding: 0.5rem 0.75rem; text-align: left; vertical-align: top; }
+  th { background: #f6f8fa; }
+  details { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;
+            padding: 0.5rem 0.85rem; margin-bottom: 0.5rem; }
+  details > summary { cursor: pointer; font-weight: 600; }
+  .tag { display: inline-block; font-size: 0.75rem; padding: 0.05rem 0.45rem; border-radius: 999px;
+         background: #ddf4ff; color: #0969da; margin-right: 0.4rem; }
+  .tag.deviation { background: #ffebe9; color: #cf222e; }
+  .tag.decision { background: #dafbe1; color: #1a7f37; }
+  .tag.tradeoff { background: #fff8c5; color: #9a6700; }
+  ul.list { margin-top: 0; }
+</style>
+</head>
+<body>
+<h1>R2 Local Gateway Completeness — Implementation Notes</h1>
+<p>
+  Living document maintained while implementing <code>SPEC.md</code> on branch
+  <code>codex/product-truth-cleanup</code>. Captures decisions, deviations,
+  tradeoffs, and open questions worth surfacing for review.
+</p>
+
+<h2>Section index</h2>
+<ul class="list">
+  <li><a href="#status">Implementation status</a></li>
+  <li><a href="#decisions">Design decisions</a></li>
+  <li><a href="#deviations">Deviations from the spec</a></li>
+  <li><a href="#tradeoffs">Tradeoffs considered</a></li>
+  <li><a href="#tests">Test coverage notes</a></li>
+  <li><a href="#open-questions">Open questions</a></li>
+</ul>
+
+<h2 id="status">Implementation status</h2>
+<p>All endpoints and behaviors required by R2 are shipped and exercised at multiple test layers.</p>
+<ul class="list">
+  <li><code>GET /runs</code> — cursor-paginated list with filters and a Zod-driven <code>400 invalid_query</code> envelope.</li>
+  <li><code>GET /providers</code>, <code>GET /runtimes</code>, <code>GET /models</code> — cursor pagination, provider-slug + adapterType filters where applicable.</li>
+  <li><code>GET /artifacts/:id</code> + <code>GET /artifacts/:id/content</code> — global lookup and raw stream with per-type Content-Type.</li>
+  <li><code>GET /runs/:id/events</code> — replay-only, bounded <code>stopAfter</code>, and open-ended <code>live=1</code> with 15s heartbeat, 5min idle close, <code>Last-Event-ID</code> resumption, and 1s disconnect cleanup.</li>
+  <li>Unified error envelope retrofitted across all 4xx/5xx responses.</li>
+  <li>Route tests in <code>packages/protocol-rest/test</code>, SSE tests in <code>packages/protocol-sse/test</code>, real-HTTP smoke and leak test in <code>apps/daemon/test</code>.</li>
+  <li><code>pnpm typecheck</code>, <code>pnpm test</code>, <code>pnpm build</code>, and <code>pnpm lint</code> all pass after the changes.</li>
+</ul>
+
+<h2 id="decisions">Design decisions</h2>
+
+<h3>Slug-to-id resolution for registry filters</h3>
+<p><span class="tag decision">decision</span>
+The registry has no separate <code>slug</code> column. For <code>/runtimes?provider=openai</code> and <code>/models?provider=openai</code> the slug <code>openai</code> is resolved by prepending <code>provider_</code> if missing, matching the seed convention (<code>provider_openai</code>, <code>runtime_codex</code>, <code>model_gpt_5_5</code>). The same shortcut works for single-record lookups, so <code>/providers/openai</code> resolves to <code>provider_openai</code>.
+</p>
+<p>For the <code>/runs</code> filter, slug values are passed through unchanged because the <code>runs</code> table stores user-supplied slug-like strings (<code>"openai"</code>, <code>"test"</code>) directly, not registry ids.</p>
+
+<h3>Opaque cursor encoding</h3>
+<p><span class="tag decision">decision</span>
+Cursors are base64url-encoded JSON of the keyset tuple (<code>{createdAt, id}</code> for runs, <code>{id}</code> for registry lists). Encoding/decoding lives in <code>packages/contracts/src/cursor.ts</code> so every endpoint shares one implementation. Malformed cursors return <code>400 invalid_query</code> with <code>details[0].path = "before"</code>.</p>
+
+<h3>Open-ended SSE writes raw to the Node response</h3>
+<p><span class="tag decision">decision</span>
+<code>reply.hijack()</code> hands the underlying socket to <code>streamRunEvents</code>. The streamer holds an <code>EventBus</code> subscription, a 15s heartbeat interval, and a 5min idle <code>setTimeout</code>. Any of disconnect, idle, or <code>stopAfter</code> triggers a single <code>close()</code> that clears all three. The cleanup path is verified by a 50-iteration connect/abort leak test.</p>
+
+<h3>Zod issue path → details path</h3>
+<p><span class="tag decision">decision</span>
+The spec example expects <code>details[0].path = "status"</code> for a bad CSV value. Zod produces <code>["status", 0]</code> because it points at the failing array element. The serializer in <code>packages/protocol-rest/src/http-errors.ts</code> truncates the trailing numeric segment so the path always names the parameter the caller sent.</p>
+
+<h3>In-memory daemon still exposes /artifacts/:id</h3>
+<p><span class="tag decision">decision</span>
+When the daemon runs without persistent storage (no <code>config</code>, used by some tests), metadata lookups still work, but <code>GET /artifacts/:id/content</code> returns <code>404 missing_artifact_content</code> because there is no filesystem reader. The error path goes through the same envelope helper, so the response shape matches production.</p>
+
+<h3>SSE leak test uses FD count, not internal subscriber count</h3>
+<p><span class="tag decision">decision</span>
+<code>apps/daemon/test/sse-leak.test.ts</code> connects 50 times via real HTTP, aborts each request, and asserts that the open file descriptor count does not grow by more than 10 above baseline (a conservative threshold to absorb logger/sqlite IO noise). The per-connection subscriber assertion (<code>subscribers.size === 0</code>) is verified separately in <code>packages/protocol-sse/test/open-ended-stream.test.ts</code> against a synthetic destination.</p>
+
+<h2 id="deviations">Deviations from the spec</h2>
+
+<h3>Routes not in any closed code use <code>internal_error</code></h3>
+<p><span class="tag deviation">deviation</span>
+The closed error-code table in the spec does not contain a code for "no such route", so the daemon's Fastify <code>notFoundHandler</code> returns <code>404</code> with the envelope <code>{ error: { code: "internal_error", message: "Route GET /foo not found" } }</code>. This pairs <code>404</code> with <code>internal_error</code>, which the table maps to <code>500</code>; the spec also says "Replaces any default Fastify error payload" for <code>internal_error</code>, which is the rule we follow here. Listed in open questions in case a dedicated <code>route_not_found</code> code is preferred.</p>
+
+<h3>R2 has no orphan-models exclusion case to actually exercise</h3>
+<p><span class="tag deviation">deviation</span>
+The spec says <code>GET /models</code> without a <code>provider</code> filter must include "orphan" models whose provider is not yet seeded. The current <code>modelSchema</code> requires a <code>providerId</code>, so the schema makes orphans impossible. The implementation still applies the correct filter semantics — when <code>provider</code> is omitted no provider filter is applied; when present, the filter is enforced — so the moment the schema relaxes (R3+), the behavior is already correct. Documented as an open question whether the schema should be relaxed in R2.</p>
+
+<h3>One R1 test was retargeted</h3>
+<p><span class="tag deviation">deviation</span>
+<code>packages/protocol-rest/test/run-routes.test.ts</code> had a test "treats invalid stopAfter as replay-length fallback" that exercised the bounded-collector path with <code>live=1&amp;stopAfter=not-a-number</code>. Under R2, <code>live=1</code> without a usable <code>stopAfter</code> means the connection stays open until disconnect or idle close — Fastify <code>inject()</code> cannot model a TCP disconnect, so the request would block. The test was rewritten to assert the same invalid-stopAfter fallback against the replay-only mode (no <code>live=1</code>), which still terminates deterministically. Open-ended live behavior is exercised in the new SSE tests instead.</p>
+
+<h2 id="tradeoffs">Tradeoffs considered</h2>
+<table>
+  <thead>
+    <tr><th>Decision</th><th>Picked</th><th>Alternative</th><th>Why</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>SSE transport</td>
+      <td>Raw <code>reply.hijack()</code> + <code>res.write</code>/<code>res.end</code>.</td>
+      <td>A custom Fastify SSE plugin (e.g. <code>fastify-sse-v2</code>).</td>
+      <td>The daemon already had a hand-rolled formatter in <code>protocol-sse</code>; adding a plugin would couple us to its lifecycle (its own heartbeat, its own resumption story) and complicate the leak test. Raw response gives us complete control over heartbeat, idle, and disconnect.</td>
+    </tr>
+    <tr>
+      <td>Slug resolution</td>
+      <td>Strip-prefix shortcut: <code>openai → provider_openai</code>.</td>
+      <td>Add a dedicated <code>slug</code> column to the registry tables and resolve via lookup.</td>
+      <td>Spec is R2 and explicitly out-of-scope for new registry columns. The prefix-strip is reversible and deterministic, and it leaves the registry schema untouched until R3.</td>
+    </tr>
+    <tr>
+      <td>Cursor payload</td>
+      <td>JSON-encoded keyset tuple, base64url, no signature.</td>
+      <td>HMAC-signed cursors or a server-side cursor store.</td>
+      <td>Local daemon only, 127.0.0.1 bound, no auth/rate-limiting in scope; opaque cursors with a documented "reserve the right to change encoding" disclaimer match the spec's stated contract.</td>
+    </tr>
+    <tr>
+      <td>Error envelope retrofit</td>
+      <td>Fastify <code>setErrorHandler</code> + explicit <code>sendHttpError</code> helper, plus a typed <code>HttpProblem</code> exception class.</td>
+      <td>A per-route try/catch that wraps every handler manually.</td>
+      <td>The middleware approach guarantees coverage of unhandled throws (any unexpected throw becomes <code>500 internal_error</code> with the envelope) and centralises Zod issue formatting so route code stays clean.</td>
+    </tr>
+    <tr>
+      <td>Leak detection</td>
+      <td>FD-count delta after 50 cycles + subscriber-count test against synthetic destination.</td>
+      <td>A dedicated probe that counts <code>EventBus</code> subscribers through the running daemon.</td>
+      <td><code>EventBus</code> isn't exported from the daemon, and exposing it just for tests would break encapsulation. The two-layer approach gives strong coverage without leaking internals.</td>
+    </tr>
+    <tr>
+      <td>List-routes test harness</td>
+      <td>A small in-test factory that wires the same in-memory stores the daemon uses.</td>
+      <td>Reuse <code>createDaemonApp</code> with an in-memory config flag.</td>
+      <td>The daemon factory also wires Codex probing, run reconciliation, and registry seeding — heavier than needed and could mask issues by always succeeding. The hand-rolled factory keeps each test focused.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="tests">Test coverage notes</h2>
+<ul class="list">
+  <li><code>packages/protocol-rest/test/list-routes.test.ts</code>: pagination round-trip, status/runtime/since filters, empty envelopes, all <code>400 invalid_query</code> paths (bad status, since &gt; until, limit &gt; max, malformed cursor), provider-slug → registry-id resolution.</li>
+  <li><code>packages/protocol-rest/test/artifact-routes.test.ts</code>: 200 metadata, 404 not-found, 200 content with <code>application/x-ndjson</code>, 404 <code>missing_artifact_content</code> for both <code>metadata.contentStored=false</code> and missing backing file, content-type picker spot-check.</li>
+  <li><code>packages/protocol-rest/test/registry-routes.test.ts</code>: legacy single-record routes still emit the envelope; <code>provider_not_found</code>, <code>runtime_not_found</code>, <code>model_not_found</code> all carry the new shape.</li>
+  <li><code>packages/protocol-rest/test/run-routes.test.ts</code>: error envelope on <code>409 adapter_protocol_failed</code> and other paths, replay-only stream, bounded live stream, replay truncation, fractional <code>stopAfter</code> handling, the rewritten invalid-stopAfter case.</li>
+  <li><code>packages/protocol-sse/test/open-ended-stream.test.ts</code>: replay-only end, bounded close at N, replay-then-live, <code>Last-Event-ID</code> resumption, 15s heartbeat + 5min idle close on a manual clock, subscriber release on client close.</li>
+  <li><code>apps/daemon/test/smoke.test.ts</code>: real HTTP smoke against every shipped local endpoint, asserts relative changes ("list grew by 1") so the suite tolerates any pre-existing state.</li>
+  <li><code>apps/daemon/test/sse-leak.test.ts</code>: 50 connect/abort cycles, FD growth bounded, daemon still healthy.</li>
+</ul>
+
+<h2 id="open-questions">Open questions</h2>
+<details>
+  <summary>Should "no such route" get its own closed code instead of <code>internal_error</code>?</summary>
+  <p>Today the Fastify <code>notFoundHandler</code> returns <code>404 internal_error</code>. The spec's closed code set doesn't include <code>route_not_found</code>, and <code>internal_error</code>'s description ("Replaces any default Fastify error payload") is the closest match. If a future caller wants to disambiguate a typo'd URL from a real internal failure, the easiest move is to add a <code>route_not_found</code> entry. Flagged for confirmation.</p>
+</details>
+<details>
+  <summary>Should <code>modelSchema</code> relax <code>providerId</code> in R2 to make orphan models representable?</summary>
+  <p>The spec describes orphan-models behavior for <code>GET /models</code> but the schema currently requires <code>providerId</code>. The filter behavior is already correct in case the schema relaxes; the only question is whether R2 should make the schema change now, or leave it for R3 with capability records.</p>
+</details>
+<details>
+  <summary>Are slug shortcuts on single-record routes (e.g. <code>/providers/openai</code>) acceptable?</summary>
+  <p>The spec only mentions slug filters on list endpoints, but the single-record routes accept either an id or its prefix-stripped slug because the same translator is used both places. This is convenient and consistent with the close-set message <code>"Unknown provider id or slug"</code>. Flagging in case strict id-only behavior was intended.</p>
+</details>
+<details>
+  <summary>SSE leak threshold (FDs growth ≤ 10) — is the budget right?</summary>
+  <p>On macOS/Linux the test asserts FDs do not grow by more than 10 above baseline after 50 connect/abort cycles. The threshold absorbs better-sqlite3 + Fastify logger churn. If CI runs on a smaller platform or the budget proves flaky, we may need to tighten or relax it.</p>
+</details>
+<details>
+  <summary>Should <code>Last-Event-ID</code> override events that are still in the live stream?</summary>
+  <p>Today, <code>Last-Event-ID</code> only trims the replay payload. If a client reconnects with a stale id, replay restarts from after that id and live events flow as usual. This matches typical EventSource semantics but isn't called out in the spec. Flagging for explicit confirmation.</p>
+</details>
+
+</body>
+</html>

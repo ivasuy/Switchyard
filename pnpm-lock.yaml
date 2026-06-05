@@ -105,6 +105,9 @@ importers:
       fastify:
         specifier: ^5.8.5
         version: 5.8.5
+      zod:
+        specifier: ^4.1.13
+        version: 4.4.3
     devDependencies:
       '@switchyard/testkit':
         specifier: workspace:*

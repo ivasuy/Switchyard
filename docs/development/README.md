@@ -4,10 +4,11 @@ This directory is the local developer center for Switchyard. Start here when you
 
 ## Read In This Order
 
-1. [Official API Contract](API.md): implemented HTTP endpoints, request bodies, response shapes, event semantics, and current limitations.
-2. [Local Development](DEVELOPMENT.md): install, start the daemon, health checks, local storage, process checks, and verification commands.
-3. [Codex Adapter Local Development](adapters/CODEX.md): Codex-specific metadata, healthy log shape, PID checks, and stuck-run diagnosis.
-4. [Architecture](../../ARCHITECTURE.md): system boundaries, package responsibilities, implemented local MVP, and planned layers.
+1. [Product Truth](../../PRODUCT.md): current shipped surface, release roadmap, and owner-facing release checklist.
+2. [Official API Contract](API.md): implemented HTTP endpoints, request bodies, response shapes, event semantics, and current limitations.
+3. [Local Development](DEVELOPMENT.md): install, start the daemon, health checks, local storage, process checks, and verification commands.
+4. [Codex Adapter Local Development](adapters/CODEX.md): Codex-specific metadata, healthy log shape, PID checks, and stuck-run diagnosis.
+5. [Architecture](../../ARCHITECTURE.md): system boundaries, package responsibilities, implemented local MVP, and planned layers.
 
 ## Current Local MVP
 
@@ -33,8 +34,9 @@ Today an app cannot yet:
 
 ## Document Ownership
 
+- `PRODUCT.md` is the owner-facing product truth and release roadmap.
 - `README.md` is product-facing.
-- `ARCHITECTURE.md` is the centralized system architecture.
+- `ARCHITECTURE.md` is the centralized system and target architecture.
 - `docs/development/API.md` is the centralized app-facing API contract.
 - `docs/development/DEVELOPMENT.md` is the centralized local operations guide.
 - `docs/development/adapters/` contains runtime-specific debugging notes only.

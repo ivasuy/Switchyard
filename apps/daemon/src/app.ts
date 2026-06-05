@@ -14,8 +14,22 @@ import {
   type RegistryStore,
   type SessionStore
 } from "@switchyard/core";
-import { registerRegistryRoutes, registerRunRoutes } from "@switchyard/protocol-rest";
-import { FakeRuntimeAdapter, InMemoryEventStore, InMemoryRunStore, InMemorySessionStore } from "@switchyard/testkit";
+import {
+  contentTypeForArtifact,
+  registerArtifactRoutes,
+  registerErrorEnvelope,
+  registerRegistryRoutes,
+  registerRunRoutes,
+  type ArtifactContentReader
+} from "@switchyard/protocol-rest";
+import {
+  FakeRuntimeAdapter,
+  InMemoryArtifactStore,
+  InMemoryEventStore,
+  InMemoryRegistryStore,
+  InMemoryRunStore,
+  InMemorySessionStore
+} from "@switchyard/testkit";
 import {
   openSqliteStorage,
   SqliteArtifactStore,
@@ -35,6 +49,7 @@ interface DaemonStores {
   registry: RegistryStore;
   artifactContent?: {
     writeText(path: string, content: string): Promise<string>;
+    readBuffer?(path: string): Promise<Buffer>;
   };
 }
 
@@ -103,6 +118,8 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     });
   }
 
+  registerErrorEnvelope(app);
+
   app.get("/health", async () => ({ ok: true }));
   registerRunRoutes(app, {
     ...stores,
@@ -111,8 +128,36 @@ export async function createDaemonApp(config?: DaemonConfig, options: CreateDaem
     runService
   });
   registerRegistryRoutes(app, { registry: stores.registry });
+  const reader = buildArtifactContentReader(stores.artifactContent);
+  registerArtifactRoutes(app, {
+    artifacts: stores.artifacts,
+    artifactContent: reader ?? unavailableContentReader
+  });
 
   return app;
+}
+
+const unavailableContentReader: ArtifactContentReader = {
+  async read() {
+    const error = new Error("Artifact content store not configured for this daemon instance");
+    (error as Error & { code?: string }).code = "ENOENT";
+    throw error;
+  }
+};
+
+function buildArtifactContentReader(
+  store: DaemonStores["artifactContent"]
+): ArtifactContentReader | undefined {
+  if (!store || typeof store.readBuffer !== "function") {
+    return undefined;
+  }
+  const reader = store.readBuffer.bind(store);
+  return {
+    async read(artifact) {
+      const body = await reader(artifact.path);
+      return { body, contentType: contentTypeForArtifact(artifact.type) };
+    }
+  };
 }
 
 function createInMemoryStores(): DaemonStores {
@@ -304,70 +349,4 @@ async function updateRuntimeRecord(
     return;
   }
   await stores.registry.createRuntime(runtime);
-}
-
-class InMemoryArtifactStore implements ArtifactStore {
-  private readonly artifacts: Parameters<ArtifactStore["create"]>[0][] = [];
-
-  async create(artifact: Parameters<ArtifactStore["create"]>[0]): Promise<Parameters<ArtifactStore["create"]>[0]> {
-    this.artifacts.push(artifact);
-    return artifact;
-  }
-
-  async get(id: string): Promise<Parameters<ArtifactStore["create"]>[0] | undefined> {
-    return this.artifacts.find((artifact) => artifact.id === id);
-  }
-
-  async update(artifact: Parameters<ArtifactStore["create"]>[0]): Promise<Parameters<ArtifactStore["create"]>[0]> {
-    const index = this.artifacts.findIndex((entry) => entry.id === artifact.id);
-    if (index === -1) {
-      this.artifacts.push(artifact);
-    } else {
-      this.artifacts[index] = artifact;
-    }
-    return artifact;
-  }
-
-  async listByRun(runId: string): Promise<Parameters<ArtifactStore["create"]>[0][]> {
-    return this.artifacts.filter((artifact) => artifact.runId === runId);
-  }
-}
-
-class InMemoryRegistryStore implements RegistryStore {
-  private readonly providers = new Map<string, Parameters<RegistryStore["createProvider"]>[0]>();
-  private readonly runtimes = new Map<string, Parameters<RegistryStore["createRuntime"]>[0]>();
-  private readonly models = new Map<string, Parameters<RegistryStore["createModel"]>[0]>();
-
-  async createProvider(
-    provider: Parameters<RegistryStore["createProvider"]>[0]
-  ): Promise<Parameters<RegistryStore["createProvider"]>[0]> {
-    this.providers.set(provider.id, provider);
-    return provider;
-  }
-
-  async createRuntime(
-    runtime: Parameters<RegistryStore["createRuntime"]>[0]
-  ): Promise<Parameters<RegistryStore["createRuntime"]>[0]> {
-    this.runtimes.set(runtime.id, runtime);
-    return runtime;
-  }
-
-  async createModel(
-    model: Parameters<RegistryStore["createModel"]>[0]
-  ): Promise<Parameters<RegistryStore["createModel"]>[0]> {
-    this.models.set(model.id, model);
-    return model;
-  }
-
-  async getProvider(id: string): Promise<Parameters<RegistryStore["createProvider"]>[0] | undefined> {
-    return this.providers.get(id);
-  }
-
-  async getRuntime(id: string): Promise<Parameters<RegistryStore["createRuntime"]>[0] | undefined> {
-    return this.runtimes.get(id);
-  }
-
-  async getModel(id: string): Promise<Parameters<RegistryStore["createModel"]>[0] | undefined> {
-    return this.models.get(id);
-  }
 }

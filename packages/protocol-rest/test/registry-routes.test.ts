@@ -1,8 +1,8 @@
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
-import type { RegistryStore } from "@switchyard/core";
 import type { Model as RegistryModel, Provider as RegistryProvider, RuntimeTarget as RegistryRuntime } from "@switchyard/contracts";
-import { registerRegistryRoutes } from "../src/index.js";
+import { InMemoryRegistryStore as MemoryRegistryStore } from "@switchyard/testkit";
+import { registerErrorEnvelope, registerRegistryRoutes } from "../src/index.js";
 
 describe("registry routes", () => {
   it("returns a provider by id", async () => {
@@ -113,36 +113,3 @@ describe("registry routes", () => {
     });
   });
 });
-
-class MemoryRegistryStore implements RegistryStore {
-  private readonly providers = new Map<string, RegistryProvider>();
-  private readonly runtimes = new Map<string, RegistryRuntime>();
-  private readonly models = new Map<string, RegistryModel>();
-
-  async createProvider(provider: RegistryProvider): Promise<RegistryProvider> {
-    this.providers.set(provider.id, provider);
-    return provider;
-  }
-
-  async createRuntime(runtime: RegistryRuntime): Promise<RegistryRuntime> {
-    this.runtimes.set(runtime.id, runtime);
-    return runtime;
-  }
-
-  async createModel(model: RegistryModel): Promise<RegistryModel> {
-    this.models.set(model.id, model);
-    return model;
-  }
-
-  async getProvider(id: string): Promise<RegistryProvider | undefined> {
-    return this.providers.get(id);
-  }
-
-  async getRuntime(id: string): Promise<RegistryRuntime | undefined> {
-    return this.runtimes.get(id);
-  }
-
-  async getModel(id: string): Promise<RegistryModel | undefined> {
-    return this.models.get(id);
-  }
-}
