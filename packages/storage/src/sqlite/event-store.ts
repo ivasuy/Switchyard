@@ -79,4 +79,13 @@ export class SqliteEventStore implements EventStore {
       .orderBy(asc(runEvents.sequence));
     return rows.map(fromRow);
   }
+
+  async listByDebate(debateId: string): Promise<SwitchyardEvent[]> {
+    const rows = await this.db
+      .select()
+      .from(runEvents)
+      .where(eq(runEvents.debateId, debateId))
+      .orderBy(asc(runEvents.sequence));
+    return rows.map(fromRow);
+  }
 }

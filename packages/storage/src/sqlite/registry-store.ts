@@ -1,48 +1,41 @@
-import type { Model, Provider, RuntimeTarget } from "@switchyard/contracts";
+import { runtimeModeSchema, type Model, type Provider, type RuntimeAvailability, type RuntimeMode, type RuntimeTarget } from "@switchyard/contracts";
 import type {
   ListModelsFilter,
   ListModelsResult,
   ListProvidersFilter,
   ListProvidersResult,
+  ListRuntimeModesFilter,
+  ListRuntimeModesResult,
   ListRuntimesFilter,
   ListRuntimesResult,
   RegistryStore
 } from "@switchyard/core";
 import type { SwitchyardSqliteDatabase } from "./database.js";
-import { models, providers, runtimes } from "./schema.js";
+import { models, providers, runtimeModes, runtimes } from "./schema.js";
 import { and, asc, eq, gt, inArray } from "drizzle-orm";
 
 type ProviderRow = typeof providers.$inferSelect;
 type ProviderInsertRow = typeof providers.$inferInsert;
-
 type RuntimeRow = typeof runtimes.$inferSelect;
-type RuntimeInsertRow = Omit<typeof runtimes.$inferInsert, "providerId"> & {
-  providerId?: string;
-};
-
+type RuntimeInsertRow = Omit<typeof runtimes.$inferInsert, "providerId"> & { providerId?: string };
 type ModelRow = typeof models.$inferSelect;
 type ModelInsertRow = Omit<typeof models.$inferInsert, "supportsTools" | "supportsStreaming" | "supportsBrowser"> & {
   supportsTools: number;
   supportsStreaming: number;
   supportsBrowser: number;
 };
+type RuntimeModeRow = typeof runtimeModes.$inferSelect;
+type RuntimeModeInsertRow = Omit<
+  typeof runtimeModes.$inferInsert,
+  "docsPath"
+> & { docsPath?: string | null };
 
 function toProviderRow(provider: Provider): ProviderInsertRow {
-  return {
-    id: provider.id,
-    name: provider.name,
-    authMode: provider.authMode,
-    status: provider.status
-  };
+  return { id: provider.id, name: provider.name, authMode: provider.authMode, status: provider.status };
 }
 
 function fromProviderRow(row: ProviderRow): Provider {
-  return {
-    id: row.id,
-    name: row.name,
-    authMode: row.authMode as Provider["authMode"],
-    status: row.status as Provider["status"]
-  };
+  return { id: row.id, name: row.name, authMode: row.authMode as Provider["authMode"], status: row.status as Provider["status"] };
 }
 
 function toRuntimeRow(runtime: RuntimeTarget): RuntimeInsertRow {
@@ -65,9 +58,7 @@ function fromRuntimeRow(row: RuntimeRow): RuntimeTarget {
     adapterType: row.adapterType as RuntimeTarget["adapterType"],
     status: row.status as RuntimeTarget["status"]
   };
-  if (row.providerId !== null && row.providerId !== undefined) {
-    runtime.providerId = row.providerId;
-  }
+  if (row.providerId !== null && row.providerId !== undefined) runtime.providerId = row.providerId;
   return runtime;
 }
 
@@ -95,6 +86,94 @@ function fromModelRow(row: ModelRow): Model {
   };
 }
 
+function toRuntimeModeRow(mode: RuntimeMode): RuntimeModeInsertRow {
+  return {
+    id: mode.id,
+    slug: mode.slug,
+    name: mode.name,
+    providerId: mode.providerId,
+    runtimeId: mode.runtimeId,
+    adapterId: mode.adapterId,
+    adapterType: mode.adapterType,
+    kind: mode.kind,
+    status: mode.status,
+    capabilitiesJson: JSON.stringify(mode.capabilities),
+    limitationsJson: JSON.stringify(mode.limitations),
+    placementJson: JSON.stringify(mode.placement),
+    availabilityJson: JSON.stringify(mode.availability),
+    docsPath: mode.docsPath ?? null,
+    createdAt: mode.createdAt,
+    updatedAt: mode.updatedAt
+  };
+}
+
+function fromRuntimeModeRow(row: RuntimeModeRow): RuntimeMode {
+  const parsed = runtimeModeSchema.parse({
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    providerId: row.providerId,
+    runtimeId: row.runtimeId,
+    adapterId: row.adapterId,
+    adapterType: row.adapterType,
+    kind: row.kind,
+    status: row.status,
+    capabilities: JSON.parse(row.capabilitiesJson),
+    limitations: JSON.parse(row.limitationsJson),
+    placement: JSON.parse(row.placementJson),
+    availability: JSON.parse(row.availabilityJson),
+    docsPath: row.docsPath ?? undefined,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  });
+  return parsed;
+}
+
+function matchesRuntimeModeFilter(mode: RuntimeMode, filter: ListRuntimeModesFilter): boolean {
+  if (filter.providerIds && filter.providerIds.length > 0 && !filter.providerIds.includes(mode.providerId)) {
+    return false;
+  }
+  if (filter.runtimeIds && filter.runtimeIds.length > 0 && !filter.runtimeIds.includes(mode.runtimeId)) {
+    return false;
+  }
+  if (filter.adapterType && filter.adapterType.length > 0 && !filter.adapterType.includes(mode.adapterType)) {
+    return false;
+  }
+  if (filter.kind && filter.kind.length > 0 && !filter.kind.includes(mode.kind)) {
+    return false;
+  }
+  if (filter.availability && filter.availability.length > 0 && !filter.availability.includes(mode.availability.state)) {
+    return false;
+  }
+  if (filter.placement && filter.placement.length > 0) {
+    const matchesPlacement = filter.placement.some((placement) => {
+      if (placement === "local") {
+        return mode.placement.local.support === "supported" || mode.placement.local.support === "conditional";
+      }
+      if (placement === "hosted") {
+        return mode.placement.hosted.support === "supported" || mode.placement.hosted.support === "conditional";
+      }
+      if (placement === "connected_local_node") {
+        return (
+          mode.placement.connectedLocalNode.support === "supported" ||
+          mode.placement.connectedLocalNode.support === "conditional"
+        );
+      }
+      return false;
+    });
+    if (!matchesPlacement) {
+      return false;
+    }
+  }
+  if (filter.capability && filter.capability.length > 0) {
+    const set = new Set<string>(mode.capabilities);
+    if (!filter.capability.every((entry) => set.has(entry))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export class SqliteRegistryStore implements RegistryStore {
   constructor(private readonly db: SwitchyardSqliteDatabase) {}
 
@@ -115,29 +194,17 @@ export class SqliteRegistryStore implements RegistryStore {
 
   async getProvider(id: string): Promise<Provider | undefined> {
     const rows = await this.db.select().from(providers).where(eq(providers.id, id)).limit(1);
-    const row = rows[0];
-    if (!row) {
-      return undefined;
-    }
-    return fromProviderRow(row);
+    return rows[0] ? fromProviderRow(rows[0]) : undefined;
   }
 
   async getRuntime(id: string): Promise<RuntimeTarget | undefined> {
     const rows = await this.db.select().from(runtimes).where(eq(runtimes.id, id)).limit(1);
-    const row = rows[0];
-    if (!row) {
-      return undefined;
-    }
-    return fromRuntimeRow(row);
+    return rows[0] ? fromRuntimeRow(rows[0]) : undefined;
   }
 
   async getModel(id: string): Promise<Model | undefined> {
     const rows = await this.db.select().from(models).where(eq(models.id, id)).limit(1);
-    const row = rows[0];
-    if (!row) {
-      return undefined;
-    }
-    return fromModelRow(row);
+    return rows[0] ? fromModelRow(rows[0]) : undefined;
   }
 
   async listProviders(filter: ListProvidersFilter): Promise<ListProvidersResult> {
@@ -145,52 +212,108 @@ export class SqliteRegistryStore implements RegistryStore {
     const conditions = filter.before ? [gt(providers.id, filter.before.id)] : [];
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
     const baseQuery = this.db.select().from(providers).orderBy(asc(providers.id)).limit(overFetch);
-    const query = whereClause ? baseQuery.where(whereClause) : baseQuery;
-    const rows = await query;
-    const records = rows.slice(0, filter.limit).map(fromProviderRow);
-    const hasMore = rows.length > filter.limit;
-    const last = records.at(-1);
-    return { providers: records, nextCursor: hasMore && last ? { id: last.id } : null };
+    const rows = await (whereClause ? baseQuery.where(whereClause) : baseQuery);
+    const page = rows.slice(0, filter.limit).map(fromProviderRow);
+    const last = page.at(-1);
+    return { providers: page, nextCursor: rows.length > filter.limit && last ? { id: last.id } : null };
   }
 
   async listRuntimes(filter: ListRuntimesFilter): Promise<ListRuntimesResult> {
     const overFetch = filter.limit + 1;
     const conditions: ReturnType<typeof eq>[] = [];
-    if (filter.providerIds && filter.providerIds.length > 0) {
-      conditions.push(inArray(runtimes.providerId, [...filter.providerIds]));
-    }
-    if (filter.adapterType && filter.adapterType.length > 0) {
-      conditions.push(inArray(runtimes.adapterType, [...filter.adapterType]));
-    }
-    if (filter.before) {
-      conditions.push(gt(runtimes.id, filter.before.id));
-    }
+    if (filter.providerIds && filter.providerIds.length > 0) conditions.push(inArray(runtimes.providerId, [...filter.providerIds]));
+    if (filter.adapterType && filter.adapterType.length > 0) conditions.push(inArray(runtimes.adapterType, [...filter.adapterType]));
+    if (filter.before) conditions.push(gt(runtimes.id, filter.before.id));
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
     const baseQuery = this.db.select().from(runtimes).orderBy(asc(runtimes.id)).limit(overFetch);
-    const query = whereClause ? baseQuery.where(whereClause) : baseQuery;
-    const rows = await query;
-    const records = rows.slice(0, filter.limit).map(fromRuntimeRow);
-    const hasMore = rows.length > filter.limit;
-    const last = records.at(-1);
-    return { runtimes: records, nextCursor: hasMore && last ? { id: last.id } : null };
+    const rows = await (whereClause ? baseQuery.where(whereClause) : baseQuery);
+    const page = rows.slice(0, filter.limit).map(fromRuntimeRow);
+    const last = page.at(-1);
+    return { runtimes: page, nextCursor: rows.length > filter.limit && last ? { id: last.id } : null };
   }
 
   async listModels(filter: ListModelsFilter): Promise<ListModelsResult> {
     const overFetch = filter.limit + 1;
     const conditions: ReturnType<typeof eq>[] = [];
-    if (filter.providerIds && filter.providerIds.length > 0) {
-      conditions.push(inArray(models.providerId, [...filter.providerIds]));
-    }
-    if (filter.before) {
-      conditions.push(gt(models.id, filter.before.id));
-    }
+    if (filter.providerIds && filter.providerIds.length > 0) conditions.push(inArray(models.providerId, [...filter.providerIds]));
+    if (filter.before) conditions.push(gt(models.id, filter.before.id));
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
     const baseQuery = this.db.select().from(models).orderBy(asc(models.id)).limit(overFetch);
-    const query = whereClause ? baseQuery.where(whereClause) : baseQuery;
-    const rows = await query;
-    const records = rows.slice(0, filter.limit).map(fromModelRow);
-    const hasMore = rows.length > filter.limit;
-    const last = records.at(-1);
-    return { models: records, nextCursor: hasMore && last ? { id: last.id } : null };
+    const rows = await (whereClause ? baseQuery.where(whereClause) : baseQuery);
+    const page = rows.slice(0, filter.limit).map(fromModelRow);
+    const last = page.at(-1);
+    return { models: page, nextCursor: rows.length > filter.limit && last ? { id: last.id } : null };
+  }
+
+  async upsertRuntimeMode(mode: RuntimeMode): Promise<RuntimeMode> {
+    await this.db
+      .insert(runtimeModes)
+      .values(toRuntimeModeRow(mode))
+      .onConflictDoUpdate({
+        target: runtimeModes.id,
+        set: {
+          slug: mode.slug,
+          name: mode.name,
+          providerId: mode.providerId,
+          runtimeId: mode.runtimeId,
+          adapterId: mode.adapterId,
+          adapterType: mode.adapterType,
+          kind: mode.kind,
+          status: mode.status,
+          capabilitiesJson: JSON.stringify(mode.capabilities),
+          limitationsJson: JSON.stringify(mode.limitations),
+          placementJson: JSON.stringify(mode.placement),
+          availabilityJson: JSON.stringify(mode.availability),
+          docsPath: mode.docsPath ?? null,
+          createdAt: mode.createdAt,
+          updatedAt: mode.updatedAt
+        }
+      });
+    return mode;
+  }
+
+  async getRuntimeMode(idOrSlug: string): Promise<RuntimeMode | undefined> {
+    let rows: RuntimeModeRow[];
+    if (idOrSlug.startsWith("runtime_mode_")) {
+      rows = await this.db.select().from(runtimeModes).where(eq(runtimeModes.id, idOrSlug)).limit(1);
+    } else {
+      rows = await this.db.select().from(runtimeModes).where(eq(runtimeModes.slug, idOrSlug)).limit(1);
+    }
+    const row = rows[0];
+    return row ? fromRuntimeModeRow(row) : undefined;
+  }
+
+  async listRuntimeModes(filter: ListRuntimeModesFilter): Promise<ListRuntimeModesResult> {
+    const overFetch = filter.limit + 1;
+    const conditions: ReturnType<typeof eq>[] = [];
+    if (filter.before) conditions.push(gt(runtimeModes.id, filter.before.id));
+    if (filter.providerIds && filter.providerIds.length > 0) conditions.push(inArray(runtimeModes.providerId, [...filter.providerIds]));
+    if (filter.runtimeIds && filter.runtimeIds.length > 0) conditions.push(inArray(runtimeModes.runtimeId, [...filter.runtimeIds]));
+    if (filter.adapterType && filter.adapterType.length > 0) conditions.push(inArray(runtimeModes.adapterType, [...filter.adapterType]));
+    if (filter.kind && filter.kind.length > 0) conditions.push(inArray(runtimeModes.kind, [...filter.kind]));
+    if (filter.availability && filter.availability.length > 0) conditions.push(inArray(runtimeModes.status, [...filter.availability]));
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const baseQuery = this.db.select().from(runtimeModes).orderBy(asc(runtimeModes.id)).limit(Math.max(overFetch, filter.limit * 4));
+    const rows = await (whereClause ? baseQuery.where(whereClause) : baseQuery);
+    const filtered = rows.map(fromRuntimeModeRow).filter((mode) => matchesRuntimeModeFilter(mode, filter));
+    const page = filtered.slice(0, filter.limit);
+    const last = page.at(-1);
+    return {
+      runtimeModes: page,
+      nextCursor: filtered.length > filter.limit && last ? { id: last.id } : null
+    };
+  }
+
+  async updateRuntimeModeAvailability(idOrSlug: string, availability: RuntimeAvailability): Promise<RuntimeMode | undefined> {
+    const mode = await this.getRuntimeMode(idOrSlug);
+    if (!mode) return undefined;
+    const updated: RuntimeMode = {
+      ...mode,
+      availability,
+      status: availability.state,
+      updatedAt: availability.checkedAt
+    };
+    await this.upsertRuntimeMode(updated);
+    return updated;
   }
 }

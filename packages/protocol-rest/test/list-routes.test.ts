@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { describe, expect, it } from "vitest";
 import {
   EventBus,
+  RegistryService,
   RunLauncherService,
   RunService,
   RuntimeRunnerService
@@ -46,7 +47,33 @@ async function createHarness(): Promise<{
   const app = Fastify();
   registerErrorEnvelope(app);
   registerRunRoutes(app, { runService, runs, events, artifacts, eventBus, launcher, registry });
-  registerRegistryRoutes(app, { registry });
+  registerRegistryRoutes(app, {
+    registry,
+    registryService: new RegistryService({ registry }),
+    doctor: {
+      checkRuntimeMode: async (_idOrSlug: string) => ({
+        runtimeModeId: "runtime_mode_fake_deterministic",
+        runtimeMode: "fake.deterministic",
+        providerId: "provider_test",
+        runtimeId: "runtime_fake",
+        state: "available",
+        canRun: true,
+        installed: true,
+        auth: "not_required",
+        version: null,
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        reasonCode: null,
+        message: null,
+        capabilities: ["run.start", "run.cancel", "event.normalized", "artifact.transcript", "tool.fake_echo", "auth.none"],
+        limitations: [{ code: "deterministic_only", message: "Outputs are fixed for local smoke and contract tests." }],
+        diagnostics: []
+      }),
+      summarize: async () => ({
+        runtimeModes: [],
+        summary: { available: 0, installed: 0, partial: 0, unavailable: 0, unsupported: 0, unknown: 0 }
+      })
+    }
+  });
 
   return {
     app,

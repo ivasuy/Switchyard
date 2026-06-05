@@ -3,4 +3,5 @@ import type { GenericStore } from "./generic-stores.js";
 
 export interface ArtifactStore extends GenericStore<Artifact> {
   listByRun(runId: string): Promise<Artifact[]>;
+  listByDebate(debateId: string): Promise<Artifact[]>;
 }

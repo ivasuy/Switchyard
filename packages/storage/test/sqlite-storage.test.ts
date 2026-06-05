@@ -1,12 +1,16 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import type {
   Artifact,
   Approval,
+  Debate,
   Model,
   Provider,
+  RuntimeAvailability,
+  RuntimeMode,
   RuntimeSession,
   RuntimeTarget,
   RoutedMessage,
@@ -17,6 +21,7 @@ import type { PlacementDecisionRecord } from "@switchyard/core";
 
 import {
   SqliteApprovalStore,
+  SqliteDebateStore,
   SqliteArtifactStore,
   SqliteEventStore,
   SqliteMessageStore,
@@ -59,8 +64,43 @@ function buildSession(overrides: Partial<RuntimeSession>): RuntimeSession {
     model: "test-model",
     protocol: "native",
     status: "active",
+    runtimeMode: "fake.deterministic",
     state: { cursor: 1 },
     createdAt: startedAt,
+    ...overrides
+  };
+}
+
+function buildRuntimeMode(overrides: Partial<RuntimeMode>): RuntimeMode {
+  return {
+    id: "runtime_mode_fake_deterministic",
+    slug: "fake.deterministic",
+    name: "Fake deterministic runtime",
+    providerId: "provider_test",
+    runtimeId: "runtime_fake",
+    adapterId: "fake",
+    adapterType: "process",
+    kind: "deterministic_fake",
+    status: "available",
+    capabilities: ["run.start", "run.cancel", "event.normalized", "event.streaming", "artifact.transcript", "tool.fake_echo", "auth.none"],
+    limitations: [{ code: "deterministic_only", message: "Outputs are fixed for local smoke and contract tests." }],
+    placement: {
+      local: { support: "supported", reason: "In-process deterministic test adapter." },
+      hosted: { support: "unsupported", reason: "Hosted worker execution is not shipped in R3." },
+      connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+    },
+    availability: {
+      state: "available",
+      canRun: true,
+      installed: true,
+      auth: "not_required",
+      version: null,
+      checkedAt: startedAt,
+      reasonCode: null,
+      message: null
+    },
+    createdAt: startedAt,
+    updatedAt: startedAt,
     ...overrides
   };
 }
@@ -72,6 +112,60 @@ function buildArtifact(overrides: Partial<Artifact>): Artifact {
     type: "transcript",
     path: "/tmp/transcript.txt",
     metadata: { bytes: 12 },
+    createdAt: startedAt,
+    ...overrides
+  };
+}
+
+function buildDebate(overrides: Partial<Debate>): Debate {
+  return {
+    id: "debate_storage",
+    topic: "Should fake debate ship first?",
+    mode: "same_provider_model_debate",
+    status: "created",
+    participants: [
+      {
+        id: "participant_storage_1",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        role: "affirmative",
+        status: "created",
+        turnsUsed: 0,
+        runIds: []
+      },
+      {
+        id: "participant_storage_2",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        role: "skeptic",
+        status: "created",
+        turnsUsed: 0,
+        runIds: []
+      }
+    ],
+    limits: {
+      maxRounds: 2,
+      maxTurnsPerAgent: 2,
+      maxSearchesPerAgent: 0,
+      maxTotalMessages: 4,
+      maxDurationSeconds: 30,
+      maxCostUsd: 0,
+      requireCitations: false,
+      requireDisagreementSummary: true,
+      stopOnConsensus: false,
+      stopOnLowNewInformation: false,
+      humanStopAllowed: false
+    },
+    evidenceIds: [],
+    messageIds: [],
+    eventIds: [],
+    budget: {
+      status: "within_budget",
+      maxCostUsd: 0,
+      spentCostUsd: 0
+    },
     createdAt: startedAt,
     ...overrides
   };
@@ -316,6 +410,65 @@ describe("sqlite persistence stores", () => {
     }
   });
 
+  it("guard-updates prepared metadata only when execution identity still matches", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-storage-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let connection: ReturnType<typeof openSqliteStorage> | undefined;
+
+    try {
+      connection = openSqliteStorage(dbPath);
+      const runs = new SqliteRunStore(connection.db);
+      await runs.create(
+        buildRun({
+          id: "run_guard_sqlite",
+          placement: "hosted",
+          runtime: "codex",
+          provider: "openai",
+          adapterType: "process",
+          runtimeMode: "codex.exec_json",
+          status: "queued",
+          metadata: { before: true }
+        })
+      );
+
+      const updated = await runs.updatePreparedMetadataIfMatch({
+        expected: {
+          id: "run_guard_sqlite",
+          status: "queued",
+          placement: "hosted",
+          runtime: "codex",
+          runtimeMode: "codex.exec_json",
+          provider: "openai",
+          adapterType: "process"
+        },
+        metadata: { sandbox: "read-only" }
+      });
+
+      expect(updated).toMatchObject({
+        ok: true,
+        run: { id: "run_guard_sqlite", metadata: { sandbox: "read-only" } }
+      });
+
+      const mismatch = await runs.updatePreparedMetadataIfMatch({
+        expected: {
+          id: "run_guard_sqlite",
+          status: "queued",
+          placement: "hosted",
+          runtime: "codex",
+          runtimeMode: "opencode.acp",
+          provider: "openai",
+          adapterType: "process"
+        },
+        metadata: { sandbox: "workspace-write" }
+      });
+      expect(mismatch).toEqual({ ok: false, reason: "identity_mismatch" });
+      expect((await runs.get("run_guard_sqlite"))?.metadata).toEqual({ sandbox: "read-only" });
+    } finally {
+      connection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("orders run events by sequence and filters by run id", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-storage-"));
     const dbPath = join(tempDir, "storage.sqlite");
@@ -351,6 +504,45 @@ describe("sqlite persistence stores", () => {
       });
 
       expect((await events.listByRun("run_storage")).map((event) => event.id)).toEqual(["event_a_1", "event_a_2"]);
+    } finally {
+      connection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists debates and supports listByDebate for events and artifacts", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-storage-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let connection: ReturnType<typeof openSqliteStorage> | undefined;
+
+    try {
+      connection = openSqliteStorage(dbPath);
+      const debates = new SqliteDebateStore(connection.db);
+      const events = new SqliteEventStore(connection.db);
+      const artifacts = new SqliteArtifactStore(connection.db);
+
+      const debate = buildDebate({ id: "debate_storage_1" });
+      await debates.create(debate);
+      await events.append({
+        id: "event_debate_1",
+        debateId: debate.id,
+        type: "debate.round.started",
+        sequence: 0,
+        payload: { round: 1 },
+        createdAt: startedAt
+      });
+      await artifacts.create({
+        id: "artifact_debate_1",
+        debateId: debate.id,
+        type: "summary",
+        path: `debates/${debate.id}/final-report.md`,
+        metadata: { contentStored: false },
+        createdAt: startedAt
+      });
+
+      expect(await debates.get(debate.id)).toEqual(debate);
+      expect(await events.listByDebate(debate.id)).toHaveLength(1);
+      expect(await artifacts.listByDebate(debate.id)).toHaveLength(1);
     } finally {
       connection?.sqlite.close();
       rmSync(tempDir, { recursive: true, force: true });
@@ -576,6 +768,232 @@ describe("sqlite persistence stores", () => {
       expect(await placements.listByRun("run_b")).toHaveLength(1);
       expect(await placements.listByRun("run_b")).toMatchObject([{ id: "placement_b_1" }]);
       expect(await placements.listByRun("run_other")).toHaveLength(0);
+    } finally {
+      connection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists runtime modes and runtimeMode fields across reopen", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-runtime-modes-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let firstConnection: ReturnType<typeof openSqliteStorage> | undefined;
+    let secondConnection: ReturnType<typeof openSqliteStorage> | undefined;
+    try {
+      firstConnection = openSqliteStorage(dbPath);
+      const registry = new SqliteRegistryStore(firstConnection.db);
+      const runs = new SqliteRunStore(firstConnection.db);
+      const sessions = new SqliteSessionStore(firstConnection.db);
+      await registry.upsertRuntimeMode(buildRuntimeMode({}));
+      await registry.upsertRuntimeMode(
+        buildRuntimeMode({
+          id: "runtime_mode_codex_exec_json",
+          slug: "codex.exec_json",
+          name: "Codex exec JSON",
+          providerId: "provider_openai",
+          runtimeId: "runtime_codex",
+          adapterId: "codex",
+          kind: "one_shot_process",
+          status: "unavailable",
+          capabilities: ["run.start", "run.cancel", "model.catalog", "auth.local"],
+          limitations: [{ code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." }],
+          availability: {
+            state: "unavailable",
+            canRun: false,
+            installed: true,
+            auth: "configured",
+            version: "codex 0.130.0",
+            checkedAt: startedAt,
+            reasonCode: "model_catalog_unavailable",
+            message: "No models returned."
+          }
+        })
+      );
+      await runs.create(buildRun({ id: "run_runtime_mode", runtimeMode: "fake.deterministic" }));
+      await sessions.create(buildSession({ id: "session_runtime_mode", runId: "run_runtime_mode", runtimeMode: "fake.deterministic" }));
+      await registry.updateRuntimeModeAvailability("codex.exec_json", {
+        state: "partial",
+        canRun: true,
+        installed: true,
+        auth: "configured",
+        version: "codex 0.130.0",
+        checkedAt: updatedAt,
+        reasonCode: "optional_check_failed",
+        message: "Optional check failed."
+      });
+
+      firstConnection.sqlite.close();
+      firstConnection = undefined;
+
+      secondConnection = openSqliteStorage(dbPath);
+      const reopenedRegistry = new SqliteRegistryStore(secondConnection.db);
+      const reopenedRuns = new SqliteRunStore(secondConnection.db);
+      const reopenedSessions = new SqliteSessionStore(secondConnection.db);
+      expect((await reopenedRegistry.getRuntimeMode("runtime_mode_fake_deterministic"))?.slug).toBe("fake.deterministic");
+      expect((await reopenedRegistry.getRuntimeMode("codex.exec_json"))?.availability.state).toBe("partial");
+      expect((await reopenedRuns.get("run_runtime_mode"))?.runtimeMode).toBe("fake.deterministic");
+      expect((await reopenedSessions.get("session_runtime_mode"))?.runtimeMode).toBe("fake.deterministic");
+    } finally {
+      firstConnection?.sqlite.close();
+      secondConnection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("adds runtime mode table and nullable run/session runtime_mode columns on pre-R3 databases", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-pre-r3-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let connection: ReturnType<typeof openSqliteStorage> | undefined;
+    try {
+      const legacy = new Database(dbPath);
+      legacy.exec(`
+        CREATE TABLE runs (
+          id TEXT PRIMARY KEY NOT NULL,
+          runtime TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          adapter_type TEXT NOT NULL,
+          cwd TEXT NOT NULL,
+          task TEXT NOT NULL,
+          status TEXT NOT NULL,
+          placement TEXT NOT NULL,
+          approval_policy TEXT NOT NULL,
+          timeout_seconds INTEGER NOT NULL,
+          metadata_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE runtime_sessions (
+          id TEXT PRIMARY KEY NOT NULL,
+          run_id TEXT NOT NULL,
+          runtime TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          protocol TEXT NOT NULL,
+          status TEXT NOT NULL,
+          state_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+      `);
+      legacy.close();
+
+      connection = openSqliteStorage(dbPath);
+      const runColumns = connection.sqlite.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
+      const sessionColumns = connection.sqlite.prepare("PRAGMA table_info(runtime_sessions)").all() as Array<{ name: string }>;
+      const runtimeModeTable = connection.sqlite
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_modes'")
+        .get() as { name?: string } | undefined;
+
+      expect(runColumns.some((column) => column.name === "runtime_mode")).toBe(true);
+      expect(sessionColumns.some((column) => column.name === "runtime_mode")).toBe(true);
+      expect(runtimeModeTable?.name).toBe("runtime_modes");
+    } finally {
+      connection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("filters runtime modes by availability, placement, capability, and pagination", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-runtime-mode-filters-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let connection: ReturnType<typeof openSqliteStorage> | undefined;
+    try {
+      connection = openSqliteStorage(dbPath);
+      const registry = new SqliteRegistryStore(connection.db);
+      await registry.upsertRuntimeMode(buildRuntimeMode({}));
+      await registry.upsertRuntimeMode(
+        buildRuntimeMode({
+          id: "runtime_mode_codex_exec_json",
+          slug: "codex.exec_json",
+          name: "Codex exec JSON",
+          providerId: "provider_openai",
+          runtimeId: "runtime_codex",
+          adapterId: "codex",
+          kind: "one_shot_process",
+          status: "partial",
+          capabilities: ["run.start", "run.cancel", "model.catalog", "auth.local"],
+          placement: {
+            local: { support: "supported", reason: "Local only." },
+            hosted: { support: "unsupported", reason: "Not hosted." },
+            connectedLocalNode: { support: "conditional", reason: "Hybrid support planned." }
+          },
+          availability: {
+            state: "partial",
+            canRun: true,
+            installed: true,
+            auth: "configured",
+            version: "codex 0.130.0",
+            checkedAt: startedAt,
+            reasonCode: "optional_check_failed",
+            message: "Optional check failed."
+          }
+        })
+      );
+      await registry.upsertRuntimeMode(
+        buildRuntimeMode({
+          id: "runtime_mode_fake_secondary",
+          slug: "fake.secondary",
+          name: "Fake secondary",
+          status: "unknown",
+          availability: {
+            state: "unknown",
+            canRun: false,
+            installed: false,
+            auth: "unknown",
+            version: null,
+            checkedAt: startedAt,
+            reasonCode: null,
+            message: null
+          }
+        })
+      );
+
+      expect((await registry.listRuntimeModes({ limit: 10, availability: ["partial"] })).runtimeModes.map((row) => row.slug)).toEqual([
+        "codex.exec_json"
+      ]);
+      expect((await registry.listRuntimeModes({ limit: 10, placement: ["connected_local_node"] })).runtimeModes.map((row) => row.slug)).toEqual([
+        "codex.exec_json"
+      ]);
+      expect((await registry.listRuntimeModes({ limit: 10, capability: ["run.start", "model.catalog"] })).runtimeModes.map((row) => row.slug)).toEqual([
+        "codex.exec_json"
+      ]);
+
+      const firstPage = await registry.listRuntimeModes({ limit: 1, adapterType: ["process"] });
+      expect(firstPage.runtimeModes).toHaveLength(1);
+      expect(firstPage.nextCursor).not.toBeNull();
+      const secondPage =
+        firstPage.nextCursor === null
+          ? await registry.listRuntimeModes({ limit: 1, adapterType: ["process"] })
+          : await registry.listRuntimeModes({ limit: 1, adapterType: ["process"], before: firstPage.nextCursor });
+      expect(secondPage.runtimeModes).toHaveLength(1);
+      expect(secondPage.runtimeModes[0]?.id).not.toBe(firstPage.runtimeModes[0]?.id);
+    } finally {
+      connection?.sqlite.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws for malformed runtime mode JSON columns", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "switchyard-sqlite-runtime-mode-malformed-"));
+    const dbPath = join(tempDir, "storage.sqlite");
+    let connection: ReturnType<typeof openSqliteStorage> | undefined;
+    try {
+      connection = openSqliteStorage(dbPath);
+      const registry = new SqliteRegistryStore(connection.db);
+      const mode = buildRuntimeMode({});
+      await registry.upsertRuntimeMode(mode);
+
+      connection.sqlite.prepare("UPDATE runtime_modes SET availability_json = ? WHERE id = ?").run("{bad-json", mode.id);
+      await expect(registry.getRuntimeMode(mode.id)).rejects.toThrow();
+
+      connection.sqlite
+        .prepare("UPDATE runtime_modes SET availability_json = ?, capabilities_json = ? WHERE id = ?")
+        .run(JSON.stringify(mode.availability), "{\"bad\":\"shape\"}", mode.id);
+      await expect(registry.getRuntimeMode(mode.id)).rejects.toThrow();
+
+      connection.sqlite
+        .prepare("UPDATE runtime_modes SET capabilities_json = ?, placement_json = ? WHERE id = ?")
+        .run(JSON.stringify(mode.capabilities), "{\"bad\":\"shape\"}", mode.id);
+      await expect(registry.getRuntimeMode(mode.id)).rejects.toThrow();
     } finally {
       connection?.sqlite.close();
       rmSync(tempDir, { recursive: true, force: true });

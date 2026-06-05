@@ -14,13 +14,27 @@ export const approvalIdSchema = idSchema("approval");
 export const providerIdSchema = idSchema("provider");
 export const modelIdSchema = idSchema("model");
 export const runtimeIdSchema = idSchema("runtime");
+export const runtimeModeIdSchema = idSchema("runtime_mode");
 export const nodeIdSchema = idSchema("node");
 export const memoryIdSchema = idSchema("memory");
 export const evidenceIdSchema = idSchema("evidence");
 export const toolInvocationIdSchema = idSchema("tool");
 export const userIdSchema = idSchema("user");
 export const organizationIdSchema = idSchema("org");
+export const accountIdSchema = idSchema("account");
+export const tenantIdSchema = idSchema("tenant");
+export const projectIdSchema = idSchema("project");
+export const apiKeyIdSchema = idSchema("api_key");
+export const billingPlanIdSchema = idSchema("billing_plan");
+export const quotaReservationIdSchema = idSchema("quota_reservation");
+export const auditLogEventIdSchema = idSchema("audit");
 export const contextPacketIdSchema = idSchema("context");
 
 export const isoDateSchema = z.string().datetime({ offset: true });
 export const metadataSchema = z.record(z.string(), z.unknown());
+export const runtimeModeSlugSchema = z
+  .string()
+  .regex(
+    /^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)+$/,
+    "must be a dot-separated lowercase runtime mode slug"
+  );

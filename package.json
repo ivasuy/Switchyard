@@ -9,7 +9,17 @@
     "build": "turbo run build",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "release:smoke-local": "pnpm --filter @switchyard/cli release:smoke-local",
+    "self-hosted:smoke": "tsx scripts/self-hosted-smoke.ts",
+    "sandbox:smoke": "tsx scripts/hosted-sandbox-smoke.ts",
+    "production:sandbox-smoke": "tsx scripts/hosted-sandbox-smoke.ts",
+    "hosted-real-runtime:smoke": "tsx scripts/hosted-real-runtime-smoke.ts",
+    "production:preflight": "tsx scripts/production-preflight.ts",
+    "production:migrate": "tsx scripts/production-migrate.ts",
+    "production:canary": "tsx scripts/production-canary.ts",
+    "production:provider-runtime-canary": "tsx scripts/production-canary.ts --live-external-tools --confirm-live-tool-spend",
+    "production:live-tool-canary": "tsx scripts/production-canary.ts --live-external-tools --confirm-live-tool-spend"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

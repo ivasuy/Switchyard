@@ -1,0 +1,208 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { R18_HTTP_ERROR_CODES, httpErrorCodeSchema, httpErrorEnvelopeSchema } from "./http-error.js";
+import {
+  ACP_RUNTIME_BRIDGE_REASON_CODES,
+  HOSTED_RUNTIME_BRIDGE_REASON_CODES
+} from "./hosted-runtime-bridge.js";
+
+const R22_TOOL_ERROR_CODES = [
+  "tool_run_required",
+  "tool_target_invalid",
+  "tool_target_mismatch",
+  "tool_hosted_auth_required",
+  "tool_store_unavailable",
+  "tool_dispatch_unavailable",
+  "tool_dispatch_failed",
+  "tool_dispatch_retry_exhausted",
+  "tool_real_tools_disabled",
+  "tool_hosted_tools_disabled",
+  "tool_connected_node_tools_disabled",
+  "tool_approval_required",
+  "tool_approval_rejected",
+  "tool_approval_expired",
+  "tool_input_limit_exceeded",
+  "tool_concurrency_limit_exceeded",
+  "tool_output_limit_exceeded",
+  "tool_artifact_write_failed",
+  "tool_redaction_failed",
+  "tool_worker_restarted",
+  "tool_node_unavailable",
+  "tool_node_execution_failed",
+  "tool_assignment_expired",
+  "tool_assignment_mismatch",
+  "hosted_runtime_approval_bridge_unshipped",
+  "approval_scope_denied",
+  "repo_hosted_unshipped",
+  "browser_tool_unshipped"
+] as const;
+
+const R24_DEBATE_ERROR_CODES = [
+  "debate_evidence_not_found_or_denied",
+  "debate_real_participant_opt_in_required",
+  "debate_runtime_unsupported",
+  "debate_wait_real_runtime_unsupported",
+  "debate_participant_count_invalid",
+  "debate_participant_placement_required",
+  "debate_participant_run_missing",
+  "debate_participant_run_failed",
+  "debate_participant_run_timeout",
+  "debate_participant_output_missing",
+  "debate_participant_output_empty",
+  "debate_participant_output_too_large",
+  "debate_runtime_approval_expired",
+  "debate_child_run_link_failed",
+  "debate_judge_config_invalid",
+  "debate_judge_runtime_unsupported",
+  "debate_judge_live_spend_unconfirmed",
+  "debate_judge_run_failed",
+  "debate_judge_timeout",
+  "debate_judge_output_missing",
+  "debate_judge_output_empty",
+  "debate_judge_output_invalid",
+  "debate_judge_output_too_large",
+  "hosted_debate_store_unavailable",
+  "hosted_debate_queue_unavailable",
+  "hosted_debate_worker_unavailable",
+  "hosted_debate_ownership_attach_failed",
+  "hosted_debate_quota_exceeded",
+  "hosted_debate_audit_unavailable",
+  "hosted_debate_artifact_write_failed",
+  "hosted_debate_event_persist_failed",
+  "debate_live_canary_spend_unconfirmed",
+  "debate_fake_canary_failed"
+] as const;
+
+const R25_HOSTED_WRAPPER_BRIDGE_STATUS_BY_CODE = {
+  runtime_input_empty: 409,
+  runtime_input_too_large: 409,
+  agentfield_bridge_capability_missing: 409,
+  agentfield_bridge_config_missing: 503,
+  agentfield_input_failed: 503,
+  agentfield_invalid_input_response: 502,
+  agentfield_input_response_too_large: 502,
+  agentfield_approval_request_invalid: 409,
+  agentfield_approval_resolution_failed: 503,
+  agentfield_invalid_approval_response: 502,
+  agentfield_approval_response_too_large: 502,
+  generic_http_bridge_capability_missing: 409,
+  generic_http_bridge_config_missing: 503,
+  generic_http_input_failed: 503,
+  generic_http_invalid_input_response: 502,
+  generic_http_input_response_too_large: 502,
+  generic_http_approval_request_invalid: 409,
+  generic_http_approval_resolution_failed: 503,
+  generic_http_invalid_approval_response: 502,
+  generic_http_approval_response_too_large: 502,
+  provider_bridge_live_canary_spend_unconfirmed: 400
+} as const;
+
+function protocolErrorCodes(): string[] {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const protocolFile = join(here, "../../protocol-rest/src/http-errors.ts");
+  const source = readFileSync(protocolFile, "utf8");
+  const match = source.match(/const STATUS_BY_CODE: Partial<Record<HttpErrorCode, number>> = \{([\s\S]*?)\n\};/);
+  if (!match || !match[1]) {
+    throw new Error("failed to locate protocol-rest STATUS_BY_CODE map");
+  }
+  return [...match[1].matchAll(/^\s*([a-z0-9_]+):\s*\d+,?$/gm)]
+    .map((entry) => entry[1] ?? "")
+    .filter(Boolean)
+    .sort();
+}
+
+function protocolStatusFor(code: string): number {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const protocolFile = join(here, "../../protocol-rest/src/http-errors.ts");
+  const source = readFileSync(protocolFile, "utf8");
+  const matcher = new RegExp(`${code}:\\s*(\\d+)`);
+  const match = source.match(matcher);
+  if (!match || !match[1]) {
+    throw new Error(`failed to locate status mapping for ${code}`);
+  }
+  return Number(match[1]);
+}
+
+describe("http error contract", () => {
+  it("accepts requestId in the HTTP error envelope", () => {
+    const parsed = httpErrorEnvelopeSchema.parse({
+      error: {
+        code: "run_not_found",
+        message: "missing",
+        requestId: "req_123"
+      }
+    });
+    expect(parsed.error.requestId).toBe("req_123");
+  });
+
+  it("matches all protocol-rest HTTP error codes", () => {
+    const contractCodes = [...httpErrorCodeSchema.options];
+    const routeCodes = protocolErrorCodes();
+
+    expect([...contractCodes].sort()).toEqual(expect.arrayContaining(routeCodes));
+    expect([...routeCodes].sort()).toEqual(routeCodes);
+  });
+
+  it("includes all R18 enterprise HTTP errors and protocol status mappings", () => {
+    for (const code of R18_HTTP_ERROR_CODES) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+    }
+
+    expect(protocolStatusFor("auth_required")).toBe(401);
+    expect(protocolStatusFor("auth_failed")).toBe(401);
+    expect(protocolStatusFor("auth_conflict")).toBe(401);
+    expect(protocolStatusFor("auth_store_unavailable")).toBe(503);
+    expect(protocolStatusFor("tenant_access_denied")).toBe(403);
+    expect(protocolStatusFor("project_access_denied")).toBe(403);
+    expect(protocolStatusFor("entitlement_denied")).toBe(403);
+    expect(protocolStatusFor("quota_exceeded")).toBe(429);
+    expect(protocolStatusFor("audit_log_unavailable")).toBe(503);
+  });
+
+  it("includes all named R22 tool HTTP errors in the contracts schema", () => {
+    for (const code of R22_TOOL_ERROR_CODES) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+    }
+  });
+
+  it("includes all named R23 hosted runtime bridge and ACP reason codes", () => {
+    for (const code of HOSTED_RUNTIME_BRIDGE_REASON_CODES) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+    }
+    for (const code of ACP_RUNTIME_BRIDGE_REASON_CODES) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+    }
+  });
+
+  it("maps hosted_runtime_bridge_non_idempotent_retry_blocked through adapter_protocol_failed conflict status", () => {
+    expect(httpErrorCodeSchema.parse("hosted_runtime_bridge_non_idempotent_retry_blocked")).toBe(
+      "hosted_runtime_bridge_non_idempotent_retry_blocked"
+    );
+    expect(protocolStatusFor("adapter_protocol_failed")).toBe(409);
+  });
+
+  it("includes all named R24 debate HTTP errors in contracts and protocol status mappings", () => {
+    for (const code of R24_DEBATE_ERROR_CODES) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+    }
+
+    expect(protocolStatusFor("debate_evidence_not_found_or_denied")).toBe(404);
+    expect(protocolStatusFor("debate_participant_placement_required")).toBe(400);
+    expect(protocolStatusFor("debate_judge_live_spend_unconfirmed")).toBe(400);
+    expect(protocolStatusFor("debate_runtime_unsupported")).toBe(409);
+    expect(protocolStatusFor("debate_wait_real_runtime_unsupported")).toBe(409);
+    expect(protocolStatusFor("debate_child_run_link_failed")).toBe(503);
+    expect(protocolStatusFor("hosted_debate_ownership_attach_failed")).toBe(503);
+    expect(protocolStatusFor("hosted_debate_quota_exceeded")).toBe(429);
+    expect(protocolStatusFor("debate_live_canary_spend_unconfirmed")).toBe(400);
+  });
+
+  it("includes all named R25 hosted wrapper bridge HTTP errors with spec-aligned statuses", () => {
+    for (const [code, status] of Object.entries(R25_HOSTED_WRAPPER_BRIDGE_STATUS_BY_CODE)) {
+      expect(httpErrorCodeSchema.parse(code)).toBe(code);
+      expect(protocolStatusFor(code)).toBe(status);
+    }
+  });
+});

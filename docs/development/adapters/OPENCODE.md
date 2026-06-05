@@ -1,0 +1,98 @@
+# OpenCode ACP Local Development
+
+This guide is only for OpenCode ACP local debugging. Use the [Official API Contract](../API.md) for endpoint shapes and [Local Development](../DEVELOPMENT.md) for daemon startup and full verification commands.
+
+R23 hosted note: `opencode.acp` hosted bridge support is shipped through existing hosted run input and approval resolution endpoints using structured ACP permission handling. Usable hosted bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker. Missing bridge command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`). Stale claimed non-idempotent provider input after worker crash is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`. Activation remains operator opt-in. Fake/no-spend remains default.
+
+## Current OpenCode Scope
+
+Implemented in R5:
+
+- Runtime mode slug: `opencode.acp`.
+- Adapter type: `acpx`.
+- Local OpenCode subprocess launch through `opencode acp` (`shell: false`).
+- ACP initialize/session-new/session-prompt/session-cancel flow through `@switchyard/protocol-acpx`.
+- Runtime-mode doctor check with bounded `opencode --version`, ACP `initialize`, and ACP `session/new`.
+- Raw ACP transcript artifacts at `runs/<runId>/opencode-acp-transcript.jsonl`.
+- Verified cancellation: public cancel returns success only after ACP confirms `stopReason:"cancelled"`.
+
+Not implemented:
+
+- Hosted terminal bridge, PTY/TUI automation, and server-owned provider execution.
+- Session resume/load/fork/list exposure through Switchyard.
+- Per-run OpenCode command or ACP transport/env overrides.
+
+## Daemon Environment Variables
+
+```text
+SWITCHYARD_OPENCODE_COMMAND=opencode
+SWITCHYARD_ACP_REQUEST_TIMEOUT_MS=5000
+SWITCHYARD_ACP_CANCEL_TIMEOUT_MS=5000
+SWITCHYARD_ACP_MAX_MESSAGE_BYTES=1048576
+```
+
+These are daemon-level settings only.
+
+## Doctor Safety
+
+`POST /runtime-modes/opencode.acp/check` is budget-safe by design:
+
+- Runs `opencode --version`.
+- Starts ACP and sends `initialize` + `session/new`.
+- Does **not** send `session/prompt`.
+
+Doctor/check does not send session/prompt.
+session/prompt can spend model budget.
+
+## Local Smoke
+
+Start daemon:
+
+```bash
+SWITCHYARD_PORT=4546 \
+SWITCHYARD_DATA_DIR=/private/tmp/switchyard-r5-opencode \
+SWITCHYARD_LOG_LEVEL=info \
+pnpm --filter @switchyard/daemon dev
+```
+
+Runtime mode + doctor:
+
+```bash
+BASE=http://127.0.0.1:4546
+curl -s "$BASE/runtime-modes/opencode.acp" | python3 -m json.tool
+curl -s -X POST "$BASE/runtime-modes/opencode.acp/check" | python3 -m json.tool
+```
+
+Optional prompt smoke (may spend budget):
+
+```bash
+curl -s -X POST "$BASE/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"runtime":"opencode","provider":"opencode","model":"opencode-default","adapterType":"acpx","cwd":"/repo","task":"Return one short sentence.","timeoutSeconds":30}' \
+  | python3 -m json.tool
+```
+
+`opencode-default` means OpenCode's current configured model; R5 does not select OpenCode models per run.
+
+## Transcript Inspection
+
+```bash
+RUN_ID=run_replace_me
+curl -s "$BASE/runs/$RUN_ID/artifacts" | python3 -m json.tool
+ARTIFACT_ID=artifact_replace_me
+curl -s "$BASE/artifacts/$ARTIFACT_ID" | python3 -m json.tool
+curl -s "$BASE/artifacts/$ARTIFACT_ID/content"
+```
+
+## Common Reason Codes
+
+- `opencode_input_unsupported`: local adapter input is unsupported outside the hosted bridge workflow.
+- `acp_permission_request_expired` / `acp_permission_response_failed`: hosted ACP permission approval lifecycle terminalization or duplicate response guard.
+- `acp_cancel_unverified`: cancel request sent but ACP did not confirm cancelled terminal state before timeout.
+- `opencode_stderr_warning`: check succeeded but non-fatal OpenCode stderr diagnostics were observed.
+
+## Healthy Log Signals
+
+- `runtime_mode.seeded` for `opencode.acp` during daemon startup.
+- `runtime_mode.check` entries with state/reasonCode for OpenCode checks.
+- Run lifecycle logs (`run.started`, `runtime.session.started`, `run.completed`/`run.cancelled`/`run.failed`).

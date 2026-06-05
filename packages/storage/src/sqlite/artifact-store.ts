@@ -111,4 +111,13 @@ export class SqliteArtifactStore implements ArtifactStore {
       .orderBy(asc(artifacts.createdAt));
     return rows.map(fromRow);
   }
+
+  async listByDebate(debateId: string): Promise<Artifact[]> {
+    const rows = await this.db
+      .select()
+      .from(artifacts)
+      .where(eq(artifacts.debateId, debateId))
+      .orderBy(asc(artifacts.createdAt));
+    return rows.map(fromRow);
+  }
 }

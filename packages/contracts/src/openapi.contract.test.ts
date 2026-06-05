@@ -1,0 +1,810 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import {
+  LOCAL_DAEMON_ROUTE_INVENTORY,
+  type RouteInventoryEntry,
+  generateOpenApiDocument,
+  renderOpenApiJson
+} from "./openapi.js";
+import { runOpenApiCli } from "./openapi-cli.js";
+import { createToolInvocationRequestSchema } from "./tool.js";
+import {
+  authScopeSchema,
+  auditEventTypeSchema,
+  auditResourceTypeSchema,
+  billingPlanSchema,
+  quotaKindSchema,
+  resourceOwnershipTypeSchema
+} from "./enterprise.js";
+import {
+  assignmentClaimResponseSchema,
+  assignmentCompleteRequestSchema,
+  assignmentSchema
+} from "./assignment.js";
+import { nodePolicySchema } from "./node.js";
+import {
+  acceptedResponseSchema,
+  hostedRuntimeBridgeOperationSchema,
+  hostedRuntimeBridgeReadinessReportSchema,
+  hostedRuntimeBridgeSupportedModeSchema,
+  isHostedRuntimeBridgeSupportedMode
+} from "./hosted-runtime-bridge.js";
+
+const FORBIDDEN_PUBLIC_ROUTE_PREFIX =
+  /^\/(exec|shell|process|command|pty|terminal|sandbox|browser|search|github|fetch|repo|dashboard|tui)(\/|$)/;
+const FORBIDDEN_OPERATION_TOKENS = [
+  "sandbox",
+  "terminal",
+  "exec",
+  "pty",
+  "shell",
+  "process",
+  "command",
+  "browser",
+  "search",
+  "github",
+  "fetch",
+  "repo",
+  "dashboard",
+  "tui",
+  "genericProcess",
+  "arbitraryProcess"
+];
+const FORBIDDEN_EXACT_PATHS = [
+  "/tenant/signup",
+  "/billing/checkout",
+  "/billing/webhook",
+  "/payments",
+  "/dashboard",
+  "/tui",
+  "/exec",
+  "/shell",
+  "/process",
+  "/command",
+  "/pty",
+  "/terminal",
+  "/sandbox",
+  "/browser",
+  "/search",
+  "/github",
+  "/fetch",
+  "/repo"
+];
+const FORBIDDEN_HOSTED_R25_ROUTE_FAMILY_PATTERNS = [
+  /^\/runtime-bridge(\/|$)/,
+  /^\/input(\/|$)/,
+  /^\/approval(\/|$)/,
+  /^\/session(\/|$)/,
+  /^\/exec(\/|$)/,
+  /^\/shell(\/|$)/,
+  /^\/process(\/|$)/,
+  /^\/command(\/|$)/,
+  /^\/pty(\/|$)/,
+  /^\/terminal(\/|$)/,
+  /^\/sandbox(\/|$)/,
+  /^\/browser(\/|$)/,
+  /^\/repo(\/|$)/,
+  /^\/judge(\/|$)/,
+  /^\/model-judge(\/|$)/,
+  /^\/judging(\/|$)/,
+  /^\/dashboard(\/|$)/,
+  /^\/tui(\/|$)/
+];
+const FORBIDDEN_HOSTED_PROVIDER_EXPANSION_PATH_PREFIX =
+  /^\/(cursor|openclaw|paperclip|debates\/participants\/real|debates\/judge|model-judge|judging)(\/|$)/;
+const FORBIDDEN_HOSTED_PROVIDER_EXPANSION_OPERATION_TOKENS = [
+  "cursor",
+  "openclaw",
+  "paperclip",
+  "debateparticipantreal",
+  "realdebateparticipant",
+  "modeljudge",
+  "debatejudge",
+  "judging"
+];
+
+function readRootFile(relativePath: string): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return readFileSync(join(here, "../../..", relativePath), "utf8");
+}
+
+describe("openapi generation", () => {
+  it("generates deterministic bytes", () => {
+    const first = renderOpenApiJson(generateOpenApiDocument());
+    const second = renderOpenApiJson(generateOpenApiDocument());
+    expect(first).toBe(second);
+  });
+
+  it("rejects empty inventory", () => {
+    expect(() => generateOpenApiDocument({ inventory: [] })).toThrow(
+      'OpenAPI route inventory is empty for surface "local_daemon".'
+    );
+  });
+
+  it("rejects unsupported content kinds", () => {
+    const bad = [{ ...LOCAL_DAEMON_ROUTE_INVENTORY[0], success: { status: 200, contentKind: "yaml" as never } }];
+    expect(() => generateOpenApiDocument({ inventory: bad })).toThrow(/unsupported content kind/i);
+  });
+
+  it("rejects unsupported schema references", () => {
+    const bad: RouteInventoryEntry[] = [
+      {
+        surface: "local_daemon",
+        errorEnvelopeOwner: "contracts",
+        method: "get",
+        path: "/bad",
+        operationId: "badSchema",
+        summary: "Bad schema",
+        tags: ["broken"],
+        noRequestBody: true,
+        success: {
+          status: 200,
+          contentKind: "json",
+          schemaRef: "UnknownSchema",
+          description: "Broken schema"
+        }
+      }
+    ];
+    expect(() => generateOpenApiDocument({ inventory: bad })).toThrow(/unknown schema reference/i);
+  });
+
+  it("rejects unknown surfaces with deterministic error message", () => {
+    expect(() => generateOpenApiDocument({ surface: "unknown" as never })).toThrow(
+      'Unknown OpenAPI surface "unknown". Expected one of: local_daemon, hosted_server.'
+    );
+  });
+
+  it("cli reports deterministic unknown surface message", async () => {
+    const stderr: string[] = [];
+    const exitCode = await runOpenApiCli(["generate", "--surface", "unknown"], {
+      cwd: () => "/tmp",
+      stdout: () => {},
+      stderr: (text) => stderr.push(text),
+      readFile: () => "",
+      writeFile: () => {}
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("")).toContain(
+      'Unknown OpenAPI surface "unknown". Expected one of: local_daemon, hosted_server.'
+    );
+  });
+
+  it("cli reports deterministic drift message with surface script", async () => {
+    const stderr: string[] = [];
+    const exitCode = await runOpenApiCli(["check", "--surface", "hosted_server"], {
+      cwd: () => "/tmp",
+      stdout: () => {},
+      stderr: (text) => stderr.push(text),
+      readFile: () => "stale",
+      writeFile: () => {}
+    });
+    expect(exitCode).toBe(1);
+    expect(stderr.join("")).toContain(
+      "OpenAPI artifact drift for openapi.hosted-server.json; run openapi:generate:hosted to regenerate."
+    );
+  });
+
+  it("documents artifact content raw behavior with extension", () => {
+    const document = generateOpenApiDocument();
+    const operation = document.paths["/artifacts/{id}/content"]?.get;
+    expect(operation).toBeDefined();
+    expect(operation?.["x-switchyard-content"]).toEqual({
+      mode: "raw",
+      supportsBinary: true
+    });
+  });
+
+  it("includes route descriptor operation id and request/query schemas", () => {
+    const document = generateOpenApiDocument();
+
+    const createRun = document.paths["/runs"]?.post;
+    expect(createRun?.operationId).toBe("createRun");
+    expect(createRun?.requestBody).toBeDefined();
+    expect(Array.isArray(createRun?.parameters)).toBe(true);
+
+    const listRuns = document.paths["/runs"]?.get;
+    expect(listRuns?.operationId).toBe("listRuns");
+    const queryParameters = listRuns?.parameters as Array<{ name: string }> | undefined;
+    expect(queryParameters?.some((parameter) => parameter.name === "limit")).toBe(true);
+  });
+
+  it("marks no-body routes and error-envelope ownership", () => {
+    const document = generateOpenApiDocument();
+    const getRun = document.paths["/runs/{id}"]?.get;
+    expect(getRun?.["x-switchyard-no-body"]).toBe(true);
+    expect(getRun?.["x-switchyard-error-envelope"]).toBe("contracts");
+  });
+
+  it("keeps local daemon OpenAPI unauthenticated and hosted-only routes absent", () => {
+    const document = generateOpenApiDocument();
+
+    expect(document.info.title).toBe("Switchyard Local Daemon API");
+    expect(document.servers).toEqual([{ url: "http://127.0.0.1:4545" }]);
+    expect(document.components.securitySchemes).toBeUndefined();
+    expect(document.paths["/auth/whoami"]).toBeUndefined();
+    expect(document.paths["/entitlements"]).toBeUndefined();
+    expect(document.paths["/audit/events"]).toBeUndefined();
+  });
+
+  it("adds hosted OpenAPI title, server, and security scheme", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    expect(document.info.title).toBe("Switchyard Hosted Server API");
+    expect(document.servers).toEqual([{ url: "https://api.switchyard.local" }]);
+    expect(document.components.securitySchemes).toEqual({
+      SwitchyardApiKey: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "Switchyard API key",
+        description: "Use Authorization: Bearer <switchyard_api_key> or x-switchyard-api-key."
+      }
+    });
+  });
+
+  it("includes hosted enterprise routes", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    expect(document.paths["/auth/whoami"]?.get?.operationId).toBe("whoami");
+    expect(document.paths["/entitlements"]?.get?.operationId).toBe("getEntitlements");
+    expect(document.paths["/audit/events"]?.get?.operationId).toBe("listAuditEvents");
+  });
+
+  it("includes only existing hosted debate route family members", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const debatePaths = Object.keys(document.paths).filter((path) => path.startsWith("/debates"));
+    expect(debatePaths.sort()).toEqual(["/debates", "/debates/{id}", "/debates/{id}/events"]);
+    expect(document.paths["/debates"]?.post?.operationId).toBe("createDebate");
+    expect(document.paths["/debates/{id}"]?.get?.operationId).toBe("getDebate");
+    expect(document.paths["/debates/{id}/events"]?.get?.operationId).toBe("streamDebateEvents");
+  });
+
+  it("keeps hosted /health and /ready public", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    expect(document.paths["/health"]?.get?.security).toBeUndefined();
+    expect(document.paths["/ready"]?.get?.security).toBeUndefined();
+  });
+
+  it("documents hosted readiness schema checks with named codes and diagnostics", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const readySchema = document.components.schemas["ReadyResponse"] as Record<string, unknown> | undefined;
+    const examples = readySchema?.examples as Array<Record<string, unknown>> | undefined;
+    expect(Array.isArray(examples)).toBe(true);
+
+    const first = (examples ?? [])[0];
+    const checks = first?.checks as Record<string, unknown> | undefined;
+    const schemaCheck = checks?.schema as Record<string, unknown> | undefined;
+    expect(typeof schemaCheck?.ok).toBe("boolean");
+    expect(String(schemaCheck?.code ?? "")).toBe("postgres_schema_migration_required");
+    expect(schemaCheck?.diagnostics).toEqual(
+      expect.objectContaining({
+        expectedVersion: expect.any(Number),
+        actualVersion: expect.any(Number)
+      })
+    );
+    expect(schemaCheck?.diagnostics).not.toEqual(
+      expect.objectContaining({
+        currentVersion: expect.any(Number),
+        requiredVersion: expect.any(Number),
+        compatible: expect.any(Boolean)
+      })
+    );
+
+    const readiness = hostedRuntimeBridgeReadinessReportSchema.parse({
+      status: "not_ready",
+      checks: [
+        { name: "payload_store", ok: false, reasonCode: "hosted_runtime_bridge_store_unavailable" },
+        { name: "session_reconciliation", ok: false, reasonCode: "hosted_runtime_bridge_worker_unavailable" },
+        { name: "approval_sender", ok: true },
+        { name: "wrapper_config", ok: true },
+        { name: "wrapper_bridge_capability", ok: false, reasonCode: "generic_http_bridge_capability_missing" }
+      ]
+    });
+    expect(readiness.checks.map((entry) => entry.name)).toEqual([
+      "payload_store",
+      "session_reconciliation",
+      "approval_sender",
+      "wrapper_config",
+      "wrapper_bridge_capability"
+    ]);
+  });
+
+  it("protects hosted runs and node routes with SwitchyardApiKey", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const expectedSecurity = [{ SwitchyardApiKey: [] }];
+
+    expect(document.paths["/runs"]?.post?.security).toEqual(expectedSecurity);
+    expect(document.paths["/runs/{id}/events"]?.get?.security).toEqual(expectedSecurity);
+    expect(document.paths["/nodes/register"]?.post?.security).toEqual(expectedSecurity);
+    expect(document.paths["/nodes/{id}"]?.get?.security).toEqual(expectedSecurity);
+  });
+
+  it("documents hosted /metrics as protected operator-only global metrics", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const metricsGet = document.paths["/metrics"]?.get as Record<string, unknown> | undefined;
+    expect(metricsGet?.security).toEqual([{ SwitchyardApiKey: [] }]);
+    expect(String(metricsGet?.summary ?? "")).toMatch(/operator-only global metrics/i);
+    const requiredScopes = metricsGet?.["x-switchyard-required-scopes"] as string[] | undefined;
+    expect(requiredScopes).toEqual(["metrics:read", "admin:read"]);
+    expect(document.paths["/metrics/tenant"]).toBeUndefined();
+  });
+
+  it("includes hosted audit query schema", () => {
+    const document = generateOpenApiDocument({ surface: "hosted_server" });
+    const listAudit = document.paths["/audit/events"]?.get as Record<string, unknown> | undefined;
+    const parameters = listAudit?.parameters as Array<{ name: string }>;
+    expect(parameters.map((parameter) => parameter.name)).toEqual(["cursor", "limit"]);
+  });
+
+  it("keeps public arbitrary execution routes out of OpenAPI", () => {
+    const local = generateOpenApiDocument();
+    const hosted = generateOpenApiDocument({ surface: "hosted_server" });
+
+    for (const document of [local, hosted]) {
+      const paths = Object.keys(document.paths);
+      for (const path of paths) {
+        const lower = path.toLowerCase();
+        expect(FORBIDDEN_PUBLIC_ROUTE_PREFIX.test(lower)).toBe(false);
+        if (lower.startsWith("/tools/") && lower !== "/tools/invocations" && !lower.startsWith("/tools/invocations/")) {
+          expect(lower).not.toMatch(/search|exec|shell|terminal|pty|process|browser|command|github|fetch|repo/);
+        }
+      }
+      for (const forbiddenPath of FORBIDDEN_EXACT_PATHS) {
+        expect(paths.some((path) => path === forbiddenPath || path.startsWith(`${forbiddenPath}/`))).toBe(false);
+      }
+    }
+
+    expect(local.paths["/memory/search"]?.get?.operationId).toBe("searchMemory");
+    expect(hosted.paths["/tools/invocations"]?.post?.operationId).toBe("invokeTool");
+    expect(hosted.paths["/tools/invocations"]?.get?.operationId).toBe("listToolInvocations");
+  });
+
+  it("keeps local and hosted debate/public execution boundaries closed", () => {
+    for (const document of [generateOpenApiDocument(), generateOpenApiDocument({ surface: "hosted_server" })]) {
+      const paths = Object.keys(document.paths);
+      const lower = paths.map((path) => path.toLowerCase());
+
+      expect(lower.some((path) => path.includes("/debates/participants/real"))).toBe(false);
+      expect(lower.some((path) => path.includes("/debates/judge"))).toBe(false);
+      expect(lower.some((path) => path.includes("/model-judge"))).toBe(false);
+      expect(lower.some((path) => path.includes("/judging"))).toBe(false);
+
+      expect(lower.some((path) => path.includes("/dashboard"))).toBe(false);
+      expect(lower.some((path) => path.includes("/tui"))).toBe(false);
+      expect(lower.some((path) => path.includes("/terminal"))).toBe(false);
+      expect(lower.some((path) => path.includes("/pty"))).toBe(false);
+      expect(lower.some((path) => path.includes("/sandbox"))).toBe(false);
+      expect(lower.some((path) => path.includes("/exec"))).toBe(false);
+      expect(lower.some((path) => path.includes("/shell"))).toBe(false);
+      expect(lower.some((path) => path.includes("/process"))).toBe(false);
+    }
+  });
+
+  it("keeps arbitrary execution operation ids out of OpenAPI", () => {
+    for (const document of [generateOpenApiDocument(), generateOpenApiDocument({ surface: "hosted_server" })]) {
+      const operations = Object.entries(document.paths).flatMap(([path, methods]) =>
+        Object.values(methods).map((operation) => ({ path, operation: operation as Record<string, unknown> }))
+      );
+      for (const { path, operation } of operations) {
+        const operationId = String(operation["operationId"] ?? "");
+        const lower = operationId.toLowerCase();
+        if (operationId === "searchMemory" && path === "/memory/search") {
+          continue;
+        }
+        const summary = String(operation["summary"] ?? "").toLowerCase();
+        const tags = Array.isArray(operation["tags"]) ? operation["tags"].map((tag) => String(tag).toLowerCase()) : [];
+        const looksExecutionSurface =
+          /tool|run|runtime|exec|shell|command|process|terminal|pty|browser|search|github|fetch|repo/.test(
+            `${path.toLowerCase()} ${summary} ${tags.join(" ")}`
+          );
+        if (!looksExecutionSurface) {
+          continue;
+        }
+        expect(FORBIDDEN_OPERATION_TOKENS.some((token) => lower.includes(token.toLowerCase()))).toBe(false);
+      }
+    }
+  });
+
+  it("keeps hosted OpenAPI free of non-R21 provider routes and hosted debate judging surfaces", () => {
+    const hosted = generateOpenApiDocument({ surface: "hosted_server" });
+    const paths = Object.keys(hosted.paths);
+    for (const path of paths) {
+      const lower = path.toLowerCase();
+      expect(FORBIDDEN_HOSTED_PROVIDER_EXPANSION_PATH_PREFIX.test(lower)).toBe(false);
+      expect(lower).not.toContain("/cursor/");
+      expect(lower).not.toContain("/openclaw/");
+      expect(lower).not.toContain("/paperclip/");
+      expect(lower).not.toContain("/debates/participants/real");
+      expect(lower).not.toContain("/debates/judge");
+      expect(lower).not.toContain("/model-judge");
+      expect(lower).not.toContain("/judging");
+    }
+
+    const operations = Object.entries(hosted.paths).flatMap(([path, methods]) =>
+      Object.values(methods).map((operation) => ({ path, operation: operation as Record<string, unknown> }))
+    );
+    for (const { path, operation } of operations) {
+      const operationId = String(operation["operationId"] ?? "");
+      const lowerId = operationId.toLowerCase();
+      const summary = String(operation["summary"] ?? "").toLowerCase();
+      const tags = Array.isArray(operation["tags"]) ? operation["tags"].map((tag) => String(tag).toLowerCase()) : [];
+      const combined = `${path.toLowerCase()} ${lowerId} ${summary} ${tags.join(" ")}`;
+      const looksLikeForbiddenExpansion =
+        /cursor|openclaw|paperclip|debate|participant|judge|judging|model/.test(combined);
+      if (!looksLikeForbiddenExpansion) {
+        continue;
+      }
+      expect(
+        FORBIDDEN_HOSTED_PROVIDER_EXPANSION_OPERATION_TOKENS.some((token) => lowerId.includes(token.toLowerCase()))
+      ).toBe(false);
+      expect(combined).not.toMatch(/debates\/participants\/real|model[ _-]?judge|debate[ _-]?judge|judging/);
+    }
+  });
+
+  it("keeps R25 hosted wrapper bridge public route boundary closed", () => {
+    const hosted = generateOpenApiDocument({ surface: "hosted_server" });
+    const paths = Object.keys(hosted.paths);
+    const lower = paths.map((path) => path.toLowerCase());
+
+    expect(paths).toContain("/runs/{id}/input");
+    expect(hosted.paths["/runs/{id}/input"]?.post?.operationId).toBe("sendRunInput");
+    expect(hosted.paths["/approvals"]?.get?.operationId).toBe("listApprovals");
+    expect(hosted.paths["/approvals"]?.post).toBeUndefined();
+    expect(hosted.paths["/approvals/{id}"]?.get?.operationId).toBe("getApproval");
+    expect(hosted.paths["/approvals/{id}/approve"]?.post?.operationId).toBe("approveApproval");
+    expect(hosted.paths["/approvals/{id}/reject"]?.post?.operationId).toBe("rejectApproval");
+
+    for (const path of lower) {
+      for (const pattern of FORBIDDEN_HOSTED_R25_ROUTE_FAMILY_PATTERNS) {
+        expect(pattern.test(path)).toBe(false);
+      }
+    }
+
+    expect(lower).not.toContain("/runtime-bridge");
+    expect(lower).not.toContain("/input");
+    expect(lower).not.toContain("/approval");
+    expect(lower).not.toContain("/approvals/{id}/resolve");
+    expect(lower).not.toContain("/runs/{id}/runtime-bridge");
+  });
+
+  it("documents R24 hosted debate boundary in product docs", () => {
+    const product = readRootFile("PRODUCT.md");
+    const readme = readRootFile("README.md");
+    const api = readRootFile("docs/development/API.md");
+    const development = readRootFile("docs/development/DEVELOPMENT.md");
+    const codex = readRootFile("docs/development/adapters/CODEX.md");
+    const claude = readRootFile("docs/development/adapters/CLAUDE_CODE.md");
+    const opencode = readRootFile("docs/development/adapters/OPENCODE.md");
+    const developerDocs = [readme, api, development, codex, claude, opencode].join("\n");
+
+    expect(product).toContain("R21");
+    expect(product).toMatch(/known provider/i);
+    expect(product).toMatch(/fake-only remains default/i);
+    expect(product).toMatch(/operator opt-in/i);
+    expect(product).toMatch(/rollback/i);
+    expect(product).toMatch(/POST \/debates|\/debates/i);
+
+    expect(developerDocs).toMatch(/known provider/i);
+    expect(developerDocs).toMatch(/operator opt-in/i);
+    expect(developerDocs).toMatch(/no-spend smoke/i);
+    expect(developerDocs).toMatch(/spend-gated canary/i);
+    expect(developerDocs).toMatch(/rollback/i);
+    expect(developerDocs).toMatch(/\/debates/i);
+    expect(developerDocs).toMatch(/fake[-/ ]only remains default|fake\/no-spend remains default/i);
+    expect(developerDocs).toMatch(/does not ship generic process\/pty runtime adapters/i);
+    expect(developerDocs).toMatch(/does not ship cursor\/openclaw\/paperclip/i);
+    expect(developerDocs).toMatch(/hosted worker tools: `fetch`, `web_search`, `github`, command-catalog `shell`/i);
+    expect(developerDocs).toMatch(/does not ship hosted browser automation/i);
+    expect(developerDocs).toMatch(/does not ship hosted `repo` execution|hosted `repo` remains denied/i);
+    expect(developerDocs).toMatch(
+      /R23 adds hosted runtime bridge support only for worker-owned `claude_code\.sdk` and structured `opencode\.acp`/i
+    );
+    expect(developerDocs).toMatch(/`codex\.exec_json` remains one-shot with hosted input\/approval unsupported/i);
+    expect(developerDocs).toMatch(/AgentField\/Generic HTTP input, approval, or debate bridges/i);
+    expect(developerDocs).toMatch(/does not ship hosted terminal bridge/i);
+  });
+
+  it("documents tool invocation create/get/list envelopes with invocation field names", () => {
+    const document = generateOpenApiDocument();
+    const components = document.components.schemas;
+    const toolInvocationResponse = components["ToolInvocationResponse"] as Record<string, unknown>;
+    const listToolInvocationsResponse = components["ListToolInvocationsResponse"] as Record<string, unknown>;
+    expect(toolInvocationResponse).toBeDefined();
+    expect(listToolInvocationsResponse).toBeDefined();
+
+    const toolInvocationProps = (toolInvocationResponse.properties ?? {}) as Record<string, unknown>;
+    const listProps = (listToolInvocationsResponse.properties ?? {}) as Record<string, unknown>;
+    expect(toolInvocationProps["invocation"]).toBeDefined();
+    expect(toolInvocationProps["approval"]).toBeDefined();
+    expect(toolInvocationProps["toolInvocation"]).toBeUndefined();
+    expect(listProps["invocations"]).toBeDefined();
+    expect(listProps["toolInvocations"]).toBeUndefined();
+  });
+
+  it("accepts R22 hosted and connected-node invocation targets and keeps local compatibility", () => {
+    const localCompatible = createToolInvocationRequestSchema.parse({
+      runId: "run_local_1",
+      type: "fetch",
+      input: { url: "https://example.com", method: "GET" }
+    });
+    expect(localCompatible.type).toBe("fetch");
+
+    const hostedTarget = createToolInvocationRequestSchema.parse({
+      runId: "run_hosted_1",
+      type: "fetch",
+      target: { placement: "hosted" },
+      input: { url: "https://example.com", method: "GET" }
+    });
+    expect(hostedTarget.target?.placement).toBe("hosted");
+
+    const nodeTarget = createToolInvocationRequestSchema.parse({
+      runId: "run_node_1",
+      type: "repo",
+      target: { placement: "connected_local_node", nodeId: "node_123" },
+      input: { operation: "status", cwd: "/tmp/repo" }
+    });
+    expect(nodeTarget.target?.placement).toBe("connected_local_node");
+    expect(nodeTarget.target).toEqual(expect.objectContaining({ nodeId: "node_123" }));
+  });
+
+  it("rejects malformed R22 invocation targets", () => {
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        runId: "run_bad_1",
+        type: "fetch",
+        target: { placement: "local" },
+        input: { url: "https://example.com", method: "GET" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        runId: "run_bad_2",
+        type: "fetch",
+        target: { placement: "hosted", nodeId: "node_123" },
+        input: { url: "https://example.com", method: "GET" }
+      })
+    ).toThrow();
+  });
+
+  it("accepts R22 tool enterprise scopes, entitlements, quotas, ownership, and audit types", () => {
+    expect(authScopeSchema.parse("tools:write")).toBe("tools:write");
+    expect(authScopeSchema.parse("tools:read")).toBe("tools:read");
+    expect(() => authScopeSchema.parse("tools:admin")).toThrow();
+
+    const plan = billingPlanSchema.parse({
+      id: "billing_plan_basic",
+      slug: "basic",
+      displayName: "Basic",
+      status: "active",
+      entitlements: {
+        allowedPlacements: ["local"],
+        allowedRuntimeModes: ["fake.deterministic"],
+        allowHostedRealRuntime: false,
+        allowConnectedNodes: false,
+        allowArtifactContentRead: false,
+        allowMetricsRead: false,
+        allowAuditRead: false,
+        allowHostedTools: false,
+        allowConnectedNodeTools: false,
+        allowedToolTypes: [],
+        allowToolArtifactContentRead: false
+      },
+      quotas: {
+        maxRunsPerHour: 100,
+        maxActiveRuns: 10,
+        maxRunTimeoutSeconds: 1800,
+        maxConnectedNodes: 2,
+        maxArtifactContentReadBytesPerHour: 1_000_000,
+        maxToolInvocationsPerHour: 200,
+        maxActiveToolInvocations: 5,
+        maxToolArtifactBytesPerHour: 2_000_000
+      },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(plan.entitlements.allowHostedTools).toBe(false);
+    expect(plan.quotas.maxToolInvocationsPerHour).toBe(200);
+
+    const enabledPlan = billingPlanSchema.parse({
+      id: "billing_plan_tools_enabled",
+      slug: "tools-enabled",
+      displayName: "Tools Enabled",
+      status: "active",
+      entitlements: {
+        allowedPlacements: ["hosted", "connected_local_node"],
+        allowedRuntimeModes: ["codex.exec_json"],
+        allowHostedRealRuntime: true,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowMetricsRead: true,
+        allowAuditRead: true,
+        allowHostedTools: true,
+        allowConnectedNodeTools: true,
+        allowedToolTypes: ["fetch", "github"],
+        allowToolArtifactContentRead: true
+      },
+      quotas: {
+        maxRunsPerHour: 200,
+        maxActiveRuns: 20,
+        maxRunTimeoutSeconds: 3600,
+        maxConnectedNodes: 10,
+        maxArtifactContentReadBytesPerHour: 2_000_000,
+        maxToolInvocationsPerHour: 500,
+        maxActiveToolInvocations: 50,
+        maxToolArtifactBytesPerHour: 10_000_000
+      },
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(enabledPlan.entitlements.allowHostedTools).toBe(true);
+    expect(enabledPlan.entitlements.allowConnectedNodeTools).toBe(true);
+    expect(enabledPlan.entitlements.allowedToolTypes).toEqual(["fetch", "github"]);
+    expect(enabledPlan.entitlements.allowToolArtifactContentRead).toBe(true);
+    expect(enabledPlan.quotas.maxToolInvocationsPerHour).toBe(500);
+
+    expect(quotaKindSchema.parse("tool_invocations_per_hour")).toBe("tool_invocations_per_hour");
+    expect(quotaKindSchema.parse("active_tool_invocations")).toBe("active_tool_invocations");
+    expect(quotaKindSchema.parse("tool_artifact_bytes_per_hour")).toBe("tool_artifact_bytes_per_hour");
+    expect(quotaKindSchema.parse("runtime_bridge_commands_per_hour")).toBe("runtime_bridge_commands_per_hour");
+    expect(quotaKindSchema.parse("active_runtime_bridge_commands")).toBe("active_runtime_bridge_commands");
+    expect(quotaKindSchema.parse("debates_per_hour")).toBe("debates_per_hour");
+    expect(quotaKindSchema.parse("active_debates")).toBe("active_debates");
+
+    expect(resourceOwnershipTypeSchema.parse("tool_invocation")).toBe("tool_invocation");
+    expect(resourceOwnershipTypeSchema.parse("approval")).toBe("approval");
+    expect(resourceOwnershipTypeSchema.parse("runtime_bridge_command")).toBe("runtime_bridge_command");
+    expect(resourceOwnershipTypeSchema.parse("debate")).toBe("debate");
+
+    expect(auditEventTypeSchema.parse("tool.execution_completed")).toBe("tool.execution_completed");
+    expect(auditResourceTypeSchema.parse("tool_invocation")).toBe("tool_invocation");
+    expect(auditResourceTypeSchema.parse("approval")).toBe("approval");
+  });
+
+  it("keeps run assignment compatibility and accepts R22 tool assignment extensions", () => {
+    const runAssignment = assignmentSchema.parse({
+      id: "assignment_run_1",
+      runId: "run_123",
+      nodeId: "node_123",
+      status: "pending",
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(runAssignment.kind).toBe("run");
+
+    const toolAssignment = assignmentSchema.parse({
+      id: "assignment_tool_1",
+      runId: "run_123",
+      nodeId: "node_123",
+      status: "pending",
+      kind: "tool",
+      toolInvocationId: "tool_123",
+      createdAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(toolAssignment.kind).toBe("tool");
+    expect(toolAssignment.toolInvocationId).toBe("tool_123");
+
+    expect(() =>
+      assignmentSchema.parse({
+        id: "assignment_tool_2",
+        runId: "run_123",
+        nodeId: "node_123",
+        status: "pending",
+        kind: "tool",
+        createdAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    const claimResponse = assignmentClaimResponseSchema.parse({
+      assignment: toolAssignment,
+      run: null,
+      toolInvocation: {
+        id: "tool_123",
+        runId: "run_123",
+        type: "fetch",
+        status: "queued",
+        input: {},
+        createdAt: "2026-06-01T00:00:00.000Z"
+      }
+    });
+    expect(claimResponse.toolInvocation?.id).toBe("tool_123");
+
+    const runClaimResponse = assignmentClaimResponseSchema.parse({
+      assignment: runAssignment,
+      run: null
+    });
+    expect(runClaimResponse.assignment?.id).toBe("assignment_run_1");
+    expect(runClaimResponse.toolInvocation).toBeNull();
+  });
+
+  it("accepts optional terminal tool invocation patch in assignment completion", () => {
+    const request = assignmentCompleteRequestSchema.parse({
+      status: "completed",
+      toolInvocation: {
+        id: "tool_123",
+        status: "completed",
+        output: {
+          ok: true
+        }
+      }
+    });
+    expect(request.toolInvocation?.status).toBe("completed");
+  });
+
+  it("parses node policy tool fields without requiring raw command catalogs", () => {
+    const policy = nodePolicySchema.parse({
+      allowRuntimeModes: ["codex.exec_json"],
+      denyAdapterTypes: [],
+      allowCwdPrefixes: ["/workspace"],
+      allowEventTypes: ["tool.result"],
+      artifactSync: "full",
+      maxArtifactBytes: 1024,
+      allowToolTypes: ["fetch", "repo"],
+      allowToolCwdPrefixes: ["/workspace/repo"],
+      toolArtifactSync: "metadata_only",
+      maxToolArtifactBytes: 2048,
+      toolApprovalRequired: true
+    });
+    expect(policy.allowToolTypes).toEqual(["fetch", "repo"]);
+    expect(policy.toolApprovalRequired).toBe(true);
+  });
+
+  it("documents hosted R22 tool invocation and approval route subset with auth, excluding POST /approvals", () => {
+    const hosted = generateOpenApiDocument({ surface: "hosted_server" });
+    const expectedSecurity = [{ SwitchyardApiKey: [] }];
+
+    expect(hosted.paths["/tools/invocations"]?.post?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/tools/invocations"]?.post?.responses?.["202"]).toBeDefined();
+    expect(hosted.paths["/tools/invocations"]?.post?.responses?.["201"]).toBeUndefined();
+    expect(hosted.paths["/tools/invocations"]?.get?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/tools/invocations/{id}"]?.get?.security).toEqual(expectedSecurity);
+
+    expect(hosted.paths["/approvals"]?.get?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/approvals"]?.post).toBeUndefined();
+    expect(hosted.paths["/approvals/{id}"]?.get?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/approvals/{id}/approve"]?.post?.security).toEqual(expectedSecurity);
+    expect(hosted.paths["/approvals/{id}/reject"]?.post?.security).toEqual(expectedSecurity);
+  });
+
+  it("keeps AcceptedResponse backward compatible with optional bridgeCommandId", () => {
+    const legacy = acceptedResponseSchema.parse({ accepted: true });
+    const extended = acceptedResponseSchema.parse({
+      accepted: true,
+      bridgeCommandId: "bridge_cmd_123"
+    });
+    expect(legacy.accepted).toBe(true);
+    expect(extended.bridgeCommandId).toBe("bridge_cmd_123");
+  });
+
+  it("supports exactly the R25 hosted runtime bridge modes and operations", () => {
+    expect(hostedRuntimeBridgeOperationSchema.options).toEqual(["input", "approval_resolution"]);
+    expect(hostedRuntimeBridgeSupportedModeSchema.options).toEqual([
+      "claude_code.sdk",
+      "opencode.acp",
+      "agentfield.async_rest",
+      "generic_http.async_rest"
+    ]);
+
+    for (const mode of hostedRuntimeBridgeSupportedModeSchema.options) {
+      expect(isHostedRuntimeBridgeSupportedMode(mode, "input")).toBe(true);
+      expect(isHostedRuntimeBridgeSupportedMode(mode, "approval_resolution")).toBe(true);
+    }
+
+    for (const unsupported of [
+      "codex.exec_json",
+      "codex.interactive",
+      "browser",
+      "browser.session",
+      "repo",
+      "repo.checkout",
+      "process",
+      "process.exec",
+      "PTY",
+      "pty",
+      "shell",
+      "Cursor",
+      "OpenClaw",
+      "Paperclip",
+      "unknown.runtime"
+    ]) {
+      expect(isHostedRuntimeBridgeSupportedMode(unsupported, "input")).toBe(false);
+      expect(isHostedRuntimeBridgeSupportedMode(unsupported, "approval_resolution")).toBe(false);
+    }
+  });
+});

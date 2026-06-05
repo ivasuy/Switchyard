@@ -1,0 +1,89 @@
+{
+  "accounts": [
+    {
+      "id": "acct_prod_primary",
+      "name": "Production Account",
+      "status": "active"
+    }
+  ],
+  "tenants": [
+    {
+      "id": "tenant_prod_primary",
+      "accountId": "acct_prod_primary",
+      "slug": "prod-primary",
+      "name": "Production Tenant",
+      "status": "active"
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj_prod_core",
+      "tenantId": "tenant_prod_primary",
+      "slug": "core",
+      "name": "Core Production Project",
+      "status": "active"
+    }
+  ],
+  "users": [
+    {
+      "id": "user_prod_operator",
+      "tenantId": "tenant_prod_primary",
+      "email": "replace-with-operator-email",
+      "displayName": "Production Operator",
+      "status": "active"
+    }
+  ],
+  "plans": [
+    {
+      "id": "plan_fake_only",
+      "tenantId": "tenant_prod_primary",
+      "name": "Fake Runtime Only",
+      "status": "active",
+      "runtimeAllowlist": ["fake.deterministic"],
+      "entitlements": {
+        "allowedPlacements": ["hosted", "connected_local_node"],
+        "allowHostedRealRuntime": false,
+        "allowConnectedNodes": true,
+        "allowHostedTools": false,
+        "allowConnectedNodeTools": false,
+        "allowedToolTypes": [],
+        "allowArtifactContentRead": true,
+        "allowToolArtifactContentRead": false,
+        "allowMetricsRead": true,
+        "allowAuditRead": true
+      },
+      "quotas": {
+        "maxRunsPerHour": 100,
+        "maxActiveRuns": 25,
+        "maxRunTimeoutSeconds": 600,
+        "maxConnectedNodes": 10,
+        "maxArtifactContentReadBytesPerHour": 10485760,
+        "maxToolInvocationsPerHour": 0,
+        "maxActiveToolInvocations": 0,
+        "maxToolArtifactBytesPerHour": 0
+      }
+    }
+  ],
+  "apiKeys": [
+    {
+      "id": "key_prod_operator",
+      "tenantId": "tenant_prod_primary",
+      "userId": "user_prod_operator",
+      "projectId": "proj_prod_core",
+      "label": "ops-admin",
+      "roles": ["admin:read", "metrics:read", "tools:read", "tools:write", "runs:read", "runs:write", "artifacts:read", "audit:read"],
+      "status": "active",
+      "rawKey": "replace-with-operator-api-key"
+    }
+  ],
+  "nodeTokens": [
+    {
+      "id": "node_token_prod_primary",
+      "tenantId": "tenant_prod_primary",
+      "projectId": "proj_prod_core",
+      "label": "prod-node",
+      "status": "active",
+      "token": "replace-with-node-registration-token"
+    }
+  ]
+}

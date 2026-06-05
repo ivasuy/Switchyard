@@ -1,5 +1,7 @@
 import type { Artifact, Run, RuntimeSession, RunStatus, SwitchyardEvent } from "@switchyard/contracts";
+import { AdapterProtocolError } from "../errors.js";
 import type { ArtifactStore } from "../ports/artifact-store.js";
+import type { StoredArtifactContent } from "../ports/artifact-content-store.js";
 import type { EventStore } from "../ports/event-store.js";
 import type { RunStore } from "../ports/run-store.js";
 import type { RuntimeAdapter } from "../ports/runtime-adapter.js";
@@ -7,6 +9,21 @@ import type { RuntimeLogger } from "../ports/runtime-logger.js";
 import type { SessionStore } from "../ports/session-store.js";
 import type { EventBus } from "./event-bus.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { approvalTypeSchema, type ApprovalType } from "@switchyard/contracts";
+import { redactSecrets } from "./local-policy-gate.js";
+
+const MAX_RUNTIME_INPUT_BYTES = 64 * 1024;
+const MAX_SESSION_STATE_PATCH_BYTES = 16 * 1024;
+const SESSION_STATE_SECRET_KEY_PATTERN = /(token|apiKey|authorization|password|secret)/i;
+
+interface RuntimeApprovalBridge {
+  create(input: { runId: string; approvalType: ApprovalType; payload: Record<string, unknown> }): Promise<void>;
+  terminalizePendingForRun?(runId: string, input: {
+    terminalEvent: "run.cancelled" | "run.failed" | "run.timeout" | "daemon_restarted";
+    approvalStatus: "rejected" | "expired";
+    message: string;
+  }): Promise<{ expired: number; rejected: number }>;
+}
 
 export interface RuntimeRunnerDependencies {
   runs: RunStore;
@@ -17,11 +34,15 @@ export interface RuntimeRunnerDependencies {
   eventBus?: EventBus;
   logger?: RuntimeLogger | undefined;
   artifactContent?: {
-    writeText(path: string, content: string): Promise<string>;
+    writeText(path: string, content: string): Promise<string | StoredArtifactContent>;
   };
+  runtimeApprovals?: RuntimeApprovalBridge;
 }
 
 export class RuntimeRunnerService {
+  private readonly persistedArtifactKeys = new Set<string>();
+  private readonly runtimeInputInFlight = new Set<string>();
+
   constructor(private readonly deps: RuntimeRunnerDependencies) {}
 
   async start(run: Run): Promise<Run> {
@@ -55,6 +76,7 @@ export class RuntimeRunnerService {
       const startResult = await adapter.start({
         runId: started.id,
         runtime: started.runtime,
+        runtimeMode: started.runtimeMode,
         provider: started.provider,
         model: started.model,
         cwd: started.cwd,
@@ -69,6 +91,7 @@ export class RuntimeRunnerService {
         runtime: started.runtime,
         provider: started.provider,
         model: started.model,
+        runtimeMode: started.runtimeMode,
         protocol: started.adapterType,
         status: "active",
         state: {},
@@ -117,27 +140,61 @@ export class RuntimeRunnerService {
         const normalized = this.normalizeEvent(event, started.id, sequence++);
         this.logEvent(normalized);
 
-        if (normalized.type === "run.completed" || normalized.type === "run.failed") {
+        if (!session) {
+          throw new AdapterProtocolError("Runtime session is missing for this run.", {
+            reasonCode: "runtime_session_missing"
+          });
+        }
+
+        let effectiveEvent = normalized;
+        if (effectiveEvent.type === "runtime.status") {
+          const patchResult = await this.applySessionStatePatchIfPresent(started.id, session, effectiveEvent);
+          session = patchResult.session;
+          if (patchResult.reasonCode) {
+            effectiveEvent = this.runtimeFailedEvent(started.id, effectiveEvent.sequence, patchResult.reasonCode);
+          }
+        }
+
+        if (effectiveEvent.type !== "run.completed" && effectiveEvent.type !== "run.failed" && effectiveEvent.type !== "run.cancelled") {
+          const statusResult = await this.applyWaitingStatusTransition(started.id, session, effectiveEvent);
+          latest = statusResult.run ?? latest;
+          session = statusResult.session;
+        }
+
+        if (effectiveEvent.type === "approval.requested") {
+          const approvalResult = await this.handleRuntimeApproval(started.id, session, effectiveEvent);
+          if (approvalResult.reasonCode) {
+            effectiveEvent = this.runtimeFailedEvent(started.id, effectiveEvent.sequence, approvalResult.reasonCode);
+          } else {
+            latest = approvalResult.run ?? latest;
+            session = approvalResult.session ?? session;
+            continue;
+          }
+        }
+
+        if (
+          effectiveEvent.type === "run.completed" ||
+          effectiveEvent.type === "run.failed" ||
+          effectiveEvent.type === "run.cancelled"
+        ) {
           const terminalSequence = sequence - 1;
-          const terminal = await this.terminalizeRunFromAdapterEvent(started, normalized, terminalSequence, session);
+          const terminal = await this.terminalizeRunFromAdapterEvent(started, effectiveEvent, terminalSequence, session);
           if (!terminal) {
             break;
           }
           latest = terminal;
           terminalized = true;
-          if (normalized.type === "run.completed") {
-            session = {
-              ...session,
-              status: "completed",
-              updatedAt: terminal.endedAt
-            };
-          } else {
-            session = {
-              ...session,
-              status: "failed",
-              updatedAt: terminal.endedAt
-            };
-          }
+          const sessionStatus: RuntimeSession["status"] =
+            effectiveEvent.type === "run.completed"
+              ? "completed"
+              : effectiveEvent.type === "run.cancelled"
+                ? "cancelled"
+                : "failed";
+          session = {
+            ...session,
+            status: sessionStatus,
+            updatedAt: terminal.endedAt
+          };
 
           if (this.deps.artifacts && session) {
             const artifactSequence = { value: sequence };
@@ -147,7 +204,8 @@ export class RuntimeRunnerService {
                 session,
                 started,
                 latest,
-                artifactSequence
+                artifactSequence,
+                effectiveEvent.type === "run.cancelled"
               );
               sequence = artifactSequence.value;
             } catch (error) {
@@ -157,7 +215,7 @@ export class RuntimeRunnerService {
           }
           break;
         } else {
-          await this.appendAndPublish(normalized);
+          await this.appendAndPublish(effectiveEvent);
         }
       }
 
@@ -189,22 +247,71 @@ export class RuntimeRunnerService {
 
   async sendInput(runId: string, input: Record<string, unknown>): Promise<void> {
     const run = await this.requireRun(runId);
+    if (this.isTerminal(run.status)) {
+      throw new AdapterProtocolError("Runtime input is only supported for active runs.", {
+        reasonCode: "runtime_input_not_active"
+      });
+    }
     const adapter = this.requireAdapter(run.runtime);
-    const session = await this.requireSession(runId);
+    const session = await this.deps.sessions.getByRunId(runId);
+    if (!session) {
+      throw new AdapterProtocolError("Runtime session is missing for this run.", {
+        reasonCode: "runtime_session_missing"
+      });
+    }
 
-    await adapter.send(this.adapterSession(session), input);
+    const text = input["text"];
+    if (typeof text === "string") {
+      if (text.trim().length === 0) {
+        throw new AdapterProtocolError("Runtime input text must be non-empty.", {
+          reasonCode: "runtime_input_empty"
+        });
+      }
+      if (Buffer.byteLength(text, "utf8") > MAX_RUNTIME_INPUT_BYTES) {
+        throw new AdapterProtocolError("Runtime input text exceeds the 64 KiB limit.", {
+          reasonCode: "runtime_input_too_large"
+        });
+      }
+    }
+
+    const inFlightKey = `${session.runId}:${session.id}`;
+    if (this.runtimeInputInFlight.has(inFlightKey)) {
+      this.log("warn", "runtime.input_in_flight", {
+        runId,
+        sessionId: session.id,
+        reasonCode: "runtime_input_in_flight"
+      });
+      throw new AdapterProtocolError("Runtime input is already in flight for this session.", {
+        reasonCode: "runtime_input_in_flight"
+      });
+    }
+
+    this.runtimeInputInFlight.add(inFlightKey);
+    try {
+      await adapter.send(this.adapterSession(session), input);
+    } finally {
+      this.runtimeInputInFlight.delete(inFlightKey);
+    }
   }
 
   async cancel(runId: string): Promise<Run> {
     const run = await this.requireRun(runId);
+    if (this.isTerminal(run.status)) {
+      return run;
+    }
     const adapter = this.requireAdapter(run.runtime);
     const session = await this.requireSession(runId);
 
     await adapter.cancel(this.adapterSession(session));
 
+    const currentRun = await this.requireRun(runId);
+    if (this.isTerminal(currentRun.status)) {
+      return currentRun;
+    }
+
     const cancelledAt = new Date().toISOString();
     const cancelledRun: Run = {
-      ...run,
+      ...currentRun,
       status: "cancelled",
       endedAt: cancelledAt
     };
@@ -215,12 +322,37 @@ export class RuntimeRunnerService {
     };
     await this.deps.runs.update(cancelledRun);
     await this.deps.sessions.update(cancelledSession);
+    await this.terminalizeRuntimeApprovalsForRun(runId, {
+      terminalEvent: "run.cancelled",
+      approvalStatus: "rejected",
+      message: "cancelled by Switchyard"
+    });
+    let sequence = (await this.deps.events.listByRun(runId)).length;
     await this.appendAndPublish(this.eventForRun(
       cancelledRun,
       "run.cancelled",
-      (await this.deps.events.listByRun(runId)).length,
+      sequence++,
       { status: "cancelled" }
     ));
+
+    if (this.deps.artifacts) {
+      const artifactSequence = { value: sequence };
+      try {
+        await this.persistArtifacts(
+          adapter,
+          cancelledSession,
+          cancelledRun,
+          cancelledRun,
+          artifactSequence,
+          true
+        );
+      } catch (error) {
+        this.log("warn", "cancel.artifact_persistence_failed", {
+          runId,
+          error: this.errorPayload(error)
+        });
+      }
+    }
 
     return cancelledRun;
   }
@@ -253,13 +385,21 @@ export class RuntimeRunnerService {
       });
     }
 
+    await this.terminalizeRuntimeApprovalsForRun(templateRun.id, {
+      terminalEvent: "run.failed",
+      approvalStatus: "rejected",
+      message: "run failed"
+    });
+
+    const reasonCode = error instanceof AdapterProtocolError ? error.reasonCode : undefined;
     await this.appendAndPublish(this.eventForRun(
       failed,
       "run.failed",
       sequence,
       {
         status: "failed",
-        error: this.errorPayload(error)
+        error: this.errorPayload(error),
+        ...(reasonCode ? { reasonCode } : {})
       }
     ));
     this.log("error", "run.failed", {
@@ -304,6 +444,11 @@ export class RuntimeRunnerService {
 
     await this.deps.runs.update(timedOut);
     await this.deps.sessions.update(timedOutSession);
+    await this.terminalizeRuntimeApprovalsForRun(templateRun.id, {
+      terminalEvent: "run.timeout",
+      approvalStatus: "expired",
+      message: "expired by Switchyard"
+    });
     await this.appendAndPublish(this.eventForRun(
       timedOut,
       "run.failed",
@@ -328,7 +473,8 @@ export class RuntimeRunnerService {
     session: RuntimeSession,
     templateRun: Run,
     baseRun: Run,
-    sequence: { value: number }
+    sequence: { value: number },
+    allowCancelledRun = false
   ): Promise<void> {
     if (!this.deps.artifacts || !adapter) {
       return;
@@ -338,7 +484,7 @@ export class RuntimeRunnerService {
     const preparedArtifacts: Array<Artifact> = [];
 
     for (const artifact of adapterArtifacts) {
-      if (await this.isCancelled(baseRun.id)) {
+      if (!allowCancelledRun && await this.isCancelled(baseRun.id)) {
         return;
       }
 
@@ -351,7 +497,17 @@ export class RuntimeRunnerService {
       let storedPath = safePath;
       let contentStored = false;
       if (hasContent && this.deps.artifactContent) {
-        storedPath = await this.deps.artifactContent.writeText(safePath, content);
+        const stored = await this.deps.artifactContent.writeText(safePath, content);
+        if (typeof stored === "string") {
+          storedPath = stored;
+        } else {
+          storedPath = stored.path;
+          metadata.storageBackend = stored.storageBackend;
+          if (stored.objectKey) metadata.objectKey = stored.objectKey;
+          metadata.sizeBytes = stored.sizeBytes;
+          metadata.sha256 = stored.sha256;
+          metadata.contentType = stored.contentType;
+        }
         contentStored = true;
       }
       if (hasContent) {
@@ -371,11 +527,28 @@ export class RuntimeRunnerService {
     }
 
     for (const prepared of preparedArtifacts) {
-      if (await this.isCancelled(baseRun.id)) {
+      if (!allowCancelledRun && await this.isCancelled(baseRun.id)) {
         return;
       }
 
-      const storedArtifact = await this.deps.artifacts.create(prepared);
+      const artifactKey = `${baseRun.id}:${prepared.type}:${prepared.path}`;
+      if (this.persistedArtifactKeys.has(artifactKey)) {
+        continue;
+      }
+      const existing = await this.deps.artifacts.listByRun(baseRun.id);
+      if (existing.some((artifact) => `${baseRun.id}:${artifact.type}:${artifact.path}` === artifactKey)) {
+        this.persistedArtifactKeys.add(artifactKey);
+        continue;
+      }
+
+      this.persistedArtifactKeys.add(artifactKey);
+      let storedArtifact: Artifact;
+      try {
+        storedArtifact = await this.deps.artifacts.create(prepared);
+      } catch (error) {
+        this.persistedArtifactKeys.delete(artifactKey);
+        throw error;
+      }
       const artifactEvent = this.eventForRun(
         templateRun,
         "artifact.created",
@@ -402,7 +575,12 @@ export class RuntimeRunnerService {
       return undefined;
     }
 
-    const terminalStatus: RunStatus = event.type === "run.completed" ? "completed" : "failed";
+    const terminalStatus: RunStatus =
+      event.type === "run.completed"
+        ? "completed"
+        : event.type === "run.cancelled"
+          ? "cancelled"
+          : "failed";
     const terminal: Run = {
       ...templateRun,
       status: terminalStatus,
@@ -417,6 +595,19 @@ export class RuntimeRunnerService {
 
     await this.deps.runs.update(terminal);
     await this.deps.sessions.update(terminalSession);
+    if (event.type === "run.failed") {
+      await this.terminalizeRuntimeApprovalsForRun(templateRun.id, {
+        terminalEvent: "run.failed",
+        approvalStatus: "rejected",
+        message: "run failed"
+      });
+    } else if (event.type === "run.cancelled") {
+      await this.terminalizeRuntimeApprovalsForRun(templateRun.id, {
+        terminalEvent: "run.cancelled",
+        approvalStatus: "rejected",
+        message: "cancelled by Switchyard"
+      });
+    }
     await this.appendAndPublish(this.eventForRun(
       terminal,
       event.type,
@@ -473,13 +664,230 @@ export class RuntimeRunnerService {
     }
   }
 
+  private runtimeFailedEvent(runId: string, sequence: number, reasonCode: string): SwitchyardEvent {
+    return {
+      id: `event_${crypto.randomUUID()}`,
+      type: "run.failed",
+      runId,
+      sequence,
+      payload: {
+        status: "failed",
+        reasonCode
+      },
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  private async applyWaitingStatusTransition(
+    runId: string,
+    session: RuntimeSession,
+    event: SwitchyardEvent
+  ): Promise<{ run?: Run; session: RuntimeSession }> {
+    if (event.type === "runtime.status") {
+      const status = typeof event.payload["status"] === "string" ? event.payload["status"] : undefined;
+      if (status === "waiting_for_input" || status === "waiting_for_approval") {
+        const updated = await this.updateRunAndSessionStatus(runId, status, session);
+        this.log("info", "runtime.status.waiting", { runId, status });
+        return updated;
+      }
+      if (status === "running" || status === "resumed") {
+        const updated = await this.resumeWaitingRunIfNeeded(runId, session);
+        return updated;
+      }
+      return { session };
+    }
+
+    if (event.type === "runtime.output") {
+      return await this.resumeWaitingRunIfNeeded(runId, session);
+    }
+
+    return { session };
+  }
+
+  private async resumeWaitingRunIfNeeded(
+    runId: string,
+    session: RuntimeSession
+  ): Promise<{ run?: Run; session: RuntimeSession }> {
+    const currentRun = await this.deps.runs.get(runId);
+    if (!currentRun || this.isTerminal(currentRun.status)) {
+      return { session };
+    }
+    if (currentRun.status !== "waiting_for_input" && currentRun.status !== "waiting_for_approval") {
+      return { session };
+    }
+    return await this.updateRunAndSessionStatus(runId, "running", session);
+  }
+
+  private async updateRunAndSessionStatus(
+    runId: string,
+    status: "running" | "waiting_for_input" | "waiting_for_approval",
+    session: RuntimeSession
+  ): Promise<{ run?: Run; session: RuntimeSession }> {
+    const currentRun = await this.deps.runs.get(runId);
+    if (!currentRun || this.isTerminal(currentRun.status) || currentRun.status === status) {
+      return { session };
+    }
+    const updatedRun: Run = { ...currentRun, status };
+    const updatedSession: RuntimeSession = {
+      ...session,
+      status: status === "running" ? "active" : status,
+      updatedAt: new Date().toISOString()
+    };
+    await this.deps.runs.update(updatedRun);
+    await this.deps.sessions.update(updatedSession);
+    return { run: updatedRun, session: updatedSession };
+  }
+
+  private async applySessionStatePatchIfPresent(
+    runId: string,
+    session: RuntimeSession,
+    event: SwitchyardEvent
+  ): Promise<{ session: RuntimeSession; reasonCode?: string }> {
+    const rawPatch = event.payload["sessionStatePatch"];
+    if (rawPatch === undefined || rawPatch === null) {
+      return { session };
+    }
+    if (!isPlainObject(rawPatch)) {
+      this.log("warn", "runtime.session_state_rejected", { runId, reasonCode: "session_state_patch_rejected" });
+      return { session, reasonCode: "session_state_patch_rejected" };
+    }
+    if (Object.keys(rawPatch).length === 0) {
+      return { session };
+    }
+    if (!isStatePatchValueSafe(rawPatch) || hasDisallowedSecretKey(rawPatch)) {
+      this.log("warn", "runtime.session_state_rejected", { runId, reasonCode: "session_state_patch_rejected" });
+      return { session, reasonCode: "session_state_patch_rejected" };
+    }
+    const serialized = JSON.stringify(rawPatch);
+    if (Buffer.byteLength(serialized, "utf8") > MAX_SESSION_STATE_PATCH_BYTES) {
+      this.log("warn", "runtime.session_state_rejected", { runId, reasonCode: "session_state_patch_too_large" });
+      return { session, reasonCode: "session_state_patch_too_large" };
+    }
+
+    const redactedPatch = redactSecrets(rawPatch);
+    const nextState = {
+      ...session.state,
+      ...redactedPatch
+    };
+    const hostedBridgePatch = this.normalizeHostedBridgeStatePatch(redactedPatch);
+    if (hostedBridgePatch) {
+      Object.assign(nextState, hostedBridgePatch);
+    }
+    const updated: RuntimeSession = {
+      ...session,
+      state: nextState,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (!session.externalSessionKey) {
+      const discoveredKey = this.selectExternalSessionKey(redactedPatch);
+      if (discoveredKey) {
+        updated.externalSessionKey = discoveredKey;
+      }
+    }
+
+    await this.deps.sessions.update(updated);
+    this.log("info", "runtime.session_state.updated", { runId, sessionId: session.id });
+    return { session: updated };
+  }
+
+  private normalizeHostedBridgeStatePatch(patch: Record<string, unknown>): Record<string, unknown> | undefined {
+    const hostedState = patch["hostedRuntimeBridge"];
+    if (!isPlainObject(hostedState)) {
+      return undefined;
+    }
+    const normalized: Record<string, unknown> = {};
+    const workerId = hostedState["workerId"];
+    if (typeof workerId === "string" && workerId.trim().length > 0) {
+      normalized["hostedWorkerId"] = workerId.trim();
+    }
+    const runtimeSessionId = hostedState["runtimeSessionId"];
+    if (typeof runtimeSessionId === "string" && runtimeSessionId.trim().length > 0) {
+      normalized["hostedRuntimeSessionId"] = runtimeSessionId.trim();
+    }
+    if (typeof hostedState["bridgeCapable"] === "boolean") {
+      normalized["hostedBridgeCapable"] = hostedState["bridgeCapable"];
+    }
+    return Object.keys(normalized).length > 0 ? normalized : undefined;
+  }
+
+  private selectExternalSessionKey(patch: Record<string, unknown>): string | undefined {
+    const claude = patch["claudeSessionId"];
+    if (typeof claude === "string" && claude.trim().length > 0) {
+      return claude.trim();
+    }
+    const codex = patch["codexThreadId"];
+    if (typeof codex === "string" && codex.trim().length > 0) {
+      return codex.trim();
+    }
+    return undefined;
+  }
+
+  private async handleRuntimeApproval(
+    runId: string,
+    session: RuntimeSession,
+    event: SwitchyardEvent
+  ): Promise<{ run?: Run; session?: RuntimeSession; reasonCode?: string }> {
+    const token = event.payload["runtimeApprovalToken"];
+    if (typeof token !== "string" || token.trim().length === 0) {
+      return { reasonCode: "runtime_approval_token_missing" };
+    }
+    if (!this.deps.runtimeApprovals) {
+      return { reasonCode: "runtime_approval_bridge_unconfigured" };
+    }
+    const rawApprovalType = event.payload["approvalType"];
+    let approvalType: ApprovalType = "before_external_message";
+    if (typeof rawApprovalType === "string") {
+      try {
+        approvalType = approvalTypeSchema.parse(rawApprovalType);
+      } catch {
+        return { reasonCode: "runtime_approval_type_invalid" };
+      }
+    }
+    const rawExpiresAt = event.payload["expiresAt"];
+    if (rawExpiresAt !== undefined && rawExpiresAt !== null) {
+      if (typeof rawExpiresAt !== "string") {
+        return { reasonCode: "runtime_approval_expires_at_invalid" };
+      }
+      const parsed = Date.parse(rawExpiresAt);
+      if (!Number.isFinite(parsed)) {
+        return { reasonCode: "runtime_approval_expires_at_invalid" };
+      }
+    }
+
+    await this.deps.runtimeApprovals.create({
+      runId,
+      approvalType,
+      payload: redactSecrets({
+        ...event.payload,
+        runtimeMode: session.runtimeMode,
+        runtimeSessionId: session.id,
+        externalSessionKey: session.externalSessionKey,
+        ...(typeof session.state["hostedWorkerId"] === "string"
+          ? { hostedWorkerId: session.state["hostedWorkerId"] }
+          : {}),
+        ...(typeof session.state["hostedRuntimeSessionId"] === "string"
+          ? { hostedRuntimeSessionId: session.state["hostedRuntimeSessionId"] }
+          : {}),
+        ...(typeof session.state["hostedBridgeCapable"] === "boolean"
+          ? { hostedBridgeCapable: session.state["hostedBridgeCapable"] }
+          : {}),
+        ...(event.payload["expiresAt"] === undefined ? {} : { expiresAt: event.payload["expiresAt"] })
+      })
+    });
+    this.log("info", "runtime.approval.requested", { runId, approvalType });
+    return await this.updateRunAndSessionStatus(runId, "waiting_for_approval", session);
+  }
+
   private logEvent(event: SwitchyardEvent): void {
     if (event.type === "runtime.output") {
       const text = typeof event.payload["text"] === "string" ? event.payload["text"] : undefined;
       this.log("info", "runtime.output", {
         runId: event.runId,
         sequence: event.sequence,
-        text: text ? this.truncate(text, 120) : undefined
+        textBytes: text ? Buffer.byteLength(text, "utf8") : 0,
+        redacted: true,
+        eventType: event.payload["codexType"]
       });
       return;
     }
@@ -581,10 +989,68 @@ export class RuntimeRunnerService {
       runtime: session.runtime,
       provider: session.provider,
       model: session.model,
+      runtimeMode: session.runtimeMode,
       protocol: session.protocol,
       externalSessionKey: session.externalSessionKey,
       processId: session.processId,
       state: session.state
     };
   }
+
+  private async terminalizeRuntimeApprovalsForRun(
+    runId: string,
+    input: {
+      terminalEvent: "run.cancelled" | "run.failed" | "run.timeout" | "daemon_restarted";
+      approvalStatus: "rejected" | "expired";
+      message: string;
+    }
+  ): Promise<void> {
+    if (!this.deps.runtimeApprovals?.terminalizePendingForRun) {
+      return;
+    }
+    try {
+      await this.deps.runtimeApprovals.terminalizePendingForRun(runId, input);
+    } catch (error) {
+      this.log("warn", "runtime.approval_terminalization_failed", {
+        runId,
+        terminalEvent: input.terminalEvent,
+        reason: this.errorPayload(error)
+      });
+    }
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStatePatchValueSafe(value: unknown): boolean {
+  if (typeof value === "function" || typeof value === "symbol") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.every((entry) => isStatePatchValueSafe(entry));
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).every((entry) => isStatePatchValueSafe(entry));
+  }
+  return true;
+}
+
+function hasDisallowedSecretKey(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasDisallowedSecretKey(entry));
+  }
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (SESSION_STATE_SECRET_KEY_PATTERN.test(key)) {
+      return true;
+    }
+    if (hasDisallowedSecretKey(entry)) {
+      return true;
+    }
+  }
+  return false;
 }

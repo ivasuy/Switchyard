@@ -1,0 +1,17 @@
+{
+  "name": "@switchyard/node",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "node --disable-warning=DEP0205 --import tsx src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@switchyard/contracts": "workspace:*",
+    "@switchyard/core": "workspace:*",
+    "@switchyard/protocol-node": "workspace:*"
+  }
+}

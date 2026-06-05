@@ -14,6 +14,7 @@ export interface CreateRunInput {
   approvalPolicy: string;
   timeoutSeconds: number;
   metadata: Record<string, unknown>;
+  runtimeMode?: string;
 }
 
 export interface RunServiceDependencies {
@@ -40,6 +41,7 @@ export class RunService {
       approvalPolicy: input.approvalPolicy,
       timeoutSeconds: input.timeoutSeconds,
       metadata: input.metadata,
+      runtimeMode: input.runtimeMode,
       createdAt: now
     };
 

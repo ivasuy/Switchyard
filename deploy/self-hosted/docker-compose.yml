@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: switchyard
+      POSTGRES_PASSWORD: switchyard
+      POSTGRES_DB: switchyard
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+
+  server:
+    image: node:22-alpine
+    working_dir: /workspace
+    command: ["sh", "-lc", "corepack enable && pnpm install --frozen-lockfile && pnpm --filter @switchyard/server dev"]
+    environment:
+      SWITCHYARD_DEPLOYMENT_MODE: staging
+      SWITCHYARD_POSTGRES_URL: postgres://switchyard:switchyard@postgres:5432/switchyard
+      SWITCHYARD_REDIS_URL: redis://redis:6379/0
+      SWITCHYARD_OBJECT_STORE_DIR: /var/switchyard/objects
+      SWITCHYARD_NODE_SHARED_TOKEN: switchyard-node-token
+      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: fake.deterministic
+      SWITCHYARD_PORT: "4646"
+    volumes:
+      - ../..:/workspace
+      - objectdata:/var/switchyard/objects
+    ports:
+      - "4646:4646"
+    depends_on:
+      - postgres
+      - redis
+
+  worker:
+    image: node:22-alpine
+    working_dir: /workspace
+    command: ["sh", "-lc", "corepack enable && pnpm install --frozen-lockfile && pnpm --filter @switchyard/worker dev"]
+    environment:
+      SWITCHYARD_DEPLOYMENT_MODE: staging
+      SWITCHYARD_POSTGRES_URL: postgres://switchyard:switchyard@postgres:5432/switchyard
+      SWITCHYARD_REDIS_URL: redis://redis:6379/0
+      SWITCHYARD_OBJECT_STORE_DIR: /var/switchyard/objects
+      SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST: fake.deterministic
+    volumes:
+      - ../..:/workspace
+      - objectdata:/var/switchyard/objects
+    depends_on:
+      - server
+
+  node:
+    image: node:22-alpine
+    working_dir: /workspace
+    command: ["sh", "-lc", "corepack enable && pnpm install --frozen-lockfile && pnpm --filter @switchyard/node dev"]
+    environment:
+      SWITCHYARD_DEPLOYMENT_MODE: staging
+      SWITCHYARD_SERVER_URL: http://server:4646
+      SWITCHYARD_NODE_SHARED_TOKEN: switchyard-node-token
+      SWITCHYARD_NODE_ID: node_smoke
+      SWITCHYARD_NODE_CAPABILITIES: runtime.fake.deterministic
+      SWITCHYARD_NODE_ALLOW_RUNTIME_MODES: fake.deterministic
+      SWITCHYARD_NODE_ALLOW_CWD_PREFIXES: /repo
+      SWITCHYARD_NODE_IDLE_MS: "200"
+    volumes:
+      - ../..:/workspace
+      - objectdata:/var/switchyard/objects
+    depends_on:
+      - server
+
+volumes:
+  pgdata:
+  objectdata:

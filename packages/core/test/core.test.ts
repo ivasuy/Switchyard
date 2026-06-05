@@ -1,13 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import {
+  AdapterProtocolError,
   createNotImplementedError,
   EventBus,
+  RegistryService,
+  RuntimeCapabilityService,
+  RuntimeDoctorService,
   RuntimeRunnerService,
   RunLauncherService,
-  RunService
+  RunService,
+  TimeoutError,
+  withTimeout
 } from "../src/index.js";
-import type { ArtifactStore, EventStore, RunStore, RuntimeAdapter, SessionStore } from "../src/index.js";
-import type { Artifact, Run, RuntimeSession, SwitchyardEvent } from "@switchyard/contracts";
+import type {
+  ArtifactStore,
+  EventStore,
+  RegistryStore,
+  RunStore,
+  RuntimeAdapter,
+  RuntimeAdapterManifest,
+  SessionStore
+} from "../src/index.js";
+import type {
+  Artifact,
+  Run,
+  RuntimeAvailability,
+  RuntimeDoctorCheck,
+  RuntimeMode,
+  RuntimeSession,
+  RuntimeTarget,
+  SwitchyardEvent
+} from "@switchyard/contracts";
 
 describe("core service shells", () => {
   it("creates domain not-implemented errors with stable codes", () => {
@@ -15,6 +39,20 @@ describe("core service shells", () => {
 
     expect(error.code).toBe("adapter_protocol_failed");
     expect(error.message).toContain("debate-service.startRound");
+  });
+
+  it("creates adapter protocol errors with stable code and optional reason code", () => {
+    const error = new AdapterProtocolError("unsupported input", {
+      reasonCode: "generic_http_input_unsupported"
+    });
+    expect(error.code).toBe("adapter_protocol_failed");
+    expect(error.reasonCode).toBe("generic_http_input_unsupported");
+    expect(error.message).toBe("unsupported input");
+  });
+
+  it("withTimeout resolves successful promises and rejects hung promises with TimeoutError", async () => {
+    await expect(withTimeout(Promise.resolve("ok"), 50)).resolves.toBe("ok");
+    await expect(withTimeout(new Promise(() => undefined), 10)).rejects.toBeInstanceOf(TimeoutError);
   });
 
   it("run service creates a queued run and emits an event through ports", async () => {
@@ -108,11 +146,14 @@ describe("core service shells", () => {
     });
     await service.startRun(run.id);
 
-    await service.sendInput(run.id, { text: "continue" });
+    await expect(service.sendInput(run.id, { text: "continue" })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_input_not_active"
+    });
     const cancelled = await service.cancelRun(run.id);
 
-    expect(adapter.sentInput).toEqual({ text: "continue" });
-    expect(cancelled.status).toBe("cancelled");
+    expect(adapter.sentInput).toBeUndefined();
+    expect(cancelled.status).toBe("completed");
   });
 
   it("runtime runner stores adapter session details before streaming events", async () => {
@@ -167,7 +208,164 @@ describe("core service shells", () => {
     const events = new MemoryEventStore();
     const sessions = new MemorySessionStore();
     const adapter = new EventfulAdapter();
+    const run = await createStoredRun(runs, { status: "running" });
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]])
+    });
+    await sessions.create({
+      id: "session_1",
+      runId: run.id,
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      protocol: "process",
+      status: "active",
+      state: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+
+    await runner.sendInput(run.id, { text: "continue" });
+
+    expect(adapter.sentInput).toEqual({ text: "continue" });
+    expect(adapter.sentSession?.["runId"]).toBe(run.id);
+  });
+
+  it("runtime runner persists waiting statuses and resumes to running on output", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
     const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new WaitingForInputAdapter()]])
+    });
+
+    await runner.start(run);
+
+    expect(events.items.some((event) => event.type === "runtime.status" && event.payload["status"] === "waiting_for_input")).toBe(true);
+    expect((await runs.get(run.id))?.status).toBe("completed");
+    expect((await sessions.getByRunId(run.id))?.status).toBe("completed");
+  });
+
+  it("runtime runner applies bounded sessionStatePatch and sets external session key once", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new SessionPatchAdapter()]])
+    });
+
+    await runner.start(run);
+
+    const stored = await sessions.getByRunId(run.id);
+    expect(stored?.state["claudeSessionId"]).toBe("claude-session-1");
+    expect(stored?.state["nested"]).toEqual({ safe: true });
+    expect(stored?.externalSessionKey).toBe("claude-session-1");
+  });
+
+  it("runtime runner fails run when sessionStatePatch is invalid", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new InvalidSessionPatchAdapter()]])
+    });
+
+    const result = await runner.start(run);
+
+    expect(result.status).toBe("failed");
+    expect(events.items.at(-1)).toMatchObject({
+      type: "run.failed",
+      payload: { reasonCode: "session_state_patch_rejected" }
+    });
+  });
+
+  it("runtime runner rejects sessionStatePatch entries with secret-like keys", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new SecretSessionPatchAdapter()]])
+    });
+
+    const result = await runner.start(run);
+
+    expect(result.status).toBe("failed");
+    expect(events.items.at(-1)).toMatchObject({
+      type: "run.failed",
+      payload: { reasonCode: "session_state_patch_rejected" }
+    });
+  });
+
+  it("runtime runner fails run when runtime approval bridge is missing", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new RuntimeApprovalAdapter()]])
+    });
+
+    const result = await runner.start(run);
+
+    expect(result.status).toBe("failed");
+    expect(events.items.at(-1)).toMatchObject({
+      type: "run.failed",
+      payload: { reasonCode: "runtime_approval_bridge_unconfigured" }
+    });
+  });
+
+  it("runtime runner creates runtime approvals and moves run/session to waiting_for_approval", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const approvals: Array<{ runId: string; approvalType: string; payload: Record<string, unknown> }> = [];
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new RuntimeApprovalAdapter()]]),
+      runtimeApprovals: {
+        create: async (input) => {
+          approvals.push(input);
+        }
+      }
+    });
+
+    const result = await runner.start(run);
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]?.payload["runtimeApprovalToken"]).toBe("pause-1");
+    expect(result.status).toBe("completed");
+  });
+
+  it("runtime runner sendInput rejects terminal, missing-session, empty, and oversized text bodies", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const adapter = new EventfulAdapter();
     const runner = new RuntimeRunnerService({
       runs,
       events,
@@ -176,10 +374,38 @@ describe("core service shells", () => {
     });
     await runner.start(run);
 
-    await runner.sendInput(run.id, { text: "continue" });
+    await expect(runner.sendInput(run.id, { text: "after completion" })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_input_not_active"
+    });
 
-    expect(adapter.sentInput).toEqual({ text: "continue" });
-    expect(adapter.sentSession?.["runId"]).toBe(run.id);
+    const activeRun = await createStoredRun(runs, { id: "run_missing_session" });
+    await expect(runner.sendInput(activeRun.id, { text: "x" })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_session_missing"
+    });
+
+    const liveRun = await createStoredRun(runs, { id: "run_live_input", status: "running" });
+    await sessions.create({
+      id: "session_live_input",
+      runId: liveRun.id,
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      protocol: "process",
+      status: "active",
+      state: {},
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+
+    await expect(runner.sendInput(liveRun.id, { text: "   " })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_input_empty"
+    });
+    await expect(runner.sendInput(liveRun.id, { text: "x".repeat(65537) })).rejects.toMatchObject({
+      code: "adapter_protocol_failed",
+      reasonCode: "runtime_input_too_large"
+    });
   });
 
   it("runtime runner stores adapter artifacts and emits artifact events", async () => {
@@ -291,9 +517,14 @@ describe("core service shells", () => {
     const [storedArtifact] = await artifacts.listByRun(run.id);
     expect(storedArtifact).toMatchObject({
       metadata: {
-        contentStored: true
+        contentStored: true,
+        storageBackend: "object",
+        objectKey: `artifacts/${adapter.artifactPath}`,
+        contentType: "application/x-ndjson"
       }
     });
+    expect(typeof storedArtifact?.metadata["sizeBytes"]).toBe("number");
+    expect(typeof storedArtifact?.metadata["sha256"]).toBe("string");
     expect(storedArtifact?.path).toBe(`stored/${adapter.artifactPath}`);
     expect(storedArtifact?.metadata).not.toHaveProperty("content");
     expect(artifactContent.writes.at(-1)).toEqual({
@@ -325,9 +556,14 @@ describe("core service shells", () => {
     expect(storedArtifact).toMatchObject({
       path: `stored/${adapter.artifactPath}`,
       metadata: {
-        contentStored: true
+        contentStored: true,
+        storageBackend: "object",
+        objectKey: `artifacts/${adapter.artifactPath}`,
+        contentType: "application/x-ndjson"
       }
     });
+    expect(typeof storedArtifact?.metadata["sizeBytes"]).toBe("number");
+    expect(typeof storedArtifact?.metadata["sha256"]).toBe("string");
     expect(storedArtifact?.metadata).not.toHaveProperty("content");
     expect(artifactContent.writes.at(-1)).toEqual({
       path: adapter.artifactPath,
@@ -583,7 +819,7 @@ describe("core service shells", () => {
     expect(runService.startRun).toHaveBeenCalledWith(run.id);
   });
 
-  it("does not collect artifacts after cancellation", async () => {
+  it("collects transcript artifacts after verified cancellation", async () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();
     const sessions = new MemorySessionStore();
@@ -606,10 +842,10 @@ describe("core service shells", () => {
     await runner.cancel(run.id);
     await running;
 
-    expect(adapter.artifactsCalled).toBe(false);
-    expect(await artifacts.listByRun(run.id)).toHaveLength(0);
+    expect(adapter.artifactsCalled).toBe(true);
+    expect(await artifacts.listByRun(run.id)).toHaveLength(1);
     expect((await runs.get(run.id))?.status).toBe("cancelled");
-    expect(events.items.some((event) => event.type === "artifact.created")).toBe(false);
+    expect(events.items.some((event) => event.type === "artifact.created")).toBe(true);
   });
 
   it("deduplicates persisted artifact ids when adapter returns duplicate artifact ids", async () => {
@@ -707,7 +943,7 @@ describe("core service shells", () => {
     const runs = new MemoryRunStore();
     const events = new MemoryEventStore();
     const sessions = new MemorySessionStore();
-    const adapter = new EventfulAdapter();
+    const adapter = new CancelBeforeCompleteAdapter();
     const run = await createStoredRun(runs);
     const runner = new RuntimeRunnerService({
       runs,
@@ -715,14 +951,85 @@ describe("core service shells", () => {
       sessions,
       adapters: new Map([["fake", adapter]])
     });
-    await runner.start(run);
-
+    const running = runner.start(run);
+    await waitFor(() => sessions.items.size > 0);
     const cancelled = await runner.cancel(run.id);
+    await running;
 
     expect(adapter.cancelledSession?.["runId"]).toBe(run.id);
     expect(cancelled.status).toBe("cancelled");
     expect((await sessions.getByRunId(run.id))?.status).toBe("cancelled");
-    expect(events.items.at(-1)?.type).toBe("run.cancelled");
+    expect(events.items.some((event) => event.type === "run.cancelled")).toBe(true);
+  });
+
+  it("terminalizes adapter-emitted run.cancelled events and persists transcript artifacts", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const artifacts = new MemoryArtifactStore();
+    const artifactContent = new InMemoryArtifactContentStore();
+    const run = await createStoredRun(runs);
+    const adapter = new CancelledEventAdapter();
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      artifacts,
+      artifactContent,
+      adapters: new Map([["fake", adapter]])
+    });
+
+    const terminal = await runner.start(run);
+
+    expect(terminal.status).toBe("cancelled");
+    expect((await sessions.getByRunId(run.id))?.status).toBe("cancelled");
+    const terminalEvents = events.items.filter((event) => event.type === "run.cancelled");
+    expect(terminalEvents).toHaveLength(1);
+    expect(await artifacts.listByRun(run.id)).toHaveLength(1);
+    expect(artifactContent.writes).toHaveLength(1);
+  });
+
+  it("keeps run state unchanged when adapter cancel throws AdapterProtocolError", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const adapter = new CancelFailureAdapter();
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]])
+    });
+    const running = runner.start(run);
+    await waitFor(() => sessions.items.size > 0);
+
+    await expect(runner.cancel(run.id)).rejects.toBeInstanceOf(AdapterProtocolError);
+    await running;
+
+    expect((await runs.get(run.id))?.status).toBe("completed");
+    expect((await sessions.getByRunId(run.id))?.status).toBe("completed");
+  });
+
+  it("treats cancel on already terminal runs as idempotent and skips adapter cancel", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const run = await createStoredRun(runs);
+    const adapter = new EventfulAdapter();
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", adapter]])
+    });
+    await runner.start(run);
+    const callsBefore = adapter.cancelCalls;
+
+    const result = await runner.cancel(run.id);
+
+    expect(result.status).toBe("completed");
+    expect(adapter.cancelCalls).toBe(callsBefore);
   });
 
   it("event bus publishes events to subscribers", async () => {
@@ -744,6 +1051,323 @@ describe("core service shells", () => {
 
     expect(received).toHaveLength(1);
     expect(received[0]?.payload).toEqual({ text: "hello" });
+  });
+
+  it("seeds runtime modes from manifests and supports docsPath omissions", async () => {
+    const registry = new MemoryRegistryStore();
+    const service = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+
+    await service.seedManifests([fakeRuntimeManifest, { ...codexRuntimeManifest, docsPath: undefined }], {
+      "fake.deterministic": {
+        state: "available",
+        canRun: true,
+        installed: true,
+        auth: "not_required",
+        version: null,
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        reasonCode: null,
+        message: null
+      }
+    });
+
+    const fake = await registry.getRuntimeMode("fake.deterministic");
+    const codex = await registry.getRuntimeMode("runtime_mode_codex_exec_json");
+    expect(fake?.slug).toBe("fake.deterministic");
+    expect(fake?.availability.state).toBe("available");
+    expect(codex?.slug).toBe("codex.exec_json");
+    expect(codex?.docsPath).toBeUndefined();
+    expect(codex?.status).toBe("unknown");
+  });
+
+  it("maps codex checks to unavailable, partial, timeout, output bounds, and unsupported states", async () => {
+    const registry = new MemoryRegistryStore();
+    const capabilityService = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+    await capabilityService.seedManifests([codexRuntimeManifest, fakeRuntimeManifest]);
+
+    const emptyModelsAdapter = new ManifestTestAdapter(codexRuntimeManifest, async () => ({
+      ok: true,
+      details: { version: "codex 0.130.0", models: [] }
+    }));
+    const partialAdapter = new ManifestTestAdapter(codexRuntimeManifest, async () => ({
+      ok: true,
+      details: {
+        version: "codex 0.130.0",
+        models: [{ slug: "gpt-5.5" }],
+        optionalChecks: {
+          sandbox_policy_probe: { ok: false, message: "optional probe failed" }
+        }
+      }
+    }));
+    const hugeOutputAdapter = new ManifestTestAdapter(codexRuntimeManifest, async () => ({
+      ok: false,
+      message: "x".repeat(256),
+      details: { reasonCode: "binary_unavailable", outputBytes: 256 }
+    }));
+    const hangingAdapter = new ManifestTestAdapter(codexRuntimeManifest, async () => await new Promise(() => undefined));
+
+    const unavailableDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", emptyModelsAdapter], ["fake", new ManifestTestAdapter(fakeRuntimeManifest, async () => ({ ok: true }))]]),
+      clock: () => "2026-05-29T00:00:00.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 64
+    });
+    const unavailable = await unavailableDoctor.checkRuntimeMode("codex.exec_json");
+    expect(unavailable.state).toBe("unavailable");
+    expect(unavailable.reasonCode).toBe("model_catalog_unavailable");
+    expect(unavailable.installed).toBe(true);
+
+    const partialDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", partialAdapter], ["fake", new ManifestTestAdapter(fakeRuntimeManifest, async () => ({ ok: true }))]]),
+      clock: () => "2026-05-29T00:00:01.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 64
+    });
+    const partial = await partialDoctor.checkRuntimeMode("runtime_mode_codex_exec_json");
+    expect(partial.state).toBe("partial");
+    expect(partial.canRun).toBe(true);
+    expect(partial.reasonCode).toBe("optional_check_failed");
+
+    const boundedDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", hugeOutputAdapter]]),
+      clock: () => "2026-05-29T00:00:02.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 64
+    });
+    const bounded = await boundedDoctor.checkRuntimeMode("codex.exec_json");
+    expect(bounded.reasonCode).toBe("check_output_too_large");
+    expect(bounded.diagnostics[0]?.message.length ?? 0).toBeLessThanOrEqual(70);
+
+    const timeoutDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", hangingAdapter]]),
+      clock: () => "2026-05-29T00:00:03.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 64
+    });
+    const timedOut = await timeoutDoctor.checkRuntimeMode("codex.exec_json");
+    expect(timedOut.state).toBe("unknown");
+    expect(timedOut.reasonCode).toBe("check_timeout");
+
+    await registry.upsertRuntimeMode({
+      ...(await registry.getRuntimeMode("runtime_mode_codex_exec_json"))!,
+      id: "runtime_mode_unregistered",
+      slug: "codex.unregistered",
+      adapterId: "missing"
+    });
+    const unsupportedDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["codex", partialAdapter]]),
+      clock: () => "2026-05-29T00:00:04.000Z"
+    });
+    const unsupported = await unsupportedDoctor.checkRuntimeMode("runtime_mode_unregistered");
+    expect(unsupported.state).toBe("unsupported");
+    expect(unsupported.reasonCode).toBe("adapter_not_registered");
+  });
+
+  it("maps generic_http http_health checks from adapter-provided availability details", async () => {
+    const registry = new MemoryRegistryStore();
+    const capabilityService = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+    await capabilityService.seedManifests([genericHttpRuntimeManifest]);
+
+    const token = "secret-r4-token";
+    const adapter = new ManifestTestAdapter(genericHttpRuntimeManifest, async () => ({
+      ok: true,
+      details: {
+        availability: {
+          state: "available",
+          canRun: true,
+          installed: true,
+          auth: "configured",
+          reasonCode: null,
+          message: `Bearer ${token} should be redacted`,
+          version: "wrapper-v1"
+        },
+        diagnostics: [
+          {
+            code: "health_ok",
+            severity: "info",
+            message: `token=${token}`
+          }
+        ]
+      }
+    }));
+    const loggerEntries: Array<Record<string, unknown>> = [];
+    const doctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["generic_http", adapter]]),
+      clock: () => "2026-05-29T00:00:10.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 256,
+      logger: {
+        info: (_event: string, payload?: Record<string, unknown>) => {
+          if (payload) loggerEntries.push(payload);
+        },
+        warn: (_event: string, payload?: Record<string, unknown>) => {
+          if (payload) loggerEntries.push(payload);
+        },
+        error: (_event: string, payload?: Record<string, unknown>) => {
+          if (payload) loggerEntries.push(payload);
+        }
+      }
+    });
+
+    const check = await doctor.checkRuntimeMode("generic_http.async_rest");
+
+    expect(check.state).toBe("available");
+    expect(check.canRun).toBe(true);
+    expect(check.auth).toBe("configured");
+    expect(check.version).toBe("wrapper-v1");
+    expect(check.message).not.toContain(token);
+    expect(check.diagnostics[0]?.message ?? "").not.toContain(token);
+    expect(JSON.stringify(check)).not.toContain(token);
+    expect(JSON.stringify(loggerEntries)).not.toContain(token);
+  });
+
+  it("maps custom strategy checks generically without runtime-mode slug special-casing", async () => {
+    const registry = new MemoryRegistryStore();
+    const capabilityService = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+    await capabilityService.seedManifests([customRuntimeManifest]);
+
+    const invalidCustom = new ManifestTestAdapter(customRuntimeManifest, async () => ({
+      ok: false,
+      message: "missing availability payload"
+    }));
+    const invalidDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["custom_runtime", invalidCustom]]),
+      clock: () => "2026-05-29T00:00:00.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 256
+    });
+    const invalid = await invalidDoctor.checkRuntimeMode("custom.runtime");
+    expect(invalid.state).toBe("unknown");
+    expect(invalid.reasonCode).toBe("custom_check_invalid");
+
+    const availableCustom = new ManifestTestAdapter(customRuntimeManifest, async () => ({
+      ok: true,
+      details: {
+        availability: {
+          state: "available",
+          canRun: true,
+          installed: true,
+          auth: "configured",
+          reasonCode: null,
+          message: null,
+          version: "custom-v1"
+        },
+        diagnostics: [{ code: "custom_ok", severity: "info", message: "custom check ok" }]
+      }
+    }));
+    const availableDoctor = new RuntimeDoctorService({
+      registry,
+      adapters: new Map([["custom_runtime", availableCustom]]),
+      clock: () => "2026-05-29T00:00:01.000Z",
+      checkTimeoutMs: 20,
+      maxDiagnosticBytes: 256
+    });
+    const available = await availableDoctor.checkRuntimeMode("runtime_mode_custom_runtime");
+    expect(available.state).toBe("available");
+    expect(available.reasonCode).toBeNull();
+    expect(available.version).toBe("custom-v1");
+  });
+
+  it("validates runtime mode inference and rejects runtime mode ids/mismatches", async () => {
+    const registry = new MemoryRegistryStore();
+    const capabilityService = new RuntimeCapabilityService({
+      registry,
+      clock: () => "2026-05-29T00:00:00.000Z"
+    });
+    await capabilityService.seedManifests([fakeRuntimeManifest, codexRuntimeManifest]);
+
+    const service = new RegistryService({ registry });
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "fake",
+        provider: "test",
+        adapterType: "process"
+      })
+    ).resolves.toBe("fake.deterministic");
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "codex",
+        provider: "openai",
+        adapterType: "process"
+      })
+    ).resolves.toBe("codex.exec_json");
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "fake",
+        provider: "test",
+        adapterType: "process",
+        runtimeMode: "runtime_mode_codex_exec_json"
+      })
+    ).rejects.toMatchObject({ code: "invalid_input", details: [{ path: "runtimeMode", issue: expect.any(String) }] });
+    await expect(
+      service.inferAndValidateRuntimeMode({
+        runtime: "fake",
+        provider: "test",
+        adapterType: "process",
+        runtimeMode: "codex.exec_json"
+      })
+    ).rejects.toMatchObject({ code: "invalid_input", details: [{ path: "runtimeMode", issue: expect.any(String) }] });
+  });
+
+  it("stores runtimeMode on runs when provided and preserves old behavior when absent", async () => {
+    const runs = new MemoryRunStore();
+    const events = new MemoryEventStore();
+    const sessions = new MemorySessionStore();
+    const runner = new RuntimeRunnerService({
+      runs,
+      events,
+      sessions,
+      adapters: new Map([["fake", new ManifestTestAdapter(fakeRuntimeManifest, async () => ({ ok: true }))]])
+    });
+    const service = new RunService({ runs, events, runner });
+
+    const withMode = await service.createRun({
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "run with mode",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic"
+    });
+    const withoutMode = await service.createRun({
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "run without mode",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {}
+    });
+
+    expect(withMode.runtimeMode).toBe("fake.deterministic");
+    expect(withoutMode.runtimeMode).toBeUndefined();
+    expect((await runs.get(withMode.id))?.runtimeMode).toBe("fake.deterministic");
   });
 });
 
@@ -775,6 +1399,10 @@ class MemoryEventStore implements EventStore {
 
   async listByRun(runId: string): Promise<SwitchyardEvent[]> {
     return this.items.filter((event) => event.runId === runId);
+  }
+
+  async listByDebate(debateId: string): Promise<SwitchyardEvent[]> {
+    return this.items.filter((event) => event.debateId === debateId);
   }
 }
 
@@ -822,6 +1450,10 @@ class MemoryArtifactStore implements ArtifactStore {
     return artifact;
   }
 
+  async listByDebate(debateId: string): Promise<Artifact[]> {
+    return this.items.filter((artifact) => artifact.debateId === debateId);
+  }
+
   async listByRun(runId: string): Promise<Artifact[]> {
     return this.items.filter((artifact) => artifact.runId === runId);
   }
@@ -850,9 +1482,24 @@ class BlockingArtifactStore extends MemoryArtifactStore {
 class InMemoryArtifactContentStore {
   readonly writes: Array<{ path: string; content: string }> = [];
 
-  async writeText(path: string, content: string): Promise<string> {
+  async writeText(path: string, content: string): Promise<{
+    path: string;
+    storageBackend: "object";
+    objectKey: string;
+    sizeBytes: number;
+    sha256: string;
+    contentType: string;
+  }> {
     this.writes.push({ path, content });
-    return `stored/${path}`;
+    const bytes = Buffer.from(content, "utf8");
+    return {
+      path: `stored/${path}`,
+      storageBackend: "object",
+      objectKey: `artifacts/${path}`,
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      contentType: "application/x-ndjson"
+    };
   }
 }
 
@@ -864,6 +1511,28 @@ class ThrowingArtifactContentStore {
 
 class NoopAdapter implements RuntimeAdapter {
   readonly id = "fake";
+  readonly manifest: RuntimeAdapterManifest = {
+    adapterId: "fake",
+    providerId: "provider_test",
+    runtimeId: "runtime_fake",
+    runtimeModeId: "runtime_mode_fake_deterministic",
+    runtimeModeSlug: "fake.deterministic",
+    name: "Fake deterministic runtime",
+    adapterType: "process",
+    kind: "deterministic_fake",
+    capabilities: ["run.start", "run.cancel", "event.normalized", "event.streaming", "artifact.transcript", "tool.fake_echo", "auth.none"],
+    limitations: [{ code: "deterministic_only", message: "Deterministic test adapter." }],
+    placement: {
+      local: { support: "supported", reason: "In-memory tests." },
+      hosted: { support: "unsupported", reason: "Not implemented in tests." },
+      connectedLocalNode: { support: "future", reason: "Not implemented in tests." }
+    },
+    check: {
+      strategy: "none",
+      required: [],
+      optional: []
+    }
+  };
 
   async check() {
     return { ok: true };
@@ -899,6 +1568,7 @@ class EventfulAdapter extends NoopAdapter {
   sentSession: Record<string, unknown> | undefined;
   sentInput: Record<string, unknown> | undefined;
   cancelledSession: Record<string, unknown> | undefined;
+  cancelCalls = 0;
 
   override async start(request: Record<string, unknown>) {
     this.startedWith = request;
@@ -911,6 +1581,7 @@ class EventfulAdapter extends NoopAdapter {
   }
 
   override async cancel(session: Record<string, unknown>) {
+    this.cancelCalls += 1;
     this.cancelledSession = session;
   }
 
@@ -949,6 +1620,129 @@ class EventfulAdapter extends NoopAdapter {
         type: "run.completed",
         runId: String(session["runId"]),
         sequence: 101,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class WaitingForInputAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_waiting_input",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: { status: "waiting_for_input" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_waiting_output",
+        type: "runtime.output",
+        runId: String(session["runId"]),
+        sequence: 2,
+        payload: { text: "waiting resolved" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_waiting_done",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 3,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class SessionPatchAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_patch",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: {
+          status: "running",
+          sessionStatePatch: {
+            claudeSessionId: "claude-session-1",
+            nested: { safe: true }
+          }
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_patch_done",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 2,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class InvalidSessionPatchAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_patch_invalid",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: {
+          status: "running",
+          sessionStatePatch: ["bad"]
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class SecretSessionPatchAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_patch_secret",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: {
+          status: "running",
+          sessionStatePatch: { apiKey: "leak" }
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class RuntimeApprovalAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_approval_requested",
+        type: "approval.requested",
+        runId: String(session["runId"]),
+        sequence: 1,
+        payload: {
+          runtimeApprovalToken: "pause-1",
+          approvalType: "before_destructive_command",
+          toolName: "Bash"
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      yield {
+        id: "event_approval_done",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 2,
         payload: { status: "completed" },
         createdAt: "2026-05-11T00:00:00.000Z"
       };
@@ -1187,6 +1981,321 @@ class ThrowingAfterFirstArtifactContentStore {
       throw new Error("artifact write failed");
     }
     return `stored/${path}`;
+  }
+}
+
+const unknownAvailability: RuntimeAvailability = {
+  state: "unknown",
+  canRun: false,
+  installed: false,
+  auth: "unknown",
+  version: null,
+  checkedAt: "2026-05-29T00:00:00.000Z",
+  reasonCode: null,
+  message: null
+};
+
+const fakeRuntimeManifest: RuntimeAdapterManifest = {
+  adapterId: "fake",
+  providerId: "provider_test",
+  runtimeId: "runtime_fake",
+  runtimeModeId: "runtime_mode_fake_deterministic",
+  runtimeModeSlug: "fake.deterministic",
+  name: "Fake deterministic runtime",
+  adapterType: "process",
+  kind: "deterministic_fake",
+  capabilities: ["run.start", "run.cancel", "event.normalized", "event.streaming", "artifact.transcript", "tool.fake_echo", "auth.none"],
+  limitations: [
+    {
+      code: "deterministic_only",
+      message: "Outputs are fixed for local smoke and contract tests."
+    }
+  ],
+  placement: {
+    local: { support: "supported", reason: "In-process deterministic test adapter." },
+    hosted: { support: "unsupported", reason: "Hosted worker execution is not shipped in R3." },
+    connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+  },
+  check: {
+    strategy: "none",
+    required: [],
+    optional: []
+  }
+};
+
+const codexRuntimeManifest: RuntimeAdapterManifest = {
+  adapterId: "codex",
+  providerId: "provider_openai",
+  runtimeId: "runtime_codex",
+  runtimeModeId: "runtime_mode_codex_exec_json",
+  runtimeModeSlug: "codex.exec_json",
+  name: "Codex exec JSON",
+  adapterType: "process",
+  kind: "one_shot_process",
+  capabilities: [
+    "run.start",
+    "run.cancel",
+    "run.timeout",
+    "event.normalized",
+    "event.streaming",
+    "artifact.transcript",
+    "artifact.raw_transcript",
+    "model.catalog",
+    "auth.local",
+    "sandbox.read_only",
+    "sandbox.workspace_write",
+    "sandbox.danger_full_access"
+  ],
+  limitations: [
+    { code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." },
+    { code: "local_only", message: "This mode runs a local Codex CLI process and is not hosted-safe in R3." }
+  ],
+  placement: {
+    local: { support: "supported", reason: "Requires a PATH-reachable local codex binary and local workspace." },
+    hosted: { support: "unsupported", reason: "Hosted subprocess execution is not shipped in R3." },
+    connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+  },
+  docsPath: "docs/development/adapters/CODEX.md",
+  check: {
+    strategy: "binary_version_and_model_catalog",
+    required: ["binary_version", "model_catalog"],
+    optional: ["sandbox_policy_probe"]
+  }
+};
+
+const genericHttpRuntimeManifest: RuntimeAdapterManifest = {
+  adapterId: "generic_http",
+  providerId: "provider_generic_http",
+  runtimeId: "runtime_generic_http",
+  runtimeModeId: "runtime_mode_generic_http_async_rest",
+  runtimeModeSlug: "generic_http.async_rest",
+  name: "Generic HTTP async REST",
+  adapterType: "http",
+  kind: "async_rest",
+  capabilities: [
+    "run.start",
+    "run.cancel",
+    "run.timeout",
+    "event.normalized",
+    "event.streaming",
+    "artifact.transcript",
+    "auth.none",
+    "auth.api_key"
+  ],
+  limitations: [
+    { code: "no_post_start_input", message: "generic_http.async_rest does not support post-start input in R4." }
+  ],
+  placement: {
+    local: { support: "conditional", reason: "Requires configured base URL." },
+    hosted: { support: "future", reason: "Hosted execution is not shipped in R4." },
+    connectedLocalNode: { support: "future", reason: "Hybrid node execution is not shipped in R4." }
+  },
+  docsPath: "docs/development/adapters/GENERIC_HTTP.md",
+  check: {
+    strategy: "http_health",
+    required: ["base_url_configured", "http_health"],
+    optional: ["auth_token_present"]
+  }
+};
+
+const customRuntimeManifest: RuntimeAdapterManifest = {
+  adapterId: "custom_runtime",
+  providerId: "provider_custom_runtime",
+  runtimeId: "runtime_custom_runtime",
+  runtimeModeId: "runtime_mode_custom_runtime",
+  runtimeModeSlug: "custom.runtime",
+  name: "Custom Runtime",
+  adapterType: "acpx",
+  kind: "acp",
+  capabilities: [
+    "run.start",
+    "run.cancel",
+    "event.normalized",
+    "event.streaming",
+    "artifact.transcript",
+    "auth.local"
+  ],
+  limitations: [{ code: "custom_only", message: "Custom strategy test manifest." }],
+  placement: {
+    local: { support: "conditional", reason: "Requires local custom runtime." },
+    hosted: { support: "future", reason: "Hosted execution is not shipped." },
+    connectedLocalNode: { support: "future", reason: "Hybrid execution is not shipped." }
+  },
+  docsPath: "docs/development/adapters/CUSTOM.md",
+  check: {
+    strategy: "custom",
+    required: ["custom_probe"],
+    optional: []
+  }
+};
+
+class CancelledEventAdapter extends EventfulAdapter {
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_adapter_cancelled",
+        type: "run.cancelled",
+        runId: String(session["runId"]),
+        sequence: 99,
+        payload: { status: "cancelled" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+
+  override async artifacts(session: Record<string, unknown>): Promise<Artifact[]> {
+    return [
+      {
+        id: `adapter_cancelled_${String(session["runId"])}`,
+        type: "transcript",
+        path: `artifacts/${String(session["runId"])}/cancelled-transcript.jsonl`,
+        metadata: {
+          content: "{\"type\":\"run.cancelled\"}\n"
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      }
+    ];
+  }
+}
+
+class CancelFailureAdapter extends EventfulAdapter {
+  override async cancel(): Promise<void> {
+    throw new AdapterProtocolError("cancel failed", { reasonCode: "generic_http_cancel_failed" });
+  }
+
+  override events(session: Record<string, unknown>): AsyncIterable<SwitchyardEvent> {
+    return (async function* () {
+      yield {
+        id: "event_cancel_failure_running",
+        type: "runtime.status",
+        runId: String(session["runId"]),
+        sequence: 99,
+        payload: { status: "running" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      yield {
+        id: "event_cancel_failure_completed",
+        type: "run.completed",
+        runId: String(session["runId"]),
+        sequence: 100,
+        payload: { status: "completed" },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      };
+    })();
+  }
+}
+
+class ManifestTestAdapter extends NoopAdapter {
+  override readonly id: string;
+  readonly manifest: RuntimeAdapterManifest;
+  private readonly impl: () => Promise<{ ok: boolean; message?: string; details?: Record<string, unknown> }>;
+
+  constructor(
+    manifest: RuntimeAdapterManifest,
+    checkImpl: () => Promise<{ ok: boolean; message?: string; details?: Record<string, unknown> }>
+  ) {
+    super();
+    this.manifest = manifest;
+    this.id = manifest.adapterId;
+    this.impl = checkImpl;
+  }
+
+  override async check(): Promise<{ ok: boolean; message?: string; details?: Record<string, unknown> }> {
+    return this.impl();
+  }
+}
+
+class MemoryRegistryStore implements RegistryStore {
+  readonly providers = new Map<string, { id: string; name: string; authMode: "none" | "local" | "api_key" | "oauth" | "custom"; status: "available" | "unavailable" | "degraded" | "unknown" }>();
+  readonly runtimes = new Map<string, RuntimeTarget>();
+  readonly models = new Map<string, { id: string; providerId: string; modelName: string; supportsTools: boolean; supportsStreaming: boolean; supportsBrowser: boolean; status: "available" | "unavailable" | "degraded" | "unknown" }>();
+  readonly runtimeModes = new Map<string, RuntimeMode>();
+  readonly runtimeModesBySlug = new Map<string, string>();
+
+  async createProvider(provider: { id: string; name: string; authMode: "none" | "local" | "api_key" | "oauth" | "custom"; status: "available" | "unavailable" | "degraded" | "unknown" }) {
+    this.providers.set(provider.id, provider);
+    return provider;
+  }
+
+  async createRuntime(runtime: RuntimeTarget): Promise<RuntimeTarget> {
+    this.runtimes.set(runtime.id, runtime);
+    return runtime;
+  }
+
+  async createModel(model: { id: string; providerId: string; modelName: string; supportsTools: boolean; supportsStreaming: boolean; supportsBrowser: boolean; status: "available" | "unavailable" | "degraded" | "unknown" }) {
+    this.models.set(model.id, model);
+    return model;
+  }
+
+  async getProvider(id: string) {
+    return this.providers.get(id);
+  }
+
+  async getRuntime(id: string): Promise<RuntimeTarget | undefined> {
+    return this.runtimes.get(id);
+  }
+
+  async getModel(id: string) {
+    return this.models.get(id);
+  }
+
+  async listProviders(_filter: { limit: number; before?: { id: string } | undefined }) {
+    return { providers: [...this.providers.values()], nextCursor: null };
+  }
+
+  async listRuntimes(_filter: { providerIds?: readonly string[]; adapterType?: readonly string[]; limit: number; before?: { id: string } | undefined }) {
+    return { runtimes: [...this.runtimes.values()], nextCursor: null };
+  }
+
+  async listModels(_filter: { providerIds?: readonly string[]; limit: number; before?: { id: string } | undefined }) {
+    return { models: [...this.models.values()], nextCursor: null };
+  }
+
+  async upsertRuntimeMode(mode: RuntimeMode): Promise<RuntimeMode> {
+    this.runtimeModes.set(mode.id, mode);
+    this.runtimeModesBySlug.set(mode.slug, mode.id);
+    return mode;
+  }
+
+  async getRuntimeMode(idOrSlug: string): Promise<RuntimeMode | undefined> {
+    if (idOrSlug.startsWith("runtime_mode_")) {
+      return this.runtimeModes.get(idOrSlug);
+    }
+    const id = this.runtimeModesBySlug.get(idOrSlug);
+    return id ? this.runtimeModes.get(id) : undefined;
+  }
+
+  async listRuntimeModes(_filter: {
+    providerIds?: readonly string[];
+    runtimeIds?: readonly string[];
+    adapterType?: readonly string[];
+    kind?: readonly string[];
+    availability?: readonly string[];
+    placement?: readonly string[];
+    capability?: readonly string[];
+    limit: number;
+    before?: { id: string } | undefined;
+  }): Promise<{ runtimeModes: RuntimeMode[]; nextCursor: { id: string } | null }> {
+    return {
+      runtimeModes: [...this.runtimeModes.values()],
+      nextCursor: null
+    };
+  }
+
+  async updateRuntimeModeAvailability(idOrSlug: string, availability: RuntimeAvailability): Promise<RuntimeMode | undefined> {
+    const mode = await this.getRuntimeMode(idOrSlug);
+    if (!mode) {
+      return undefined;
+    }
+    const updated: RuntimeMode = {
+      ...mode,
+      availability,
+      status: availability.state,
+      updatedAt: availability.checkedAt
+    };
+    await this.upsertRuntimeMode(updated);
+    return updated;
   }
 }
 

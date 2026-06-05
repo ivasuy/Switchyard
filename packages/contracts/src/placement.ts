@@ -13,4 +13,18 @@ export const placementDecisionSchema = z.object({
   policyTrace: z.array(z.string())
 });
 
+export const placementRequestSchema = z.object({
+  requestedPlacement: z.enum(["local", "hosted", "connected_local_node"]).optional(),
+  runtimeMode: z.string().min(1),
+  adapterType: z.string().min(1),
+  now: z.string().datetime({ offset: true }).optional()
+});
+
+export const placementTraceSchema = z.object({
+  code: z.string().min(1),
+  detail: z.string().min(1)
+});
+
 export type PlacementDecision = z.infer<typeof placementDecisionSchema>;
+export type PlacementRequest = z.infer<typeof placementRequestSchema>;
+export type PlacementTrace = z.infer<typeof placementTraceSchema>;

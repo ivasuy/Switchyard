@@ -3,8 +3,17 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -13,7 +22,8 @@
   },
   "dependencies": {
     "@switchyard/contracts": "workspace:*",
-    "@switchyard/core": "workspace:*"
+    "@switchyard/core": "workspace:*",
+    "@switchyard/protocol-acpx": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

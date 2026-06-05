@@ -4,6 +4,15 @@ Switchyard is a protocol-neutral runtime gateway. Its job is to expose many agen
 
 This document is both a reference for the current architecture and the target architecture Switchyard is building toward. Some packages and routes shown here are planned but not shipped yet. Use `PRODUCT.md` for the current shipped surface and release roadmap.
 
+## R20 Sandbox Boundary (Current Shipped Truth)
+
+R20 ships a production subprocess/PTY sandbox foundation as an internal hosted-worker substrate only.
+
+- Sandbox construction is worker-only (`apps/worker`) and is not exposed as a public API route.
+- Policy resolves commands before execution: executors receive only policy-owned resolved command values (`executablePath`, `argv`, `cwd`, `env`, adapter type).
+- PTY is fail-closed: if no PTY driver is configured, requests fail with a named boundary error and never fall back to unsafe process execution.
+- No public arbitrary execution API exists in this release (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox` remain absent).
+
 The core architectural idea is separation:
 
 ```text
@@ -130,9 +139,9 @@ Frontend / Backend / CLI / Automation
 | Local / Remote Execution    |   | Hosted Execution            |
 | apps/daemon                 |   | apps/server                 |
 | apps/node                   |   | apps/worker                 |
-| SQLite + filesystem         |   | Postgres + Redis + S3/R2    |
+| SQLite + filesystem         |   | Postgres + Redis + local    |
 | packages/storage/sqlite     |   | packages/storage/postgres   |
-| packages/storage/filesystem |   | packages/storage/s3         |
+| packages/storage/filesystem |   | filesystem object content   |
 +--------------+--------------+   +--------------+--------------+
                |                                 |
                v                                 v
@@ -149,7 +158,7 @@ Short mapping:
 - `Event Bus / Message Router`: event and message services in `packages/core`.
 - `Runtime Adapter Layer`: `packages/adapters`, `packages/protocol-acpx`, `packages/protocol-node`, and queue integration.
 - `Local / Remote Execution`: `apps/daemon`, `apps/node`, SQLite, filesystem artifacts.
-- `Hosted Execution`: `apps/server`, `apps/worker`, Postgres, Redis/BullMQ, S3/R2 artifacts.
+- `Hosted Execution`: `apps/server`, `apps/worker`, Postgres, Redis/BullMQ, and filesystem-backed object-compatible artifact content.
 
 ## Layer-by-Layer Design
 
@@ -601,13 +610,13 @@ Adapter details are time-sensitive. Switchyard should treat every real adapter a
 |---|---|---|---|---|---|
 | OpenCode | ACP via `opencode acp` | CLI/process | local or hosted worker with installed binary | High | OpenCode documents ACP support through JSON-RPC over stdio. This should be the first real ACP adapter. |
 | Claude Code | TypeScript Agent SDK or `claude -p --output-format stream-json` | PTY/process | local first, hosted only with explicit credentials/sandbox | High | Claude Code exposes a current Agent SDK and programmatic CLI path with streaming JSON. Treat SDK as preferred over terminal scraping. |
-| Codex CLI | `codex exec --json` process adapter | PTY/process for future interactive mode | local first | Medium-High | First real provider slice is implemented for non-interactive runs. The adapter reads the local model catalog with `codex debug models`, normalizes JSONL events, logs process lifecycle details, enforces run timeouts, and preserves raw transcript artifacts. |
+| Codex CLI | `codex exec --json` one-shot + explicit `codex.interactive` process mode | PTY/process fallback remains future | local first | Medium-High | One-shot mode remains default (`codex.exec_json`), and explicit local `codex.interactive` ships bounded post-start input/session-state/resume flow without adding public PTY/terminal APIs. |
 | Cursor | `cursor-agent -p --output-format stream-json` | PTY/process | local first | Medium | Cursor documents headless CLI and streaming JSON. Treat as experimental until command behavior is tested locally. |
 | OpenClaw | HTTP/gateway adapter | process only for local dev | hosted or local depending on deployment | Medium | OpenClaw is itself a gateway with sessions, workspace, streaming, queue behavior, skills, and tool policy. Switchyard should integrate at its gateway boundary, not by controlling its internals. |
 | AgentField | REST API adapter, async execution preferred | HTTP sync for fast tasks | hosted or local | High | AgentField exposes REST execution APIs with async execution for long-running LLM workflows. Switchyard should treat it as a wrapper runtime. |
 | Paperclip | HTTP adapter | none until API verified | hosted or local | Low | Needs source verification before implementation. Keep as planned adapter, not first implementation target. |
 | Browser/Search | Native library/API adapter | process | hosted-safe with policy | High | Should be implemented as a Switchyard tool/runtime adapter with strict network and evidence policy. |
-| Generic HTTP | HTTP adapter | none | hosted-safe | High | Easiest wrapper adapter. Useful for tests and third-party integrations. |
+| Generic HTTP | HTTP adapter | none | local configured wrapper | High | Easiest wrapper adapter. Useful for tests and third-party integrations; hosted safety is not shipped in R4. |
 | Process | Node child process | none | local or sandboxed hosted worker | High | Useful fallback for non-interactive CLIs. |
 | PTY | Node PTY package | process when non-interactive | local first | High | Required for interactive runtimes but should be fallback because parsing terminal state is brittle. |
 
@@ -691,7 +700,7 @@ Stores:
 ### Hosted Mode
 
 ```text
-Postgres + Redis/BullMQ + S3/R2
+Postgres + Redis/BullMQ + filesystem-backed object content
 ```
 
 Used for:
@@ -706,7 +715,7 @@ Postgres stores durable metadata and events.
 
 Redis/BullMQ handles queues and background jobs.
 
-S3/R2 stores large artifacts.
+The filesystem-backed object-compatible content store durably stores large artifact payloads when `SWITCHYARD_OBJECT_STORE_DIR` is configured. R13 also ships an S3/R2-compatible object-store client path selected by explicit `SWITCHYARD_OBJECT_STORE_BACKEND=s3-compatible` plus endpoint/region/bucket/static credential env vars.
 
 ### Hybrid Mode
 
@@ -787,7 +796,7 @@ switchyard/
 
 - `apps/daemon`: local standalone Switchyard gateway. It wires local Fastify routes, SQLite, filesystem artifacts, local queues, local policy, and local-capable adapters.
 - `apps/node`: remote execution node for teams running workers on different servers. It connects outward to hosted/team Switchyard, receives assigned work, enforces node policy, runs local/server-local adapters, and syncs approved events/artifacts.
-- `apps/server`: hosted/team Switchyard API. It owns public API serving, org/team auth hooks, node coordination, Postgres, Redis/BullMQ, object storage, and hosted-safe adapters.
+- `apps/server`: hosted/team Switchyard API. It owns public API serving, org/team auth hooks, node coordination, Postgres, Redis/BullMQ, filesystem-backed object-compatible artifact content, and hosted-safe adapters.
 - `apps/worker`: hosted background worker process for queued runs, debate turns, tools, artifact extraction, memory extraction, and report generation.
 
 ### Core Packages
@@ -807,11 +816,17 @@ switchyard/
 
 ### Runtime and Integration Packages
 
-- `packages/adapters`: runtime and tool integrations. The current implemented adapter is `codex` for non-interactive local `codex exec --json` runs. Planned adapter folders include `opencode`, `claude-code`, `cursor`, `openclaw`, `paperclip`, `agentfield`, `browser-search`, `generic-http`, `process`, and `pty`.
-- `packages/storage`: persistence implementations for in-memory tests, SQLite local mode, Postgres hosted mode, filesystem artifacts, and S3/R2-compatible object storage.
+- `packages/adapters`: runtime and tool integrations. Current shipped runtime-mode adapters include `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `generic_http.async_rest`, `agentfield.async_rest`, and `opencode.acp`. R17 also ships local-daemon real tool adapters behind `/tools/invocations` for `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell` with deny-by-default policy and approval-by-default. Codex uses one adapter id with mode routing (`codex.exec_json` default one-shot and explicit local `codex.interactive`). Planned adapter folders still include `cursor`, `openclaw`, `paperclip`, `browser-search`, broad `process`, and broad `pty` work.
+- `packages/storage`: persistence implementations for in-memory tests, SQLite local mode, Postgres hosted mode, filesystem artifacts, and filesystem-backed object-compatible artifact content.
 - `packages/queue`: local in-process queue and hosted Redis/BullMQ queue implementations.
 - `packages/sdk`: typed client for frontend, backend, CLI, automation, and third-party consumers.
 - `packages/cli`: developer/admin commands for doctor, local launch, runtime test, adapter verification, and debugging.
+
+R11 shipped note:
+
+- `@switchyard/sdk` is now implemented and tested against the local daemon with typed run/event/artifact/registry methods and typed HTTP/network/decode/timeout/validation/stream errors.
+- `@switchyard/cli` is now implemented with local no-spend commands for `doctor`, `daemon start`, `run fake`, `runtime test`, `debug run`, and `contract export`.
+- `@switchyard/contracts` now ships deterministic route inventory and OpenAPI 3.1 generation/check for the local daemon surface.
 
 ### Important File Responsibilities
 
@@ -848,7 +863,7 @@ Switchyard uses:
 - SQLite for local metadata and events.
 - Redis/BullMQ for hosted job orchestration.
 - Filesystem artifact storage locally.
-- S3/R2-compatible object storage hosted.
+- Filesystem-backed object-compatible artifact content for hosted-like mode.
 - Vitest for unit, contract, adapter, and smoke tests.
 
 ## Why This Stack
@@ -875,9 +890,11 @@ Drizzle supports Postgres and SQLite while keeping SQL understandable. That matt
 
 Redis/BullMQ provide practical hosted job orchestration for run execution, debate rounds, tool calls, artifact extraction, retries, and worker pools.
 
-### Filesystem and S3/R2 Artifacts
+### Filesystem and Object-Compatible Artifacts
 
-Artifacts should have one logical model regardless of backend. Local mode maps logical artifact paths to files. Hosted mode maps them to object storage keys.
+Artifacts should have one logical model regardless of backend. Local mode maps logical artifact paths to files. Hosted-like mode maps them to object-compatible keys persisted either under a configured local filesystem root or an explicitly configured S3/R2-compatible object store.
+
+R10 shipped the hosted-like artifact content backend as a local filesystem-backed object-compatible store selected by `SWITCHYARD_OBJECT_STORE_DIR`. R13 extends that model with shipped S3/R2-compatible object-store client wiring while preserving fake-only hosted execution.
 
 ### acpx
 
@@ -944,3 +961,28 @@ Each phase should produce a runnable proof rather than only internal scaffolding
 For the current owner-facing release roadmap, use [PRODUCT.md](./PRODUCT.md). Historical implementation plans under `docs/superpowers/plans/` are references, not current truth.
 
 For the diagram-to-module checklist, use [the module coverage audit](./docs/decisions/2026-05-11-module-coverage-audit.md).
+
+## R10 Architecture Update (Shipped Slice)
+
+R10 now includes the previously planned hosted/hybrid surfaces in a safety-first shape:
+
+- `apps/server` is the hosted-like API gateway.
+- `apps/worker` is the hosted queue consumer and executes only hosted-safe fake runtime mode.
+- `apps/node` is the connected local-node executor with policy-gated assignment execution and sync.
+- `packages/queue` provides deterministic memory queue behavior plus opt-in Redis/BullMQ-backed queueing.
+- `packages/protocol-node` provides hosted<->node routes/client.
+- `packages/storage` includes opt-in Postgres metadata stores, deterministic in-memory defaults, and filesystem-backed object-compatible artifact content.
+
+Current safety posture:
+
+- Hosted worker execution defaults to `fake.deterministic`; R15 adds operator opt-in self-hosted/staging hosted worker execution for `codex.exec_json`, `claude_code.sdk`, and `opencode.acp` through a closed runtime catalog and allowlist gate.
+- R16 adds explicit local-only `codex.interactive` under existing `/runs` + `/runs/:id/input` + `/runs/:id/cancel` + approvals APIs; it does not add any public `/terminal`, `/pty`, `/exec`, or `/sandbox` route.
+- R16 keeps `codex.exec_json` as the default inferred Codex mode and requires explicit `runtimeMode: "codex.interactive"` for interactive behavior.
+- R16 doctor/registry checks distinguish `resumeCommandShapeAvailable` from `liveResumeVerified` so default no-spend checks do not overclaim live local resume success.
+- R17 adds local-daemon real tool execution only through `/tools/invocations` for configured `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell` with explicit allowlists and approval-by-default.
+- R14 adds an internal hosted sandbox substrate (`HostedSandboxService` + deny-by-default fake command policy + `FakeHostedSandboxExecutor`) for process/PTY safety contracts; R15 does not add arbitrary hosted process/PTY execution or public sandbox execution routes.
+- The R14 substrate is fake/no-spend only: no `child_process`, no `node-pty`, no shell/browser/fetch/GitHub/repo execution, no public `/sandbox`/`/exec`/`/pty`/`/terminal` route, and no kernel/container isolation claims.
+- Hosted server remains fake-runner-only; real provider adapters are worker-owned and opt-in only for self-hosted/staging. Production hosted real-runtime execution is fail-closed in R15.
+- Hosted real tools and connected-node real tools remain unshipped in R17.
+- Hybrid connected nodes are explicit trust boundaries and enforce local policy before execution and sync.
+- S3/R2-compatible object-store backing is shipped in R13; required verification remains deterministic and local/no-spend by default.

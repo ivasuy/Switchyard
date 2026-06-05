@@ -1,8 +1,8 @@
 import type { RoutedMessage } from "@switchyard/contracts";
-import type { MessageStore } from "@switchyard/core";
+import type { ListMessagesFilter, ListMessagesResult, MessageStore } from "@switchyard/core";
 import type { SwitchyardSqliteDatabase } from "./database.js";
 import { messages } from "./schema.js";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 
 type MessageRow = typeof messages.$inferSelect;
 type MessageInsertRow = Omit<typeof messages.$inferInsert, "fromRunId" | "toRunId" | "channel" | "deliveredAt"> & {
@@ -94,5 +94,45 @@ export class SqliteMessageStore implements MessageStore {
   async update(message: RoutedMessage): Promise<RoutedMessage> {
     await this.db.update(messages).set(toUpdateRow(message)).where(eq(messages.id, message.id));
     return message;
+  }
+
+  async list(filter: ListMessagesFilter): Promise<ListMessagesResult> {
+    const conditions: Array<ReturnType<typeof eq> | ReturnType<typeof or>> = [];
+    if (filter.runId) {
+      const runCondition = or(eq(messages.fromRunId, filter.runId), eq(messages.toRunId, filter.runId));
+      if (runCondition) conditions.push(runCondition);
+    }
+    if (filter.channel) {
+      conditions.push(eq(messages.channel, filter.channel));
+    }
+    if (filter.deliveryStatus) {
+      conditions.push(eq(messages.deliveryStatus, filter.deliveryStatus));
+    }
+    if (filter.before) {
+      const cursorCondition = or(
+        lt(messages.createdAt, filter.before.createdAt),
+        and(eq(messages.createdAt, filter.before.createdAt), lt(messages.id, filter.before.id))
+      );
+      if (cursorCondition) {
+        conditions.push(cursorCondition);
+      }
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const overFetch = filter.limit + 1;
+    const baseQuery = this.db
+      .select()
+      .from(messages)
+      .orderBy(desc(messages.createdAt), desc(sql`${messages.id}`))
+      .limit(overFetch);
+    const query = whereClause ? baseQuery.where(whereClause) : baseQuery;
+    const rows = await query;
+    const page = rows.slice(0, filter.limit).map(fromRow);
+    const hasMore = rows.length > filter.limit;
+    const last = page.at(-1);
+    return {
+      messages: page,
+      nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null
+    };
   }
 }

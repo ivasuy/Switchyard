@@ -1,4 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ProviderResolvedCommand } from "@switchyard/contracts";
+import type { RuntimeLogger } from "@switchyard/core";
+import type { probeCodexCatalog } from "./codex-model-catalog.js";
 
 export type CodexReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 export type CodexReasoningSummary = "auto" | "concise" | "detailed" | "none";
@@ -32,9 +35,25 @@ export interface CodexCatalogProbe {
   version?: string;
   models: CodexModelCatalogEntry[];
   message?: string;
+  reasonCode?: "binary_unavailable" | "model_catalog_unavailable" | "check_timeout" | "check_output_too_large";
+  outputBytes?: number;
+  optionalChecks?: Record<string, { ok: boolean; message?: string }>;
 }
 
-export type CodexProcessFactory = (
-  args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv }
-) => ChildProcessWithoutNullStreams;
+export type CodexProcessFactory =
+  | ((args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams)
+  | ((command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams);
+
+export interface CodexExecJsonAdapterOptions {
+  command?: string;
+  processFactory?: CodexProcessFactory;
+  modelCatalog?: CodexModelCatalogEntry[];
+  probeCatalog?: typeof probeCodexCatalog;
+  logger?: RuntimeLogger | undefined;
+  hostedProviderCommand?: ProviderResolvedCommand;
+}
+
+export interface CodexInteractiveRuntimeMetadata {
+  codexThreadId?: string;
+  codexResumeMode?: "exec_resume_json";
+}
