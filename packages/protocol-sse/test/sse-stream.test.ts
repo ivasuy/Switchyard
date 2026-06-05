@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SwitchyardEvent } from "@switchyard/contracts";
 import { EventBus } from "@switchyard/core";
-import { collectReplayAndLiveEvents, formatSseEvent } from "../src/index.js";
+import { collectReplayAndLiveEvents, formatSseEvent, streamEntityEvents } from "../src/index.js";
 
 describe("protocol-sse", () => {
   it("formats event payload for SSE output", () => {
@@ -239,5 +239,81 @@ describe("protocol-sse", () => {
 
     const body = await bodyPromise;
     expect(body).toBe(formatSseEvent(replay));
+  });
+
+  it("collects debate replay/live events through generic entity filtering", async () => {
+    const eventBus = new EventBus();
+    const replay: SwitchyardEvent = {
+      id: "event_debate_queued",
+      debateId: "debate_123",
+      type: "debate.round.started",
+      sequence: 0,
+      payload: { round: 1 },
+      createdAt: "2026-05-11T00:00:00.000Z"
+    };
+    const bodyPromise = collectReplayAndLiveEvents({
+      runId: "run_unused",
+      replay: [replay],
+      eventBus,
+      stopAfter: 2,
+      match: (event) => event.debateId === "debate_123"
+    });
+
+    setTimeout(() => {
+      void eventBus.publish({
+        id: "event_other",
+        debateId: "debate_other",
+        type: "debate.agent.argument",
+        sequence: 1,
+        payload: { ignored: true },
+        createdAt: "2026-05-11T00:00:01.000Z"
+      });
+      void eventBus.publish({
+        id: "event_debate_next",
+        debateId: "debate_123",
+        type: "debate.agent.argument",
+        sequence: 2,
+        payload: { accepted: true },
+        createdAt: "2026-05-11T00:00:01.000Z"
+      });
+    }, 0);
+
+    const body = await bodyPromise;
+    expect(body).toContain("event: debate.round.started");
+    expect(body).toContain("event: debate.agent.argument");
+    expect(body).not.toContain("ignored");
+  });
+
+  it("streams debate events with streamEntityEvents matcher", async () => {
+    const eventBus = new EventBus();
+    const chunks: string[] = [];
+    const destination = {
+      write(chunk: string) {
+        chunks.push(chunk);
+        return true;
+      },
+      end() {},
+      on(_event: "close", _listener: () => void) {}
+    };
+
+    const handle = streamEntityEvents({
+      replay: [],
+      destination,
+      live: true,
+      eventBus,
+      stopAfter: 1,
+      matches: (event) => event.debateId === "debate_stream"
+    });
+    await eventBus.publish({
+      id: "event_stream_1",
+      debateId: "debate_stream",
+      type: "debate.round.started",
+      sequence: 0,
+      payload: { round: 1 },
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    await handle.finished;
+
+    expect(chunks.join("")).toContain("event: debate.round.started");
   });
 });

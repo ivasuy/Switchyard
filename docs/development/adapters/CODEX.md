@@ -1,26 +1,53 @@
 # Codex Adapter Local Development
 
 This guide is only for Codex-specific local debugging. Use the [Official API Contract](../API.md) for endpoint shapes and [Local Development](../DEVELOPMENT.md) for daemon startup, SQLite, process, and verification commands.
+Manual smoke in this file depends on a locally installed `codex` CLI on your machine (`PATH`-reachable). It does not cover hosted Codex interactive execution.
+
+R21 hosted note: `codex.exec_json` is in the known provider set for production hosted execution, but activation is operator opt-in only. Fake-only remains default, no-spend smoke is required before rollout, spend-gated canary is required before real traffic, and rollback returns to fake-only by config restart.
 
 ## Current Codex Scope
 
 Implemented:
 
 - Local non-interactive `codex exec --json`.
+- Local interactive `codex.interactive` mode through explicit `runtimeMode` (never inferred by omission).
+- Runtime mode slugs: `codex.exec_json` (one-shot) and `codex.interactive` (interactive, local-only in R16).
 - Process adapter mode through `adapterType: "process"`.
+- Shared process substrate usage (`ProcessRunner`, JSONL parser harness, transcript recorder, adapter timeout wrapper) with unchanged public Codex behavior.
 - JSONL stdout parsing into Switchyard events.
 - Raw stdout/stderr transcript artifact capture.
 - Model and reasoning metadata mapping.
 - Child process PID logging.
 - Timeout and daemon-restart terminalization.
+- Runtime doctor checks that never run model tasks (`POST /runtime-modes/:id/check`) and are bounded by timeout/output limits.
+- Interactive checks require command-shape support for `codex exec --help` with `--json` and `codex exec resume --help` with `--json`.
+- Interactive doctor/check details separate `resumeCommandShapeAvailable` from `liveResumeVerified`; default no-spend checks do not claim live resume success.
 
 Not implemented yet:
 
-- Interactive Codex sessions.
-- Post-start input for Codex `exec --json`.
-- PTY fallback.
-- Approval bridging.
-- Hosted Codex process execution.
+- Post-start input for `codex.exec_json` one-shot mode.
+- Hosted interactive Codex create/input/approval bridge.
+- Public PTY/terminal route or TUI automation.
+- Generic process/PTY adapter promotion for Codex.
+- Hosted input/approval/terminal bridges for provider runtime execution.
+
+R3 check behavior:
+
+- missing Codex binary: reported as `unavailable` (`binary_unavailable`).
+- model catalog unavailable/empty: reported as `unavailable` (`model_catalog_unavailable`).
+- optional check failure with required checks passing: reported as `partial` (`optional_check_failed`).
+- hung/slow/oversized checks: bounded and sanitized as `unknown`/`unavailable` with stable reason codes.
+
+R4 Codex compatibility note:
+
+- Shared process substrate extraction is internal-only.
+- Public Codex adapter behavior is preserved: `codex exec --json`, `shell: false`, immediate stdin close, log names (`codex.spawned`, `codex.stderr`, `codex.stdout.first_line`, `codex.exit`, `codex.process_error`), and transcript path `runs/<runId>/codex-transcript.jsonl`.
+
+R16 interactive note:
+
+- `codex.interactive` uses the same runtime adapter contract (`start`, `send`, `cancel`, `events`, `artifacts`) with bounded session-state patches (`codexThreadId`) and resume flow.
+- `POST /runs?wait=1` with `runtimeMode: "codex.interactive"` is rejected as `interactive_wait_unsupported`.
+- Approval bridge support is conditional: fake/no-spend approval bridge coverage exists; live approval resolution is only advertised when the selected local interactive driver reports support.
 
 ## Request Metadata
 
@@ -56,7 +83,7 @@ Recommended local smoke payload:
 }
 ```
 
-Use it with [Create And Wait](../API.md#create-and-wait) when you want the final answer in `response.text`.
+Use it with [Create Run](../API.md#create-run) when you want the final answer in `response.text`.
 
 ## Healthy Log Shape
 
@@ -116,6 +143,8 @@ Run is `running` after daemon restart:
 
 ```bash
 pnpm --filter @switchyard/adapters test -- codex-exec-json-adapter
+pnpm --filter @switchyard/adapters test -- codex-interactive-adapter
+pnpm --filter @switchyard/testkit test -- fake-codex-interactive-session
 pnpm --filter @switchyard/adapters test
 pnpm --filter @switchyard/daemon test
 ```

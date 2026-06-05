@@ -19,6 +19,10 @@ describe("codex jsonl parser", () => {
       "run.completed"
     ]);
     expect(events[2]?.payload).toMatchObject({ text: "hello from codex", codexType: "item.completed" });
+    expect(events[0]?.payload).toMatchObject({
+      threadId: "thread_123",
+      sessionStatePatch: { codexThreadId: "thread_123" }
+    });
     expect(events[3]?.payload).toMatchObject({
       status: "completed",
       codexType: "turn.completed",
@@ -60,7 +64,8 @@ describe("codex jsonl parser", () => {
     expect(mapped.payload).toMatchObject({
       status: "event",
       codexType: "thread.updated",
-      threadId: "thread_abc"
+      threadId: "thread_abc",
+      sessionStatePatch: { codexThreadId: "thread_abc" }
     });
   });
 

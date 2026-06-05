@@ -47,13 +47,41 @@ When a release ships:
 
 ## Current Snapshot
 
-Snapshot source: `main` after PR #2, commit `94b6f32`.
+Snapshot source: `agent/phase-24-r25-hosted-wrapper-bridges` after R25 code went green.
 
-Current product state: local daemon MVP with a fake runtime and a real local Codex `exec --json` runtime mode.
+Current product state: local daemon with shipped runtime modes `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `codex.interactive`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; shipped local middleware APIs for messages, memory, evidence, context packets, approvals, and real/fake tool invocations; shipped local deterministic Debate V1; shipped hosted worker and connected-node execution foundations; shipped SDK/CLI/OpenAPI packaging and hardening; shipped self-hosted staging foundation for hosted/connected-node slice; shipped S3/R2-compatible object-store client wiring for hosted artifact content; shipped the R18 API-first hosted/server enterprise control-plane foundation; shipped R19 production hosted deployment readiness; shipped R20 internal production subprocess/PTY sandbox foundation plus production ops gates; shipped R21 production hosted provider activation for the known provider set `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`; shipped R22 hosted/connected-node real-tool execution for the exact R22 set with policy-first fail-closed checks; shipped R23 hosted runtime input/approval bridges for worker-owned `claude_code.sdk` and structured `opencode.acp`; shipped R24 hosted/server-safe debate through the existing `/debates` route family only: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`; and shipped R25 conditional hosted runtime input/approval bridges plus hosted debate participant bridges for wrapper modes `agentfield.async_rest` and `generic_http.async_rest`.
 
-The product is usable locally for one-shot agent runs, event inspection, artifact listing, cancellation, and registry lookups. It is not yet a hosted gateway, debate system, approval system, SDK, dashboard, or multi-runtime production platform.
+R25 keeps fake deterministic hosted debate as the default no-spend path; fake-only remains default. Opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`. Real participant runs require request-level `realRuntimeOptIn: true`; hosted real participants require `placement: "hosted"` plus existing hosted provider activation/spend gates, wrapper configuration and bridge capability checks for wrapper modes, bridge readiness, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness. `POST /debates?wait=1` remains supported only for fake deterministic no-spend debates and rejects real participant or live judge requests before provider side effects.
 
-Important runtime wording: `codex.exec_json` exists as a one-shot non-interactive runtime mode. A full interactive Codex runtime is not shipped yet.
+The R24 judge runner is internal and bounded. The default judge is deterministic and no-spend. A live model judge is allowed only through `judgeConfig.mode: "model"` inside `POST /debates`, with request opt-in and `confirmLiveProviderSpend: true`; there is no public model judge route. Debate participant and judge execution use existing run/runtime contracts and preserve run/message/event/artifact traceability, including participant run ids, judge run id when present, message ids, event ids, evidence ids, and final report artifact metadata.
+
+Hosted debate requires durable Postgres debate, message, evidence, event, artifact, and job/outbox state; child-run idempotency; evidence ownership preauthorization before side effects; ownership attachment; quota and audit stores; queue/outbox readiness; object-store readiness; worker readiness; provider activation; R23 bridge readiness where `claude_code.sdk` or `opencode.acp` are allowlisted; and R25 wrapper bridge readiness where `agentfield.async_rest` or `generic_http.async_rest` are allowlisted. Usable hosted runtime bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker. Wrapper modes additionally require daemon/operator wrapper config and explicit advertised bridge capabilities for input, approval request, and approval resolution. Missing command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`). Stale claimed non-idempotent provider input after worker crash is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`. Fake/no-spend remains default for required tests, smoke, preflight, and default canary. Production live provider canaries remain explicit opt-in only and require spend confirmation.
+
+The product is usable locally for one-shot agent runs, bounded Claude Code interaction, local fake deterministic debate execution, R24 hosted fake deterministic debate, opt-in hosted debate participant runs for the known runtime set, event inspection, artifact listing/content retrieval, cancellation, registry/runtime-mode lookups, durable middleware records, SDK/CLI workflows, OpenAPI contract export, clean local packaging smoke, the R10 hosted-like/hybrid node slice, the R12 self-hosted staging deployment foundation, the R18 hosted enterprise auth/tenant/quota/audit control-plane baseline, the R19 production hosted deployment operability workflow (`production:preflight`, `production:migrate`, `production:canary`), the R20 production sandbox operability smoke (`production:sandbox-smoke`), and the R24/R25 no-spend hosted debate and wrapper-bridge preflight/canary workflow. It is not a managed hosted platform. Hosted real-provider production execution is shipped only for the known provider set and remains gated behind explicit operator activation and spend controls.
+
+Important runtime wording: `codex.exec_json` remains the default inferred Codex one-shot mode. `codex.interactive` is a separate explicit local-only mode for bounded post-start input and resume/session-state flows.
+
+R25 production hosted boundary wording:
+
+- Hosted/server APIs require API key auth in staging/production fail-closed mode.
+- Hosted `/metrics` remains global operator/admin telemetry (`metrics:read` plus `admin:read`) and is not tenant-scoped in R20.
+- Production readiness includes named schema compatibility codes and diagnostics (`checks.schema`), sandbox diagnostics (`checks.sandbox`), provider activation diagnostics (`checks.hostedRuntimeGate`), and hosted debate readiness diagnostics with deterministic no-spend smoke and spend-gated canary verification.
+- R20 sandbox execution remains a worker-internal substrate only. It is policy-first, deny-by-default, and fail-closed when real execution is enabled without policy.
+- R21/R25 hosted provider activation is known provider only (`codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, `generic_http.async_rest`) and remains fake-only by default unless explicit operator opt-in is configured.
+- Local daemon defaults remain no-auth and backwards compatible for local fake runs, SDK usage, CLI fake runs, and local OpenAPI export.
+- R22 ships hosted worker tools for `fetch`, `web_search`, `github`, and command-catalog `shell`.
+- R22 ships connected-node tools for `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell`.
+- R23 hosted runtime bridge support is shipped for `claude_code.sdk` and `opencode.acp`; R25 extends the same hosted runtime bridge family conditionally to `agentfield.async_rest` and `generic_http.async_rest`.
+- Usable hosted runtime bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker claim/apply flow.
+- R25 wrapper bridges use only existing public routes: `POST /runs/:id/input`, `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, and `POST /approvals/:id/reject`.
+- Wrapper bridge support requires provider activation/spend gates, wrapper config, advertised wrapper bridge capabilities, bridge readiness, durable command/payload stores, queue, object store, ownership, quota, audit, and worker readiness.
+- Missing bridge command/payload stores fail closed in preflight/readiness/admission with named store errors (for example `hosted_runtime_bridge_store_unavailable`).
+- Stale claimed non-idempotent provider input after worker crash fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked` (no blind provider-input retries).
+- `codex.exec_json` remains one-shot with hosted input and approval bridges explicitly unsupported.
+- `codex.interactive` remains explicit local-only and unshipped for hosted placement.
+- R24/R25 hosted/server-safe debate ships only through `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`; no `/debates/judge`, `/model-judge`, `/judging`, or public arbitrary model judging route is shipped.
+- No dashboard/TUI, no public arbitrary `/exec`/`/shell`/`/process`/`/command`/`/pty`/`/terminal`/`/sandbox` routes, no hosted browser automation, no hosted `repo` execution, no generic process/PTY adapters, and no managed SaaS/billing/OAuth/SSO/SCIM ship in R25.
+- R21 rollback to fake-only is operator-controlled by config change + restart (`SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`, allowlist reset to `fake.deterministic`).
 
 ## What Exists Today
 
@@ -62,13 +90,22 @@ Important runtime wording: `codex.exec_json` exists as a one-shot non-interactiv
 The repository is a TypeScript pnpm/Turborepo monorepo with these shipped packages:
 
 - `apps/daemon`: local Fastify daemon.
-- `packages/contracts`: Zod schemas and inferred TypeScript types.
+- `apps/server`: hosted-like API gateway for the safe fake-worker slice.
+- `apps/worker`: hosted worker app with fake deterministic default plus opt-in self-hosted/staging real runtime execution for the R25 known provider set: `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, and conditional wrapper modes `agentfield.async_rest` and `generic_http.async_rest` under explicit operator, spend, and readiness gates.
+- `apps/node`: connected local-node app for registration, claim, and sync flows.
+- `packages/contracts`: Zod schemas, inferred TypeScript types, endpoint inventory, and OpenAPI 3.1 generation/checks.
 - `packages/core`: protocol-neutral ports and runtime lifecycle services.
 - `packages/testkit`: fake runtime adapter and in-memory test stores.
 - `packages/storage`: SQLite stores and filesystem artifact content storage.
 - `packages/protocol-rest`: local REST route groups.
 - `packages/protocol-sse`: SSE event formatting and bounded replay/live collection helpers.
-- `packages/adapters`: Codex `exec --json` adapter.
+- `packages/protocol-node`: connected-node protocol routes/client contracts.
+- `packages/queue`: in-memory and opt-in Redis/BullMQ queue adapters.
+- `packages/adapters`: Claude Code, Codex, Generic HTTP, AgentField, and OpenCode adapters plus no-spend compatibility matrix automation.
+- `packages/protocol-acpx`: outbound ACP/acpx protocol framing, schemas, stdio client, and transcript helpers.
+- `packages/sdk`: TypeScript SDK for the local daemon contract.
+- `packages/cli`: `switchyard` CLI for doctor, daemon start, fake run, runtime test, debug, contract export, and release smoke.
+- `deploy/self-hosted`: Docker Compose based self-hosted staging stack for server, worker, connected node, Postgres, Redis, and shared local object volume.
 
 ### Local Daemon
 
@@ -78,8 +115,11 @@ The local daemon can:
 - Store local state in SQLite.
 - Store artifact content on the filesystem.
 - Wire REST routes, event bus, storage, fake runtime, and Codex runtime together.
-- Reconcile persisted `running` runs to `failed` on restart.
-- Log run start/completion, Codex process PID, stderr snippets, first stdout detection, runtime output, timeout, and startup reconciliation.
+- Wire middleware services for local messages/memory/evidence/context/approvals/tools through the same SQLite-backed daemon.
+- Preserve bounded inbound `x-request-id` values and generate request ids otherwise.
+- Expose local metrics for request counts, error counts, run statuses, and startup recovery.
+- Reconcile persisted active run states to terminal failure on restart with idempotency coverage.
+- Log run start/completion, Codex process PID, stderr snippets, first stdout detection, runtime output, timeout, request errors, and startup reconciliation.
 
 ### Runs
 
@@ -100,8 +140,25 @@ The run lifecycle supports:
 
 Shipped runtime modes:
 
-- `fake`: deterministic test runtime for local smoke tests and contract coverage.
+- `fake.deterministic`: deterministic test runtime mode for local smoke tests and contract coverage.
+- `claude_code.sdk`: local bounded interactive Claude Code runtime mode with post-start input, session-state patches, runtime approval bridging, normalized tool events, and dual transcript artifacts (daemon default path uses structured `claude -p` stream-json IO).
 - `codex.exec_json`: local non-interactive Codex CLI execution through `codex exec --json`.
+- `codex.interactive`: local explicit-only Codex interactive mode with bounded post-start input, `waiting_for_input`/`waiting_for_approval` states, session-state patching (`codexThreadId`), and transcript artifacts capped/redacted under the existing runtime adapter contract.
+- `agentfield.async_rest`: daemon-configured AgentField async REST wrapper runtime with bounded health/discovery checks, async execute/status polling, normalized events, transcript artifacts, and result payload artifacts.
+- `generic_http.async_rest`: daemon-configured async REST wrapper runtime with bounded health/start/status/events/cancel/artifacts, verified-terminal cancellation, and transcript artifact capture.
+- `opencode.acp`: local OpenCode ACP subprocess runtime with bounded doctor check, one-prompt-per-run behavior, verified cancellation, and raw ACP transcript artifacts.
+
+Claude Code support includes:
+
+- `claude_code.sdk` runtime-mode inference for `runtime: "claude_code"` + `adapterType: "native"`.
+- Post-start text input with 64 KiB public body limit and core protocol guards.
+- Waiting state persistence (`waiting_for_input`, `waiting_for_approval`) through existing run/session statuses.
+- Session state patch persistence with rejection bounds for oversized/non-plain/function/symbol/secret-key patches.
+- Runtime approval bridge through existing approval records and approve/reject endpoints.
+- Session resume is not shipped for `claude_code.sdk` in R8.
+- Raw and normalized transcript artifacts with 1 MiB caps and 64 KiB normalized-record cap.
+- Unknown provider event flood suppression after 100 unknown events.
+- Default no-spend doctor posture (`live_probe_disabled`) with opt-in bounded live probe.
 
 Codex support includes:
 
@@ -114,12 +171,28 @@ Codex support includes:
 - JSONL stdout parsing into normalized Switchyard events.
 - Raw stdout/stderr transcript artifact capture.
 - `409` response for post-start input because Codex `exec --json` is one-shot and non-interactive.
+- Explicit `codex.interactive` mode that never auto-infers from omitted `runtimeMode`; omitted Codex mode remains `codex.exec_json`.
+- Bounded local resume flow using persisted `codexThreadId` session state and visible failures for missing/stale resume tokens.
+- Runtime approval bridge contract wiring through existing approval records and approval endpoints, with deterministic fake/no-spend coverage.
+- Runtime approval expiration and terminal cleanup behavior so pending runtime approvals do not survive timeout/cancel/failure/daemon restart.
+- Runtime output logging redaction (`runtime.output` logs omit raw output text while artifacts remain the bounded debug surface).
+
+R4 shared substrate note:
+
+- Codex and Generic HTTP adapters now share extracted runtime substrates for process/session streaming, JSONL parsing, timeout helpers, and transcript recording while preserving existing public Codex behavior.
+
+R16 Codex boundary note:
+
+- `codex.exec_json` remains one-shot with unchanged default inference and unsupported post-start input semantics.
+- `codex.interactive` is explicit local-only runtime mode; `POST /runs?wait=1` is rejected (`interactive_wait_unsupported`) for this mode.
+- No hosted interactive Codex run bridge, no PTY/TUI automation, and no public `/sandbox`/`/exec`/`/pty`/`/terminal` route are shipped.
 
 ### REST API
 
 Implemented local endpoints:
 
 - `GET /health`
+- `GET /metrics`
 - `POST /runs`
 - `POST /runs?wait=1`
 - `GET /runs`
@@ -128,15 +201,52 @@ Implemented local endpoints:
 - `GET /runs/:id/artifacts`
 - `POST /runs/:id/input`
 - `POST /runs/:id/cancel`
+- `POST /messages`, `GET /messages`, `GET /messages/:id`
+- `POST /memory`, `GET /memory`, `GET /memory/search`, `GET /memory/:id`
+- `POST /evidence`, `GET /evidence`, `GET /evidence/:id`
+- `POST /context`
+- `POST /approvals`, `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, `POST /approvals/:id/reject`
+- `POST /tools/invocations`, `GET /tools/invocations`, `GET /tools/invocations/:id`
+- `POST /debates`, `GET /debates/:id`, `GET /debates/:id/events`
 - `GET /providers`, `GET /providers/:id`
 - `GET /runtimes`, `GET /runtimes/:id`
 - `GET /models`, `GET /models/:id`
+- `GET /runtime-modes`, `GET /runtime-modes/:id`
+- `POST /runtime-modes/:id/check`
+- `GET /doctor`
 - `GET /artifacts/:id`
 - `GET /artifacts/:id/content`
 
-Every 4xx and 5xx response uses the unified `{ error: { code, message, details? } }` envelope with a closed code set.
+Every 4xx and 5xx response uses the unified `{ error: { code, message, details?, requestId? } }` envelope with a closed code set.
 
 The full current endpoint contract lives in `docs/development/API.md`.
+
+### Debates
+
+R24/R25 ships hosted/server-safe debate through the existing debate route family only:
+
+- `POST /debates`
+- `GET /debates/:id`
+- `GET /debates/:id/events`
+
+Debate behavior:
+
+- Fake deterministic hosted debate is the default no-spend path.
+- `POST /debates?wait=1` is supported only for fake deterministic no-spend debates.
+- Real participant debate runs require request-level `realRuntimeOptIn: true`.
+- Hosted real participant debate runs require `placement: "hosted"`.
+- Allowed debate participant runtime modes are exactly `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`.
+- `codex.exec_json` remains one-shot; each debate turn is a normal bounded child run, not a resumed interactive session.
+- Hosted `codex.interactive` debate execution is not shipped.
+- Wrapper hosted debate participants (`agentfield.async_rest` and `generic_http.async_rest`) are allowed only with hosted placement, `realRuntimeOptIn`, provider activation and spend gates, wrapper config/capability checks, bridge readiness, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness.
+- Debate participant and judge work use existing run/runtime contracts and preserve run/message/event/artifact traceability.
+- Hosted debate requires durable Postgres debate/message/evidence/job state, child-run idempotency, evidence ownership preauthorization, ownership, quota, audit, queue/outbox, object store, worker readiness, provider activation, and hosted runtime bridge readiness where applicable.
+
+Judge behavior:
+
+- The internal judge runner defaults to deterministic no-spend judging.
+- Live model judge execution is available only from `judgeConfig.mode: "model"` in `POST /debates`, with request opt-in and `confirmLiveProviderSpend: true`.
+- Public model judge routes are not shipped: no `/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family exists.
 
 ### Events And Artifacts
 
@@ -146,24 +256,33 @@ Current events include:
 - `run.started`
 - `runtime.status`
 - `runtime.output`
+- `tool.call`
+- `tool.result`
+- `message.sent`
+- `approval.requested`
+- `approval.approved`
+- `approval.rejected`
 - `artifact.created`
 - `run.completed`
 - `run.cancelled`
 - `run.failed`
 
-`GET /runs/:id/events` returns SSE-formatted replay. Open-ended local live streaming ships through `?live=1` with a 15-second heartbeat and 5-minute idle close; the bounded `live=1&stopAfter=N` mode is preserved for deterministic tests. Hosted production streaming is still planned (R10).
+`GET /runs/:id/events` returns SSE-formatted replay. Open-ended local live streaming ships through `?live=1` with a 15-second heartbeat and 5-minute idle close; the bounded `live=1&stopAfter=N` mode is preserved for deterministic tests. Hosted production streaming beyond the safe fake-worker slice is still not production-grade.
 
-Completed fake and Codex runs can expose transcript artifacts through `GET /runs/:id/artifacts`, `GET /artifacts/:id` for global metadata lookup, and `GET /artifacts/:id/content` for streaming the raw bytes (transcripts as `application/x-ndjson`).
+Completed, cancelled, failed-after-start, and timeout-after-start runs can expose transcript artifacts through `GET /runs/:id/artifacts`, `GET /artifacts/:id` for global metadata lookup, and `GET /artifacts/:id/content` for streaming the raw bytes (transcripts as `application/x-ndjson`).
 
 ### Registry
 
 The daemon seeds local registry records for:
 
 - test provider/runtime/model records for the fake runtime.
+- Anthropic provider and Claude Code runtime/model records for `claude_code.sdk`.
 - OpenAI provider and Codex runtime records.
+- AgentField provider/runtime/model records for `agentfield.async_rest`.
+- OpenCode provider/runtime/model records for `opencode.acp`.
 - Codex model records when `codex debug models` is available.
 
-Both single-record registry lookups and registry list endpoints (`GET /providers`, `GET /runtimes`, `GET /models` with cursor pagination and provider/adapter filters) are shipped.
+Both single-record registry lookups and registry list endpoints (`GET /providers`, `GET /runtimes`, `GET /models` with cursor pagination and provider/adapter filters) are shipped. Runtime capability endpoints (`GET /runtime-modes`, `GET /runtime-modes/:id`, `POST /runtime-modes/:id/check`) and runtime doctor summaries (`GET /doctor`) are also shipped.
 
 ### Tests And Verification
 
@@ -176,45 +295,53 @@ The current workspace has passing package coverage for:
 - REST run and registry routes.
 - SSE formatting and bounded replay/live collection.
 - Codex catalog parsing, JSONL parsing, process adapter behavior, cancellation, transcript capture, and unsupported input.
-- daemon smoke behavior, registry seeding, persistence, artifact content, and restart reconciliation.
+- Claude Code adapter checks, event mapping, input/approval resolution handling, transcript bounds, and runtime-adapter contract behavior.
+- ACP framing/correlation/redaction behavior in `@switchyard/protocol-acpx`.
+- OpenCode ACP adapter checks, event mapping, cancellation semantics, and transcript artifacts.
+- daemon smoke behavior including runtime-mode checks (including Claude no-spend defaults and fake live-probe budget flags), OpenCode ACP run/cancel/failure/timeout artifact retrieval, registry seeding, persistence, and restart reconciliation.
+- contracts-owned OpenAPI generation and route/error-code drift checks.
+- SDK lifecycle, event replay/live stream, artifact metadata/content, registry, runtime-mode, and typed error behavior.
+- CLI doctor, daemon start, fake run, runtime/runtimes test, debug, contract export, and clean local packaging smoke behavior.
+- adapter compatibility matrix no-spend pass/skip/fail reporting.
+- SQLite schema metadata, additive migration policy, representative pre-R3/pre-R7/pre-R9/pre-R11 fixture preservation, and corrupt/zero-byte database rejection.
+- self-hosted staging config fail-closed behavior, readiness/metrics dependency reporting, queue stale-claim exhaustion handling, local object-store named errors, node protocol hardening, and compose smoke prerequisite diagnostics.
+- fake/no-spend hosted sandbox substrate contracts, deny-by-default policy, deterministic fake process/PTY-like executor scenarios, sandbox readiness/metrics counters, transcript redaction, and no public sandbox execution routes.
 
 ## What Does Not Exist Yet
 
 These are planned or designed in docs, but not shipped product:
 
-- Hosted server app.
-- Hosted worker app.
-- Hybrid local node app.
-- Postgres storage.
-- Redis/BullMQ queue.
-- S3/R2 artifact storage.
-- ACP/acpx protocol package.
+- Managed production hosted platform deployment with tenant isolation, cloud networking, production secrets, and operator controls.
+- Payment provider integration (invoices, checkout, webhooks, tax, dunning, subscription lifecycle).
+- Public tenant self-service signup/billing/key-management UI.
+- OAuth/OIDC/SAML/SSO/SCIM, session-cookie auth, and browser login flows.
+- Production hosted arbitrary process/PTY runtime deployment is not shipped.
+- Public arbitrary subprocess/PTY execution APIs and generic process/PTY product adapters are not shipped.
+- Presigned direct upload/download URLs, bucket provisioning automation, lifecycle policy management, provider-managed encryption setup, and CDN integration.
 - WebSocket protocol package.
-- SDK package.
-- CLI package.
 - Policy package beyond current contracts/ports.
-- OpenCode adapter.
-- Claude Code adapter.
 - Cursor adapter.
-- AgentField adapter.
-- Generic HTTP adapter.
 - OpenClaw adapter.
 - Paperclip adapter.
 - Browser/search adapter.
-- Generic process adapter.
-- PTY adapter.
-- Debate engine.
-- Approval workflow beyond contracts/ports/storage.
-- Memory APIs.
-- Tool APIs.
+- Generic process adapter is not shipped.
+- PTY adapter is not shipped.
+- Public model judge routes are not shipped (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family).
+- Hosted/runtime-specific input or approval bridges remain unsupported for `codex.exec_json` and `codex.interactive`; `agentfield.async_rest` and `generic_http.async_rest` use the conditional R25 hosted wrapper bridge path only.
+- Hosted debate participant bridges for `agentfield.async_rest` and `generic_http.async_rest` are conditional wrapper bridges, not arbitrary endpoint execution.
+- Browser automation is not shipped and remains denied with `browser_tool_unshipped`.
+- Hosted `repo` execution is not shipped and remains denied with `repo_hosted_unshipped`.
+- R22 ships hosted worker real tools (`fetch`, `web_search`, `github`, command-catalog `shell`) and connected-node real tools (`fetch`, `web_search`, `github`, `repo`, command-catalog `shell`) through the same policy/approval contract.
 - Trace endpoint.
-- OpenAPI generation.
-- Dashboard.
-- TUI.
+- Dashboard is not shipped.
+- TUI is not shipped.
 - Hosted (non-local) open-ended SSE streams.
-- Interactive Codex sessions.
-- Codex approval bridging.
-- Hosted Codex execution.
+- Hosted Codex interactive sessions are not shipped.
+- Hosted Codex approval bridging.
+- Codex live-resume success guarantees and hosted session-resume runtime mode.
+- Hosted Codex execution beyond one-shot `codex.exec_json` admission and fail-closed bridge semantics.
+- Hosted Claude Code/OpenCode execution outside the shipped R23 bridge boundary.
+- Runtime approval/session-resume bridge for interactive Codex.
 
 ## Release Roadmap
 
@@ -224,7 +351,7 @@ Every release below should eventually get one active spec and one active impleme
 
 ### R0: Current Baseline
 
-Status: shipped.
+Status: shipped. Verified on 2026-05-29 (`codex-org-47c4739e`) against `agent/roadmap-base-20260529` commit `461dea5`.
 
 Goal: freeze what exists today as the baseline for future releases.
 
@@ -255,7 +382,7 @@ Not included:
 - full Codex interactive runtime.
 - memory, tools, approval, debate, hosted, hybrid, SDK, or CLI product surfaces.
 
-Local verification:
+Local verification shipped:
 
 - full workspace checks pass.
 - fake runtime `POST /runs?wait=1` completes.
@@ -270,7 +397,7 @@ Promotion criteria:
 
 ### R1: Product Truth And Release Discipline
 
-Status: in progress on `codex/product-truth-cleanup`.
+Status: shipped. Verified on 2026-05-29 (`codex-org-47c4739e`) against `agent/roadmap-base-20260529` commit `461dea5`.
 
 Goal: make release planning and product truth reliable before adding more features.
 
@@ -317,7 +444,7 @@ Promotion criteria:
 
 ### R2: Local Gateway Completeness
 
-Status: planned.
+Status: shipped. Verified on 2026-05-29 (`codex-org-47c4739e`) against `agent/roadmap-base-20260529` commit `461dea5`.
 
 Goal: make the current local daemon complete enough to inspect and verify without database spelunking or known seeded IDs.
 
@@ -369,13 +496,13 @@ Promotion criteria:
 
 ### R3: Runtime Capability Infrastructure
 
-Status: planned.
+Status: shipped.
 
 Goal: model runtimes, runtime modes, provider capabilities, and adapter health before adding more adapters.
 
 Why this release exists:
 
-Today Codex `exec --json` exists, but that is not the same as full Codex runtime support. Future providers will expose different modes: one-shot process, interactive process, PTY, ACP, SDK, HTTP wrapper, browser-backed, hosted-safe, and local-only. Switchyard needs a capability model before more adapters are connected.
+Today Codex `exec --json` exists, but that is not the same as full Codex runtime support. Future providers may expose different modes: one-shot process, interactive process, PTY (not shipped), ACP, SDK, HTTP wrapper, browser-backed, hosted-safe, and local-only. Switchyard needs a capability model before more adapters are connected.
 
 Release scope:
 
@@ -387,24 +514,25 @@ Release scope:
 - clear distinction between provider, runtime, runtime mode, model, and adapter.
 - update Codex exec-json registration to use the new vocabulary.
 
-Usable after this release:
+Shipped now:
 
-- runtime mode vocabulary such as `codex.exec_json` versus future `codex.interactive`.
+- runtime mode vocabulary with shipped `fake.deterministic` and `codex.exec_json`, versus future `codex.interactive`.
 - adapter manifest shape.
 - doctor/check service.
 - capability records in registry.
 - placement facts for local, hosted, and future hybrid execution.
-- runtime availability API that distinguishes installed, unavailable, unsupported, and partially supported runtimes.
+- runtime availability API that distinguishes `available`, `installed`, `partial`, `unavailable`, `unsupported`, and `unknown`.
 - owners and clients can ask what this Switchyard instance can actually run.
 
-Not included:
+Not included in R3:
 
 - full interactive Codex runtime.
 - broad adapter expansion.
 
-Local verification:
+Local verification shipped:
 
-- registry and/or doctor API shows `codex.exec_json` as available when Codex is installed.
+- `GET /runtime-modes`, `GET /runtime-modes/:id`, `POST /runtime-modes/:id/check`, and `GET /doctor` expose local runtime capability state.
+- registry/doctor APIs show `codex.exec_json` as available when Codex is installed.
 - the same API marks Codex unavailable without crashing when Codex is missing or model probing fails.
 - fake runtime reports deterministic capabilities.
 - existing run creation still works after registry/capability changes.
@@ -431,7 +559,7 @@ Release scope:
 - stdout/stderr/event parser harness.
 - cancellation and timeout helpers.
 - stronger adapter contract tests that every adapter must satisfy.
-- Generic HTTP adapter for simple wrapper runtimes.
+- Generic HTTP async REST adapter for daemon-configured wrapper runtimes (`generic_http.async_rest`).
 - fake HTTP wrapper test server for deterministic CI coverage.
 - adapter docs template updated to match the capability model.
 
@@ -444,22 +572,19 @@ Usable after this release:
 - stronger adapter contract tests.
 - Generic HTTP async REST adapter for daemon-configured wrapper runtimes (`generic_http.async_rest`).
 - Switchyard can run one process-backed provider mode and one HTTP-wrapper-backed provider mode through the same public run lifecycle.
-- runtime doctor mapping for `http_health` without Codex-specific version/model assumptions.
-- verified-terminal cancellation semantics for Generic HTTP (`cancel` does not mark terminal on 2xx acknowledgement alone).
 
 Not included:
 
 - ACP/acpx.
-- PTY.
+- PTY is not included in R4.
 - full Codex interactive mode.
 
-Local verification shipped:
+Local verification:
 
 - Codex exec-json behavior still passes all existing tests and smoke checks after substrate extraction.
 - Generic HTTP adapter can run against a local fake HTTP runtime.
 - Generic HTTP status, failure, cancellation, output, and artifact paths are normalized.
 - transcript artifacts are stored for both process and HTTP adapter paths.
-- runtime-mode and doctor APIs expose `generic_http.async_rest` availability with bounded diagnostics and token redaction.
 
 Promotion criteria met:
 
@@ -468,7 +593,7 @@ Promotion criteria met:
 
 ### R5: ACP Foundation And OpenCode
 
-Status: planned.
+Status: shipped. Verified on 2026-05-30 in phase branch `agent/phase-4-r5-acp-foundation-and-opencode`.
 
 Goal: add the structured ACP/acpx path and validate it with OpenCode.
 
@@ -503,6 +628,8 @@ Not included:
 - hosted node connectivity.
 - debate orchestration.
 - full inbound ACP server unless explicitly included in the release spec.
+- approval workflow expansion, tool routing expansion, and memory APIs.
+- PTY adapters and interactive Codex runtime sessions are not included in R5.
 
 Local verification:
 
@@ -519,52 +646,55 @@ Promotion criteria:
 
 ### R6: Wrapper Runtime Integration
 
-Status: planned.
+Status: shipped on `agent/phase-5-r6-wrapper-runtime-integration`.
 
 Goal: prove Switchyard can coordinate a real wrapper runtime, not only local CLIs.
 
 Why this release exists:
 
-Switchyard is meant to normalize direct runtimes and wrapper runtimes. Generic HTTP proves the wrapper contract in isolation; AgentField proves it against a real wrapper-style provider. This should happen before OpenClaw or Paperclip because AgentField has a clearer verified path.
+Switchyard is meant to normalize direct runtimes and wrapper runtimes. Generic HTTP proves the wrapper contract in isolation; AgentField now proves it against a real wrapper-style provider boundary without turning AgentField into Switchyard's control plane.
 
 Release scope:
 
-- AgentField adapter using async REST execution.
-- create-execution, poll/status, result, and failure mapping.
-- wrapper execution metadata preserved in events and artifacts.
-- wrapper capability and doctor reporting.
-- local or mocked verification path that does not require uncontrolled spend.
-- docs for AgentField setup and local verification.
+- `agentfield.async_rest` adapter using daemon-configured async REST execution.
+- AgentField create-execution, status polling, result capture, and visible failure mapping.
+- wrapper execution metadata preserved in normalized events, transcript artifacts, and result artifacts.
+- AgentField runtime-mode manifest, seeded provider/runtime/model records, runtime-mode inference, and doctor/check reporting.
+- fake AgentField server and local verification script for deterministic CI-safe coverage.
+- local docs for fake verification and optional real AgentField smoke with spend warning.
 
 Usable after this release:
 
-- AgentField adapter using async REST execution.
-- create/poll/result/failure mapping.
-- wrapper execution metadata and artifacts.
-- wrapper-specific doctor and local verification docs.
-- an AgentField workflow can be launched as a Switchyard run when configured.
+- A configured AgentField target can be launched through normal `POST /runs` using `runtime: "agentfield"` and `adapterType: "http"`.
+- `agentfield.async_rest` starts upstream async executions, polls terminal status, emits normalized status/output/completion/failure events, and stores sanitized transcript plus result payload artifacts.
+- `GET /runtime-modes/agentfield.async_rest`, `POST /runtime-modes/agentfield.async_rest/check`, and `GET /doctor` expose configured/unconfigured AgentField availability without exposing API keys.
+- Active cancel is reported truthfully as unsupported with `409 adapter_protocol_failed` and `reasonCode: agentfield_cancel_unsupported`; Switchyard timeouts still persist `timeout`.
 
 Not included:
 
-- OpenClaw or Paperclip until their API boundaries are verified.
-- hosted worker execution.
-- debate orchestration.
+- verified upstream AgentField cancellation.
+- OpenClaw or Paperclip.
+- hosted worker execution or hosted/hybrid placement.
+- debate orchestration, approvals, memory, tools, SDK, CLI, TUI, or dashboard work are not included in R6.
+- AgentField memory, admin, node lifecycle, permissions, or Agentic APIs as Switchyard product surfaces.
 
 Local verification:
 
 - AgentField doctor reports configured/unconfigured states clearly.
-- mocked AgentField flow passes CI.
-- approved local smoke can create an execution, poll it, and normalize completion/failure.
-- artifacts preserve wrapper result payloads.
+- fake AgentField flow passes CI without uncontrolled model spend.
+- local fake smoke can create an execution, poll it, normalize completion/failure, and retrieve transcript/result artifacts.
+- active cancel returns `agentfield_cancel_unsupported`; R25 later adds conditional wrapper input/approval bridges for bridge-ready AgentField sessions.
+- Switchyard timeout persists `timeout` even though upstream cancellation is unsupported.
 
 Promotion criteria:
 
 - wrapper adapters follow Generic HTTP/runtime capability conventions.
 - AgentField does not become a second control plane inside Switchyard.
+- API keys are not exposed in doctor output, events, logs, transcripts, snapshots, or artifacts.
 
 ### R7: Middleware Foundation
 
-Status: planned.
+Status: shipped on `agent/phase-6-r7-middleware-foundation`.
 
 Goal: build the missing internal layers that debate, research, tools, approvals, and memory need.
 
@@ -598,9 +728,11 @@ Usable after this release:
 
 Not included:
 
-- vector memory unless explicitly scoped.
+- vector memory and embedding search (memory search is case-insensitive substring on `content` only).
+- remote evidence fetching (evidence records store metadata and optional relative `fetchedContentPath` pointers only).
 - full debate engine.
-- real browser/search/GitHub/shell tool execution unless separately scoped.
+- browser automation, hosted real tools, connected-node real tools, and public arbitrary execution routes (`/sandbox`, `/exec`, `/pty`, `/terminal`, `/process`, `/shell`, `/command`, top-level `/search`).
+- persisted first-class reusable context packets (R7 stores context packets only in `run.metadata.contextPacket` when `POST /runs` includes `context`).
 
 Local verification:
 
@@ -617,7 +749,7 @@ Promotion criteria:
 
 ### R8: Interactive Coding Runtimes
 
-Status: planned.
+Status: shipped.
 
 Goal: add richer coding-runtime behavior after the runtime capability and middleware foundations exist.
 
@@ -627,46 +759,47 @@ One-shot Codex exec-json is useful, but coding agents often need input, approval
 
 Release scope:
 
-- Codex interactive runtime mode decision: structured process if available, PTY only if necessary.
-- post-start input where Codex supports it or explicit unsupported semantics if it cannot.
-- session state and resume behavior where available.
-- approval bridging where exposed by the runtime.
-- Claude Code adapter using SDK or stream-json after an approved live probe.
-- tool-call and approval-pause normalization.
-- richer transcript artifacts.
-- runtime docs and local smoke commands.
+- Claude Code bounded interactive runtime mode via `claude_code.sdk`.
+- post-start input for active Claude sessions with bounded validation and explicit failure reasons.
+- session-state patch persistence with bounded rejection matrix and external session key inference.
+- approval bridging from runtime pauses into existing approvals store and resolution callback path.
+- tool-call/tool-result normalization and ask-user-question mapping into approval flow.
+- richer raw and normalized transcript artifacts with strict size limits.
+- runtime docs and no-spend-first smoke/check behavior.
+- explicit Codex one-shot preservation (`codex.exec_json`) in that phase, with interactive Codex arriving later in R16 as explicit `codex.interactive`.
 
 Usable after this release:
 
-- Codex interactive runtime mode if a safe structured/process/PTY strategy is selected.
-- Claude Code adapter through SDK or stream-json after an approved live probe.
-- post-start input where supported.
-- session state and transcript artifacts.
-- approval pause mapping where the runtime exposes it.
-- local coding runtimes can move beyond one-shot execution where the provider supports it.
+- Claude runtime mode `claude_code.sdk` for local bounded interactive sessions.
+- post-start input for active Claude runs and explicit unsupported semantics for non-interactive modes.
+- session state persistence and waiting-state transitions through existing run/session stores.
+- runtime approval pause mapping through normal approval records and resolution endpoints.
+- raw plus normalized transcript artifacts under bounded caps.
 
 Not included:
 
 - Cursor until local auth/keychain behavior is understood.
+- Codex interactive runtime mode promotion.
+- PTY/TUI automation is not included in R8.
 - unbounded autonomous multi-agent execution.
 - hosted arbitrary subprocess execution.
 
 Local verification:
 
-- interactive-capable runtime mode reports distinct capabilities from `codex.exec_json`.
-- post-start input succeeds where supported and returns clear `409` where unsupported.
-- Claude doctor reports auth/config without leaking secrets.
-- Claude or Codex interactive smoke produces normalized output and transcript artifacts.
-- approval pauses are represented consistently if the runtime emits them.
+- `claude_code.sdk` reports interactive capabilities (`run.input`, `session.state`, `approval.bridge`, normalized tools).
+- post-start input succeeds where supported and returns clear `400`/`409` bounds where unsupported or invalid.
+- Claude doctor reports install/auth state without leaking secrets and defaults to `live_probe_disabled`.
+- fake Claude smoke and adapter tests cover normalized output/events, approvals, and transcript artifacts without live prompt spend.
+- Codex remains explicitly one-shot with unsupported post-start input semantics.
 
 Promotion criteria:
 
-- no provider is promoted from one-shot to interactive unless local smoke proves input/session behavior.
-- PTY use, if any, is explicitly local-only and policy-gated.
+- no provider is promoted from one-shot to interactive unless local smoke and tests prove bounded input/session behavior.
+- PTY use remains explicitly out of scope and not shipped in R8.
 
 ### R9: Debate V1
 
-Status: planned.
+Status: shipped (fake deterministic local path only).
 
 Goal: build bounded multi-agent debate on top of runs, messages, context, evidence, and artifacts.
 
@@ -705,6 +838,8 @@ Not included:
 - unbounded autonomous swarms.
 - hosted/hybrid debate execution unless hosted has already shipped.
 - complex research tools unless R7 explicitly shipped them.
+- real participant runtimes in debate orchestration.
+- model-based judging, vector retrieval, or external search/browser/shell tooling inside debate execution.
 
 Local verification:
 
@@ -721,7 +856,7 @@ Promotion criteria:
 
 ### R10: Hosted And Hybrid Execution
 
-Status: planned.
+Status: shipped. Verified on 2026-05-30 in `agent/phase-9-r10-hosted-and-hybrid-execution`.
 
 Goal: move from local product to deploy-anywhere product once local semantics are stable.
 
@@ -759,7 +894,7 @@ Usable after this release:
 Not included:
 
 - enterprise billing or multi-tenant authorization beyond required interface boundaries.
-- hosted arbitrary subprocess/PTY execution without an explicit sandbox design.
+- hosted arbitrary subprocess/PTY execution without an explicit sandbox design is not included in R10.
 
 Local verification:
 
@@ -776,7 +911,7 @@ Promotion criteria:
 
 ### R11: SDK, CLI, And Hardening
 
-Status: planned.
+Status: shipped. Verified on 2026-05-30 in `agent/phase-10-r11-sdk-cli-and-hardening`.
 
 Goal: make Switchyard easier to consume and operate once the API is stable.
 
@@ -806,7 +941,7 @@ Usable after this release:
 
 Not included:
 
-- broad UI/dashboard work unless separately scoped.
+- broad UI/dashboard work is not included unless separately scoped.
 
 Local verification:
 
@@ -873,19 +1008,22 @@ For releases that claim Codex behavior, verify:
 
 Current release readiness:
 
-- Local MVP is testable.
-- Codex `exec --json` is usable for one-shot local runs.
-- API docs exist for the local daemon.
-- Development docs contain local smoke and inspection commands.
-- Specs and implementation plans are no longer reliable as product truth because several plan checkboxes are stale.
+- R0-R17 have audit-green phase branches.
+- Local daemon, hosted-like fake worker slice, connected-node safe slice, self-hosted staging foundation, S3/R2-compatible artifact storage, hosted real-runtime staging gates, local Codex interactive mode, local real-tool execution, SDK, CLI, OpenAPI, compatibility matrix, migrations, and packaging smoke are locally testable.
+- Codex `exec --json` remains usable for one-shot local runs.
+- Claude Code SDK mode is the shipped bounded interactive coding path.
+- API docs, generated OpenAPI, SDK, CLI, and development docs exist for the local daemon surface.
+- `PROJECT.md` records phase-by-phase audit status; `PRODUCT.md` is the owner-facing current truth.
 
 Known release risks:
 
 - Codex event shape depends on the local Codex CLI version.
-- Live SSE is bounded and test-oriented, not a production open stream.
-- Registry support is lookup-only.
-- Artifact content is stored locally, but there is no artifact-by-id HTTP endpoint.
-- There is no hosted deployment path yet.
+- Local open-ended SSE (`GET /runs/:id/events?live=1`) is shipped for daemon use, but hosted production streaming remains unshipped.
+- Runtime capability and doctor reporting are shipped for `fake.deterministic`, `claude_code.sdk`, `codex.exec_json`, `agentfield.async_rest`, `generic_http.async_rest`, and `opencode.acp`; external/provider-backed modes still require local binaries/configuration or remain no-spend skipped in CI.
+- Artifact metadata/content endpoints are shipped (`GET /artifacts/:id`, `GET /artifacts/:id/content`), but HTTP `HEAD` and `Range` support is not implemented.
+- Hosted-like execution remains safety-first and worker-owned. Managed hosted deployment, public arbitrary hosted subprocess execution, generic process adapters, and PTY adapters remain unshipped. Hosted real worker execution is operator opt-in only for the R25 known provider set: `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, and conditional wrapper modes `agentfield.async_rest` and `generic_http.async_rest`; wrapper modes additionally require wrapper config/capability, bridge readiness, provider activation, and spend gates with production fail-closed posture.
+- Local real tools are shipped through `POST /tools/invocations` and remain disabled by default, deny-by-default, explicitly configured/allowlisted, and approval-by-default. R22 also ships hosted worker tools for `fetch`, `web_search`, `github`, and command-catalog `shell`, plus connected-node tools for `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell`.
+- Hosted debate readiness depends on Postgres stores, queue/outbox, object store, ownership, quota, audit, worker readiness, provider activation, and R23 bridge stores where applicable. Missing dependencies fail closed before provider dispatch.
 
 ## Source Map
 
@@ -901,3 +1039,332 @@ Use these files for details:
 - Adapter research: `docs/adapters/`
 - Historical specs: `docs/superpowers/specs/`
 - Historical implementation plans: `docs/superpowers/plans/`
+
+## R10 Hosted And Hybrid Execution (Shipped Safe Slice)
+
+Shipped in this phase:
+
+- `apps/server` hosted-like API gateway preserving public run/artifact envelopes.
+- `apps/worker` hosted worker path with strict fake-only runtime validation (`fake.deterministic`).
+- `apps/node` connected local-node registration/heartbeat/claim/sync loop.
+- Placement decisions across `local`, `hosted`, and `connected_local_node` with inspectable denial reasons.
+- Queue abstraction with deterministic memory default and opt-in Redis/BullMQ-backed queue when `SWITCHYARD_REDIS_URL` is configured.
+- Postgres metadata stores for runs/events/sessions/artifacts/registry/placement/nodes/assignments when `SWITCHYARD_POSTGRES_URL` is configured; deterministic in-memory substitutes remain the default.
+- Memory artifact-content store by default and filesystem-backed object-compatible artifact store when `SWITCHYARD_OBJECT_STORE_DIR` is configured.
+- Node protocol routes and client.
+
+Explicitly not shipped in R10:
+
+- Hosted arbitrary subprocess/PTY/Codex/Claude/OpenCode execution is not shipped in R10.
+- Hosted browser/search/repo/GitHub/fetch tooling.
+- Hosted debate participant runtimes or model-judging workflows.
+- TUI/dashboard packaging changes are not shipped in R10.
+- Enterprise auth/billing/tenant controls.
+- S3/R2 network object-store client wiring (shipped later in R13).
+
+## R11 SDK, CLI, And Hardening (Shipped)
+
+Shipped in this phase:
+
+- `@switchyard/sdk` typed local daemon client for health/doctor, run lifecycle, event replay/live stream helpers, artifact metadata/content retrieval, registry/runtime-mode discovery, runtime-mode checks, and typed HTTP/network/decode/timeout/validation/stream errors.
+- `@switchyard/cli` `switchyard` binary with doctor, daemon start, fake run, runtime/runtimes test, debug run, contract export, and release smoke flows.
+- `@switchyard/contracts` endpoint inventory and deterministic OpenAPI 3.1 generation/checks.
+- Optional request ids in the HTTP error envelope, with bounded inbound `x-request-id` preservation.
+- Local `/metrics` endpoint.
+- SQLite schema metadata, additive migration policy checks, representative legacy fixture preservation, and corrupt/zero-byte database rejection.
+- Adapter compatibility matrix automation in CI-safe/no-spend mode.
+- Dist package exports plus clean temp packaging smoke that packs, installs, and exercises SDK/CLI/daemon flows outside the monorepo.
+
+Explicitly not shipped in R11:
+
+- Dashboard or TUI is not shipped in R11.
+- New runtime adapters beyond the existing runtime modes.
+- External provider spend in required checks.
+- Production-grade hosted deployment.
+- Enterprise auth, billing, or tenant controls.
+
+## R12 Production Hosting Foundation (Shipped)
+
+Shipped in this phase:
+
+- Self-hosted Docker Compose stack for the hosted fake-worker and connected-node slice with Postgres, Redis, server, worker, node, and a shared local object volume.
+- Fail-closed staging/production config validation for server, worker, and node required env vars, including hosted runtime allowlists, node tokens, node capabilities, runtime-mode allowlists, CWD prefixes, Postgres, Redis, and object-store paths.
+- `/ready` dependency reporting for Postgres, Redis, local object store, hosted allowlist, and node token posture.
+- JSON `/metrics` dependency availability reporting for server and queue state.
+- Worker lifecycle hardening for queue stale-claim recovery, retry exhaustion, and durable run failure propagation.
+- Local object-volume artifact backend hardening with named errors for unavailable store, write failure, missing content, empty content, and digest mismatch.
+- Connected-node protocol/client hardening around auth, body limits, HTTP error details, and staging policy.
+- Compose-backed `pnpm self-hosted:smoke` that exercises hosted fake runs, external HTTP checks, restart/persistence verification, connected-node assignment, diagnostics preservation, and named Docker prerequisite failure when the daemon is unavailable.
+
+Explicitly not shipped in R12:
+
+- Managed hosted platform deployment.
+- Hosted arbitrary subprocess/PTY/Codex/Claude/OpenCode execution is not shipped in R12.
+- S3/R2 network object-store client wiring (shipped later in R13).
+- Enterprise auth, billing, or tenant controls.
+- Cursor, OpenClaw, Paperclip, browser/search, generic process, PTY, GitHub, fetch, repo, or real shell adapters/tools are not shipped in R12.
+- Runtime-specific approval bridges for Codex/OpenCode/AgentField/Generic HTTP.
+- Hosted debate with real participant runtimes or model judging.
+- Dashboard or TUI is not shipped in R12.
+
+## R13 S3/R2 Object-Store Client Wiring (Shipped)
+
+Shipped in this phase:
+
+- Real S3-compatible artifact content client in `packages/storage` using official AWS SDK v3 S3 primitives with explicit static Switchyard credentials.
+- Shared server/worker object-store resolver with explicit `SWITCHYARD_OBJECT_STORE_BACKEND=memory|local|s3-compatible`, key prefix validation, endpoint validation/redaction, timeout parsing, and probe-mode controls.
+- Hosted server/worker wiring for network object storage with preserved fake-only worker runtime boundary (`fake.deterministic` only).
+- Artifact metadata preservation for runtime-produced content: `contentStored`, `storageBackend`, `objectKey`, `sizeBytes`, `sha256`, and `contentType`.
+- Artifact route error mapping for missing object content, object-store availability/auth/bucket/timeout/read failures, and integrity mismatches.
+- `/ready` object-store probe coverage and low-cardinality hosted metrics for object-store reads/writes/failures/probe/auth/unavailable/integrity counters.
+
+Explicitly not shipped in R13:
+
+- Hosted real-runtime execution for Codex/Claude/OpenCode or arbitrary subprocess/PTY is not shipped in R13.
+- Presigned direct upload/download URLs.
+- Automated bucket provisioning/lifecycle policy/KMS/CDN management.
+- Enterprise auth, billing, tenant controls, dashboard, or TUI are not shipped in R13.
+
+## R14 Hosted Sandbox Substrate For Process/PTY (Shipped Fake/No-Spend Slice)
+
+Shipped in this phase:
+
+- Internal hosted sandbox contracts for future process-like and PTY-like work.
+- Deny-by-default fake-command policy and deterministic fake executor coverage.
+- Resource-limit validation, transcript redaction, artifact metadata redaction, readiness/metrics counters, and no-spend sandbox smoke coverage.
+- Hosted worker construction that still registers only safe fake execution by default.
+- OpenAPI boundary checks proving no public `/sandbox`, `/exec`, `/pty`, or `/terminal` execution routes.
+
+Explicitly not shipped in R14:
+
+- Managed hosted deployment.
+- Production arbitrary subprocess/PTY execution is not shipped in R14.
+- Hosted Codex/Claude/OpenCode execution.
+- Cursor, OpenClaw, Paperclip, browser/search/fetch/GitHub/repo/generic process/generic PTY adapters are not shipped in R14.
+- Real shell/browser/search/GitHub/fetch/repo tool execution.
+- Interactive Codex runtime/session-resume/approval bridges.
+- Enterprise auth/billing/tenant controls, hosted debate with real participants/model judging, dashboard, or TUI are not shipped in R14.
+
+## R15 Hosted Real Runtime Execution (Shipped Self-Hosted/Staging Slice)
+
+Shipped in this phase:
+
+- Operator opt-in self-hosted/staging hosted worker execution for known real runtime modes: `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- Closed hosted runtime catalog, real-runtime gate validation, explicit hosted placement requirements, production fail-closed behavior, and server-side `?wait=1` denial before durable or queue side effects.
+- Worker claim revalidation and guarded prepared-metadata compare-and-update before adapter start.
+- Hosted-safe adapter logging and provider adapter construction limited to allowlisted known modes.
+- No-spend hosted real-runtime smoke coverage and rollback/operations documentation.
+
+Explicitly not shipped in R15:
+
+- Managed production hosted platform deployment.
+- Production arbitrary subprocess/PTY sandboxing is not shipped in R15.
+- Generic process/PTY adapters are not shipped in R15.
+- Public `/sandbox`, `/exec`, `/pty`, or `/terminal` APIs.
+- Hosted Generic HTTP/AgentField/Cursor/OpenClaw/Paperclip/browser/search/fetch/GitHub/repo/shell execution.
+- Interactive Codex sessions, Codex session resume, approval bridges, hosted debate with real participants/model judging, enterprise auth/billing/tenant controls, dashboard, or TUI are not shipped in R15.
+
+## R16 Interactive Codex And Approval Bridges (Shipped Local Codex Slice)
+
+Shipped in this phase:
+
+- Explicit local-only `codex.interactive` runtime mode while preserving `codex.exec_json` as the inferred one-shot default.
+- Fake/no-spend Codex interactive session coverage, bounded post-start input, session-state/resume metadata handling, and double-input conflict handling.
+- Runtime approval terminalization, startup reconciliation, approval expiry without lock re-entry, and adapter-emitted terminal failure cleanup.
+- Runtime-output log redaction, daemon registry/doctor wiring that avoids live-resume overclaiming, REST/OpenAPI boundary guards, and product/development docs for the shipped local Codex interactive path.
+
+Explicitly not shipped in R16:
+
+- Hosted post-start input or approval bridges.
+- Public PTY/TUI/terminal/exec/sandbox routes are not shipped in R16.
+- Arbitrary shell/tool execution.
+- Generic process/PTY adapters are not shipped in R16.
+- Real shell/browser/search/GitHub/fetch/repo tools.
+- Live Codex resume success guarantees.
+- Hosted debate with real participant runtimes/model judging, managed production hosted platform deployment, enterprise auth/billing/tenant controls, dashboard, or TUI are not shipped in R16.
+
+## R17 Production Tools And Adapter Expansion (Shipped Local-Daemon Slice)
+
+Shipped in this phase:
+
+- Local-daemon production real-tool slice through `POST /tools/invocations` for configured `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell`.
+- Real tools disabled by default, deny-by-default, explicit allowlist/config requirements, and approval-by-default policy.
+- Typed per-tool contracts and OpenAPI alignment, immutable `ToolExecutionPlan` handoff, local real-tool policy gates, and fake/no-spend adapter coverage.
+- Bounded and redacted inputs, outputs, artifacts, logs, events, and approval payloads.
+- Fetch DNS/private-network/redirect protection, web_search/GitHub inline output bounding, repo direct-spawn Git operations, and shell catalog direct-spawn execution with absolute executable paths and argument/pathspec hardening.
+- Exactly-once approval execution/expiration handling, approval-store failure side-effect guards, daemon config/REST/metrics wiring, hosted/node real-tool denial tests, and expanded no-spend REST/daemon/adapter acceptance matrices.
+
+Explicitly not shipped in R17:
+
+- Hosted or connected-node real-tool execution.
+- Browser automation.
+- Generic process/PTY runtimes or arbitrary shell/exec/pty/terminal/sandbox routes are not shipped in R17.
+- Cursor, OpenClaw, or Paperclip adapters.
+- Runtime-specific approval bridges for OpenCode, AgentField, Generic HTTP, or hosted Codex.
+- Managed production hosted platform deployment.
+- Enterprise auth, billing, tenant controls, dashboard, or TUI are not shipped in R17.
+
+## R18 Enterprise Auth, Billing, And Tenant Controls (Shipped Control-Plane Foundation)
+
+Shipped in this phase:
+
+- API-first hosted/server enterprise control-plane foundation for API key auth, tenant/project ownership, plan/entitlement/quota contracts, and audit events.
+- Public contracts for account, tenant, project, user, API key, billing plan, entitlement, quota reservation/usage, resource ownership, auth context, and audit event records.
+- Hosted/server API key authentication with bearer and `x-switchyard-api-key` support, query-string credential rejection, redacted auth failures, tenant/project scoping, and scope-based route authorization.
+- Durable ownership for hosted/server resources touched by R18, including runs, events, artifacts, placement decisions, nodes, assignments, quota reservations, and audit log events.
+- Entitlement and quota enforcement before hosted side effects for run creation, active run count, timeout limits, placements/runtime modes, artifact reads, and connected-node registration.
+- Tenant-scoped hosted enterprise routes for `GET /auth/whoami`, `GET /entitlements`, and `GET /audit/events`.
+- Hosted OpenAPI surface with API-key security for protected routes while local-daemon OpenAPI remains unauthenticated and backwards compatible by default.
+- Staging/production fail-closed server config and readiness checks for auth mode, key pepper, bootstrap records, active plan/key/tenant/project, quota store, audit store, node-token binding, and unowned hosted resources.
+- Hosted global `/metrics` protected as operator/admin telemetry requiring `metrics:read` plus `admin:read`; tenant-scoped metrics are not shipped in R18.
+- Local daemon, SDK, and CLI compatibility tests proving local fake flows, local metrics, and local OpenAPI remain no-auth by default.
+
+Explicitly not shipped in R18:
+
+- Dashboard or TUI is not shipped in R18.
+- Payment provider integration, invoices, checkout, webhooks, tax, subscription lifecycle, customer portal, or automated billing collection.
+- Managed production hosting platform.
+- Public tenant signup, tenant self-service UI, API-key creation UI, billing admin UI, or organization-management UI.
+- OAuth, OIDC, SAML, SSO, SCIM, passkeys, session cookies, user passwords, email invites, or browser login flow.
+- Hosted or connected-node real tools.
+- Browser automation.
+- Arbitrary process/PTY execution, generic process/PTY adapters, or public `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` execution APIs are not shipped in R18.
+- Cursor, OpenClaw, or Paperclip adapters.
+- Runtime-specific approval bridge expansion for OpenCode, AgentField, Generic HTTP, or hosted Codex.
+- Hosted debate with real participant runtimes or model judging.
+
+## R19 Production Hosted Deployment (Shipped Production-Readiness Slice)
+
+Shipped in this phase:
+
+- Provider-neutral production manifest pack for the existing fake-safe hosted boundary, including production compose, manifest posture metadata, `.env.example`, bootstrap example, and documentation.
+- Fail-closed production config validation shared by server, worker, and node, including placeholder/blank-entry rejection, runtime allowlist enforcement, production auth/object-store requirements, and redacted startup logging.
+- Postgres schema compatibility checks, additive migration policy gates, `production:migrate`, and `/ready` schema diagnostics with named codes.
+- Worker/node operability improvements: cheap health, schema-aware readiness, worker cached/full readiness, CLI readiness output, and sanitized startup failures.
+- Production `preflight`, `migrate`, and deterministic no-spend `canary` commands that validate the hosted API workflow without relying on live provider spend.
+- Hosted OpenAPI, API docs, development docs, and product truth aligned with the shipped R19 production-readiness boundary.
+- CLI typecheck self-containment so full branch verification does not depend on prebuilt local package artifacts.
+
+Explicitly not shipped in R19:
+
+- Dashboard or TUI is not shipped in R19.
+- Managed SaaS/public signup, tenant self-service UI, billing admin UI, or organization-management UI.
+- Payment provider integration, invoices, checkout, webhooks, tax, subscription lifecycle, customer portal, or automated billing collection.
+- OAuth, OIDC, SAML, SSO, SCIM, passkeys, session cookies, user passwords, email invites, or browser login flow.
+- Production hosted real-runtime execution for Codex/Claude/OpenCode.
+- Production arbitrary subprocess/PTY execution, generic process/PTY adapters, or public `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` execution APIs are not shipped in R19.
+- Hosted or connected-node real-tool execution.
+- Browser automation.
+- Cursor, OpenClaw, or Paperclip adapters.
+- Runtime-specific hosted approval bridge expansion for Codex/OpenCode/AgentField/Generic HTTP.
+- Hosted debate with real participant runtimes or model judging.
+
+## R20 Production Subprocess/PTY Sandbox Foundation (Shipped Internal Worker Substrate)
+
+Shipped in this phase:
+
+- Internal worker-only production subprocess/PTY sandbox substrate with policy-first resolved-command handoff.
+- Fail-closed readiness/config gates for sandbox posture, including explicit disabled-by-default real execution and named readiness failures when enabled without valid policy.
+- Deterministic no-spend production sandbox verification (`production:sandbox-smoke` plus `scripts/production-sandbox-smoke.test.ts`) covering process/PTY fake paths, denial, timeout/cancel, output/artifact limits, transcript redaction, and local/hosted OpenAPI boundary checks.
+- Product/docs alignment that keeps sandbox claims internal and operations-focused rather than public execution APIs.
+
+Explicitly not shipped in R20:
+
+- Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
+- Generic process/PTY product adapters are not shipped in R20.
+- Hosted provider execution (Codex/Claude/OpenCode) in production.
+- Hosted or connected-node real-tool execution.
+- Browser automation.
+- Cursor, OpenClaw, or Paperclip adapters.
+- Dashboard or TUI is not shipped in R20.
+- Hosted debate runtime execution with real participant runtimes or model judging.
+
+## R21 Production Hosted Provider Activation (Shipped Known-Provider Slice)
+
+Shipped in this phase:
+
+- Production hosted provider activation gates for the known worker-owned runtime modes `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- Provider policy, credential, command-resolution, adapter-readiness, and spend-control checks before provider dispatch.
+- No-spend hosted-provider smoke/canary coverage that verifies fake-factory paths and fail-closed denials.
+
+Explicitly not shipped in R21:
+
+- Hosted `codex.interactive`.
+- Wrapper hosted bridges for `agentfield.async_rest` and `generic_http.async_rest`; R25 later adds these conditionally.
+- Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
+- Generic process/PTY product adapters, browser automation, hosted `repo` execution, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM are not shipped in R21.
+
+## R22 Hosted And Connected-Node Real Tools (Shipped Exact Tool Slice)
+
+Shipped in this phase:
+
+- Hosted worker tools for `fetch`, `web_search`, `github`, and command-catalog `shell`.
+- Connected-node tools for `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell`.
+- Policy-first activation, approval defaults, bounded IO, auditability, and fail-closed readiness for the exact R22 tool set.
+
+Explicitly not shipped in R22:
+
+- Browser automation.
+- Hosted `repo` execution.
+- Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
+- Generic process/PTY product adapters, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM are not shipped in R22.
+
+## R23 Hosted Runtime Bridges (Shipped Claude/OpenCode Bridge Slice)
+
+Shipped in this phase:
+
+- Hosted runtime input/approval bridge support for worker-owned `claude_code.sdk` and structured `opencode.acp`.
+- Shared Postgres-backed hosted runtime bridge command and payload stores across server and worker.
+- Fail-closed bridge readiness/admission with named bridge-store errors such as `hosted_runtime_bridge_store_unavailable`.
+- Non-idempotent stale claimed provider input after worker crash fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`.
+
+Explicitly not shipped in R23:
+
+- `codex.exec_json` input or approval bridges; it remains one-shot.
+- Hosted `codex.interactive`.
+- Wrapper hosted input/approval bridges for `agentfield.async_rest` and `generic_http.async_rest`; R25 later adds these conditionally.
+- Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
+- Generic process/PTY product adapters, browser automation, hosted `repo` execution, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM are not shipped in R23.
+
+## R24 Hosted Real Debate (Shipped Hosted Debate Slice)
+
+Shipped in this phase:
+
+- Hosted/server-safe debate through the existing route family only: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
+- Fake deterministic hosted debate as the default no-spend path.
+- Opt-in local/hosted debate participant runs for exactly `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`.
+- Internal bounded judge runner with deterministic default and live model judge only behind request opt-in plus `confirmLiveProviderSpend: true`.
+- Debate participant and judge execution through existing run/runtime contracts with run/message/event/artifact traceability.
+- Hosted debate durability and readiness gates for Postgres debate/message/evidence/job state, child-run idempotency, evidence ownership preauthorization, ownership, quota, audit, queue/outbox, object store, worker readiness, provider activation, and R23 bridge readiness where applicable.
+- Production preflight/canary coverage for the default fake/no-spend hosted debate path, with live debate flags requiring `--confirm-live-provider-spend`.
+
+Explicitly not shipped in R24:
+
+- Public model judge routes are not shipped: no `/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family.
+- Hosted `codex.interactive`; `codex.exec_json` remains one-shot.
+- Wrapper hosted debate support for `agentfield.async_rest` and `generic_http.async_rest`; R25 supersedes this with conditional wrapper hosted debate participant bridges.
+- Browser automation.
+- Hosted `repo` execution.
+- Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
+- Generic process/PTY product adapters are not shipped.
+- Dashboard/TUI is not shipped.
+- Managed SaaS, public signup, billing, OAuth, SSO, or SCIM.
+
+## R25 Hosted Wrapper Runtime Bridges (Shipped Conditional Wrapper Bridge Slice)
+
+Shipped in this phase:
+
+- Conditional hosted runtime input/approval bridges for `agentfield.async_rest` and `generic_http.async_rest` through the existing hosted runtime bridge command/payload stores.
+- Existing public route reuse only: `POST /runs/:id/input`, `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, and `POST /approvals/:id/reject`.
+- Conditional hosted debate participant bridges for wrapper modes through the existing `/debates` route family only.
+- Wrapper bridge readiness checks for operator wrapper config and advertised input, approval request, and approval resolution capabilities.
+- Fail-closed provider activation/spend gates, durable bridge command/payload stores, queue/outbox, object-store, ownership, quota, audit, and worker readiness before hosted wrapper side effects.
+- Default fake deterministic no-spend canary posture remains unchanged; live provider canary probes require explicit spend confirmation.
+
+Explicitly not shipped in R25:
+
+- Hosted `codex.interactive`; `codex.exec_json` remains one-shot and has no hosted input/approval bridge.
+- Hosted active cancel bridge for wrapper runs; hosted cancel remains unsupported.
+- Per-run wrapper base URL, target, endpoint, or auth overrides.
+- Arbitrary wrapper endpoint execution, generic process/PTY adapters, public `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` APIs.
+- Public model judge routes, browser automation, hosted `repo` execution, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM.

@@ -10,6 +10,25 @@ export class SwitchyardDomainError extends Error {
   }
 }
 
+export class AdapterProtocolError extends Error {
+  readonly code = "adapter_protocol_failed" as const;
+  readonly reasonCode: string | undefined;
+  readonly details: Record<string, unknown> | undefined;
+
+  constructor(
+    message: string,
+    options: {
+      reasonCode?: string;
+      details?: Record<string, unknown>;
+    } = {}
+  ) {
+    super(message);
+    this.name = "AdapterProtocolError";
+    this.reasonCode = options.reasonCode;
+    this.details = options.details;
+  }
+}
+
 export function createNotImplementedError(service: string, method: string): SwitchyardDomainError {
   return new SwitchyardDomainError({
     code: "adapter_protocol_failed",

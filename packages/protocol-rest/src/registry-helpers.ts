@@ -8,3 +8,8 @@ export function resolveProviderIds(slugs: readonly string[] | undefined): string
   if (!slugs || slugs.length === 0) return undefined;
   return slugs.map((slug) => (slug.startsWith("provider_") ? slug : `provider_${slug}`));
 }
+
+export function resolveRuntimeIds(slugs: readonly string[] | undefined): string[] | undefined {
+  if (!slugs || slugs.length === 0) return undefined;
+  return slugs.map((slug) => (slug.startsWith("runtime_") ? slug : `runtime_${slug}`));
+}

@@ -1,13 +1,20 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
   ArtifactStore,
+  ControlPlaneService,
   EventBus,
   EventStore,
+  HostedRuntimeBridgeService,
+  PlacementStore,
+  RegistryService,
   RegistryStore,
+  ContextBuilder,
+  HostedRunService,
   RunLauncherService,
   RunService,
   RunStore
 } from "@switchyard/core";
+import { AdapterProtocolError, ControlPlaneError, HostedRuntimeBridgeServiceError, isRealHostedRuntimeMode } from "@switchyard/core";
 import {
   adapterTypeSchema,
   decodeCursor,
@@ -23,51 +30,298 @@ import {
   streamRunEvents
 } from "@switchyard/protocol-sse";
 import { ZodError } from "zod";
+import { getHostedAuthContext } from "./hosted-auth.js";
 import { HttpProblem, sendHttpError, zodIssuesToDetails } from "./http-errors.js";
 import { resolveProviderIds } from "./registry-helpers.js";
 
 export interface RunRouteDependencies {
   runService: RunService;
+  hostedRuns?: HostedRunService;
   runs: RunStore;
   events: EventStore;
+  contextBuilder?: ContextBuilder;
   artifacts?: ArtifactStore;
   eventBus?: EventBus;
   launcher?: RunLauncherService;
   registry?: RegistryStore;
+  registryService?: RegistryService;
+  placements?: PlacementStore;
+  listAssignmentsByRun?: (runId: string) => Promise<readonly { id: string }[]>;
+  controlPlane?: ControlPlaneService;
+  hostedRuntimeBridge?: Pick<HostedRuntimeBridgeService, "createInputCommand">;
 }
+
+type OwnershipAttachFailure = {
+  code: "ownership_attach_failed";
+  reasonCode: "ownership_attach_failed";
+  resourceType: "run" | "run_event" | "placement_decision" | "assignment";
+  resourceId: string;
+};
 
 export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependencies): void {
   app.post("/runs", async (request, reply) => {
-    const wait = shouldWaitForCompletion(request.query);
-    const body = parseCreateRunBody(request.body);
-    const run = await deps.runService.createRun({
-      runtime: body.runtime,
-      provider: body.provider,
-      model: body.model,
-      adapterType: body.adapterType,
-      cwd: body.cwd,
-      task: body.task,
-      placement: body.placement ?? "local",
-      approvalPolicy: body.approvalPolicy ?? "default",
-      timeoutSeconds: body.timeoutSeconds ?? 600,
-      metadata: body.metadata ?? {}
-    });
-    if (wait) {
-      const completed = await deps.runService.startRun(run.id);
-      const events = await deps.events.listByRun(run.id);
-      return reply.code(201).send({ run: completed, response: collectRunResponse(events) });
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
     }
-    if (deps.launcher) {
-      deps.launcher.launch(run);
-    } else {
-      queueMicrotask(() => {
-        void deps.runService.startRun(run.id).catch(() => {});
-      });
+
+    const requestStartedAt = new Date().toISOString();
+    let reservationId: string | undefined;
+    let controlPlaneAuth = auth;
+    let createdRunId: string | undefined;
+    let recoveryCreateInput: Parameters<RunService["createRun"]>[0] | undefined;
+    try {
+      const rawBody = isRecord(request.body) ? request.body : undefined;
+      if (rawBody) {
+        const ownershipOverrideIssue = findOwnershipOverrideIssue(rawBody);
+        if (ownershipOverrideIssue) {
+          return sendHttpError(reply, "invalid_input", "ownership overrides are not allowed", [ownershipOverrideIssue]);
+        }
+      }
+      const wait = shouldWaitForCompletion(request.query);
+      const body = parseCreateRunBody(request.body);
+      const renderedContext = body.context
+        ? await buildRunContext(body, deps.contextBuilder)
+        : undefined;
+      const runtimeMode = await inferRuntimeMode(body, deps.registryService);
+      if (wait && runtimeMode === "codex.interactive") {
+        return sendHttpError(reply, "invalid_input", "wait=1 is not supported for codex.interactive", [
+          { path: "wait", issue: "interactive_wait_unsupported" }
+        ]);
+      }
+      const metadata = body.metadata ?? {};
+      const createInput: Parameters<RunService["createRun"]>[0] = {
+        runtime: body.runtime,
+        provider: body.provider,
+        model: body.model,
+        adapterType: body.adapterType,
+        cwd: body.cwd,
+        task: renderedContext ? renderRunTask(body.task, renderedContext.rendered) : body.task,
+        placement: body.placement ?? "local",
+        approvalPolicy: body.approvalPolicy ?? "default",
+        timeoutSeconds: body.timeoutSeconds ?? 600,
+        metadata: renderedContext
+          ? {
+            ...metadata,
+            originalTask: body.task,
+            contextPacket: renderedContext.context
+          }
+          : metadata
+      };
+      if (runtimeMode !== undefined) {
+        createInput.runtimeMode = runtimeMode;
+      }
+      recoveryCreateInput = createInput;
+
+      let placementFacts;
+      if (runtimeMode && deps.registry) {
+        const mode = await deps.registry.getRuntimeMode(runtimeMode);
+        placementFacts = mode?.placement;
+      }
+      const hostedPreflight = deps.hostedRuns && placementFacts && hasHostedPreflight(deps.hostedRuns)
+        ? await deps.hostedRuns.preflightCreateRun({
+          ...createInput,
+          placementFacts
+        }, { wait })
+        : undefined;
+
+      if (deps.controlPlane && controlPlaneAuth) {
+        const reservation = await deps.controlPlane.preflightRunCreate({
+          auth: controlPlaneAuth,
+          placement: createInput.placement ?? "local",
+          runtimeMode: createInput.runtimeMode ?? "",
+          timeoutSeconds: createInput.timeoutSeconds
+        });
+        reservationId = reservation.id;
+      }
+
+      if (createInput.placement === "hosted" && placementFacts?.hosted.support === "unsupported") {
+        return sendHttpError(reply, "placement_denied", "hosted_runtime_not_allowed", [
+          { path: "placement", issue: "hosted_runtime_not_allowed" }
+        ]);
+      }
+
+      const runResult = deps.hostedRuns && placementFacts
+        ? await deps.hostedRuns.createRun({
+          ...createInput,
+          placementFacts
+        }, { wait, ...(hostedPreflight ? { preflight: hostedPreflight } : {}) })
+        : { run: await deps.runService.createRun(createInput) };
+
+      const run = runResult.run;
+      createdRunId = run.id;
+
+      if (deps.controlPlane && controlPlaneAuth) {
+        const ownership = await deps.controlPlane.ensureOwnedOrAttachFromRun({
+          auth: controlPlaneAuth,
+          resourceType: "run",
+          resourceId: run.id,
+          runId: run.id
+        });
+        if (!ownership.ok) {
+          await handleOwnershipAttachFailure(deps, {
+            auth: controlPlaneAuth,
+            reservationId,
+            runId: run.id,
+            requestId: request.id,
+            failure: { ...ownership, resourceType: "run", resourceId: run.id }
+          });
+          return sendHttpError(reply, "internal_error", "ownership_attach_failed", [
+            { path: "reasonCode", issue: "ownership_attach_failed" }
+          ]);
+        }
+        const sideEffectOwnership = await attachRunSideEffectOwnership(deps, controlPlaneAuth, run.id);
+        if (sideEffectOwnership) {
+          await handleOwnershipAttachFailure(deps, {
+            auth: controlPlaneAuth,
+            reservationId,
+            runId: run.id,
+            requestId: request.id,
+            failure: sideEffectOwnership
+          });
+          return sendHttpError(reply, "internal_error", "ownership_attach_failed", [
+            { path: "reasonCode", issue: "ownership_attach_failed" }
+          ]);
+        }
+      }
+
+      if (wait) {
+        if (runResult.response) {
+          if (deps.controlPlane && controlPlaneAuth && reservationId) {
+            await deps.controlPlane.releaseQuotaReservation({
+              auth: controlPlaneAuth,
+              reservationId,
+              outcome: "consumed",
+              reasonCode: "run_create_wait_completed"
+            });
+            reservationId = undefined;
+          }
+          if (deps.controlPlane && controlPlaneAuth) {
+            await deps.controlPlane.recordAudit({
+              auth: controlPlaneAuth,
+              eventType: "run.create_allowed",
+              decision: "allow",
+              reasonCode: "run_create_allowed",
+              resourceType: "run",
+              resourceId: run.id,
+              requestId: request.id,
+              payload: { routeId: "runs.create", wait: true }
+            });
+          }
+          return reply.code(201).send({ run: runResult.run, response: runResult.response });
+        }
+        const completed = await deps.runService.startRun(run.id);
+        const events = await deps.events.listByRun(run.id);
+        if (deps.controlPlane && controlPlaneAuth && reservationId) {
+          await deps.controlPlane.releaseQuotaReservation({
+            auth: controlPlaneAuth,
+            reservationId,
+            outcome: "consumed",
+            reasonCode: "run_create_wait_completed"
+          });
+          reservationId = undefined;
+        }
+        if (deps.controlPlane && controlPlaneAuth) {
+          await deps.controlPlane.recordAudit({
+            auth: controlPlaneAuth,
+            eventType: "run.create_allowed",
+            decision: "allow",
+            reasonCode: "run_create_allowed",
+            resourceType: "run",
+            resourceId: run.id,
+            requestId: request.id,
+            payload: { routeId: "runs.create", wait: true }
+          });
+        }
+        return reply.code(201).send({ run: completed, response: collectRunResponse(events) });
+      }
+      if (!deps.hostedRuns && deps.launcher) {
+        deps.launcher.launch(run);
+      } else if (!deps.hostedRuns) {
+        queueMicrotask(() => {
+          void deps.runService.startRun(run.id).catch(() => {});
+        });
+      }
+      if (deps.controlPlane && controlPlaneAuth && reservationId) {
+        await deps.controlPlane.releaseQuotaReservation({
+          auth: controlPlaneAuth,
+          reservationId,
+          outcome: "consumed",
+          reasonCode: "run_create_accepted"
+        });
+        reservationId = undefined;
+      }
+      if (deps.controlPlane && controlPlaneAuth) {
+        await deps.controlPlane.recordAudit({
+          auth: controlPlaneAuth,
+          eventType: "run.create_allowed",
+          decision: "allow",
+          reasonCode: "run_create_allowed",
+          resourceType: "run",
+          resourceId: run.id,
+          requestId: request.id,
+          payload: { routeId: "runs.create", wait: false }
+        });
+      }
+      return reply.code(202).send({ run });
+    } catch (error) {
+      if (deps.controlPlane && controlPlaneAuth) {
+        const recoveredRunId = createdRunId ?? await findRecoverableQueuedRunId({
+          deps,
+          auth: controlPlaneAuth,
+          createInput: recoveryCreateInput,
+          requestStartedAt
+        });
+        if (recoveredRunId) {
+          await terminalizeCreatedRun(deps, recoveredRunId);
+        }
+      }
+      if (deps.controlPlane && controlPlaneAuth && reservationId) {
+        const failure = classifyRunCreateFailure(error);
+        await deps.controlPlane.releaseQuotaReservation({
+          auth: controlPlaneAuth,
+          reservationId,
+          outcome: failure.outcome,
+          reasonCode: failure.reasonCode
+        });
+        await deps.controlPlane.recordAudit({
+          auth: controlPlaneAuth,
+          eventType: failure.eventType,
+          decision: "deny",
+          reasonCode: failure.reasonCode,
+          resourceType: "run",
+          requestId: request.id,
+          payload: { routeId: "runs.create", reasonCode: failure.reasonCode }
+        });
+      }
+      if (error instanceof ControlPlaneError) {
+        return sendHttpError(reply, error.code, error.reasonCode, [{ path: "reasonCode", issue: error.reasonCode }]);
+      }
+      if (isHostedRunServiceError(error)) {
+        if (error.code === "queue_unavailable") {
+          return sendHttpError(reply, "queue_unavailable", error.message);
+        }
+        return sendHttpError(reply, "placement_denied", error.message, placementDeniedDetails(error.message));
+      }
+      if (error instanceof HttpProblem) {
+        return sendHttpError(reply, error.code, error.message, error.details);
+      }
+      throw error;
     }
-    return reply.code(202).send({ run });
   });
 
   app.get("/runs", async (request, reply) => {
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane) {
+      if (!auth) {
+        return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+      }
+      const deniedOwnerFilter = detectOwnerFilterAttempt(request.query);
+      if (deniedOwnerFilter) {
+        return sendHttpError(reply, "tenant_access_denied", "tenant_filter_not_allowed", [deniedOwnerFilter]);
+      }
+    }
+
     const query = parseListRunsQuery(request.query);
     let providerSlugFilter: readonly string[] | undefined;
     let runtimeSlugFilter: readonly string[] | undefined;
@@ -94,7 +348,9 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
       filter.before = decodeRunCursor(query.before);
     }
 
-    const result = await deps.runs.list(filter);
+    const result = deps.controlPlane && auth
+      ? await listOwnedRunsPage(deps, auth, filter, limit)
+      : await deps.runs.list(filter);
     return reply.send({
       runs: result.runs,
       nextCursor: result.nextCursor ? encodeRunCursor(result.nextCursor) : null
@@ -103,6 +359,31 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
 
   app.get("/runs/:id", async (request, reply) => {
     const id = (request.params as { id: string }).id;
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+    if (deps.controlPlane && auth) {
+      const owned = await deps.controlPlane.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: id,
+        notFoundCode: "run_not_found"
+      });
+      if (!owned.ok) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "tenant.access_denied",
+          decision: "deny",
+          reasonCode: owned.reasonCode,
+          resourceType: "run",
+          resourceId: id,
+          requestId: request.id,
+          payload: { routeId: "runs.get", reasonCode: owned.reasonCode }
+        });
+        return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      }
+    }
     const run = await deps.runs.get(id);
     if (!run) {
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
@@ -118,6 +399,31 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
 
   app.get("/runs/:id/artifacts", async (request, reply) => {
     const id = (request.params as { id: string }).id;
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+    if (deps.controlPlane && auth) {
+      const owned = await deps.controlPlane.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: id,
+        notFoundCode: "run_not_found"
+      });
+      if (!owned.ok) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "tenant.access_denied",
+          decision: "deny",
+          reasonCode: owned.reasonCode,
+          resourceType: "run",
+          resourceId: id,
+          requestId: request.id,
+          payload: { routeId: "runs.artifacts", reasonCode: owned.reasonCode }
+        });
+        return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      }
+    }
     const run = await deps.runs.get(id);
     if (!run) {
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
@@ -130,19 +436,85 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
 
   app.post("/runs/:id/input", async (request, reply) => {
     const id = (request.params as { id: string }).id;
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+    if (deps.controlPlane && auth) {
+      const owned = await deps.controlPlane.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: id,
+        notFoundCode: "run_not_found"
+      });
+      if (!owned.ok) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "tenant.access_denied",
+          decision: "deny",
+          reasonCode: owned.reasonCode,
+          resourceType: "run",
+          resourceId: id,
+          requestId: request.id,
+          payload: { routeId: "runs.input", reasonCode: owned.reasonCode }
+        });
+        return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      }
+    }
     const run = await deps.runs.get(id);
     if (!run) {
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
     }
 
+    if (isHostedRealRun(run)) {
+      if (!deps.hostedRuntimeBridge) {
+        if (deps.controlPlane && auth) {
+          await deps.controlPlane.recordAudit({
+            auth,
+            eventType: "hosted.runtime_bridge.admission",
+            decision: "deny",
+            reasonCode: "hosted_runtime_bridge_store_unavailable",
+            resourceType: "run",
+            resourceId: id,
+            requestId: request.id,
+            payload: {
+              routeId: "runs.input",
+              resourceId: id,
+              reasonCode: "hosted_runtime_bridge_store_unavailable",
+              runtimeMode: run.runtimeMode,
+              operation: "input"
+            }
+          });
+        }
+        return sendHttpError(reply, "adapter_protocol_failed", "Hosted runtime bridge payload store unavailable", [
+          { path: "reasonCode", issue: "hosted_runtime_bridge_store_unavailable" }
+        ]);
+      }
+
+      try {
+        const idempotencyKey = readIdempotencyKey(request);
+        const admitted = await deps.hostedRuntimeBridge.createInputCommand({
+          runId: id,
+          body: parseHostedInputBody(request.body),
+          ...(auth ? { auth } : {}),
+          requestId: request.id,
+          ...(idempotencyKey ? { idempotencyKey } : {})
+        });
+        return reply.code(202).send({ accepted: true, bridgeCommandId: admitted.commandId });
+      } catch (error) {
+        return sendHostedBridgeHttpError(reply, error);
+      }
+    }
+
     try {
       await deps.runService.sendInput(id, parseInputBody(request.body));
     } catch (error) {
-      if (error instanceof Error && error.name === "CodexInputUnsupportedError") {
+      if (error instanceof AdapterProtocolError) {
         return sendHttpError(
           reply,
           "adapter_protocol_failed",
-          "Codex exec-json does not support input after start"
+          error.message,
+          adapterProtocolDetails(error)
         );
       }
       throw error;
@@ -152,13 +524,58 @@ export function registerRunRoutes(app: FastifyInstance, deps: RunRouteDependenci
 
   app.post("/runs/:id/cancel", async (request, reply) => {
     const id = (request.params as { id: string }).id;
+    const auth = getHostedAuthContext(request);
+    if (deps.controlPlane && !auth) {
+      return sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    }
+    if (deps.controlPlane && auth) {
+      const owned = await deps.controlPlane.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: id,
+        notFoundCode: "run_not_found"
+      });
+      if (!owned.ok) {
+        await deps.controlPlane.recordAudit({
+          auth,
+          eventType: "tenant.access_denied",
+          decision: "deny",
+          reasonCode: owned.reasonCode,
+          resourceType: "run",
+          resourceId: id,
+          requestId: request.id,
+          payload: { routeId: "runs.cancel", reasonCode: owned.reasonCode }
+        });
+        return sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      }
+    }
     const run = await deps.runs.get(id);
     if (!run) {
       return sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
     }
 
-    const cancelled = await deps.runService.cancelRun(id);
-    return reply.send({ run: cancelled });
+    if (isHostedRealRun(run)) {
+      if (run.status === "queued") {
+        const cancelled = await deps.runService.cancelRun(id);
+        return reply.send({ run: cancelled });
+      }
+      if (!isTerminalStatus(run.status)) {
+        return sendHttpError(reply, "adapter_protocol_failed", "Hosted cancellation bridge is not supported", [
+          { path: "reasonCode", issue: "hosted_cancel_unsupported" }
+        ]);
+      }
+      return reply.send({ run });
+    }
+
+    try {
+      const cancelled = await deps.runService.cancelRun(id);
+      return reply.send({ run: cancelled });
+    } catch (error) {
+      if (error instanceof AdapterProtocolError) {
+        return sendHttpError(reply, "adapter_protocol_failed", error.message, adapterProtocolDetails(error));
+      }
+      throw error;
+    }
   });
 }
 
@@ -168,6 +585,34 @@ async function handleRunEventsRequest(
   deps: RunRouteDependencies
 ): Promise<void> {
   const id = (request.params as { id: string }).id;
+  const auth = getHostedAuthContext(request);
+  if (deps.controlPlane && !auth) {
+    sendHttpError(reply, "auth_required", "auth_required", [{ path: "reasonCode", issue: "auth_required" }]);
+    return;
+  }
+  if (deps.controlPlane && auth) {
+    const owned = await deps.controlPlane.authorizeResource({
+      auth,
+      resourceType: "run",
+      resourceId: id,
+      notFoundCode: "run_not_found"
+    });
+    if (!owned.ok) {
+      await deps.controlPlane.recordAudit({
+        auth,
+        eventType: "tenant.access_denied",
+        decision: "deny",
+        reasonCode: owned.reasonCode,
+        resourceType: "run",
+        resourceId: id,
+        requestId: request.id,
+        payload: { routeId: "runs.events", reasonCode: owned.reasonCode }
+      });
+      sendHttpError(reply, owned.code, owned.reasonCode, [{ path: "reasonCode", issue: owned.reasonCode }]);
+      return;
+    }
+  }
+
   const run = await deps.runs.get(id);
   if (!run) {
     sendHttpError(reply, "run_not_found", `Run not found: ${id}`);
@@ -241,6 +686,263 @@ async function handleRunEventsRequest(
   if (lastEventId !== undefined) streamInput.lastEventId = lastEventId;
   const handle = streamRunEvents(streamInput);
   await handle.finished;
+}
+
+async function listOwnedRunsPage(
+  deps: RunRouteDependencies,
+  auth: NonNullable<ReturnType<typeof getHostedAuthContext>>,
+  filter: Parameters<RunStore["list"]>[0],
+  limit: number
+): Promise<{ runs: Awaited<ReturnType<RunStore["list"]>>["runs"]; nextCursor: Awaited<ReturnType<RunStore["list"]>>["nextCursor"] }> {
+  const runs: Awaited<ReturnType<RunStore["list"]>>["runs"] = [];
+  let currentBefore = filter.before;
+  let nextCursor: Awaited<ReturnType<RunStore["list"]>>["nextCursor"] = null;
+
+  while (runs.length < limit) {
+    const pageFilter: Parameters<RunStore["list"]>[0] = { ...filter, limit };
+    if (currentBefore) {
+      pageFilter.before = currentBefore;
+    }
+    const page = await deps.runs.list(pageFilter);
+    const owned: typeof page.runs = [];
+    for (const run of page.runs) {
+      const result = await deps.controlPlane!.authorizeResource({
+        auth,
+        resourceType: "run",
+        resourceId: run.id,
+        notFoundCode: "run_not_found"
+      });
+      if (result.ok) {
+        owned.push(run);
+      }
+    }
+    runs.push(...owned);
+    if (!page.nextCursor) {
+      nextCursor = null;
+      break;
+    }
+    currentBefore = page.nextCursor;
+    nextCursor = page.nextCursor;
+    if (page.runs.length === 0) {
+      break;
+    }
+  }
+
+  return {
+    runs: runs.slice(0, limit),
+    nextCursor
+  };
+}
+
+function detectOwnerFilterAttempt(query: unknown): { path: string; issue: string } | null {
+  if (!query || typeof query !== "object" || Array.isArray(query)) {
+    return null;
+  }
+  const key = Object.keys(query).find((entry) =>
+    entry === "accountId" ||
+    entry === "tenantId" ||
+    entry === "projectId" ||
+    entry === "createdByUserId" ||
+    entry === "apiKeyId"
+  );
+  if (!key) {
+    return null;
+  }
+  return { path: key, issue: "owner filters are not allowed" };
+}
+
+function findOwnershipOverrideIssue(payload: Record<string, unknown>): { path: string; issue: string } | null {
+  const ownerKeys = ["accountId", "tenantId", "projectId", "createdByUserId", "apiKeyId"];
+  const topLevel = ownerKeys.find((key) => key in payload);
+  if (topLevel) {
+    return { path: topLevel, issue: "owner override is not allowed" };
+  }
+  const metadata = payload["metadata"];
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const metadataRecord = metadata as Record<string, unknown>;
+  const metadataOverride = ownerKeys.find((key) => key in metadataRecord);
+  if (!metadataOverride) {
+    return null;
+  }
+  return { path: `metadata.${metadataOverride}`, issue: "owner override is not allowed" };
+}
+
+function classifyRunCreateFailure(error: unknown): {
+  eventType: "run.create_denied" | "quota.denied";
+  reasonCode: string;
+  outcome: "released" | "failed";
+} {
+  if (error instanceof ControlPlaneError) {
+    if (error.code === "quota_exceeded") {
+      return { eventType: "quota.denied", reasonCode: error.reasonCode, outcome: "released" };
+    }
+    if (error.code === "entitlement_denied") {
+      return { eventType: "run.create_denied", reasonCode: error.reasonCode, outcome: "released" };
+    }
+    return { eventType: "run.create_denied", reasonCode: error.reasonCode, outcome: "failed" };
+  }
+  if (isHostedRunServiceError(error)) {
+    if (error.code === "queue_unavailable") {
+      return { eventType: "run.create_denied", reasonCode: "queue_enqueue_failed", outcome: "failed" };
+    }
+    return { eventType: "run.create_denied", reasonCode: "placement_store_failed", outcome: "failed" };
+  }
+  if (error instanceof Error && error.message.includes("create")) {
+    return { eventType: "run.create_denied", reasonCode: "run_store_create_failed", outcome: "failed" };
+  }
+  return { eventType: "run.create_denied", reasonCode: "run_create_failed", outcome: "failed" };
+}
+
+async function terminalizeCreatedRun(deps: RunRouteDependencies, runId: string): Promise<void> {
+  const run = await deps.runs.get(runId);
+  if (!run || isTerminalStatus(run.status)) {
+    return;
+  }
+  await deps.runs.update({
+    ...run,
+    status: "failed",
+    endedAt: new Date().toISOString()
+  });
+}
+
+async function findRecoverableQueuedRunId(input: {
+  deps: RunRouteDependencies;
+  auth: NonNullable<ReturnType<typeof getHostedAuthContext>>;
+  createInput: Parameters<RunService["createRun"]>[0] | undefined;
+  requestStartedAt: string;
+}): Promise<string | undefined> {
+  const { deps, auth, createInput, requestStartedAt } = input;
+  if (!deps.controlPlane || !createInput) {
+    return undefined;
+  }
+
+  const filter: Parameters<RunStore["list"]>[0] = {
+    limit: 50,
+    status: ["queued"],
+    runtime: [createInput.runtime],
+    provider: [createInput.provider],
+    model: [createInput.model],
+    placement: [createInput.placement],
+    adapterType: [createInput.adapterType]
+  };
+  const page = await deps.runs.list(filter);
+  const startMs = Date.parse(requestStartedAt);
+
+  for (const run of page.runs) {
+    if (run.task !== createInput.task || run.status !== "queued") {
+      continue;
+    }
+    const createdMs = Date.parse(run.createdAt);
+    if (Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs + 5_000 < startMs) {
+      continue;
+    }
+    const owned = await deps.controlPlane.authorizeResource({
+      auth,
+      resourceType: "run",
+      resourceId: run.id,
+      notFoundCode: "run_not_found"
+    });
+    if (!owned.ok && owned.decision === "not_found") {
+      return run.id;
+    }
+  }
+
+  return undefined;
+}
+
+async function handleOwnershipAttachFailure(
+  deps: RunRouteDependencies,
+  input: {
+    auth: NonNullable<ReturnType<typeof getHostedAuthContext>>;
+    reservationId: string | undefined;
+    runId: string;
+    requestId: string;
+    failure: OwnershipAttachFailure;
+  }
+): Promise<void> {
+  if (!deps.controlPlane) {
+    return;
+  }
+  await terminalizeCreatedRun(deps, input.runId);
+  if (input.reservationId) {
+    await deps.controlPlane.releaseQuotaReservation({
+      auth: input.auth,
+      reservationId: input.reservationId,
+      outcome: "failed",
+      reasonCode: input.failure.reasonCode
+    });
+  }
+  await deps.controlPlane.recordAudit({
+    auth: input.auth,
+    eventType: "run.create_denied",
+    decision: "error",
+    reasonCode: input.failure.reasonCode,
+    resourceType: input.failure.resourceType,
+    resourceId: input.failure.resourceId,
+    requestId: input.requestId,
+    payload: {
+      routeId: "runs.create",
+      reasonCode: input.failure.reasonCode,
+      resourceType: input.failure.resourceType
+    }
+  });
+}
+
+async function attachRunSideEffectOwnership(
+  deps: RunRouteDependencies,
+  auth: NonNullable<ReturnType<typeof getHostedAuthContext>>,
+  runId: string
+): Promise<OwnershipAttachFailure | null> {
+  if (!deps.controlPlane) {
+    return null;
+  }
+
+  const events = await deps.events.listByRun(runId);
+  for (const event of events) {
+    const ownership = await deps.controlPlane.ensureOwnedOrAttachFromRun({
+      auth,
+      resourceType: "run_event",
+      resourceId: event.id,
+      runId
+    });
+    if (!ownership.ok) {
+      return { ...ownership, resourceType: "run_event", resourceId: event.id };
+    }
+  }
+
+  if (deps.placements) {
+    const placements = await deps.placements.listByRun(runId);
+    for (const placement of placements) {
+      const ownership = await deps.controlPlane.ensureOwnedOrAttachFromRun({
+        auth,
+        resourceType: "placement_decision",
+        resourceId: placement.id,
+        runId
+      });
+      if (!ownership.ok) {
+        return { ...ownership, resourceType: "placement_decision", resourceId: placement.id };
+      }
+    }
+  }
+
+  if (deps.listAssignmentsByRun) {
+    const assignments = await deps.listAssignmentsByRun(runId);
+    for (const assignment of assignments) {
+      const ownership = await deps.controlPlane.ensureOwnedOrAttachFromRun({
+        auth,
+        resourceType: "assignment",
+        resourceId: assignment.id,
+        runId
+      });
+      if (!ownership.ok) {
+        return { ...ownership, resourceType: "assignment", resourceId: assignment.id };
+      }
+    }
+  }
+
+  return null;
 }
 
 function noopEventBus(): EventBus {
@@ -352,6 +1054,13 @@ interface CreateRunBody {
   approvalPolicy?: string | undefined;
   timeoutSeconds?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
+  runtimeMode?: string | undefined;
+  context?: {
+    sections?: Array<{ name: string; content: string }>;
+    memoryIds?: string[];
+    evidenceIds?: string[];
+    messageIds?: string[];
+  } | undefined;
 }
 
 function parseCreateRunBody(value: unknown): CreateRunBody {
@@ -378,10 +1087,12 @@ function parseCreateRunBody(value: unknown): CreateRunBody {
     adapterType,
     cwd: requiredString(body, "cwd"),
     task: requiredString(body, "task"),
-    placement: typeof body["placement"] === "string" ? body["placement"] as CreateRunBody["placement"] : undefined,
+    placement: parsePlacement(body["placement"]),
     approvalPolicy: typeof body["approvalPolicy"] === "string" ? body["approvalPolicy"] : undefined,
     timeoutSeconds: typeof body["timeoutSeconds"] === "number" ? body["timeoutSeconds"] : undefined,
-    metadata: isRecord(body["metadata"]) ? body["metadata"] : undefined
+    metadata: isRecord(body["metadata"]) ? body["metadata"] : undefined,
+    runtimeMode: typeof body["runtimeMode"] === "string" ? body["runtimeMode"] : undefined,
+    context: parseRunContext(body["context"])
   };
 }
 
@@ -395,13 +1106,132 @@ function requiredString(body: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function parsePlacement(value: unknown): CreateRunBody["placement"] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    throw new HttpProblem("invalid_input", "placement must be a non-empty string", [
+      { path: "placement", issue: "must be local, hosted, or connected_local_node" }
+    ]);
+  }
+  return value as CreateRunBody["placement"];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function parseInputBody(value: unknown): Record<string, unknown> {
   if (!isRecord(value)) {
-    throw new HttpProblem("invalid_input", "Input body must be an object");
+    throw new HttpProblem("invalid_input", "Input body must be an object", [
+      { path: "body", issue: "must be an object" }
+    ]);
+  }
+  const text = value["text"];
+  if (typeof text !== "string") {
+    throw new HttpProblem("invalid_input", "text is required", [
+      { path: "text", issue: "must be a non-empty string" }
+    ]);
+  }
+  if (text.trim().length === 0) {
+    throw new HttpProblem("invalid_input", "text is required", [
+      { path: "text", issue: "must be a non-empty string" }
+    ]);
+  }
+  if (Buffer.byteLength(text, "utf8") > 64 * 1024) {
+    throw new HttpProblem("invalid_input", "text is too large", [
+      { path: "text", issue: "must be <= 65536 bytes" }
+    ]);
+  }
+  return { text };
+}
+
+function parseHostedInputBody(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new HttpProblem("invalid_input", "Input body must be an object", [
+      { path: "body", issue: "must be an object" }
+    ]);
+  }
+  const text = value["text"];
+  if (typeof text !== "string") {
+    throw new HttpProblem("invalid_input", "text is required", [
+      { path: "text", issue: "must be a non-empty string" }
+    ]);
+  }
+  if (Buffer.byteLength(text, "utf8") > 64 * 1024) {
+    throw new HttpProblem("invalid_input", "text is too large", [
+      { path: "text", issue: "must be <= 65536 bytes" }
+    ]);
+  }
+  return { text };
+}
+
+function parseRunContext(value: unknown): CreateRunBody["context"] {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new HttpProblem("invalid_input", "context must be an object");
+  }
+  const sectionsRaw = value["sections"];
+  const memoryIdsRaw = value["memoryIds"];
+  const evidenceIdsRaw = value["evidenceIds"];
+  const messageIdsRaw = value["messageIds"];
+
+  const sections = parseContextSections(sectionsRaw);
+  const memoryIds = parseContextIdList(memoryIdsRaw, "memoryIds");
+  const evidenceIds = parseContextIdList(evidenceIdsRaw, "evidenceIds");
+  const messageIds = parseContextIdList(messageIdsRaw, "messageIds");
+
+  return {
+    sections,
+    memoryIds,
+    evidenceIds,
+    messageIds
+  };
+}
+
+function parseContextSections(value: unknown): Array<{ name: string; content: string }> {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new HttpProblem("invalid_input", "context.sections must be an array", [
+      { path: "context.sections", issue: "must be an array" }
+    ]);
+  }
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new HttpProblem("invalid_input", "context.sections entries must be objects", [
+        { path: `context.sections.${index}`, issue: "must be an object" }
+      ]);
+    }
+    const section = entry as Record<string, unknown>;
+    const name = section["name"];
+    const content = section["content"];
+    if (typeof name !== "string" || name.trim().length === 0) {
+      throw new HttpProblem("invalid_input", "context section name must be a non-empty string", [
+        { path: `context.sections.${index}.name`, issue: "must be a non-empty string" }
+      ]);
+    }
+    if (typeof content !== "string") {
+      throw new HttpProblem("invalid_input", "context section content must be a string", [
+        { path: `context.sections.${index}.content`, issue: "must be a string" }
+      ]);
+    }
+    return { name, content };
+  });
+}
+
+function parseContextIdList(value: unknown, path: string): string[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new HttpProblem("invalid_input", `${path} must be a string array`, [
+      { path: `context.${path}`, issue: "must be an array of strings" }
+    ]);
   }
   return value;
 }
@@ -418,4 +1248,203 @@ function shouldWaitForCompletion(query: unknown): boolean {
     return wait.some((value) => value === "1");
   }
   return false;
+}
+
+async function buildRunContext(
+  body: CreateRunBody,
+  contextBuilder: ContextBuilder | undefined
+): Promise<{ context: Record<string, unknown>; rendered: string }> {
+  if (!body.context) {
+    throw new HttpProblem("internal_error", "context is required");
+  }
+  if (body.metadata && ("originalTask" in body.metadata || "contextPacket" in body.metadata)) {
+    throw new HttpProblem("invalid_input", "metadata contains reserved keys", [
+      { path: "metadata", issue: "originalTask/contextPacket are reserved when context is provided" }
+    ]);
+  }
+  if (!contextBuilder) {
+    throw new HttpProblem("internal_error", "context builder is not configured");
+  }
+  try {
+    const built = await contextBuilder.build({
+      target: "run",
+      sections: body.context.sections ?? [],
+      memoryIds: body.context.memoryIds ?? [],
+      evidenceIds: body.context.evidenceIds ?? [],
+      messageIds: body.context.messageIds ?? []
+    });
+    return built;
+  } catch (error) {
+    if (!error || typeof error !== "object") {
+      throw error;
+    }
+    const err = error as { code?: string; message?: string; details?: Array<{ path: string; issue: string }> };
+    if (typeof err.code === "string" && typeof err.message === "string") {
+      if (err.code === "memory_not_found" || err.code === "evidence_not_found" || err.code === "message_not_found") {
+        throw new HttpProblem(err.code, err.message, err.details);
+      }
+      if (err.code === "invalid_input" || err.code === "invalid_query") {
+        throw new HttpProblem(err.code, err.message, err.details);
+      }
+    }
+    throw error;
+  }
+}
+
+function renderRunTask(task: string, renderedContext: string): string {
+  if (renderedContext.length === 0) {
+    return task;
+  }
+  return `${task}\n\n${renderedContext}`;
+}
+
+async function inferRuntimeMode(
+  body: CreateRunBody,
+  registryService: RegistryService | undefined
+): Promise<string | undefined> {
+  if (!registryService) {
+    return undefined;
+  }
+  try {
+    const input: Parameters<RegistryService["inferAndValidateRuntimeMode"]>[0] = {
+      runtime: body.runtime,
+      provider: body.provider,
+      adapterType: body.adapterType
+    };
+    if (body.runtimeMode !== undefined) {
+      input.runtimeMode = body.runtimeMode;
+    }
+    return await registryService.inferAndValidateRuntimeMode(input);
+  } catch (error) {
+    if (isValidationError(error)) {
+      throw new HttpProblem("invalid_input", error.message, error.details);
+    }
+    throw error;
+  }
+}
+
+function isValidationError(error: unknown): error is { code: string; message: string; details: Array<{ path: string; issue: string }> } {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const record = error as Record<string, unknown>;
+  return record["code"] === "invalid_input" && Array.isArray(record["details"]) && typeof record["message"] === "string";
+}
+
+function adapterProtocolDetails(error: AdapterProtocolError): Array<{ path: string; issue: string }> | undefined {
+  if (!error.reasonCode) {
+    return undefined;
+  }
+  return [{ path: "reasonCode", issue: error.reasonCode }];
+}
+
+function hostedBridgeDetails(error: HostedRuntimeBridgeServiceError): Array<{ path: string; issue: string }> | undefined {
+  if (error.details && error.details.length > 0) {
+    return error.details;
+  }
+  if (error.reasonCode) {
+    return [{ path: "reasonCode", issue: error.reasonCode }];
+  }
+  return undefined;
+}
+
+function sendHostedBridgeHttpError(reply: FastifyReply, error: unknown): FastifyReply {
+  if (error instanceof HostedRuntimeBridgeServiceError) {
+    if (error.code === "invalid_input") {
+      return sendHttpError(reply, "invalid_input", error.message, hostedBridgeDetails(error));
+    }
+    if (error.code === "run_not_found") {
+      return sendHttpError(reply, "run_not_found", error.message, hostedBridgeDetails(error));
+    }
+    if (error.code === "adapter_protocol_failed") {
+      return sendHttpError(reply, "adapter_protocol_failed", error.message, hostedBridgeDetails(error));
+    }
+    if (error.code === "quota_exceeded") {
+      return sendHttpError(reply, "quota_exceeded", error.message, hostedBridgeDetails(error));
+    }
+    return sendHttpError(reply, "internal_error", error.message, hostedBridgeDetails(error));
+  }
+  if (error instanceof ControlPlaneError) {
+    return sendHttpError(reply, error.code, error.reasonCode, [{ path: "reasonCode", issue: error.reasonCode }]);
+  }
+  if (error && typeof error === "object") {
+    const serviceError = error as {
+      code?: unknown;
+      message?: unknown;
+      reasonCode?: unknown;
+      details?: Array<{ path: string; issue: string }>;
+    };
+    if (serviceError.code === "adapter_protocol_failed" && typeof serviceError.message === "string") {
+      const details = serviceError.details
+        ?? (typeof serviceError.reasonCode === "string" ? [{ path: "reasonCode", issue: serviceError.reasonCode }] : undefined);
+      return sendHttpError(reply, "adapter_protocol_failed", serviceError.message, details);
+    }
+    if (serviceError.code === "invalid_input" && typeof serviceError.message === "string") {
+      const details = serviceError.details
+        ?? (typeof serviceError.reasonCode === "string" ? [{ path: "reasonCode", issue: serviceError.reasonCode }] : undefined);
+      return sendHttpError(reply, "invalid_input", serviceError.message, details);
+    }
+  }
+  throw error;
+}
+
+function readIdempotencyKey(request: FastifyRequest): string | undefined {
+  const header = request.headers["idempotency-key"];
+  if (typeof header === "string" && header.trim().length > 0) {
+    return header.trim();
+  }
+  if (Array.isArray(header) && typeof header[0] === "string" && header[0].trim().length > 0) {
+    return header[0].trim();
+  }
+  return undefined;
+}
+
+function isHostedRunServiceError(error: unknown): error is { code: "placement_denied" | "queue_unavailable" | "hosted_runtime_not_allowed"; message: string } {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return code === "placement_denied" || code === "queue_unavailable" || code === "hosted_runtime_not_allowed";
+}
+
+function hasHostedPreflight(value: HostedRunService): value is HostedRunService & {
+  preflightCreateRun: (
+    input: Parameters<HostedRunService["createRun"]>[0],
+    options?: { wait?: boolean }
+  ) => Promise<unknown>;
+} {
+  return typeof (value as { preflightCreateRun?: unknown }).preflightCreateRun === "function";
+}
+
+function placementDeniedDetails(message: string): Array<{ path: string; issue: string }> | undefined {
+  const known = new Set([
+    "hosted_wait_unsupported",
+    "hosted_explicit_placement_required",
+    "hosted_real_runtime_disabled",
+    "hosted_real_runtime_production_forbidden",
+    "hosted_runtime_not_allowed",
+    "provider_runtime_policy_missing",
+    "provider_runtime_policy_empty",
+    "provider_runtime_policy_malformed",
+    "provider_runtime_policy_unknown_mode",
+    "provider_runtime_policy_disabled",
+    "provider_command_policy_invalid",
+    "provider_binary_unavailable",
+    "provider_credentials_missing",
+    "provider_spend_controls_invalid",
+    "provider_spend_limit_exceeded",
+    "provider_prompt_too_large"
+  ]);
+  if (!known.has(message)) {
+    return undefined;
+  }
+  return [{ path: "placement", issue: message }];
+}
+
+function isHostedRealRun(run: { placement: string; runtimeMode?: string | undefined }): boolean {
+  return run.placement === "hosted" && isRealHostedRuntimeMode(run.runtimeMode);
+}
+
+function isTerminalStatus(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled" || status === "timeout";
 }

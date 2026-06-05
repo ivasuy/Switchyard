@@ -1,5 +1,6 @@
 import type {
   Artifact,
+  Debate,
   Model,
   Provider,
   Run,
@@ -11,7 +12,10 @@ import type {
 } from "@switchyard/contracts";
 import type {
   ArtifactStore,
+  DebateStore,
   EventStore,
+  GuardedPreparedMetadataUpdateInput,
+  GuardedPreparedMetadataUpdateResult,
   ListModelsFilter,
   ListModelsResult,
   ListProvidersFilter,
@@ -46,6 +50,30 @@ export class InMemoryRunStore implements RunStore {
     return run;
   }
 
+  async updatePreparedMetadataIfMatch(
+    input: GuardedPreparedMetadataUpdateInput
+  ): Promise<GuardedPreparedMetadataUpdateResult> {
+    const current = this.items.get(input.expected.id);
+    if (!current) {
+      return { ok: false, reason: "not_found" };
+    }
+
+    const sameIdentity =
+      current.status === input.expected.status &&
+      current.placement === input.expected.placement &&
+      current.runtime === input.expected.runtime &&
+      current.runtimeMode === input.expected.runtimeMode &&
+      current.provider === input.expected.provider &&
+      current.adapterType === input.expected.adapterType;
+    if (!sameIdentity) {
+      return { ok: false, reason: "identity_mismatch" };
+    }
+
+    const next: Run = { ...current, metadata: input.metadata ?? {} };
+    this.items.set(next.id, next);
+    return { ok: true, run: next };
+  }
+
   async list(filter: ListRunsFilter): Promise<ListRunsResult> {
     const matchesCsv = (allowed: readonly string[] | undefined, value: string): boolean =>
       !allowed || allowed.length === 0 || allowed.includes(value);
@@ -58,17 +86,37 @@ export class InMemoryRunStore implements RunStore {
     });
 
     const filtered = sorted.filter((run) => {
-      if (!matchesCsv(filter.status, run.status)) return false;
-      if (!matchesCsv(filter.runtime, run.runtime)) return false;
-      if (!matchesCsv(filter.provider, run.provider)) return false;
-      if (!matchesCsv(filter.model, run.model)) return false;
-      if (!matchesCsv(filter.placement, run.placement)) return false;
-      if (!matchesCsv(filter.adapterType, run.adapterType)) return false;
-      if (filter.since !== undefined && run.createdAt < filter.since) return false;
-      if (filter.until !== undefined && run.createdAt >= filter.until) return false;
+      if (!matchesCsv(filter.status, run.status)) {
+        return false;
+      }
+      if (!matchesCsv(filter.runtime, run.runtime)) {
+        return false;
+      }
+      if (!matchesCsv(filter.provider, run.provider)) {
+        return false;
+      }
+      if (!matchesCsv(filter.model, run.model)) {
+        return false;
+      }
+      if (!matchesCsv(filter.placement, run.placement)) {
+        return false;
+      }
+      if (!matchesCsv(filter.adapterType, run.adapterType)) {
+        return false;
+      }
+      if (filter.since !== undefined && run.createdAt < filter.since) {
+        return false;
+      }
+      if (filter.until !== undefined && run.createdAt >= filter.until) {
+        return false;
+      }
       if (filter.before) {
-        if (run.createdAt > filter.before.createdAt) return false;
-        if (run.createdAt === filter.before.createdAt && run.id >= filter.before.id) return false;
+        if (run.createdAt > filter.before.createdAt) {
+          return false;
+        }
+        if (run.createdAt === filter.before.createdAt && run.id >= filter.before.id) {
+          return false;
+        }
       }
       return true;
     });
@@ -93,6 +141,10 @@ export class InMemoryEventStore implements EventStore {
 
   async listByRun(runId: string): Promise<SwitchyardEvent[]> {
     return this.items.filter((event) => event.runId === runId);
+  }
+
+  async listByDebate(debateId: string): Promise<SwitchyardEvent[]> {
+    return this.items.filter((event) => event.debateId === debateId);
   }
 }
 
@@ -138,13 +190,37 @@ export class InMemoryArtifactStore implements ArtifactStore {
   async listByRun(runId: string): Promise<Artifact[]> {
     return [...this.items.values()].filter((artifact) => artifact.runId === runId);
   }
+
+  async listByDebate(debateId: string): Promise<Artifact[]> {
+    return [...this.items.values()].filter((artifact) => artifact.debateId === debateId);
+  }
+}
+
+export class InMemoryDebateStore implements DebateStore {
+  readonly items = new Map<string, Debate>();
+
+  async create(value: Debate): Promise<Debate> {
+    this.items.set(value.id, value);
+    return value;
+  }
+
+  async get(id: string): Promise<Debate | undefined> {
+    return this.items.get(id);
+  }
+
+  async update(value: Debate): Promise<Debate> {
+    this.items.set(value.id, value);
+    return value;
+  }
 }
 
 export class InMemoryPlacementStore implements PlacementStore {
   readonly items = new Map<string, PlacementDecisionRecord>();
 
   async create(record: PlacementDecisionRecord): Promise<PlacementDecisionRecord> {
-    if (!record.runId) throw new Error("placement records require a runId");
+    if (!record.runId) {
+      throw new Error("placement records require a runId");
+    }
     this.items.set(record.id, record);
     return record;
   }
@@ -154,7 +230,9 @@ export class InMemoryPlacementStore implements PlacementStore {
   }
 
   async update(record: PlacementDecisionRecord): Promise<PlacementDecisionRecord> {
-    if (!record.runId) throw new Error("placement records require a runId");
+    if (!record.runId) {
+      throw new Error("placement records require a runId");
+    }
     this.items.set(record.id, record);
     return record;
   }
@@ -200,7 +278,7 @@ export class InMemoryRegistryStore implements RegistryStore {
 
   async listProviders(filter: ListProvidersFilter): Promise<ListProvidersResult> {
     const sorted = [...this.providers.values()].sort((left, right) => left.id.localeCompare(right.id));
-    const filtered = filter.before ? sorted.filter((row) => row.id > filter.before.id) : sorted;
+    const filtered = filter.before ? sorted.filter((row) => row.id > filter.before!.id) : sorted;
     const page = filtered.slice(0, filter.limit);
     const hasMore = filtered.length > filter.limit;
     const last = page.at(-1);
@@ -211,12 +289,18 @@ export class InMemoryRegistryStore implements RegistryStore {
     const sorted = [...this.runtimes.values()].sort((left, right) => left.id.localeCompare(right.id));
     const filtered = sorted.filter((runtime) => {
       if (filter.providerIds && filter.providerIds.length > 0) {
-        if (!runtime.providerId || !filter.providerIds.includes(runtime.providerId)) return false;
+        if (!runtime.providerId || !filter.providerIds.includes(runtime.providerId)) {
+          return false;
+        }
       }
       if (filter.adapterType && filter.adapterType.length > 0) {
-        if (!filter.adapterType.includes(runtime.adapterType)) return false;
+        if (!filter.adapterType.includes(runtime.adapterType)) {
+          return false;
+        }
       }
-      if (filter.before && runtime.id <= filter.before.id) return false;
+      if (filter.before && runtime.id <= filter.before.id) {
+        return false;
+      }
       return true;
     });
     const page = filtered.slice(0, filter.limit);
@@ -228,10 +312,14 @@ export class InMemoryRegistryStore implements RegistryStore {
   async listModels(filter: ListModelsFilter): Promise<ListModelsResult> {
     const sorted = [...this.models.values()].sort((left, right) => left.id.localeCompare(right.id));
     const filtered = sorted.filter((model) => {
-      if (filter.providerIds && filter.providerIds.length > 0 && !filter.providerIds.includes(model.providerId)) {
+      if (filter.providerIds && filter.providerIds.length > 0) {
+        if (!filter.providerIds.includes(model.providerId)) {
+          return false;
+        }
+      }
+      if (filter.before && model.id <= filter.before.id) {
         return false;
       }
-      if (filter.before && model.id <= filter.before.id) return false;
       return true;
     });
     const page = filtered.slice(0, filter.limit);
@@ -257,32 +345,52 @@ export class InMemoryRegistryStore implements RegistryStore {
   async listRuntimeModes(filter: ListRuntimeModesFilter): Promise<ListRuntimeModesResult> {
     const sorted = [...this.runtimeModes.values()].sort((left, right) => left.id.localeCompare(right.id));
     const filtered = sorted.filter((mode) => {
-      if (filter.providerIds && filter.providerIds.length > 0 && !filter.providerIds.includes(mode.providerId)) return false;
-      if (filter.runtimeIds && filter.runtimeIds.length > 0 && !filter.runtimeIds.includes(mode.runtimeId)) return false;
-      if (filter.adapterType && filter.adapterType.length > 0 && !filter.adapterType.includes(mode.adapterType)) return false;
-      if (filter.kind && filter.kind.length > 0 && !filter.kind.includes(mode.kind)) return false;
-      if (filter.availability && filter.availability.length > 0 && !filter.availability.includes(mode.availability.state)) return false;
+      if (filter.providerIds && filter.providerIds.length > 0 && !filter.providerIds.includes(mode.providerId)) {
+        return false;
+      }
+      if (filter.runtimeIds && filter.runtimeIds.length > 0 && !filter.runtimeIds.includes(mode.runtimeId)) {
+        return false;
+      }
+      if (filter.adapterType && filter.adapterType.length > 0 && !filter.adapterType.includes(mode.adapterType)) {
+        return false;
+      }
+      if (filter.kind && filter.kind.length > 0 && !filter.kind.includes(mode.kind)) {
+        return false;
+      }
+      if (filter.availability && filter.availability.length > 0 && !filter.availability.includes(mode.availability.state)) {
+        return false;
+      }
       if (filter.placement && filter.placement.length > 0) {
         const matchesPlacement = filter.placement.some((placement) => {
-          if (placement === "local") return mode.placement.local.support === "supported" || mode.placement.local.support === "conditional";
-          if (placement === "hosted") return mode.placement.hosted.support === "supported" || mode.placement.hosted.support === "conditional";
+          if (placement === "local") {
+            return mode.placement.local.support === "supported" || mode.placement.local.support === "conditional";
+          }
+          if (placement === "hosted") {
+            return mode.placement.hosted.support === "supported" || mode.placement.hosted.support === "conditional";
+          }
           if (placement === "connected_local_node") {
-            return mode.placement.connectedLocalNode.support === "supported" || mode.placement.connectedLocalNode.support === "conditional";
+            return (
+              mode.placement.connectedLocalNode.support === "supported" ||
+              mode.placement.connectedLocalNode.support === "conditional"
+            );
           }
           return false;
         });
-        if (!matchesPlacement) return false;
-      }
-      if (filter.capability && filter.capability.length > 0) {
-        const set = new Set(mode.capabilities);
-        if (!filter.capability.every((capability) => set.has(capability as RuntimeMode["capabilities"][number]))) {
+        if (!matchesPlacement) {
           return false;
         }
       }
-      if (filter.before && mode.id <= filter.before.id) return false;
+      if (filter.capability && filter.capability.length > 0) {
+        const set = new Set<string>(mode.capabilities);
+        if (!filter.capability.every((capability) => set.has(capability))) {
+          return false;
+        }
+      }
+      if (filter.before && mode.id <= filter.before.id) {
+        return false;
+      }
       return true;
     });
-
     const page = filtered.slice(0, filter.limit);
     const hasMore = filtered.length > filter.limit;
     const last = page.at(-1);
@@ -291,7 +399,9 @@ export class InMemoryRegistryStore implements RegistryStore {
 
   async updateRuntimeModeAvailability(idOrSlug: string, availability: RuntimeAvailability): Promise<RuntimeMode | undefined> {
     const mode = await this.getRuntimeMode(idOrSlug);
-    if (!mode) return undefined;
+    if (!mode) {
+      return undefined;
+    }
     const updated: RuntimeMode = {
       ...mode,
       availability,

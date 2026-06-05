@@ -81,7 +81,8 @@ describe("codex model catalog", () => {
     await expect(probeCodexCatalog("codex")).resolves.toEqual({
       ok: false,
       models: [],
-      message: "spawn ENOENT"
+      message: "spawn ENOENT",
+      reasonCode: "binary_unavailable"
     });
   });
 
@@ -98,7 +99,8 @@ describe("codex model catalog", () => {
       ok: true,
       version: "codex 1.2.3",
       models: [],
-      message: "debug failed"
+      message: "debug failed",
+      reasonCode: "model_catalog_unavailable"
     });
   });
 
@@ -131,6 +133,56 @@ describe("codex model catalog", () => {
           supportedReasoningLevels: ["low", "medium"]
         }
       ]
+    });
+  });
+
+  it("passes timeout and maxBuffer bounds to execFile probes", async () => {
+    execFileMock.mockImplementation((file: string, args: string[], opts: Record<string, unknown>, cb: Function) => {
+      if (args[0] === "--version") {
+        expect(opts.timeout).toBe(1234);
+        expect(opts.maxBuffer).toBe(5678);
+        cb(null, "codex 2.0.0\n", "");
+        return;
+      }
+      expect(opts.timeout).toBe(1234);
+      expect(opts.maxBuffer).toBe(5678);
+      cb(null, JSON.stringify({ models: [] }), "");
+    });
+
+    const probe = await probeCodexCatalog("codex", { timeoutMs: 1234, maxBufferBytes: 5678 });
+    expect(probe.version).toBe("codex 2.0.0");
+  });
+
+  it("maps timeout failures to a sanitized reason code", async () => {
+    execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: Function) => {
+      const timeoutError = Object.assign(new Error("command timed out"), { code: "ETIMEDOUT" });
+      cb(timeoutError, "", "very long stderr ".repeat(100));
+    });
+
+    await expect(probeCodexCatalog("codex", { timeoutMs: 50, maxBufferBytes: 64 })).resolves.toMatchObject({
+      ok: false,
+      models: [],
+      reasonCode: "check_timeout"
+    });
+  });
+
+  it("maps max-buffer failures to a sanitized reason code", async () => {
+    execFileMock.mockImplementation((file: string, args: string[], _opts: unknown, cb: Function) => {
+      if (args[0] === "--version") {
+        cb(null, "codex 2.0.0\n", "");
+        return;
+      }
+      const bufferError = Object.assign(new Error("stdout maxBuffer length exceeded"), {
+        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+      });
+      cb(bufferError, "", "huge output ".repeat(100));
+    });
+
+    await expect(probeCodexCatalog("codex", { timeoutMs: 50, maxBufferBytes: 64 })).resolves.toMatchObject({
+      ok: true,
+      version: "codex 2.0.0",
+      models: [],
+      reasonCode: "check_output_too_large"
     });
   });
 });

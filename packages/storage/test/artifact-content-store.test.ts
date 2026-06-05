@@ -1,0 +1,266 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { describe, expect, it } from "vitest";
+import { LocalObjectArtifactContentStore, MemoryArtifactContentStore, ObjectArtifactContentStore } from "../src/index.js";
+
+describe("artifact content stores", () => {
+  it("stores and reads bytes in memory with digest metadata", async () => {
+    const store = new MemoryArtifactContentStore();
+    const bytes = Buffer.from("hello");
+    const stored = await store.writeBytes("runs/run_1/transcript.jsonl", bytes, {
+      contentType: "application/x-ndjson"
+    });
+
+    expect(stored.sizeBytes).toBe(bytes.byteLength);
+    expect(stored.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+
+    const read = await store.read({
+      id: "artifact_1",
+      runId: "run_1",
+      type: "transcript",
+      path: "runs/run_1/transcript.jsonl",
+      metadata: {},
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    expect(read.body.toString("utf8")).toBe("hello");
+  });
+
+  it("rejects unsafe logical path", async () => {
+    const store = new MemoryArtifactContentStore();
+    await expect(store.writeText("../escape", "oops")).rejects.toThrow("escapes root");
+  });
+
+  it("supports object-store shaped adapter with injected client", async () => {
+    const objects = new Map<string, { body: Buffer; contentType: string }>();
+    const store = new ObjectArtifactContentStore(
+      {
+        endpoint: "https://example.test",
+        region: "auto",
+        bucket: "switchyard",
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        forcePathStyle: true,
+        keyPrefix: "artifacts"
+      },
+      {
+        async putObject(input) {
+          objects.set(`${input.bucket}/${input.key}`, { body: input.body, contentType: input.contentType });
+        },
+        async getObject(input) {
+          const hit = objects.get(`${input.bucket}/${input.key}`);
+          if (!hit) throw new Error("not found");
+          return hit;
+        },
+        async deleteObject(input) {
+          objects.delete(`${input.bucket}/${input.key}`);
+        }
+      }
+    );
+
+    const saved = await store.writeText("runs/run_1/file.txt", "content", { contentType: "text/plain" });
+    expect(saved.objectKey).toBe("artifacts/runs/run_1/file.txt");
+
+    const read = await store.read({
+      id: "artifact_2",
+      runId: "run_1",
+      type: "raw_log",
+      path: "runs/run_1/file.txt",
+      metadata: {},
+      createdAt: "2026-05-30T00:00:00.000Z"
+    });
+    expect(read.body.toString("utf8")).toBe("content");
+  });
+
+  it("prefers metadata objectKey and validates object digest/size", async () => {
+    const objects = new Map<string, { body: Buffer; contentType: string }>();
+    const store = new ObjectArtifactContentStore(
+      {
+        endpoint: "https://example.test",
+        region: "auto",
+        bucket: "switchyard",
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        forcePathStyle: true,
+        keyPrefix: "artifacts"
+      },
+      {
+        async putObject(input) {
+          objects.set(`${input.bucket}/${input.key}`, { body: input.body, contentType: input.contentType });
+        },
+        async getObject(input) {
+          const hit = objects.get(`${input.bucket}/${input.key}`);
+          if (!hit) throw new Error("not found");
+          return hit;
+        },
+        async deleteObject() {
+          return undefined;
+        }
+      }
+    );
+    const saved = await store.writeText("runs/run_1/path.txt", "payload", { contentType: "text/plain" });
+    const baseArtifact = {
+      id: "artifact_obj_1",
+      runId: "run_1",
+      type: "raw_log" as const,
+      path: "runs/run_1/path.txt",
+      createdAt: "2026-05-30T00:00:00.000Z"
+    };
+
+    await expect(store.read({
+      ...baseArtifact,
+      metadata: {
+        objectKey: saved.objectKey,
+        sha256: saved.sha256,
+        sizeBytes: saved.sizeBytes,
+        contentType: "text/plain"
+      }
+    })).resolves.toMatchObject({ body: Buffer.from("payload") });
+
+    await expect(store.read({
+      ...baseArtifact,
+      metadata: {
+        objectKey: saved.objectKey,
+        sha256: "0".repeat(64),
+        sizeBytes: saved.sizeBytes,
+        contentType: "text/plain"
+      }
+    })).rejects.toThrow("artifact_digest_mismatch");
+
+    await expect(store.read({
+      ...baseArtifact,
+      metadata: {
+        objectKey: saved.objectKey,
+        sha256: saved.sha256,
+        sizeBytes: 999,
+        contentType: "text/plain"
+      }
+    })).rejects.toThrow("artifact_digest_mismatch");
+  });
+
+  it("supports object store probe write/read/delete roundtrip", async () => {
+    const objects = new Map<string, Buffer>();
+    const store = new ObjectArtifactContentStore(
+      {
+        endpoint: "https://example.test",
+        region: "auto",
+        bucket: "switchyard",
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        forcePathStyle: true,
+        keyPrefix: "artifacts"
+      },
+      {
+        async putObject(input) {
+          objects.set(`${input.bucket}/${input.key}`, input.body);
+        },
+        async getObject(input) {
+          const hit = objects.get(`${input.bucket}/${input.key}`);
+          if (!hit) throw new Error("not found");
+          return { body: hit, contentType: "application/octet-stream" };
+        },
+        async deleteObject(input) {
+          objects.delete(`${input.bucket}/${input.key}`);
+        }
+      }
+    );
+
+    await expect(store.probe()).resolves.toEqual({ ok: true });
+    expect(objects.size).toBe(0);
+  });
+
+  it("supports opt-in local object-compatible persistence", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-objects-"));
+    try {
+      const store = new LocalObjectArtifactContentStore(dir);
+      const saved = await store.writeText("runs/run_1/file.txt", "content", { contentType: "text/plain" });
+      expect(saved.storageBackend).toBe("object");
+      expect(saved.objectKey).toBe("artifacts/runs/run_1/file.txt");
+      const read = await store.read({
+        id: "artifact_3",
+        runId: "run_1",
+        type: "raw_log",
+        path: "runs/run_1/file.txt",
+        metadata: { objectKey: saved.objectKey, contentType: saved.contentType },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      });
+      expect(read.body.toString("utf8")).toBe("content");
+      const digestMismatchArtifact = {
+        id: "artifact_4",
+        runId: "run_1",
+        type: "raw_log" as const,
+        path: "runs/run_1/file.txt",
+        metadata: { objectKey: saved.objectKey, contentType: saved.contentType, sha256: "0".repeat(64), sizeBytes: 7 },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      };
+      await expect(store.read(digestMismatchArtifact as any)).rejects.toThrow("artifact_digest_mismatch");
+      await expect(store.read({
+        ...digestMismatchArtifact,
+        metadata: { objectKey: saved.objectKey, contentType: saved.contentType, sha256: saved.sha256, sizeBytes: 1 }
+      } as any)).rejects.toThrow("artifact_digest_mismatch");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("maps local object store write failures to object_store_write_failed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-objects-file-root-"));
+    const rootFile = join(dir, "root-as-file");
+    await writeFile(rootFile, "x");
+    const store = new LocalObjectArtifactContentStore(rootFile);
+    await expect(store.writeText("runs/run_1/file.txt", "content")).rejects.toThrow("object_store_write_failed");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("maps unavailable roots and probe failures to object_store_unavailable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-objects-unavailable-"));
+    const rootFile = join(dir, "root-as-file");
+    await writeFile(rootFile, "x");
+    const store = new LocalObjectArtifactContentStore(rootFile);
+    await expect(store.probe()).rejects.toThrow("object_store_unavailable");
+    await expect(store.read({
+      id: "artifact_unavailable",
+      runId: "run_1",
+      type: "raw_log",
+      path: "runs/run_1/file.txt",
+      metadata: { objectKey: "artifacts/runs/run_1/file.txt" },
+      createdAt: "2026-05-30T00:00:00.000Z"
+    })).rejects.toThrow("object_store_unavailable");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("maps missing content and empty-content mismatch errors", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "switchyard-objects-missing-"));
+    try {
+      const store = new LocalObjectArtifactContentStore(dir);
+      await expect(store.read({
+        id: "artifact_missing",
+        runId: "run_1",
+        type: "raw_log",
+        path: "runs/run_1/missing.txt",
+        metadata: { objectKey: "artifacts/runs/run_1/missing.txt" },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      })).rejects.toThrow("artifact_content_not_found");
+
+      const saved = await store.writeBytes("runs/run_1/empty.txt", Buffer.alloc(0), {
+        contentType: "application/octet-stream"
+      });
+      await expect(store.read({
+        id: "artifact_empty",
+        runId: "run_1",
+        type: "raw_log",
+        path: "runs/run_1/empty.txt",
+        metadata: {
+          objectKey: saved.objectKey,
+          contentType: saved.contentType,
+          sha256: saved.sha256,
+          sizeBytes: 1
+        },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      })).rejects.toThrow("artifact_content_empty");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

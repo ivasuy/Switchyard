@@ -1,29 +1,15 @@
-# OpenCode Adapter
+# OpenCode Adapter Research Notes
 
-## Target
+R5 shipped the OpenCode ACP path. The active local development and smoke guide is:
 
-OpenCode should be the first real structured runtime adapter because it exposes an ACP server path.
+- `docs/development/adapters/OPENCODE.md`
 
-## Preferred Protocol
+Historical planning notes in this file are retained only as background context.
 
-- Primary: ACP/acpx through `opencode acp`.
-- Fallback: CLI/process only if ACP is unavailable.
+## Hosted Debate Boundary
 
-## Verified Local Facts
-
-- Binary: `/opt/homebrew/bin/opencode`
-- Version: `1.3.15`
-- ACP initialize succeeded locally.
-- `session/new` succeeded and returned a session id and current model.
-- `session/prompt` was not run because it could spend model budget.
-
-## Implementation Notes
-
-- Build on `packages/protocol-acpx` outbound client.
-- Preserve raw JSON-RPC messages as transcript artifacts.
-- Map ACP session updates to normalized Switchyard events.
-- Implement cancellation through ACP session cancel.
-
-## Status
-
-Implementation-ready after the ACP client base and fake ACP contract tests exist.
+- R24 allows `opencode.acp` as an opt-in local/hosted debate participant runtime.
+- Hosted debate use depends on the R23 hosted runtime bridge command and payload stores shared by server and worker.
+- Missing bridge stores fail closed with `hosted_runtime_bridge_store_unavailable`.
+- Hosted debate still uses normal run/runtime contracts and preserves child run, message, event, evidence, and artifact traceability.
+- Generic process adapters, PTY/TUI automation, hosted terminal bridges, and public arbitrary execution routes remain unshipped.

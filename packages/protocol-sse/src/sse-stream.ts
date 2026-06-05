@@ -42,10 +42,13 @@ export async function collectReplayAndLiveEvents(input: {
   stopAfter: number;
   timeoutMs?: number;
   startAfterEventId?: string;
+  match?: ((event: SwitchyardEvent) => boolean) | undefined;
 }): Promise<string> {
   const replay = trimReplayByLastEventId(input.replay, input.startAfterEventId);
-  const normalizedStopAfter = normalizeStopAfter(input.stopAfter, replay.length);
-  const chunks = replay.slice(0, normalizedStopAfter).map(formatSseEvent);
+  const matches = input.match ?? ((event: SwitchyardEvent) => event.runId === input.runId);
+  const filteredReplay = replay.filter(matches);
+  const normalizedStopAfter = normalizeStopAfter(input.stopAfter, filteredReplay.length);
+  const chunks = filteredReplay.slice(0, normalizedStopAfter).map(formatSseEvent);
   if (chunks.length >= normalizedStopAfter) {
     return chunks.join("");
   }
@@ -76,7 +79,7 @@ export async function collectReplayAndLiveEvents(input: {
     }, timeoutMs);
 
     unsubscribe = input.eventBus.subscribe((event) => {
-      if (event.runId !== input.runId) {
+      if (!matches(event)) {
         return;
       }
       chunks.push(formatSseEvent(event));
@@ -132,6 +135,43 @@ export interface StreamRunEventsHandle {
 }
 
 export function streamRunEvents(input: StreamRunEventsInput): StreamRunEventsHandle {
+  const streamInput: StreamEntityEventsInput = {
+    replay: input.replay,
+    destination: input.destination,
+    live: input.live,
+    matches: (event) => event.runId === input.runId
+  };
+  if (input.stopAfter !== undefined) streamInput.stopAfter = input.stopAfter;
+  if (input.lastEventId !== undefined) streamInput.lastEventId = input.lastEventId;
+  if (input.eventBus !== undefined) streamInput.eventBus = input.eventBus;
+  if (input.heartbeatIntervalMs !== undefined) streamInput.heartbeatIntervalMs = input.heartbeatIntervalMs;
+  if (input.idleTimeoutMs !== undefined) streamInput.idleTimeoutMs = input.idleTimeoutMs;
+  if (input.now !== undefined) streamInput.now = input.now;
+  if (input.setIntervalFn !== undefined) streamInput.setIntervalFn = input.setIntervalFn;
+  if (input.clearIntervalFn !== undefined) streamInput.clearIntervalFn = input.clearIntervalFn;
+  if (input.setTimeoutFn !== undefined) streamInput.setTimeoutFn = input.setTimeoutFn;
+  if (input.clearTimeoutFn !== undefined) streamInput.clearTimeoutFn = input.clearTimeoutFn;
+  return streamEntityEvents(streamInput);
+}
+
+export interface StreamEntityEventsInput {
+  replay: SwitchyardEvent[];
+  destination: SseWritable;
+  live: boolean;
+  matches: (event: SwitchyardEvent) => boolean;
+  stopAfter?: number | undefined;
+  lastEventId?: string | undefined;
+  eventBus?: EventBus | undefined;
+  heartbeatIntervalMs?: number;
+  idleTimeoutMs?: number;
+  now?: () => number;
+  setIntervalFn?: typeof setInterval;
+  clearIntervalFn?: typeof clearInterval;
+  setTimeoutFn?: typeof setTimeout;
+  clearTimeoutFn?: typeof clearTimeout;
+}
+
+export function streamEntityEvents(input: StreamEntityEventsInput): StreamRunEventsHandle {
   const heartbeatInterval = input.heartbeatIntervalMs ?? SSE_HEARTBEAT_INTERVAL_MS;
   const idleTimeout = input.idleTimeoutMs ?? SSE_IDLE_CLOSE_MS;
   const setIntervalFn = input.setIntervalFn ?? setInterval;
@@ -139,7 +179,7 @@ export function streamRunEvents(input: StreamRunEventsInput): StreamRunEventsHan
   const setTimeoutFn = input.setTimeoutFn ?? setTimeout;
   const clearTimeoutFn = input.clearTimeoutFn ?? clearTimeout;
 
-  const replay = trimReplayByLastEventId(input.replay, input.lastEventId);
+  const replay = trimReplayByLastEventId(input.replay, input.lastEventId).filter(input.matches);
   const stopAfter = input.stopAfter !== undefined
     ? normalizeStopAfter(input.stopAfter, replay.length + Number.MAX_SAFE_INTEGER)
     : undefined;
@@ -233,7 +273,7 @@ export function streamRunEvents(input: StreamRunEventsInput): StreamRunEventsHan
 
   if (input.eventBus) {
     unsubscribe = input.eventBus.subscribe((event) => {
-      if (event.runId !== input.runId) {
+      if (!input.matches(event)) {
         return;
       }
       writeEvent(event);

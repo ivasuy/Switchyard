@@ -1,12 +1,37 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import {
+  accountIdSchema,
+  tenantIdSchema,
+  projectIdSchema,
+  apiKeyIdSchema,
+  billingPlanIdSchema,
+  quotaReservationIdSchema,
+  auditLogEventIdSchema,
+  accountSchema,
+  tenantSchema as enterpriseTenantSchema,
+  projectSchema,
+  apiKeyPublicSchema,
+  apiKeyStoredSchema,
+  billingPlanSchema,
+  entitlementSnapshotSchema,
+  quotaUsageSchema,
+  quotaReservationSchema,
+  resourceOwnershipSchema,
+  authContextSchema,
+  auditLogEventSchema,
+  whoamiResponseSchema,
+  entitlementsResponseSchema,
+  auditEventsResponseSchema,
+  doctorSummaryResponseSchema,
+  approvalTypeSchema,
   approvalSchema,
   artifactSchema,
   budgetSchema,
   contextPacketSchema,
   contextSectionSchema,
   debateSchema,
+  createDebateRequestSchema,
   errorSchema,
   eventSchema,
   evidenceItemSchema,
@@ -17,10 +42,32 @@ import {
   placementDecisionSchema,
   providerSchema,
   runSchema,
+  runtimeAvailabilitySchema,
+  runtimeCapabilitySchema,
+  runtimeDoctorCheckSchema,
+  runtimeModeSchema,
+  runtimeModeSlugSchema,
   runtimeSchema,
   runtimeSessionSchema,
+  executionPlacementSchema,
+  createToolInvocationRequestSchema,
   toolInvocationSchema,
-  userSchema
+  userSchema,
+  httpErrorCodeSchema,
+  httpErrorEnvelopeSchema,
+  assignmentSchema,
+  nodeRegisterRequestSchema,
+  assignmentClaimResponseSchema,
+  assignmentEventSyncRequestSchema,
+  assignmentArtifactManifestRequestSchema,
+  hostedRuntimeBridgeCommandSchema,
+  hostedRuntimeBridgeReadinessReportSchema,
+  HOSTED_RUNTIME_BRIDGE_REASON_CODES,
+  ACP_RUNTIME_BRIDGE_REASON_CODES,
+  acceptedResponseSchema,
+  isHostedRuntimeBridgeSupportedMode,
+  generateOpenApiDocument,
+  HOSTED_NODE_ROUTE_INVENTORY
 } from "../src/index.js";
 
 function expectRequiredFields(schema: z.ZodType, valid: Record<string, unknown>, requiredKeys: string[]): void {
@@ -92,6 +139,595 @@ describe("Switchyard contracts", () => {
     expect(session.externalSessionKey).toBe("ses_abc");
   });
 
+  it("parses runtime mode slug, record, doctor payloads, and doctor summary", () => {
+    expect(runtimeModeSlugSchema.parse("fake.deterministic")).toBe("fake.deterministic");
+    expect(runtimeModeSlugSchema.parse("codex.exec_json")).toBe("codex.exec_json");
+    expect(() => runtimeModeSlugSchema.parse("codex")).toThrow();
+    expect(() => runtimeModeSlugSchema.parse("Codex.exec_json")).toThrow();
+    expect(() => runtimeModeSlugSchema.parse(".codex")).toThrow();
+    expect(() => runtimeModeSlugSchema.parse("codex..exec_json")).toThrow();
+
+    const fakeMode = runtimeModeSchema.parse({
+      id: "runtime_mode_fake_deterministic",
+      slug: "fake.deterministic",
+      name: "Fake deterministic runtime",
+      providerId: "provider_test",
+      runtimeId: "runtime_fake",
+      adapterId: "fake",
+      adapterType: "process",
+      kind: "deterministic_fake",
+      status: "available",
+      capabilities: ["run.start", "run.cancel", "event.normalized", "event.streaming", "artifact.transcript", "tool.fake_echo", "auth.none"],
+      limitations: [{ code: "deterministic_only", message: "Outputs are fixed for local smoke and contract tests." }],
+      placement: {
+        local: { support: "supported", reason: "In-process deterministic test adapter." },
+        hosted: { support: "supported", reason: "Hosted-safe deterministic fake worker mode for R10 smoke execution." },
+        connectedLocalNode: { support: "supported", reason: "Connected local node fake execution for R10 hybrid smoke flows." }
+      },
+      availability: {
+        state: "available",
+        canRun: true,
+        installed: true,
+        auth: "not_required",
+        version: null,
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        reasonCode: null,
+        message: null
+      },
+      createdAt: "2026-05-29T00:00:00.000Z",
+      updatedAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(fakeMode.slug).toBe("fake.deterministic");
+
+    const codexMode = runtimeModeSchema.parse({
+      id: "runtime_mode_codex_exec_json",
+      slug: "codex.exec_json",
+      name: "Codex exec JSON",
+      providerId: "provider_openai",
+      runtimeId: "runtime_codex",
+      adapterId: "codex",
+      adapterType: "process",
+      kind: "one_shot_process",
+      status: "available",
+      capabilities: [
+        "run.start",
+        "run.cancel",
+        "run.timeout",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "artifact.raw_transcript",
+        "model.catalog",
+        "auth.local",
+        "sandbox.read_only",
+        "sandbox.workspace_write",
+        "sandbox.danger_full_access"
+      ],
+      limitations: [
+        { code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." },
+        { code: "local_only", message: "This mode runs a local Codex CLI process and is not hosted-safe in R3." }
+      ],
+      placement: {
+        local: { support: "supported", reason: "Requires a PATH-reachable local codex binary and local workspace." },
+        hosted: { support: "unsupported", reason: "Hosted subprocess execution is not shipped in R3." },
+        connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for R10." }
+      },
+      availability: {
+        state: "available",
+        canRun: true,
+        installed: true,
+        auth: "configured",
+        version: "codex-cli 0.130.0",
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        reasonCode: null,
+        message: null
+      },
+      docsPath: "docs/development/adapters/CODEX.md",
+      createdAt: "2026-05-29T00:00:00.000Z",
+      updatedAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(codexMode.id).toBe("runtime_mode_codex_exec_json");
+
+    const availableCheck = runtimeDoctorCheckSchema.parse({
+      runtimeModeId: "runtime_mode_codex_exec_json",
+      runtimeMode: "codex.exec_json",
+      providerId: "provider_openai",
+      runtimeId: "runtime_codex",
+      state: "available",
+      canRun: true,
+      installed: true,
+      auth: "configured",
+      version: "codex-cli 0.130.0",
+      checkedAt: "2026-05-29T00:00:00.000Z",
+      reasonCode: null,
+      message: null,
+      capabilities: ["run.start", "run.cancel", "model.catalog", "auth.local"],
+      limitations: [{ code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." }],
+      diagnostics: [{ code: "binary_version_ok", severity: "info", message: "codex --version succeeded." }]
+    });
+    expect(availableCheck.state).toBe("available");
+
+    const unavailableCheck = runtimeDoctorCheckSchema.parse({
+      runtimeModeId: "runtime_mode_codex_exec_json",
+      runtimeMode: "codex.exec_json",
+      providerId: "provider_openai",
+      runtimeId: "runtime_codex",
+      state: "unavailable",
+      canRun: false,
+      installed: true,
+      auth: "unknown",
+      version: null,
+      checkedAt: "2026-05-29T00:00:00.000Z",
+      reasonCode: "model_catalog_unavailable",
+      message: "No model catalog entries were returned.",
+      capabilities: ["run.start", "run.cancel", "model.catalog", "auth.local"],
+      limitations: [{ code: "one_shot_no_input", message: "codex.exec_json does not support post-start input." }],
+      diagnostics: [{ code: "model_catalog_unavailable", severity: "error", message: "codex debug models returned no usable models." }]
+    });
+    expect(unavailableCheck.installed).toBe(true);
+
+    expect(() =>
+      runtimeAvailabilitySchema.parse({
+        state: "degraded",
+        canRun: false,
+        installed: false,
+        auth: "unknown",
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        version: null,
+        reasonCode: "bad_state",
+        message: null
+      })
+    ).toThrow();
+
+    const summary = doctorSummaryResponseSchema.parse({
+      runtimeModes: [
+        { runtimeModeId: "runtime_mode_fake_deterministic", runtimeMode: "fake.deterministic", state: "available", canRun: true, checkedAt: "2026-05-29T00:00:00.000Z" },
+        { runtimeModeId: "runtime_mode_codex_exec_json", runtimeMode: "codex.exec_json", state: "partial", canRun: true, checkedAt: "2026-05-29T00:00:00.000Z" }
+      ],
+      summary: {
+        available: 1,
+        installed: 0,
+        partial: 1,
+        unavailable: 0,
+        unsupported: 0,
+        unknown: 0
+      }
+    });
+    expect(summary.summary.partial).toBe(1);
+  });
+
+  it("accepts auth.api_key capability and rejects unsupported future capabilities", () => {
+    expect(runtimeCapabilitySchema.parse("auth.api_key")).toBe("auth.api_key");
+    expect(runtimeCapabilitySchema.parse("run.input")).toBe("run.input");
+    expect(runtimeCapabilitySchema.parse("session.state")).toBe("session.state");
+    expect(runtimeCapabilitySchema.parse("session.resume")).toBe("session.resume");
+    expect(runtimeCapabilitySchema.parse("approval.bridge")).toBe("approval.bridge");
+    expect(runtimeCapabilitySchema.parse("tool.call.normalized")).toBe("tool.call.normalized");
+    expect(runtimeCapabilitySchema.parse("tool.result.normalized")).toBe("tool.result.normalized");
+    expect(runtimeCapabilitySchema.parse("user.question")).toBe("user.question");
+
+    expect(() => runtimeCapabilitySchema.parse("approval.request")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("webhook.callback")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("tool.invoke")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("hosted.run")).toThrow();
+    expect(() => runtimeCapabilitySchema.parse("mcp.server")).toThrow();
+  });
+
+  it("parses claude_code.sdk runtime mode record with interactive capabilities", () => {
+    const mode = runtimeModeSchema.parse({
+      id: "runtime_mode_claude_code_sdk",
+      slug: "claude_code.sdk",
+      name: "Claude Code SDK",
+      providerId: "provider_anthropic",
+      runtimeId: "runtime_claude_code",
+      adapterId: "claude_code",
+      adapterType: "native",
+      kind: "sdk",
+      status: "unknown",
+      capabilities: [
+        "run.start",
+        "run.input",
+        "run.cancel",
+        "run.timeout",
+        "session.state",
+        "approval.bridge",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "artifact.raw_transcript",
+        "tool.call.normalized",
+        "tool.result.normalized",
+        "user.question",
+        "auth.local"
+      ],
+      limitations: [
+        { code: "no_hosted_support", message: "Hosted subprocess execution is not shipped in R8." }
+      ],
+      placement: {
+        local: { support: "conditional", reason: "Requires local Claude Code tooling and auth." },
+        hosted: { support: "unsupported", reason: "Hosted execution is not shipped in R8." },
+        connectedLocalNode: { support: "future", reason: "Hybrid node execution is planned for a future release." }
+      },
+      availability: {
+        state: "unknown",
+        canRun: false,
+        installed: false,
+        auth: "unknown",
+        version: null,
+        checkedAt: "2026-05-30T00:00:00.000Z",
+        reasonCode: "live_probe_disabled",
+        message: "Live probe is disabled by default."
+      },
+      docsPath: "docs/development/adapters/CLAUDE_CODE.md",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      updatedAt: "2026-05-30T00:00:00.000Z"
+    });
+
+    expect(mode.slug).toBe("claude_code.sdk");
+    expect(mode.kind).toBe("sdk");
+    expect(mode.capabilities).toContain("run.input");
+    expect(mode.capabilities).toContain("approval.bridge");
+    expect(mode.capabilities).toContain("tool.call.normalized");
+    expect(mode.capabilities).toContain("tool.result.normalized");
+    expect(mode.capabilities).toContain("user.question");
+    expect(mode.capabilities).not.toContain("session.resume");
+  });
+
+  it("parses generic_http.async_rest runtime mode record", () => {
+    const mode = runtimeModeSchema.parse({
+      id: "runtime_mode_generic_http_async_rest",
+      slug: "generic_http.async_rest",
+      name: "Generic HTTP async REST",
+      providerId: "provider_generic_http",
+      runtimeId: "runtime_generic_http",
+      adapterId: "generic_http",
+      adapterType: "http",
+      kind: "async_rest",
+      status: "unknown",
+      capabilities: [
+        "run.start",
+        "run.cancel",
+        "run.timeout",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "auth.none",
+        "auth.api_key"
+      ],
+      limitations: [
+        { code: "no_post_start_input", message: "generic_http.async_rest does not support post-start input in R4." },
+        {
+          code: "configured_endpoint_only",
+          message: "The HTTP wrapper base URL is configured by daemon environment, not per run."
+        },
+        { code: "no_webhooks", message: "Webhook callbacks are not shipped for Generic HTTP in R4." }
+      ],
+      placement: {
+        local: {
+          support: "conditional",
+          reason: "Requires SWITCHYARD_GENERIC_HTTP_BASE_URL to point at a reachable HTTP wrapper."
+        },
+        hosted: { support: "future", reason: "Hosted execution is not shipped in R4." },
+        connectedLocalNode: { support: "future", reason: "Hybrid node execution is not shipped in R4." }
+      },
+      availability: {
+        state: "unknown",
+        canRun: false,
+        installed: false,
+        auth: "unknown",
+        version: null,
+        checkedAt: "2026-05-29T00:00:00.000Z",
+        reasonCode: "generic_http_config_missing",
+        message: "SWITCHYARD_GENERIC_HTTP_BASE_URL is not configured."
+      },
+      docsPath: "docs/development/adapters/GENERIC_HTTP.md",
+      createdAt: "2026-05-29T00:00:00.000Z",
+      updatedAt: "2026-05-29T00:00:00.000Z"
+    });
+
+    expect(mode.slug).toBe("generic_http.async_rest");
+    expect(mode.adapterType).toBe("http");
+    expect(mode.kind).toBe("async_rest");
+    expect(mode.capabilities).toContain("auth.api_key");
+  });
+
+  it("parses agentfield.async_rest runtime mode record", () => {
+    const mode = runtimeModeSchema.parse({
+      id: "runtime_mode_agentfield_async_rest",
+      slug: "agentfield.async_rest",
+      name: "AgentField async REST",
+      providerId: "provider_agentfield",
+      runtimeId: "runtime_agentfield",
+      adapterId: "agentfield",
+      adapterType: "http",
+      kind: "async_rest",
+      status: "unknown",
+      capabilities: [
+        "run.start",
+        "run.timeout",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "auth.api_key"
+      ],
+      limitations: [
+        {
+          code: "configured_target_only",
+          message: "agentfield.async_rest uses the daemon-level AgentField target configured by SWITCHYARD_AGENTFIELD_TARGET."
+        },
+        {
+          code: "cancel_unsupported",
+          message: "AgentField upstream cancellation is not claimed in R6 because no cancel endpoint is verified by this spec."
+        }
+      ],
+      placement: {
+        local: {
+          support: "conditional",
+          reason: "Requires SWITCHYARD_AGENTFIELD_BASE_URL, SWITCHYARD_AGENTFIELD_API_KEY, and SWITCHYARD_AGENTFIELD_TARGET."
+        },
+        hosted: { support: "future", reason: "Hosted execution is not shipped in R6." },
+        connectedLocalNode: { support: "future", reason: "Hybrid local-node execution is not shipped in R6." }
+      },
+      availability: {
+        state: "unavailable",
+        canRun: false,
+        installed: false,
+        auth: "missing",
+        version: null,
+        checkedAt: "2026-05-30T00:00:00.000Z",
+        reasonCode: "agentfield_config_missing",
+        message: "SWITCHYARD_AGENTFIELD_BASE_URL is not configured."
+      },
+      docsPath: "docs/development/adapters/AGENTFIELD.md",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      updatedAt: "2026-05-30T00:00:00.000Z"
+    });
+
+    expect(mode.slug).toBe("agentfield.async_rest");
+    expect(mode.capabilities).not.toContain("run.cancel");
+    expect(mode.capabilities).toContain("auth.api_key");
+  });
+
+  it("parses opencode.acp runtime mode record", () => {
+    const mode = runtimeModeSchema.parse({
+      id: "runtime_mode_opencode_acp",
+      slug: "opencode.acp",
+      name: "OpenCode ACP",
+      providerId: "provider_opencode",
+      runtimeId: "runtime_opencode",
+      adapterId: "opencode",
+      adapterType: "acpx",
+      kind: "acp",
+      status: "unknown",
+      capabilities: [
+        "run.start",
+        "run.cancel",
+        "run.timeout",
+        "event.normalized",
+        "event.streaming",
+        "artifact.transcript",
+        "artifact.raw_transcript",
+        "auth.local"
+      ],
+      limitations: [
+        { code: "one_prompt_per_run", message: "opencode.acp sends one ACP prompt per Switchyard run in R5." },
+        { code: "no_post_start_input", message: "opencode.acp does not support POST /runs/:id/input in R5." },
+        { code: "no_switchyard_approval_bridge", message: "ACP permission requests are failed visibly because Switchyard approval workflow is not shipped in R5." },
+        { code: "configured_local_binary_only", message: "OpenCode command is daemon-level local configuration, not per run." },
+        { code: "no_session_resume", message: "OpenCode ACP session load/resume/fork/list are not exposed through Switchyard in R5." }
+      ],
+      placement: {
+        local: { support: "conditional", reason: "Requires a PATH-reachable local opencode binary and local OpenCode authentication/configuration." },
+        hosted: { support: "future", reason: "Hosted execution is not shipped in R5." },
+        connectedLocalNode: { support: "future", reason: "Hybrid local-node execution is not shipped in R5." }
+      },
+      availability: {
+        state: "unknown",
+        canRun: false,
+        installed: false,
+        auth: "unknown",
+        version: null,
+        checkedAt: "2026-05-30T00:00:00.000Z",
+        reasonCode: "opencode_binary_unavailable",
+        message: "OpenCode command was not found."
+      },
+      docsPath: "docs/development/adapters/OPENCODE.md",
+      createdAt: "2026-05-30T00:00:00.000Z",
+      updatedAt: "2026-05-30T00:00:00.000Z"
+    });
+    expect(mode.adapterType).toBe("acpx");
+    expect(mode.kind).toBe("acp");
+    expect(mode.slug).toBe("opencode.acp");
+  });
+
+  it("supports run and session runtimeMode compatibility and rejects runtime mode ids", () => {
+    const runWithMode = runSchema.parse({
+      id: "run_runtime_mode_new",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "Inspect runtime mode support",
+      status: "queued",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      runtimeMode: "fake.deterministic",
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(runWithMode.runtimeMode).toBe("fake.deterministic");
+
+    const oldRun = runSchema.parse({
+      id: "run_runtime_mode_old",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      adapterType: "process",
+      cwd: "/repo",
+      task: "Legacy run",
+      status: "queued",
+      placement: "local",
+      approvalPolicy: "default",
+      timeoutSeconds: 60,
+      metadata: {},
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(oldRun.runtimeMode).toBeUndefined();
+    expect(() =>
+      runSchema.parse({
+        ...oldRun,
+        runtimeMode: "runtime_mode_fake_deterministic"
+      })
+    ).toThrow();
+
+    const sessionWithMode = runtimeSessionSchema.parse({
+      id: "session_mode_new",
+      runId: "run_runtime_mode_new",
+      runtime: "codex",
+      provider: "openai",
+      model: "gpt-5.5",
+      protocol: "process",
+      status: "active",
+      runtimeMode: "codex.exec_json",
+      state: {},
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(sessionWithMode.runtimeMode).toBe("codex.exec_json");
+
+    const legacySession = runtimeSessionSchema.parse({
+      id: "session_mode_legacy",
+      runId: "run_runtime_mode_old",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      protocol: "process",
+      status: "created",
+      state: {},
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(legacySession.runtimeMode).toBeUndefined();
+
+    const nullSession = runtimeSessionSchema.parse({
+      id: "session_mode_null",
+      runId: "run_runtime_mode_old",
+      runtime: "fake",
+      provider: "test",
+      model: "test-model",
+      protocol: "process",
+      status: "created",
+      runtimeMode: null,
+      state: {},
+      createdAt: "2026-05-29T00:00:00.000Z"
+    });
+    expect(nullSession.runtimeMode).toBeNull();
+  });
+
+  it("includes runtime_mode_not_found in HTTP error schemas", () => {
+    expect(httpErrorCodeSchema.parse("runtime_mode_not_found")).toBe("runtime_mode_not_found");
+    expect(
+      httpErrorEnvelopeSchema.parse({
+        error: {
+          code: "runtime_mode_not_found",
+          message: "Runtime mode not found: codex.exec_json"
+        }
+      }).error.code
+    ).toBe("runtime_mode_not_found");
+  });
+
+  it("includes debate_not_found and evidence_not_found in HTTP error schemas", () => {
+    expect(httpErrorCodeSchema.parse("debate_not_found")).toBe("debate_not_found");
+    expect(httpErrorCodeSchema.parse("evidence_not_found")).toBe("evidence_not_found");
+    expect(httpErrorCodeSchema.parse("placement_denied")).toBe("placement_denied");
+    expect(httpErrorCodeSchema.parse("node_auth_failed")).toBe("node_auth_failed");
+    expect(httpErrorCodeSchema.parse("assignment_claim_conflict")).toBe("assignment_claim_conflict");
+    expect(httpErrorCodeSchema.parse("hosted_runtime_not_allowed")).toBe("hosted_runtime_not_allowed");
+    expect(httpErrorCodeSchema.parse("auth_required")).toBe("auth_required");
+    expect(httpErrorCodeSchema.parse("auth_failed")).toBe("auth_failed");
+    expect(httpErrorCodeSchema.parse("auth_conflict")).toBe("auth_conflict");
+    expect(httpErrorCodeSchema.parse("auth_store_unavailable")).toBe("auth_store_unavailable");
+    expect(httpErrorCodeSchema.parse("tenant_access_denied")).toBe("tenant_access_denied");
+    expect(httpErrorCodeSchema.parse("project_access_denied")).toBe("project_access_denied");
+    expect(httpErrorCodeSchema.parse("entitlement_denied")).toBe("entitlement_denied");
+    expect(httpErrorCodeSchema.parse("quota_exceeded")).toBe("quota_exceeded");
+    expect(httpErrorCodeSchema.parse("audit_log_unavailable")).toBe("audit_log_unavailable");
+  });
+
+  it("parses R10 assignment and node sync request contracts", () => {
+    expect(
+      assignmentSchema.parse({
+        id: "assignment_123",
+        runId: "run_123",
+        nodeId: "node_123",
+        status: "pending",
+        retryCount: 0,
+        lastEventSequence: 0,
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }).status
+    ).toBe("pending");
+
+    expect(
+      nodeRegisterRequestSchema.parse({
+        capabilities: ["runtime.fake.deterministic"],
+        policy: {
+          allowRuntimeModes: ["fake.deterministic"],
+          denyAdapterTypes: [],
+          allowCwdPrefixes: ["/repo"],
+          allowEventTypes: ["runtime.output"],
+          artifactSync: "full"
+        }
+      }).policy?.allowRuntimeModes[0]
+    ).toBe("fake.deterministic");
+
+    expect(assignmentEventSyncRequestSchema.parse({ cursor: 0, events: [] }).events).toEqual([]);
+    expect(
+      assignmentClaimResponseSchema.parse({
+        assignment: {
+          id: "assignment_123",
+          runId: "run_123",
+          nodeId: "node_123",
+          status: "claimed",
+          retryCount: 0,
+          lastEventSequence: 0,
+          createdAt: "2026-05-30T00:00:00.000Z"
+        },
+        run: {
+          id: "run_123",
+          runtime: "fake",
+          provider: "test",
+          model: "test-model",
+          adapterType: "process",
+          cwd: "/repo",
+          task: "assignment task",
+          status: "running",
+          placement: "connected_local_node",
+          approvalPolicy: "default",
+          timeoutSeconds: 60,
+          metadata: {},
+          runtimeMode: "fake.deterministic",
+          createdAt: "2026-05-30T00:00:00.000Z"
+        }
+      }).assignment?.id
+    ).toBe("assignment_123");
+
+    expect(
+      assignmentArtifactManifestRequestSchema.parse({
+        artifacts: [
+          {
+            id: "artifact_123",
+            type: "transcript",
+            path: "runs/run_123/transcript.jsonl",
+            contentType: "application/x-ndjson",
+            sizeBytes: 0,
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            syncContent: true
+          }
+        ]
+      }).artifacts[0]?.id
+    ).toBe("artifact_123");
+  });
+
   it("parses debate participant and limits", () => {
     const debate = debateSchema.parse({
       id: "debate_123",
@@ -106,7 +742,8 @@ describe("Switchyard contracts", () => {
           model: "opencode/big-pickle",
           role: "architect",
           status: "created",
-          turnsUsed: 0
+          turnsUsed: 0,
+          runIds: []
         }
       ],
       limits: {
@@ -122,10 +759,221 @@ describe("Switchyard contracts", () => {
         stopOnLowNewInformation: true,
         humanStopAllowed: true
       },
+      evidenceIds: [],
+      messageIds: [],
+      eventIds: [],
+      budget: {
+        status: "within_budget",
+        maxCostUsd: 0,
+        spentCostUsd: 0
+      },
       createdAt: "2026-05-11T00:00:00.000Z"
     });
 
     expect(debate.participants[0]?.role).toBe("architect");
+    expect(debate.evidenceIds).toEqual([]);
+    expect(debate.messageIds).toEqual([]);
+    expect(debate.eventIds).toEqual([]);
+    expect(debate.budget.status).toBe("within_budget");
+  });
+
+  it("parses legacy debate payloads without budget for backward compatibility", () => {
+    const debate = debateSchema.parse({
+      id: "debate_legacy_123",
+      topic: "Legacy debate payload",
+      mode: "mixed_model_panel",
+      status: "created",
+      participants: [],
+      limits: {
+        maxRounds: 1,
+        maxTurnsPerAgent: 1,
+        maxSearchesPerAgent: 0,
+        maxTotalMessages: 2,
+        maxDurationSeconds: 60,
+        maxCostUsd: 0,
+        requireCitations: false,
+        requireDisagreementSummary: true,
+        stopOnConsensus: false,
+        stopOnLowNewInformation: false,
+        humanStopAllowed: true
+      },
+      evidenceIds: [],
+      messageIds: [],
+      eventIds: [],
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+
+    expect(debate.id).toBe("debate_legacy_123");
+    expect(debate.budget).toEqual({
+      status: "within_budget",
+      maxCostUsd: 0,
+      spentCostUsd: 0
+    });
+  });
+
+  it("parses R24 create debate request defaults for fake deterministic participants", () => {
+    const request = createDebateRequestSchema.parse({
+      topic: "Should Switchyard use ACP first?",
+      participants: [{ role: "affirmative" }, { role: "skeptic" }]
+    });
+
+    expect(request.participants).toEqual([
+      {
+        role: "affirmative",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        runtimeMode: "fake.deterministic",
+        placement: "local",
+        realRuntimeOptIn: false
+      },
+      {
+        role: "skeptic",
+        runtime: "fake",
+        provider: "test",
+        model: "test-model",
+        adapterType: "process",
+        runtimeMode: "fake.deterministic",
+        placement: "local",
+        realRuntimeOptIn: false
+      }
+    ]);
+    expect(request.judgeConfig).toEqual({ mode: "deterministic" });
+    expect(request.evidenceIds).toEqual([]);
+  });
+
+  it("parses R24 create debate request for hosted real participants and deterministic judge", () => {
+    const request = createDebateRequestSchema.parse({
+      topic: "Should Switchyard use hosted real debate now?",
+      participants: [
+        {
+          role: "affirmative",
+          runtime: "claude_code",
+          provider: "anthropic",
+          model: "claude-code",
+          adapterType: "native",
+          runtimeMode: "claude_code.sdk",
+          placement: "hosted",
+          realRuntimeOptIn: true
+        },
+        {
+          role: "skeptic",
+          runtime: "opencode",
+          provider: "opencode",
+          model: "opencode-default",
+          adapterType: "acpx",
+          runtimeMode: "opencode.acp",
+          placement: "hosted",
+          realRuntimeOptIn: true
+        }
+      ],
+      judgeConfig: {
+        mode: "deterministic"
+      },
+      evidenceIds: ["evidence_123"]
+    });
+
+    expect(request.participants[0]?.placement).toBe("hosted");
+    expect(request.participants[1]?.runtimeMode).toBe("opencode.acp");
+    expect(request.judgeConfig).toEqual({ mode: "deterministic" });
+  });
+
+  it("parses R24 model judge only with spend confirmation", () => {
+    const request = createDebateRequestSchema.parse({
+      topic: "Should model judge run live?",
+      participants: [{ role: "affirmative" }, { role: "skeptic" }],
+      judgeConfig: {
+        mode: "model",
+        runtime: "claude_code",
+        provider: "anthropic",
+        model: "claude-code",
+        adapterType: "native",
+        runtimeMode: "claude_code.sdk",
+        placement: "hosted",
+        realRuntimeOptIn: true,
+        confirmLiveProviderSpend: true
+      }
+    });
+
+    expect(request.judgeConfig).toEqual({
+      mode: "model",
+      runtime: "claude_code",
+      provider: "anthropic",
+      model: "claude-code",
+      adapterType: "native",
+      runtimeMode: "claude_code.sdk",
+      placement: "hosted",
+      realRuntimeOptIn: true,
+      confirmLiveProviderSpend: true
+    });
+
+    expect(() =>
+      createDebateRequestSchema.parse({
+        topic: "missing confirmation",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }],
+        judgeConfig: {
+          mode: "model",
+          runtime: "claude_code",
+          provider: "anthropic",
+          model: "claude-code",
+          adapterType: "native",
+          runtimeMode: "claude_code.sdk",
+          placement: "hosted",
+          realRuntimeOptIn: true
+        }
+      })
+    ).toThrow();
+  });
+
+  it("rejects reserved judge input field in create debate request while debate output accepts judge", () => {
+    expect(() =>
+      createDebateRequestSchema.parse({
+        topic: "Should judge be input?",
+        participants: [{ role: "affirmative" }, { role: "skeptic" }],
+        judge: {
+          consensus: "no_consensus",
+          summary: "invalid",
+          disagreementSummary: "invalid",
+          winner: "none"
+        }
+      })
+    ).toThrow();
+
+    const debate = debateSchema.parse({
+      id: "debate_456",
+      topic: "Output may include judge",
+      mode: "mixed_model_panel",
+      status: "completed",
+      participants: [],
+      limits: {
+        maxRounds: 1,
+        maxTurnsPerAgent: 1,
+        maxSearchesPerAgent: 0,
+        maxTotalMessages: 1,
+        maxDurationSeconds: 10,
+        maxCostUsd: 0,
+        requireCitations: false,
+        requireDisagreementSummary: true,
+        stopOnConsensus: false,
+        stopOnLowNewInformation: false,
+        humanStopAllowed: false
+      },
+      judge: {
+        consensus: "no_consensus",
+        summary: "No consensus",
+        disagreementSummary: "Both sides remain unconvinced",
+        winner: "none"
+      },
+      budget: {
+        status: "within_budget",
+        maxCostUsd: 0,
+        spentCostUsd: 0
+      },
+      createdAt: "2026-06-02T00:00:00.000Z"
+    });
+
+    expect(debate.judge?.consensus).toBe("no_consensus");
   });
 
   it("parses the normalized event envelope", () => {
@@ -141,6 +989,39 @@ describe("Switchyard contracts", () => {
     expect(event.sequence).toBe(1);
   });
 
+  it("includes R7 approval lifecycle event types", () => {
+    expect(
+      eventSchema.parse({
+        id: "event_approval_approved",
+        type: "approval.approved",
+        runId: "run_123",
+        sequence: 2,
+        payload: { approvalId: "approval_123" },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }).type
+    ).toBe("approval.approved");
+    expect(
+      eventSchema.parse({
+        id: "event_approval_rejected",
+        type: "approval.rejected",
+        runId: "run_123",
+        sequence: 3,
+        payload: { approvalId: "approval_124" },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }).type
+    ).toBe("approval.rejected");
+    expect(
+      eventSchema.parse({
+        id: "event_approval_expired",
+        type: "approval.expired",
+        runId: "run_123",
+        sequence: 4,
+        payload: { approvalId: "approval_125" },
+        createdAt: "2026-05-30T00:00:00.000Z"
+      }).type
+    ).toBe("approval.expired");
+  });
+
   it("parses message routing records", () => {
     const message = messageSchema.parse({
       id: "message_123",
@@ -154,6 +1035,132 @@ describe("Switchyard contracts", () => {
     });
 
     expect(message.deliveryStatus).toBe("queued");
+  });
+
+  it("parses the R17 local process approval type", () => {
+    expect(approvalTypeSchema.parse("before_local_process_execution")).toBe("before_local_process_execution");
+  });
+
+  it("validates per-tool create invocation input shapes", () => {
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "fetch",
+        input: {
+          url: "https://example.com/path",
+          method: "GET",
+          captureContent: true
+        }
+      }).type
+    ).toBe("fetch");
+
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "web_search",
+        input: {
+          query: "Switchyard runtime adapters",
+          maxResults: 5
+        }
+      }).type
+    ).toBe("web_search");
+
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "github",
+        input: {
+          operation: "get_issue",
+          owner: "openai",
+          repo: "codex",
+          number: 123
+        }
+      }).type
+    ).toBe("github");
+
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "repo",
+        input: {
+          operation: "diff",
+          cwd: "/repo",
+          pathspec: ["packages/core/src/services/tool-router.ts"]
+        }
+      }).type
+    ).toBe("repo");
+
+    expect(
+      createToolInvocationRequestSchema.parse({
+        type: "shell",
+        input: {
+          commandId: "local.date.utc",
+          cwd: "/repo",
+          args: []
+        }
+      }).type
+    ).toBe("shell");
+  });
+
+  it("rejects invalid real tool payloads", () => {
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "fetch",
+        input: { url: "https://example.com", method: "POST" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "web_search",
+        input: { query: "" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "github",
+        input: { operation: "create_issue", owner: "o", repo: "r" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "repo",
+        input: { operation: "diff", cwd: "/repo", pathspec: ["../secret"] }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "shell",
+        input: { command: "rm -rf /", cwd: "/repo" }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "repo",
+        input: { operation: "diff", cwd: "/repo", pathspec: ["safe\nunsafe.ts"] }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "repo",
+        input: { operation: "diff", cwd: "/repo", pathspec: ["safe\u0000unsafe.ts"] }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "shell",
+        input: { commandId: "local.date.utc", cwd: "/repo", args: ["line1\nline2"] }
+      })
+    ).toThrow();
+
+    expect(() =>
+      createToolInvocationRequestSchema.parse({
+        type: "shell",
+        input: { commandId: "local.date.utc", cwd: "/repo", args: ["bad\u0007arg"] }
+      })
+    ).toThrow();
   });
 
   it("parses artifacts, approvals, memory, evidence, tools, registry, placement, nodes, users, budgets, context, and errors", () => {
@@ -201,12 +1208,17 @@ describe("Switchyard contracts", () => {
     expect(
       toolInvocationSchema.parse({
         id: "tool_123",
-        type: "web_search",
+        type: "fake_echo",
         status: "queued",
         input: {},
+        approvalId: "approval_123",
+        error: {
+          code: "tool_policy_denied",
+          message: "real tools are denied in R7"
+        },
         createdAt: "2026-05-11T00:00:00.000Z"
       }).type
-    ).toBe("web_search");
+    ).toBe("fake_echo");
 
     expect(providerSchema.parse({ id: "provider_123", name: "OpenCode", authMode: "local", status: "available" }).status).toBe("available");
     expect(runtimeSchema.parse({ id: "runtime_123", name: "OpenCode", adapterType: "acpx", status: "available" }).adapterType).toBe("acpx");
@@ -216,6 +1228,410 @@ describe("Switchyard contracts", () => {
     expect(budgetSchema.parse({ status: "within_budget", maxCostUsd: 5, spentCostUsd: 0 }).status).toBe("within_budget");
     expect(contextPacketSchema.parse({ id: "context_123", target: "run", sections: [], createdAt: "2026-05-11T00:00:00.000Z" }).target).toBe("run");
     expect(errorSchema.parse({ code: "validation_failed", message: "Invalid request" }).code).toBe("validation_failed");
+  });
+
+  it("parses enterprise ids and rejects org prefix outside legacy organization id", () => {
+    expect(accountIdSchema.parse("account_123")).toBe("account_123");
+    expect(tenantIdSchema.parse("tenant_123")).toBe("tenant_123");
+    expect(projectIdSchema.parse("project_123")).toBe("project_123");
+    expect(apiKeyIdSchema.parse("api_key_123")).toBe("api_key_123");
+    expect(billingPlanIdSchema.parse("billing_plan_123")).toBe("billing_plan_123");
+    expect(quotaReservationIdSchema.parse("quota_reservation_123")).toBe("quota_reservation_123");
+    expect(auditLogEventIdSchema.parse("audit_123")).toBe("audit_123");
+    expect(() => tenantIdSchema.parse("org_123")).toThrow();
+  });
+
+  it("accepts legacy and enterprise user shapes", () => {
+    const legacy = userSchema.parse({
+      id: "user_legacy",
+      organizationId: "org_legacy",
+      displayName: "Legacy User",
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(legacy.organizationId).toBe("org_legacy");
+
+    const enterprise = userSchema.parse({
+      id: "user_enterprise",
+      accountId: "account_123",
+      tenantId: "tenant_123",
+      displayName: "Enterprise User",
+      email: "enterprise@example.com",
+      status: "active",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-12T00:00:00.000Z"
+    });
+    expect(enterprise.accountId).toBe("account_123");
+    expect(enterprise.tenantId).toBe("tenant_123");
+    expect(enterprise.status).toBe("active");
+    expect(() =>
+      userSchema.parse({
+        id: "user_bad",
+        displayName: "Bad",
+        status: "invited",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
+  });
+
+  it("enforces api key secret visibility boundaries", () => {
+    expect(() =>
+      apiKeyPublicSchema.parse({
+        id: "api_key_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        userId: "user_1",
+        name: "test",
+        keyPrefix: "sk_sw",
+        scopes: ["runs:read"],
+        status: "active",
+        createdAt: "2026-05-11T00:00:00.000Z",
+        secretHash: "sha256:abc"
+      })
+    ).toThrow();
+
+    const stored = apiKeyStoredSchema.parse({
+      id: "api_key_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      name: "test",
+      keyPrefix: "sk_sw",
+      secretHash: "sha256:abc",
+      scopes: ["runs:read"],
+      status: "active",
+      lastUsedAt: "2026-05-12T00:00:00.000Z",
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(stored.secretHash).toBe("sha256:abc");
+    expect(() =>
+      apiKeyStoredSchema.parse({
+        id: "api_key_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        userId: "user_1",
+        name: "test",
+        keyPrefix: "sk_sw",
+        scopes: ["runs:read"],
+        status: "active",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
+  });
+
+  it("parses enterprise identity, billing, entitlement, quota, and audit fixtures", () => {
+    const account = accountSchema.parse({
+      id: "account_1",
+      name: "Acme Account",
+      status: "active",
+      billingPlanId: "billing_plan_1",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(account.id).toBe("account_1");
+
+    const tenant = enterpriseTenantSchema.parse({
+      id: "tenant_1",
+      accountId: "account_1",
+      slug: "acme-tenant",
+      displayName: "Acme Tenant",
+      status: "active",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(tenant.accountId).toBe("account_1");
+
+    const project = projectSchema.parse({
+      id: "project_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      slug: "production",
+      displayName: "Production",
+      status: "active",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(project.tenantId).toBe("tenant_1");
+
+    const plan = billingPlanSchema.parse({
+      id: "billing_plan_1",
+      slug: "enterprise_standard",
+      displayName: "Enterprise Standard",
+      status: "active",
+      entitlements: {
+        allowedPlacements: ["hosted", "local", "connected_local_node"],
+        allowedRuntimeModes: ["fake.deterministic"],
+        allowHostedRealRuntime: false,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowMetricsRead: true,
+        allowAuditRead: true
+      },
+      quotas: {
+        maxRunsPerHour: 100,
+        maxActiveRuns: 10,
+        maxRunTimeoutSeconds: 1800,
+        maxConnectedNodes: 5,
+        maxArtifactContentReadBytesPerHour: 1048576
+      },
+      createdAt: "2026-05-11T00:00:00.000Z",
+      updatedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(plan.quotas.maxRunsPerHour).toBe(100);
+    expect(plan.entitlements.allowedPlacements).toContain("hosted");
+
+    const entitlement = entitlementSnapshotSchema.parse({
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      planId: "billing_plan_1",
+      planSlug: "enterprise_standard",
+      planDisplayName: "Enterprise Standard",
+      entitlements: {
+        allowedPlacements: ["hosted", "local", "connected_local_node"],
+        allowedRuntimeModes: ["fake.deterministic"],
+        allowHostedRealRuntime: false,
+        allowConnectedNodes: true,
+        allowArtifactContentRead: true,
+        allowMetricsRead: true,
+        allowAuditRead: true
+      },
+      quotas: {
+        maxRunsPerHour: 100,
+        maxActiveRuns: 10,
+        maxRunTimeoutSeconds: 1800,
+        maxConnectedNodes: 5,
+        maxArtifactContentReadBytesPerHour: 1048576
+      },
+      scopes: ["runs:read", "runs:write"],
+      capturedAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(entitlement.planId).toBe("billing_plan_1");
+
+    const usage = quotaUsageSchema.parse({
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      used: 12,
+      windowStartedAt: "2026-05-11T00:00:00.000Z",
+      windowEndsAt: "2026-05-11T01:00:00.000Z",
+      updatedAt: "2026-05-11T00:10:00.000Z"
+    });
+    expect(usage.quotaKind).toBe("runs_per_hour");
+
+    const reservation = quotaReservationSchema.parse({
+      id: "quota_reservation_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      quotaKind: "runs_per_hour",
+      amount: 1,
+      state: "reserved",
+      reasonCode: "run_create",
+      createdAt: "2026-05-11T00:00:00.000Z",
+      expiresAt: "2026-05-11T00:05:00.000Z",
+      finalizedAt: "2026-05-11T00:01:00.000Z"
+    });
+    expect(reservation.state).toBe("reserved");
+
+    const ownership = resourceOwnershipSchema.parse({
+      resourceType: "run",
+      resourceId: "run_123",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      userId: "user_1",
+      apiKeyId: "api_key_1",
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(ownership.resourceType).toBe("run");
+
+    const authContext = authContextSchema.parse({
+      account,
+      tenant,
+      project,
+      user: {
+        id: "user_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        displayName: "Vasu",
+        email: "vasu@example.com",
+        status: "active",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      },
+      apiKey: {
+        id: "api_key_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        projectId: "project_1",
+        userId: "user_1",
+        name: "test",
+        keyPrefix: "sk_sw",
+        scopes: ["runs:read"],
+        status: "active",
+        lastUsedAt: "2026-05-12T00:00:00.000Z",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      },
+      entitlement
+    });
+    expect(authContext.apiKey.id).toBe("api_key_1");
+
+    const auditEvent = auditLogEventSchema.parse({
+      id: "audit_1",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      projectId: "project_1",
+      actorType: "api_key",
+      actorUserId: "user_1",
+      apiKeyId: "api_key_1",
+      eventType: "api_key.auth_failed",
+      resourceType: "auth",
+      resourceId: "api_key_1",
+      decision: "deny",
+      reasonCode: "auth_required",
+      payload: {
+        authorization: "[REDACTED]",
+        keyPrefix: "sk_sw",
+        requestId: "req_1"
+      },
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(auditEvent.payload.authorization).toBe("[REDACTED]");
+    const systemAuditEvent = auditLogEventSchema.parse({
+      id: "audit_2",
+      accountId: "account_1",
+      tenantId: "tenant_1",
+      actorType: "system",
+      eventType: "config.fail_closed",
+      decision: "error",
+      payload: { reason: "missing_bootstrap" },
+      createdAt: "2026-05-11T00:00:00.000Z"
+    });
+    expect(systemAuditEvent.projectId).toBeUndefined();
+
+    expect(
+      whoamiResponseSchema.parse({
+        auth: authContext
+      }).auth.project.id
+    ).toBe("project_1");
+    expect(
+      entitlementsResponseSchema.parse({
+        entitlement
+      }).entitlement.accountId
+    ).toBe("account_1");
+    expect(
+      auditEventsResponseSchema.parse({
+        events: [auditEvent, systemAuditEvent],
+        nextCursor: "cursor_2"
+      }).events.length
+    ).toBe(2);
+  });
+
+  it("rejects invalid bounded enterprise values and out-of-contract shapes", () => {
+    expect(() =>
+      accountSchema.parse({
+        id: "account_1",
+        name: "Acme Account",
+        status: "pending",
+        billingPlanId: "billing_plan_1",
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      billingPlanSchema.parse({
+        id: "billing_plan_1",
+        slug: "enterprise_standard",
+        displayName: "Enterprise Standard",
+        status: "active",
+        entitlements: {
+          allowedPlacements: ["edge"],
+          allowedRuntimeModes: ["fake.deterministic"],
+          allowHostedRealRuntime: false,
+          allowConnectedNodes: true,
+          allowArtifactContentRead: true,
+          allowMetricsRead: true,
+          allowAuditRead: true
+        },
+        quotas: {
+          maxRunsPerHour: 100,
+          maxActiveRuns: 10,
+          maxRunTimeoutSeconds: 1800,
+          maxConnectedNodes: 5,
+          maxArtifactContentReadBytesPerHour: 1048576
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      billingPlanSchema.parse({
+        id: "billing_plan_1",
+        slug: "enterprise_standard",
+        displayName: "Enterprise Standard",
+        status: "active",
+        entitlements: {
+          allowedPlacements: ["hosted"],
+          allowedRuntimeModes: ["UPPERCASE"],
+          allowHostedRealRuntime: false,
+          allowConnectedNodes: true,
+          allowArtifactContentRead: true,
+          allowMetricsRead: true,
+          allowAuditRead: true
+        },
+        quotas: {
+          maxRunsPerHour: 100,
+          maxActiveRuns: 10,
+          maxRunTimeoutSeconds: 1800,
+          maxConnectedNodes: 5,
+          maxArtifactContentReadBytesPerHour: 1048576
+        },
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      billingPlanSchema.parse({
+        id: "billing_plan_1",
+        slug: "enterprise_standard",
+        displayName: "Enterprise Standard",
+        status: "active",
+        entitlements: {
+          allowedPlacements: [executionPlacementSchema.parse("hosted")],
+          allowedRuntimeModes: ["fake.deterministic"],
+          allowHostedRealRuntime: false,
+          allowConnectedNodes: true,
+          allowArtifactContentRead: true,
+          allowMetricsRead: true,
+          allowAuditRead: true
+        },
+        quotas: {
+          maxRunsPerHour: 100,
+          maxActiveRuns: 10,
+          maxRunTimeoutSeconds: 1800,
+          maxConnectedNodes: 5,
+          maxArtifactContentReadBytesPerHour: 1048576
+        },
+        createdAt: "2026-05-11T00:00:00.000Z",
+        accountId: "account_1"
+      })
+    ).toThrow();
+
+    expect(() =>
+      auditLogEventSchema.parse({
+        id: "audit_1",
+        accountId: "account_1",
+        tenantId: "tenant_1",
+        actorType: "user",
+        eventType: "random.event",
+        decision: "allowish",
+        payload: {},
+        createdAt: "2026-05-11T00:00:00.000Z"
+      })
+    ).toThrow();
   });
 
   it("rejects missing required fields for every public contract schema", () => {
@@ -288,6 +1704,14 @@ describe("Switchyard contracts", () => {
           stopOnConsensus: false,
           stopOnLowNewInformation: false,
           humanStopAllowed: true
+        },
+        evidenceIds: [],
+        messageIds: [],
+        eventIds: [],
+        budget: {
+          status: "within_budget",
+          maxCostUsd: 0,
+          spentCostUsd: 0
         },
         createdAt: "2026-05-11T00:00:00.000Z"
       },
@@ -485,5 +1909,206 @@ describe("Switchyard contracts", () => {
       },
       ["code", "message"]
     );
+  });
+
+  it("keeps local OpenAPI default and supports hosted-node inventory generation", () => {
+    const local = generateOpenApiDocument();
+    expect(Object.keys(local.paths)).not.toContain("/nodes/register");
+
+    const hosted = generateOpenApiDocument({ inventory: HOSTED_NODE_ROUTE_INVENTORY });
+    expect(Object.keys(hosted.paths)).toContain("/nodes/register");
+    expect(Object.keys(hosted.paths)).toContain("/nodes/{id}/assignments/{assignmentId}/artifacts/{artifactId}/content");
+    expect((hosted.paths["/nodes/{id}/assignments/{assignmentId}/artifacts/{artifactId}/content"] as any).put).toBeDefined();
+  });
+
+  it("includes node auth required and payload too large error codes", () => {
+    expect(httpErrorCodeSchema.parse("node_auth_required")).toBe("node_auth_required");
+    expect(httpErrorCodeSchema.parse("payload_too_large")).toBe("payload_too_large");
+    const envelope = httpErrorEnvelopeSchema.parse({
+      error: {
+        code: "payload_too_large",
+        message: "Node payload exceeds limit"
+      }
+    });
+    expect(envelope.error.code).toBe("payload_too_large");
+  });
+
+  it("parses hosted runtime bridge command fixtures and readiness report", () => {
+    const command = hostedRuntimeBridgeCommandSchema.parse({
+      id: "bridge_cmd_123",
+      runId: "run_123",
+      runtimeSessionId: "session_123",
+      runtimeMode: "claude_code.sdk",
+      operation: "input",
+      status: "queued",
+      idempotencyKey: "idem_123",
+      payloadHash: "sha256:abc123",
+      redactedPayload: {
+        kind: "input_summary",
+        hasAnswers: false
+      },
+      payloadBytes: 128,
+      accountId: "account_123",
+      tenantId: "tenant_123",
+      projectId: "project_123",
+      userId: "user_123",
+      apiKeyId: "api_key_123",
+      attempts: 0,
+      maxAttempts: 3,
+      expiresAt: "2026-06-01T00:05:00.000Z",
+      createdAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z"
+    });
+    expect(command.operation).toBe("input");
+
+    const readiness = hostedRuntimeBridgeReadinessReportSchema.parse({
+      status: "ready",
+      checks: [
+        { name: "payload_store", ok: true },
+        { name: "session_reconciliation", ok: true },
+        { name: "approval_sender", ok: true }
+      ]
+    });
+    expect(readiness.status).toBe("ready");
+  });
+
+  it("rejects malformed hosted runtime bridge command fixtures", () => {
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runtimeSessionId: "session_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "input",
+        status: "queued",
+        idempotencyKey: "idem_123",
+        payloadHash: "sha256:abc123",
+        redactedPayload: { summary: true },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runId: "run_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "shell",
+        status: "queued",
+        idempotencyKey: "idem_123",
+        payloadHash: "sha256:abc123",
+        redactedPayload: { summary: true },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runId: "run_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "input",
+        status: "retrying",
+        idempotencyKey: "idem_123",
+        payloadHash: "sha256:abc123",
+        redactedPayload: { summary: true },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runId: "run_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "input",
+        status: "queued",
+        idempotencyKey: "idem_123",
+        payloadHash: "sha256:abc123",
+        redactedPayload: {
+          prompt: "raw prompt is forbidden"
+        },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+
+    expect(() =>
+      hostedRuntimeBridgeCommandSchema.parse({
+        id: "bridge_cmd_123",
+        runId: "run_123",
+        runtimeMode: "claude_code.sdk",
+        operation: "input",
+        status: "queued",
+        idempotencyKey: "",
+        payloadHash: "sha256:abc123",
+        redactedPayload: { summary: true },
+        payloadBytes: 128,
+        accountId: "account_123",
+        tenantId: "tenant_123",
+        projectId: "project_123",
+        userId: "user_123",
+        apiKeyId: "api_key_123",
+        attempts: 0,
+        maxAttempts: 3,
+        expiresAt: "2026-06-01T00:05:00.000Z",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z"
+      })
+    ).toThrow();
+  });
+
+  it("exports hosted runtime bridge reason code constants and supported mode checks", () => {
+    expect(HOSTED_RUNTIME_BRIDGE_REASON_CODES).toContain("hosted_runtime_bridge_non_idempotent_retry_blocked");
+    expect(ACP_RUNTIME_BRIDGE_REASON_CODES).toContain("acp_permission_request_expired");
+
+    expect(isHostedRuntimeBridgeSupportedMode("claude_code.sdk")).toBe(true);
+    expect(isHostedRuntimeBridgeSupportedMode("opencode.acp", "approval_resolution")).toBe(true);
+    expect(isHostedRuntimeBridgeSupportedMode("codex.exec_json")).toBe(false);
+  });
+
+  it("keeps AcceptedResponse compatible with and without bridgeCommandId", () => {
+    const legacy = acceptedResponseSchema.parse({ accepted: true });
+    const withBridge = acceptedResponseSchema.parse({ accepted: true, bridgeCommandId: "bridge_cmd_123" });
+    expect(legacy.accepted).toBe(true);
+    expect(withBridge.bridgeCommandId).toBe("bridge_cmd_123");
   });
 });

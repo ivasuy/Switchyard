@@ -17,18 +17,52 @@ Switchyard is a runtime gateway that exposes multiple agent runtimes and wrapper
 [![Redis](https://img.shields.io/badge/Redis-queues-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 [![pnpm](https://img.shields.io/badge/pnpm-workspaces-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
 
-Instead of integrating separately with Claude Code, Codex, OpenCode, OpenClaw, Paperclip, AgentField, Cursor, browser/search agents, and custom HTTP agents, applications integrate once with Switchyard.
+Instead of integrating separately with shipped runtime interfaces (Claude Code, Codex, OpenCode, AgentField, and Generic HTTP wrappers), applications integrate once with Switchyard.
 
 ```text
 POST /runs
 GET  /runs/:id
 GET  /runs/:id/events
+GET  /metrics
 POST /debates
+GET  /debates/:id
+GET  /debates/:id/events
 POST /runs/:id/approve
-GET  /runs/:id/artifacts (local MVP)
+GET  /runs/:id/artifacts
+GET  /artifacts/:id
+GET  /artifacts/:id/content
 ```
 
-`GET /artifacts/:id` and `/artifacts` are planned for future deployment modes and are not implemented in the local daemon MVP.
+R11 adds a shipped local TypeScript SDK (`@switchyard/sdk`), a shipped local CLI (`@switchyard/cli`), deterministic OpenAPI export/check under `@switchyard/contracts`, and startup/metrics hardening for local operations.
+
+R18 adds the shipped API-first enterprise control-plane foundation for hosted/server APIs: API key auth, tenant/project ownership, plan/entitlement/quota contracts, audit events, hosted OpenAPI surface generation, and fail-closed staging/production readiness checks.
+
+R19 ships production hosted deployment readiness for the existing safe hosted boundary: provider-neutral production manifests, explicit `production:preflight` and `production:migrate` gates, rollout/rollback runbook gates, API-key-protected hosted `/metrics`, named readiness/schema failure codes, and a deterministic no-spend `production:canary` flow (`fake.deterministic` only). This is self-hosted/managed-hosting-ready operability work, not a managed hosted platform or public tenant self-service launch.
+
+R22 ships hosted/connected-node real-tool execution with policy-first controls for an exact boundary:
+
+- hosted worker tools: `fetch`, `web_search`, `github`, command-catalog `shell`
+- connected-node tools: `fetch`, `web_search`, `github`, `repo`, command-catalog `shell`
+
+Production fake-only/no-spend remains the default posture for tests, smoke, preflight, and default canary.
+
+R23 adds hosted runtime bridge support only for worker-owned `claude_code.sdk` and structured `opencode.acp` through existing `POST /runs/:id/input` and hosted approval resolution routes. Usable hosted bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker. Missing bridge command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`). Stale claimed non-idempotent provider input after worker crash is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`. `codex.exec_json` remains one-shot with hosted input/approval unsupported. `codex.interactive` remains local-only and unshipped for hosted.
+
+R24 ships hosted/server-safe debate through the existing `/debates` route family only: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`. Fake deterministic hosted debate is the default no-spend path. Opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`. The internal bounded judge runner defaults to deterministic no-spend judging; live model judging is available only through request opt-in and spend confirmation inside `POST /debates`, not through a public judge route.
+
+R24 boundary non-goals remain explicit:
+
+- does not ship generic process/pty runtime adapters.
+- does not ship cursor/openclaw/paperclip.
+- does not ship hosted browser automation.
+- does not ship hosted `repo` execution.
+- does not ship any public arbitrary execution route (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`).
+- does not ship hosted `codex.interactive`.
+- does not ship hosted Codex live-resume guarantees.
+- does not ship hosted AgentField/Generic HTTP input, approval, or debate bridges.
+- does not ship public model judge routes (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family).
+- does not ship hosted terminal bridge, PTY/TUI automation, or dashboard/TUI surfaces.
+- no managed SaaS/public signup, no payment-provider integration (invoices/checkout/webhooks), no OAuth/OIDC/SAML/SSO/SCIM, no dashboard, and no TUI.
 
 Switchyard lets frontends, backends, CLIs, automations, bots, and internal systems treat every agent runtime like a backend service.
 
@@ -40,7 +74,7 @@ Agent runtimes are becoming the worker layer for software work, research, automa
 - Some speak ACP/acpx.
 - Some are HTTP wrappers.
 - Some are CLIs.
-- Some require an interactive PTY.
+- Some require interactive terminal behavior; Switchyard PTY/TUI automation remains unshipped.
 - Some can run hosted.
 - Some must run locally because they depend on local credentials, local repos, or local filesystem access.
 
@@ -66,7 +100,7 @@ It provides:
 
 - One API for many runtimes.
 - One event model for many output formats.
-- One adapter contract for native APIs, acpx, HTTP, subprocess, and PTY.
+- One adapter contract for shipped native APIs, acpx, HTTP, and bounded subprocess modes; PTY adapters remain unshipped.
 - One debate engine for cross-provider and same-provider multi-model deliberation.
 - One artifact model for transcripts, diffs, logs, screenshots, evidence packs, and proof reports.
 - One approval and policy layer for risky actions.
@@ -100,7 +134,7 @@ and controls risky actions with approvals.
 
 Switchyard is designed for:
 
-- Web dashboards that need to run agent sessions.
+- Web applications that need to run agent sessions; Switchyard's own dashboard/TUI surfaces remain unshipped.
 - SaaS backends that want agent execution as an internal service.
 - CLI tools that want a stable run/debate API.
 - GitHub bots and CI pipelines.
@@ -109,7 +143,7 @@ Switchyard is designed for:
 - Internal ops tools that need approvals and audit trails.
 - Teams that want hosted orchestration with local execution nodes.
 
-Clients do not need to know how Claude Code, Codex, OpenClaw, Paperclip, AgentField, or any other runtime works internally. They only call Switchyard.
+Clients do not need to know how Claude Code, Codex, OpenCode, AgentField, or other integrated runtimes work internally. They only call Switchyard.
 
 ## Core API Surface
 
@@ -176,14 +210,14 @@ Example:
 {
   "topic": "Should we use JWT or sessions?",
   "participants": [
-    {"provider": "claude", "model": "opus", "role": "architect"},
-    {"provider": "codex", "model": "gpt-5.5", "role": "skeptic"},
-    {"provider": "codex", "model": "gpt-5.3", "role": "implementer"}
-  ]
+    { "role": "affirmative", "runtimeMode": "fake.deterministic" },
+    { "role": "skeptic", "runtimeMode": "fake.deterministic" }
+  ],
+  "judgeConfig": { "mode": "deterministic" }
 }
 ```
 
-Debates have hard limits: max rounds, max turns, max messages, max duration, max cost, tool/search budgets, and stop conditions. Unresolved disagreement is allowed.
+Debates have hard limits: max rounds, max turns, max messages, max duration, max cost, and stop conditions. Fake deterministic debate is the default no-spend path. Real participant debate runs require explicit request opt-in; hosted real participants also require `placement: "hosted"` and hosted provider readiness. `POST /debates?wait=1` is fake/no-spend only. There is no public model judge route.
 
 ### Registry
 
@@ -194,9 +228,9 @@ Example registry facts:
 ```text
 Claude Code available: yes
 Codex available: yes
-OpenClaw URL configured: yes
+OpenClaw URL configured: not shipped in R22
 AgentField URL configured: yes
-Paperclip adapter configured: no
+Paperclip adapter configured: not shipped in R22
 ```
 
 The registry is also used by placement policy to decide where and how work should run.
@@ -205,21 +239,23 @@ The registry is also used by placement policy to decide where and how work shoul
 
 Switchyard is designed to normalize direct runtimes and wrapper runtimes.
 
-Direct runtimes:
+Shipped runtime interfaces:
 
 - Claude Code
 - Codex CLI
 - OpenCode
+- AgentField async REST wrapper
+- Generic HTTP async REST wrapper
+
+Not shipped in R24:
+
 - Cursor
-- Browser/Search agents
-- Gemini or other CLI runtimes
-
-Wrapper/control runtimes:
-
 - OpenClaw
 - Paperclip
-- AgentField
-- Generic HTTP agents
+- Hosted browser automation
+- Hosted `repo` tool execution
+- Generic process/PTY adapters are not shipped.
+- Dashboard/TUI surfaces are not shipped.
 
 Switchyard treats them through the same lifecycle:
 
@@ -240,6 +276,45 @@ Local setup, test commands, prebuilt curl requests, PID checks, SQLite inspectio
 - [Development docs](docs/development/)
 - [Adapter local debugging guides](docs/development/adapters/)
 
+## SDK And CLI Quickstart
+
+Install workspace dependencies:
+
+```bash
+pnpm install
+```
+
+SDK usage:
+
+```ts
+import { SwitchyardClient } from "@switchyard/sdk";
+
+const client = new SwitchyardClient({ baseUrl: "http://127.0.0.1:4545" });
+const created = await client.createRun(
+  {
+    runtime: "fake",
+    provider: "test",
+    model: "test-model",
+    adapterType: "process",
+    cwd: "/repo",
+    task: "sdk smoke",
+    timeoutSeconds: 30
+  },
+  { wait: true }
+);
+console.log(created.run.status);
+```
+
+CLI usage:
+
+```bash
+pnpm --filter @switchyard/cli exec switchyard doctor --base-url http://127.0.0.1:4545
+pnpm --filter @switchyard/cli exec switchyard run fake --wait --base-url http://127.0.0.1:4545
+pnpm --filter @switchyard/cli exec switchyard runtime test
+pnpm --filter @switchyard/cli exec switchyard contract export --output ./openapi.local-daemon.json
+pnpm --filter @switchyard/cli exec switchyard debug run <run_id> --base-url http://127.0.0.1:4545
+```
+
 ## Deployment Modes
 
 Switchyard is designed to run locally, hosted, or hybrid with the same API semantics.
@@ -257,7 +332,7 @@ Switchyard Local Gateway
  │   ├── Codex
  │   └── OpenCode
  │
- ├── Local PTY sessions
+ ├── Local PTY sessions (unshipped)
  ├── Local HTTP wrappers
  └── Local acpx runtimes
 
@@ -278,17 +353,16 @@ Switchyard Hosted Gateway
  ▼
 Workers
  │
- ├── hosted-safe runtimes
- ├── HTTP wrappers
- ├── AgentField
- ├── Paperclip
- └── browser/search agents
+ ├── fake.deterministic (default no-spend runtime)
+ ├── codex.exec_json (opt-in one-shot hosted provider runtime)
+ ├── claude_code.sdk (opt-in hosted provider runtime; R23 bridge store required)
+ └── opencode.acp (opt-in hosted provider runtime; R23 bridge store required)
 
 Storage:
-  Postgres + Redis/BullMQ + S3/R2
+  Postgres + Redis/BullMQ + local object volume or S3/R2-compatible object store
 ```
 
-Best for teams, SaaS products, automation APIs, shared state, and cloud-safe workflows.
+Best for teams that need hosted orchestration with fake/no-spend defaults and tightly gated known-provider execution.
 
 ### Hybrid Mode
 
@@ -301,7 +375,7 @@ Hosted Switchyard
  ├── shared state
  ├── users/orgs
  ├── approvals
- ├── dashboards
+ ├── operator interfaces (dashboard/TUI surfaces unshipped)
  └── cloud workflows
  │
  ▼
@@ -312,7 +386,7 @@ Local Switchyard Node
  ├── OpenCode
  ├── local repo
  ├── local shell
- └── PTY sessions
+ └── PTY sessions (unshipped)
 
 Shared:
   state

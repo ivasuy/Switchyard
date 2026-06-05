@@ -2,26 +2,43 @@
 
 ## Target
 
-Claude Code should be integrated without PTY first. PTY remains fallback only for interactive workflows that cannot be represented through SDK or headless streaming.
+Claude Code ships in R8 as the first bounded interactive coding runtime through `claude_code.sdk`.
 
 ## Preferred Protocol
 
-- Primary: Claude Agent SDK if the SDK surface is stable.
-- Fallback: `claude -p --output-format stream-json`.
-- Last resort: PTY, local-only by policy.
+- Primary: structured client port behind `claude_code.sdk` (native adapter type). Current daemon default path is `claude -p` with `stream-json` input/output.
+- Fallback: no PTY fallback is shipped in R8.
+- Last resort: PTY remains unshipped for Claude Code.
 
 ## Verified Local Facts
 
-- Binary: `/Users/vasuyadav/.local/bin/claude`
-- Version: `2.1.138`
-- Live prompt probe was deferred to avoid model spend.
+- Runtime mode: `claude_code.sdk`.
+- Adapter id: `claude_code` (`native`, `sdk` kind).
+- Default doctor path is no-spend and does not run a live prompt.
+- Live probe is opt-in only (`SWITCHYARD_CLAUDE_CODE_LIVE_PROBE=1`) and bounded by budget/time safeguards.
 
 ## Implementation Notes
 
-- Normalize text deltas, tool calls, tool results, approval pauses, completion, and failures.
-- Preserve the raw SDK/stream-json transcript as an artifact.
-- Doctor must report auth availability without printing secrets.
+- Supports post-start text input for active sessions (`POST /runs/:id/input`).
+- Session resume is not shipped for `claude_code.sdk` in R8.
+- Persists session state patches (for example `claudeSessionId`) through the existing runtime session store.
+- Bridges runtime approval pauses into existing approval records and resolves them back to the active runtime on approve/reject.
+- Normalizes text deltas, tool calls, tool results, approval pauses, ask-user-question pauses, completion, failure, and cancellation.
+- Stores both raw and normalized transcript artifacts with bounds:
+  - raw transcript max: 1 MiB
+  - normalized transcript max: 1 MiB
+  - normalized record max: 64 KiB
+- Unknown provider events are flood-bounded (suppression after the first 100 unknown events).
+- PTY/TUI automation is not implemented.
+
+## Hosted Debate Boundary
+
+- R24 allows `claude_code.sdk` as an opt-in local/hosted debate participant runtime.
+- Hosted debate use depends on the R23 hosted runtime bridge command and payload stores shared by server and worker.
+- Missing bridge stores fail closed with `hosted_runtime_bridge_store_unavailable`.
+- Hosted debate still uses normal run/runtime contracts and preserves child run, message, event, evidence, and artifact traceability.
+- PTY/TUI automation and hosted terminal bridges remain unshipped.
 
 ## Status
 
-Planned. Requires an approved live probe before implementation.
+Implemented for local bounded interactive sessions in R8 and for the R23 hosted bridge boundary. R24 hosted debate may use `claude_code.sdk` only when hosted provider activation and R23 bridge readiness pass. Generic PTY execution remains unshipped.

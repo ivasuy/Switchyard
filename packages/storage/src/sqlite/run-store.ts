@@ -1,15 +1,23 @@
 import type { Run } from "@switchyard/contracts";
-import type { ListRunsFilter, ListRunsResult, RunStore } from "@switchyard/core";
+import type {
+  GuardedPreparedMetadataUpdateInput,
+  GuardedPreparedMetadataUpdateResult,
+  ListRunsFilter,
+  ListRunsResult,
+  RunStore
+} from "@switchyard/core";
 import type { SwitchyardSqliteDatabase } from "./database.js";
 import { runs } from "./schema.js";
-import { and, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 
 type RunRow = typeof runs.$inferSelect;
-type RunInsertRow = Omit<typeof runs.$inferInsert, "startedAt" | "endedAt"> & {
+type RunInsertRow = Omit<typeof runs.$inferInsert, "startedAt" | "endedAt" | "runtimeMode"> & {
+  runtimeMode?: string;
   startedAt?: string;
   endedAt?: string;
 };
-type RunUpdateRow = Omit<typeof runs.$inferInsert, "id" | "startedAt" | "endedAt"> & {
+type RunUpdateRow = Omit<typeof runs.$inferInsert, "id" | "startedAt" | "endedAt" | "runtimeMode"> & {
+  runtimeMode: string | null;
   startedAt: string | null;
   endedAt: string | null;
 };
@@ -30,6 +38,9 @@ function toCreateRow(run: Run): RunInsertRow {
     metadataJson: JSON.stringify(run.metadata),
     createdAt: run.createdAt
   };
+  if (run.runtimeMode !== undefined) {
+    row.runtimeMode = run.runtimeMode;
+  }
   if (run.startedAt !== undefined) {
     row.startedAt = run.startedAt;
   }
@@ -52,6 +63,7 @@ function toUpdateRow(run: Run): RunUpdateRow {
     approvalPolicy: run.approvalPolicy,
     timeoutSeconds: run.timeoutSeconds,
     metadataJson: JSON.stringify(run.metadata),
+    runtimeMode: run.runtimeMode ?? null,
     createdAt: run.createdAt,
     startedAt: run.startedAt ?? null,
     endedAt: run.endedAt ?? null
@@ -74,6 +86,9 @@ function fromRow(row: RunRow): Run {
     metadata: JSON.parse(row.metadataJson),
     createdAt: row.createdAt
   };
+  if (row.runtimeMode !== null) {
+    run.runtimeMode = row.runtimeMode;
+  }
 
   if (row.startedAt !== null) {
     run.startedAt = row.startedAt;
@@ -104,6 +119,36 @@ export class SqliteRunStore implements RunStore {
   async update(run: Run): Promise<Run> {
     await this.db.update(runs).set(toUpdateRow(run)).where(eq(runs.id, run.id));
     return run;
+  }
+
+  async updatePreparedMetadataIfMatch(
+    input: GuardedPreparedMetadataUpdateInput
+  ): Promise<GuardedPreparedMetadataUpdateResult> {
+    const identityConditions = [
+      eq(runs.id, input.expected.id),
+      eq(runs.status, input.expected.status),
+      eq(runs.placement, input.expected.placement),
+      eq(runs.runtime, input.expected.runtime),
+      eq(runs.provider, input.expected.provider),
+      eq(runs.adapterType, input.expected.adapterType),
+      input.expected.runtimeMode === undefined ? isNull(runs.runtimeMode) : eq(runs.runtimeMode, input.expected.runtimeMode)
+    ];
+
+    const rows = await this.db
+      .update(runs)
+      .set({ metadataJson: JSON.stringify(input.metadata ?? {}) })
+      .where(and(...identityConditions))
+      .returning();
+    const row = rows[0];
+    if (row) {
+      return { ok: true, run: fromRow(row) };
+    }
+
+    const existing = await this.get(input.expected.id);
+    if (!existing) {
+      return { ok: false, reason: "not_found" };
+    }
+    return { ok: false, reason: "identity_mismatch" };
   }
 
   async list(filter: ListRunsFilter): Promise<ListRunsResult> {

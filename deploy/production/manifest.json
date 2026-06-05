@@ -1,0 +1,147 @@
+{
+  "version": "r22-production-manifest-v1",
+  "tools": {
+    "hostedRealTools": "disabled",
+    "connectedNodeRealTools": "disabled",
+    "policy": "required_when_enabled",
+    "approvalDefault": "required",
+    "adapterMode": "fake_for_smoke"
+  },
+  "canary": {
+    "defaultMode": "hosted_debate_fake_no_spend",
+    "allowedPaths": [
+      "GET /auth/whoami",
+      "GET /entitlements",
+      "GET /ready",
+      "POST /debates",
+      "GET /debates/:id",
+      "GET /debates/:id/events",
+      "GET /artifacts/:id/content",
+      "GET /metrics",
+      "GET /audit/events"
+    ],
+    "liveProviderSpend": "requires --confirm-live-provider-spend"
+  },
+  "services": {
+    "server": {
+      "deploymentMode": "production",
+      "command": ["node", "apps/server/dist/main.js"],
+      "requiredEnv": [
+        "SWITCHYARD_DEPLOYMENT_MODE",
+        "SWITCHYARD_SERVER_AUTH_MODE",
+        "SWITCHYARD_API_KEY_PEPPER",
+        "SWITCHYARD_CONTROL_PLANE_STORE",
+        "SWITCHYARD_CONTROL_PLANE_BOOTSTRAP_PATH",
+        "SWITCHYARD_POSTGRES_URL",
+        "SWITCHYARD_REDIS_URL",
+        "SWITCHYARD_OBJECT_STORE_BACKEND",
+        "SWITCHYARD_NODE_SHARED_TOKEN",
+        "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        "SWITCHYARD_SANDBOX_REAL_EXECUTION",
+        "SWITCHYARD_PUBLIC_METRICS"
+      ],
+      "healthChecks": [
+        "GET /health",
+        "GET /ready"
+      ],
+      "policy": {
+        "runtimeAllowlist": ["fake.deterministic"],
+        "hostedRealRuntimeExecution": "disabled",
+        "objectStoreProbe": "write_read_delete",
+        "sandboxExecution": {
+          "realExecution": "disabled",
+          "commandPolicy": "required_when_enabled",
+          "networkPolicy": "disabled"
+        }
+      },
+      "privateDependencies": ["postgres", "redis", "object-store"]
+    },
+    "worker": {
+      "deploymentMode": "production",
+      "command": ["node", "apps/worker/dist/main.js"],
+      "requiredEnv": [
+        "SWITCHYARD_DEPLOYMENT_MODE",
+        "SWITCHYARD_POSTGRES_URL",
+        "SWITCHYARD_REDIS_URL",
+        "SWITCHYARD_OBJECT_STORE_BACKEND",
+        "SWITCHYARD_OBJECT_STORE_PROBE",
+        "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+        "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+        "SWITCHYARD_SANDBOX_REAL_EXECUTION"
+      ],
+      "readinessGate": {
+        "command": ["node", "apps/worker/dist/ready.js"]
+      },
+      "policy": {
+        "runtimeAllowlist": ["fake.deterministic"],
+        "hostedRealRuntimeExecution": "disabled",
+        "objectStoreProbe": "write_read_delete",
+        "sandboxExecution": {
+          "realExecution": "disabled",
+          "commandPolicy": "required_when_enabled",
+          "networkPolicy": "disabled"
+        }
+      },
+      "privateDependencies": ["postgres", "redis", "object-store"]
+    },
+    "node": {
+      "deploymentMode": "production",
+      "command": ["node", "apps/node/dist/main.js"],
+      "requiredEnv": [
+        "SWITCHYARD_DEPLOYMENT_MODE",
+        "SWITCHYARD_SERVER_URL",
+        "SWITCHYARD_NODE_SHARED_TOKEN",
+        "SWITCHYARD_NODE_CAPABILITIES",
+        "SWITCHYARD_NODE_ALLOW_RUNTIME_MODES",
+        "SWITCHYARD_NODE_ALLOW_CWD_PREFIXES"
+      ],
+      "policy": {
+        "runtimeAllowlist": ["fake.deterministic"],
+        "hostedRealRuntimeExecution": "disabled",
+        "realTools": "forbidden"
+      },
+      "privateDependencies": ["server"]
+    }
+  },
+  "requiredEnv": [
+    "SWITCHYARD_DEPLOYMENT_MODE",
+    "SWITCHYARD_SERVER_AUTH_MODE",
+    "SWITCHYARD_CONTROL_PLANE_STORE",
+    "SWITCHYARD_POSTGRES_URL",
+    "SWITCHYARD_REDIS_URL",
+    "SWITCHYARD_OBJECT_STORE_BACKEND",
+    "SWITCHYARD_OBJECT_STORE_PROBE",
+    "SWITCHYARD_NODE_SHARED_TOKEN",
+    "SWITCHYARD_HOSTED_RUNTIME_ALLOWLIST",
+    "SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION",
+    "SWITCHYARD_SANDBOX_REAL_EXECUTION"
+  ],
+  "forbiddenSurfaces": [
+    "dashboard",
+    "tui",
+    "payment",
+    "oauth",
+    "browser",
+    "/sandbox",
+    "/exec",
+    "/shell",
+    "/process",
+    "/command",
+    "/pty",
+    "/terminal",
+    "/runtime-bridge",
+    "/session",
+    "/input",
+    "/approval",
+    "/browser",
+    "/search",
+    "/github",
+    "/fetch",
+    "/repo",
+    "/dashboard",
+    "/tui",
+    "hosted-real-runtime",
+    "real-tool"
+  ]
+}
