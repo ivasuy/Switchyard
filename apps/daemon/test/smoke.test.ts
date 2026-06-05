@@ -7,6 +7,17 @@ import { createDaemonApp } from "../src/app.js";
 import type { DaemonConfig } from "../src/config.js";
 import { openSqliteStorage } from "@switchyard/storage";
 
+function tempDaemonConfig(prefix: string): DaemonConfig {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  return {
+    host: "127.0.0.1",
+    port: 0,
+    dataDir: dir,
+    sqlitePath: join(dir, "switchyard.sqlite"),
+    artifactDir: join(dir, "artifacts")
+  };
+}
+
 type CodexProbe = NonNullable<Parameters<typeof createDaemonApp>[1]>["codexProbe"];
 
 const unavailableCodexProbe = {
@@ -232,6 +243,90 @@ describe("daemon app", () => {
         rmSync(dir, { recursive: true, force: true });
       } catch {
         // Do not fail cleanup on best-effort temp cleanup.
+      }
+    }
+  });
+
+  it("local gateway smoke: list, artifact lookup, error envelope", async () => {
+    const config = tempDaemonConfig("switchyard-daemon-smoke-");
+    const app = await createDaemonApp(config, { codexProbe: unavailableCodexProbe });
+    try {
+      const beforeRuns = await app.inject({ method: "GET", url: "/runs?limit=200" });
+      expect(beforeRuns.statusCode).toBe(200);
+      const startCount = (beforeRuns.json().runs as unknown[]).length;
+
+      const created = await app.inject({
+        method: "POST",
+        url: "/runs?wait=1",
+        payload: {
+          runtime: "fake",
+          provider: "test",
+          model: "test-model",
+          adapterType: "process",
+          cwd: "/repo",
+          task: "smoke-list-run"
+        }
+      });
+      expect(created.statusCode).toBe(201);
+      const runId = created.json().run.id as string;
+
+      const afterRuns = await app.inject({ method: "GET", url: "/runs?limit=200" });
+      expect(afterRuns.statusCode).toBe(200);
+      const endCount = (afterRuns.json().runs as unknown[]).length;
+      expect(endCount).toBe(startCount + 1);
+
+      const providers = await app.inject({ method: "GET", url: "/providers" });
+      const runtimes = await app.inject({ method: "GET", url: "/runtimes" });
+      const models = await app.inject({ method: "GET", url: "/models" });
+      expect(providers.statusCode).toBe(200);
+      expect(providers.json().providers.length).toBeGreaterThan(0);
+      expect(runtimes.json().runtimes.length).toBeGreaterThan(0);
+      expect(models.json().models.length).toBeGreaterThan(0);
+
+      const narrowedModels = await app.inject({ method: "GET", url: "/models?provider=test" });
+      expect(narrowedModels.statusCode).toBe(200);
+      expect(narrowedModels.json().models.length).toBeGreaterThan(0);
+
+      const artifacts = await app.inject({ method: "GET", url: `/runs/${runId}/artifacts` });
+      expect(artifacts.statusCode).toBe(200);
+      const artifactId = artifacts.json().artifacts[0].id as string;
+
+      const artifact = await app.inject({ method: "GET", url: `/artifacts/${artifactId}` });
+      expect(artifact.statusCode).toBe(200);
+      expect(artifact.json().artifact.id).toBe(artifactId);
+
+      const content = await app.inject({ method: "GET", url: `/artifacts/${artifactId}/content` });
+      expect(content.statusCode).toBe(200);
+      expect(content.headers["content-type"]).toContain("application/x-ndjson");
+      expect(content.body).toContain("fake runtime output");
+
+      const missingRun = await app.inject({ method: "GET", url: "/runs/run_missing_id" });
+      expect(missingRun.statusCode).toBe(404);
+      expect(missingRun.json().error.code).toBe("run_not_found");
+
+      const bananaStatus = await app.inject({ method: "GET", url: "/runs?status=banana" });
+      expect(bananaStatus.statusCode).toBe(400);
+      const bananaBody = bananaStatus.json();
+      expect(bananaBody.error.code).toBe("invalid_query");
+      expect(bananaBody.error.details?.[0]?.path).toBe("status");
+
+      const missingArtifact = await app.inject({ method: "GET", url: "/artifacts/artifact_missing" });
+      expect(missingArtifact.statusCode).toBe(404);
+      expect(missingArtifact.json().error.code).toBe("artifact_not_found");
+
+      const missingContent = await app.inject({ method: "GET", url: "/artifacts/artifact_missing/content" });
+      expect(missingContent.statusCode).toBe(404);
+      expect(missingContent.json().error.code).toBe("artifact_not_found");
+    } finally {
+      try {
+        await app.close();
+      } catch {
+        // best-effort cleanup
+      }
+      try {
+        rmSync(config.dataDir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
       }
     }
   });

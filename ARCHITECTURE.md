@@ -2,6 +2,8 @@
 
 Switchyard is a protocol-neutral runtime gateway. Its job is to expose many agent runtimes and wrappers through one stable backend API while preserving runtime-specific capabilities behind adapters.
 
+This document is both a reference for the current architecture and the target architecture Switchyard is building toward. Some packages and routes shown here are planned but not shipped yet. Use `PRODUCT.md` for the current shipped surface and release roadmap.
+
 The core architectural idea is separation:
 
 ```text
@@ -925,22 +927,20 @@ Observability must not leak secrets, private prompts, local file contents, or pr
 
 The architecture includes the full product map, but implementation should prove the foundation first:
 
-0. Adapter research matrix and local command verification.
-1. Contract foundation.
-2. Local gateway with fake runtime.
-3. First real provider slice: Codex `exec --json` process adapter.
-4. acpx inbound and outbound protocol package.
-5. OpenCode ACP adapter.
-6. Generic HTTP and AgentField adapters.
-7. Claude Code SDK/headless adapter.
-8. Hosted gateway with workers.
-9. Cursor process/headless adapter after parser and auth spikes.
-10. Debate engine.
-11. Hybrid node connectivity.
-12. Memory, tools, approvals, SDK, and CLI completion.
+0. Product truth and release discipline.
+1. Local gateway completeness.
+2. Runtime capability infrastructure.
+3. Shared runtime substrates and Generic HTTP.
+4. acpx foundation and OpenCode.
+5. Wrapper runtime integration, starting with AgentField.
+6. Middleware foundation: context, messages, memory, evidence, approvals, tools, and policy gates.
+7. Interactive coding runtimes such as Codex interactive mode and Claude Code.
+8. Debate engine.
+9. Hosted and hybrid execution.
+10. SDK, CLI, packaging, and hardening.
 
 Each phase should produce a runnable proof rather than only internal scaffolding.
 
-For the detailed phase/subphase plan, use [the master implementation plan](./docs/superpowers/plans/2026-05-11-switchyard-master-implementation-plan.md).
+For the current owner-facing release roadmap, use [PRODUCT.md](./PRODUCT.md). Historical implementation plans under `docs/superpowers/plans/` are references, not current truth.
 
 For the diagram-to-module checklist, use [the module coverage audit](./docs/decisions/2026-05-11-module-coverage-audit.md).

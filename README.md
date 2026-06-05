@@ -127,6 +127,28 @@ Switchyard exposes product-level endpoints:
 /approvals
 ```
 
+## R17 Local Real Tool Slice
+
+R17 ships a narrow production-grade tool slice on the local daemon only through `POST /tools/invocations` (plus `GET /tools/invocations` and `GET /tools/invocations/:id`).
+
+Shipped in this slice:
+
+- `fake_echo` deterministic tool (existing behavior).
+- Configured real tools: `fetch`, `web_search`, `github`, `repo`, and command-catalog `shell`.
+- Deny-by-default policy at global, per-tool, and target levels.
+- Approval-by-default for real tools with queued invocation records and explicit approve/reject/expire lifecycle.
+- Bounded outputs with artifact persistence and redaction.
+
+Important defaults and boundaries:
+
+- Real tools are disabled by default (`SWITCHYARD_REAL_TOOLS_ENABLED=0`).
+- No public `/exec`, `/terminal`, `/pty`, `/sandbox`, `/shell`, `/process`, `/command`, `/browser`, or top-level `/search` execution routes.
+- `browser` tool remains unshipped and policy-denied.
+- Hosted real tools and connected-node real tools remain unshipped in R17.
+- `GET /memory/search` remains shipped (substring memory search) and is not a tool-execution route.
+
+Operator config is environment-driven. See [Local Development](docs/development/DEVELOPMENT.md#r17-middleware--real-tool-smoke-no-spend) and [Official API Contract](docs/development/API.md#r17-middleware-and-local-real-tool-constraints) for the exact key list, request examples, and no-spend smoke.
+
 ### Runs
 
 A run is a single task executed by one runtime.
@@ -214,6 +236,7 @@ collect artifacts
 
 Local setup, test commands, prebuilt curl requests, PID checks, SQLite inspection, and Codex debugging live outside this product README:
 
+- [Product truth and release roadmap](PRODUCT.md)
 - [Development docs](docs/development/)
 - [Adapter local debugging guides](docs/development/adapters/)
 

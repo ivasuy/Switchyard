@@ -10,21 +10,56 @@ http://127.0.0.1:4545
 
 Current implementation status:
 
-- Implemented: health, runs, run events, run artifacts, run input, run cancellation, single-record registry lookups.
+- Implemented: health, runs (create/get/list), run events (replay-only, bounded live, open-ended live), run artifacts (per-run listing, global metadata, content), run input, run cancellation, registry lookups (single-record and listing).
 - Implemented runtime: local Codex through `codex exec --json`, plus the fake test runtime.
-- Not implemented yet: run listing, trace endpoint, OpenAPI generation, debates, approvals, memory, tools, artifact-by-id, hosted workers, dashboards, TUI, open-ended live SSE.
+- Not implemented yet: trace endpoint, OpenAPI generation, debates, approvals, memory, tools, hosted workers, hosted/hybrid placement, dashboards, TUI, generic HTTP adapter, authentication, rate limiting.
+
+## Error Contract
+
+Every 4xx and 5xx response uses one envelope:
+
+```json
+{
+  "error": {
+    "code": "snake_case_machine_code",
+    "message": "human-readable explanation",
+    "details": [
+      { "path": "limit", "issue": "must be <= 200" }
+    ]
+  }
+}
+```
+
+`details` is optional and is only present on validation failures.
+
+Closed code set:
+
+| Code | HTTP | Used for |
+| --- | --- | --- |
+| `run_not_found` | 404 | Unknown run id. |
+| `artifact_not_found` | 404 | Unknown artifact id. |
+| `missing_artifact_content` | 404 | Artifact exists, content unavailable. |
+| `provider_not_found` | 404 | Unknown provider id or slug. |
+| `runtime_not_found` | 404 | Unknown runtime id or slug. |
+| `model_not_found` | 404 | Unknown model id or slug. |
+| `invalid_input` | 400 | Malformed body. |
+| `invalid_query` | 400 | Malformed or out-of-range query parameter. |
+| `adapter_protocol_failed` | 409 | Adapter cannot perform the requested action. |
+| `internal_error` | 500 | Unexpected server failure. |
+
+All success bodies (`{run, events}`, `{accepted: true}`, etc.) are unchanged.
 
 ## Status Codes
-
-Common success responses:
 
 | Status | Meaning |
 | --- | --- |
 | `200` | Query succeeded. |
-| `201` | Run was created and completed synchronously through `wait=1`. |
-| `202` | Run was accepted and launched asynchronously, or input was accepted. |
-| `404` | Requested run, provider, runtime, or model was not found. |
-| `409` | Request is valid, but the selected adapter cannot perform it. Codex `exec --json` returns this for post-start input. |
+| `201` | Run created and completed synchronously through `wait=1`. |
+| `202` | Run accepted and launched asynchronously, or input accepted. |
+| `400` | Validation failure on the body or query string. |
+| `404` | Requested run/artifact/provider/runtime/model is not found. |
+| `409` | Request is valid, but the selected adapter cannot perform it. |
+| `500` | Unexpected server failure. |
 
 ## Run Object
 
@@ -74,77 +109,15 @@ pty
 browser
 ```
 
-## Response Summary
-
-`POST /runs?wait=1` returns a compact response summary in addition to the run.
-
-```json
-{
-  "response": {
-    "text": "Switchyard is a TypeScript monorepo...",
-    "outputs": [
-      {
-        "sequence": 16,
-        "text": "Switchyard is a TypeScript monorepo..."
-      }
-    ]
-  }
-}
-```
-
-Rules:
-
-- `response.text` is the last normalized `runtime.output` text, usually the final visible model answer.
-- `response.outputs` contains every normalized text output event.
-- `outputs[].sequence` is the global run event sequence, not a contiguous output index. Gaps mean non-output events occurred between output events.
-- Async `POST /runs` does not include `response`; fetch `/runs/:id` or `/runs/:id/events`.
-
-## Event Object
-
-```json
-{
-  "id": "event_...",
-  "type": "runtime.output",
-  "runId": "run_...",
-  "sequence": 4,
-  "payload": {
-    "text": "I found a TypeScript monorepo...",
-    "codexType": "item.completed"
-  },
-  "createdAt": "2026-05-14T15:53:35.000Z"
-}
-```
-
-Current event types include:
-
-```text
-run.queued
-run.started
-runtime.status
-runtime.output
-artifact.created
-run.completed
-run.cancelled
-run.failed
-```
-
-The contract allows more event types than the current local Codex path emits.
-
 ## Health
 
 ```bash
 curl -s http://127.0.0.1:4545/health
 ```
 
-Response:
+## Create Run
 
-```json
-{"ok":true}
-```
-
-## Create Async Run
-
-Use this when your app wants to start work and inspect progress later.
+Async:
 
 ```bash
 curl -s -X POST "http://127.0.0.1:4545/runs" \
@@ -156,76 +129,19 @@ curl -s -X POST "http://127.0.0.1:4545/runs" \
     "adapterType": "process",
     "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
     "task": "Return one sentence describing this repository. Do not edit files.",
-    "metadata": {
-      "reasoningEffort": "low",
-      "reasoningSummary": "auto",
-      "verbosity": "low",
-      "sandbox": "read-only",
-      "ignoreUserConfig": true
-    },
     "timeoutSeconds": 120
   }'
 ```
 
-Response:
-
-```json
-{
-  "run": {
-    "id": "run_...",
-    "status": "queued"
-  }
-}
-```
-
-The daemon launches the run in the background.
-
-## Create And Wait
-
-Use this when your app wants one blocking request and the final model answer.
+Synchronous wait-for-completion:
 
 ```bash
 curl -s -X POST "http://127.0.0.1:4545/runs?wait=1" \
   -H 'content-type: application/json' \
-  -d '{
-    "runtime": "codex",
-    "provider": "openai",
-    "model": "gpt-5.5",
-    "adapterType": "process",
-    "cwd": "/Users/vasuyadav/Downloads/Projects/switchyard",
-    "task": "Return one sentence describing this repository. Do not edit files.",
-    "metadata": {
-      "reasoningEffort": "low",
-      "reasoningSummary": "auto",
-      "verbosity": "low",
-      "sandbox": "read-only",
-      "ignoreUserConfig": true
-    },
-    "timeoutSeconds": 120
-  }'
+  -d '{ "runtime": "fake", "provider": "test", "model": "test-model", "adapterType": "process", "cwd": "/repo", "task": "Smoke" }'
 ```
 
-Response shape:
-
-```json
-{
-  "run": {
-    "id": "run_...",
-    "status": "completed"
-  },
-  "response": {
-    "text": "Switchyard is a TypeScript monorepo for a deploy-anywhere agent runtime gateway...",
-    "outputs": [
-      {
-        "sequence": 16,
-        "text": "Switchyard is a TypeScript monorepo for a deploy-anywhere agent runtime gateway..."
-      }
-    ]
-  }
-}
-```
-
-`POST /runs?wait=1` is not streamed. It returns one JSON response when the run reaches a terminal state.
+`POST /runs?wait=1` returns `{run, response}` where `response.text` is the last normalized `runtime.output`. Async create returns `{run}` and the daemon launches the run in the background.
 
 ## Get Run
 
@@ -234,45 +150,65 @@ RUN_ID=run_replace_me
 curl -s "http://127.0.0.1:4545/runs/$RUN_ID"
 ```
 
+Returns `{run, events}` with every persisted event.
+
+## List Runs
+
+```bash
+curl -s "http://127.0.0.1:4545/runs?limit=50"
+```
+
 Response:
 
 ```json
 {
-  "run": {},
-  "events": []
+  "runs": [ /* Run objects, newest first */ ],
+  "nextCursor": "base64-opaque-or-null"
 }
 ```
 
-Use this for complete JSON event inspection. It returns every persisted event.
+Sort order is `createdAt DESC, id DESC`. `nextCursor` is opaque; pass it back as `?before=...` to page.
+
+Query parameters:
+
+| Name | Type | Notes |
+| --- | --- | --- |
+| `status` | CSV of run status enum | Unknown values → `400 invalid_query`. |
+| `runtime` | CSV of runtime slugs | E.g. `codex,fake`. |
+| `provider` | CSV of provider slugs | E.g. `openai`. |
+| `model` | CSV of model slugs | E.g. `gpt-5.5`. |
+| `placement` | CSV of placement values | Currently always `local`. |
+| `adapterType` | CSV of adapter types | `native,acpx,http,webhook,process,pty,browser`. |
+| `since` | ISO-8601 timestamp | Inclusive lower bound on `createdAt`. |
+| `until` | ISO-8601 timestamp | Exclusive upper bound on `createdAt`. |
+| `limit` | integer | Default `50`, max `200`. |
+| `before` | opaque cursor | From a previous response's `nextCursor`. |
+
+Well-formed-but-unknown slug filter values match zero rows (200 with empty array). Empty result still returns `nextCursor: null`.
 
 ## Get Run Events
 
-```bash
-RUN_ID=run_replace_me
-curl -s "http://127.0.0.1:4545/runs/$RUN_ID/events"
-```
+Three modes on the same endpoint:
 
-Response content type:
-
-```text
-text/event-stream; charset=utf-8
-```
-
-The response is Server-Sent Events formatted replay:
-
-```text
-event: runtime.output
-data: {"id":"event_...","type":"runtime.output","runId":"run_...","sequence":4,"payload":{"text":"..."},"createdAt":"..."}
-```
-
-Bounded live mode:
+| Query | Behavior |
+| --- | --- |
+| _(none)_ | Replay-only. SSE response of every persisted event, then connection closes. |
+| `?live=1` | Replay-then-live. Replays persisted events, then keeps the connection open and streams new events as they reach the event bus. |
+| `?live=1&stopAfter=N` | Bounded replay-then-live. Closes after `N` total events. |
 
 ```bash
 RUN_ID=run_replace_me
-curl -N "http://127.0.0.1:4545/runs/$RUN_ID/events?live=1&stopAfter=20"
+curl -N "http://127.0.0.1:4545/runs/$RUN_ID/events?live=1"
 ```
 
-Current limitation: live mode is bounded by `stopAfter`; it is not an open-ended stream yet.
+Open-ended SSE contract:
+
+- Response `Content-Type` is `text/event-stream; charset=utf-8`.
+- Server emits an SSE comment heartbeat (`:\n\n`) every 15 seconds on otherwise-idle connections.
+- Server closes the connection after 5 minutes with no events (idle timeout) with a clean `event: stream.idle` marker followed by EOF.
+- On client disconnect, the server unsubscribes from the event bus and releases resources within 1 second.
+
+Resumption: clients reconnect with the standard SSE `Last-Event-ID` header to receive only events with id greater than the supplied id. Resumption applies to all three modes.
 
 ## Get Run Artifacts
 
@@ -281,26 +217,81 @@ RUN_ID=run_replace_me
 curl -s "http://127.0.0.1:4545/runs/$RUN_ID/artifacts"
 ```
 
-Response:
+Returns `{ artifacts: [ ... ] }`.
+
+## Get Artifact
+
+```bash
+ARTIFACT_ID=artifact_replace_me
+curl -s "http://127.0.0.1:4545/artifacts/$ARTIFACT_ID"
+```
+
+Returns:
 
 ```json
 {
-  "artifacts": [
-    {
-      "id": "artifact_...",
-      "runId": "run_...",
-      "type": "transcript",
-      "path": "runs/run_.../transcript.jsonl",
-      "metadata": {
-        "contentStored": true
-      },
-      "createdAt": "2026-05-14T15:53:49.000Z"
-    }
-  ]
+  "artifact": {
+    "id": "artifact_...",
+    "runId": "run_...",
+    "type": "transcript",
+    "path": "runs/run_.../transcript.jsonl",
+    "metadata": { "contentStored": true },
+    "createdAt": "..."
+  }
 }
 ```
 
-Artifact content is stored locally by the daemon. There is no `GET /artifacts/:id` endpoint yet.
+Errors: `404 artifact_not_found`.
+
+## Get Artifact Content
+
+```bash
+ARTIFACT_ID=artifact_replace_me
+curl -s "http://127.0.0.1:4545/artifacts/$ARTIFACT_ID/content"
+```
+
+- Response `Content-Type` is chosen per artifact type:
+  - `transcript` → `application/x-ndjson`
+- Body is the raw stored content; no JSON wrapping.
+- `HEAD` and `Range` requests are **not** supported.
+
+Errors: `404 artifact_not_found`; if the record exists but `metadata.contentStored=false` or the backing file is missing, `404 missing_artifact_content`.
+
+## List Providers / Runtimes / Models
+
+```bash
+curl -s "http://127.0.0.1:4545/providers?limit=50"
+curl -s "http://127.0.0.1:4545/runtimes?provider=openai"
+curl -s "http://127.0.0.1:4545/models?provider=openai"
+```
+
+Filter rules:
+
+| Endpoint | Filters |
+| --- | --- |
+| `GET /providers` | `limit`, `before` |
+| `GET /runtimes` | `provider` (CSV slug), `adapterType` (CSV), `limit`, `before` |
+| `GET /models` | `provider` (CSV slug), `limit`, `before` — when `provider` is omitted, orphan models are included |
+
+Responses:
+
+```json
+{ "providers": [ /* records */ ], "nextCursor": "...|null" }
+{ "runtimes":  [ /* records */ ], "nextCursor": "...|null" }
+{ "models":    [ /* records */ ], "nextCursor": "...|null" }
+```
+
+R2 returns registry records as stored. Health, capability, and partial-support reporting are R3+.
+
+## Single-Record Registry Lookups
+
+```bash
+curl -s http://127.0.0.1:4545/providers/provider_openai
+curl -s http://127.0.0.1:4545/runtimes/runtime_codex
+curl -s http://127.0.0.1:4545/models/model_gpt_5_5
+```
+
+Slug shortcuts are accepted as well (e.g. `openai`, `codex`, `gpt_5_5`).
 
 ## Send Input
 
@@ -311,24 +302,7 @@ curl -s -X POST "http://127.0.0.1:4545/runs/$RUN_ID/input" \
   -d '{"text":"continue"}'
 ```
 
-Success response:
-
-```json
-{"accepted":true}
-```
-
-Codex `exec --json` limitation:
-
-```json
-{
-  "error": {
-    "code": "adapter_protocol_failed",
-    "message": "Codex exec-json does not support input after start"
-  }
-}
-```
-
-Use Codex `exec --json` as a one-shot non-interactive run mode.
+Success returns `{"accepted":true}`. Codex `exec --json` returns `409 adapter_protocol_failed` for any post-start input.
 
 ## Cancel Run
 
@@ -337,42 +311,7 @@ RUN_ID=run_replace_me
 curl -s -X POST "http://127.0.0.1:4545/runs/$RUN_ID/cancel"
 ```
 
-Response:
-
-```json
-{
-  "run": {
-    "id": "run_...",
-    "status": "cancelled"
-  }
-}
-```
-
-## Registry Lookups
-
-Provider:
-
-```bash
-curl -s http://127.0.0.1:4545/providers/provider_openai
-```
-
-Runtime:
-
-```bash
-curl -s http://127.0.0.1:4545/runtimes/runtime_codex
-```
-
-Model:
-
-```bash
-curl -s http://127.0.0.1:4545/models/model_gpt_5_5
-```
-
-Current limitation: list endpoints are not implemented yet. Use known seeded IDs.
-
 ## Codex Metadata
-
-Current Codex metadata keys:
 
 | Key | Example | Notes |
 | --- | --- | --- |

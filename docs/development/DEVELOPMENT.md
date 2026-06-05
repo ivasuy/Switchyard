@@ -107,6 +107,44 @@ RUN_ID=run_replace_me
 watch -n 1 "curl -s http://127.0.0.1:4545/runs/$RUN_ID/events"
 ```
 
+## Local Smoke Walkthrough
+
+Copy-paste these commands against a fresh `pnpm dev:daemon` instance. Each step asserts relative changes, so the walkthrough works regardless of pre-existing local state.
+
+```bash
+BASE=http://127.0.0.1:4545
+
+BEFORE=$(curl -s "$BASE/runs?limit=200" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["runs"]))')
+
+RUN_ID=$(curl -s -X POST "$BASE/runs?wait=1" \
+  -H 'content-type: application/json' \
+  -d '{"runtime":"fake","provider":"test","model":"test-model","adapterType":"process","cwd":"/repo","task":"smoke"}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["run"]["id"])')
+
+AFTER=$(curl -s "$BASE/runs?limit=200" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["runs"]))')
+test "$AFTER" -eq "$((BEFORE + 1))" && echo "list grew by 1: ok"
+
+curl -s "$BASE/providers"        | head -c 200; echo
+curl -s "$BASE/runtimes"         | head -c 200; echo
+curl -s "$BASE/models?provider=test" | head -c 200; echo
+
+ARTIFACT_ID=$(curl -s "$BASE/runs/$RUN_ID/artifacts" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["artifacts"][0]["id"])')
+
+curl -s "$BASE/artifacts/$ARTIFACT_ID"           | head -c 200; echo
+curl -s -i "$BASE/artifacts/$ARTIFACT_ID/content" | head -n 6
+
+# Error envelope retrofit checks
+curl -s -o /dev/null -w "%{http_code}\n" "$BASE/runs/run_missing_id"
+curl -s "$BASE/runs?status=banana"                # 400 invalid_query, details[0].path = "status"
+curl -s "$BASE/artifacts/artifact_missing/content" # 404 artifact_not_found
+
+# Open-ended SSE. Ctrl-C closes the stream; the server unsubscribes within 1s.
+curl -N "$BASE/runs/$RUN_ID/events?live=1"
+# Bounded for tests / scripted assertions:
+curl -N "$BASE/runs/$RUN_ID/events?live=1&stopAfter=20"
+```
+
 ## SQLite Inspection
 
 Default database:
