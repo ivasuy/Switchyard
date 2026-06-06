@@ -68,7 +68,7 @@ SDK quick one-liner:
 node --import tsx -e 'import {SwitchyardClient} from \"@switchyard/sdk\"; const c=new SwitchyardClient({baseUrl:\"http://127.0.0.1:4545\"}); const r=await c.health(); console.log(r.ok);'
 ```
 
-## R22 No-Spend Verification (Copy/Paste)
+## Current No-Spend Verification (Copy/Paste)
 
 These required checks are deterministic and no-spend. They must not call payment providers, model providers, AWS/R2 live services, live GitHub, external search, hosted browsers, or arbitrary process/PTY execution.
 
@@ -93,7 +93,7 @@ pnpm --filter @switchyard/contracts openapi:generate:hosted
 pnpm --filter @switchyard/contracts openapi:check:hosted
 ```
 
-## R24 Production Operator Commands
+## R25 Production Operator Commands
 
 Preflight (required before deploy):
 
@@ -148,7 +148,7 @@ Safe default sandbox env posture (required unless an operator intentionally enab
 - `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` unset when real execution is disabled.
 - If `SWITCHYARD_SANDBOX_REAL_EXECUTION=enabled`, `SWITCHYARD_SANDBOX_COMMAND_POLICY_JSON` must be present and valid or readiness fails closed (`sandbox_policy_missing`/`sandbox_policy_invalid`).
 
-## R24 Hosted Rollout / Rollback
+## R25 Hosted Rollout / Rollback
 
 Rollout order (required):
 
@@ -175,7 +175,7 @@ Fail-closed production behavior:
 - Missing bridge command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`).
 - Worker crash/stale claimed non-idempotent provider input is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`.
 - Production hosted/connected-node tool activation is operator opt-in and requires explicit real-tool policy plus API-key auth, Postgres, Redis, object store, quota/audit readiness, worker claim readiness, and node readiness for connected-node tool placements.
-- R24 hosted debate uses only `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
+- R24/R25 hosted debate uses only `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`.
 - Fake deterministic hosted debate is the default no-spend route through production canary.
 - Real debate participants require request-level `realRuntimeOptIn: true`; hosted real participants require `placement: "hosted"` and are allowed only for `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest` beyond fake.
 - Live model judge requests require `judgeConfig.mode: "model"`, `realRuntimeOptIn: true`, and `confirmLiveProviderSpend: true`.
@@ -562,7 +562,7 @@ R17 middleware and tool boundaries:
 - Browser automation and hosted `repo` execution remain unshipped and denied (`browser_tool_unshipped`, `repo_hosted_unshipped`).
 - Public `/sandbox`/`/exec`/`/pty`/`/terminal`/`/process`/`/shell`/`/command`/`/browser` routes and top-level tool-search execution routes remain unshipped.
 
-## R24 Debate Smoke (No Spend)
+## R25 Debate Smoke (No Spend)
 
 ```bash
 BASE=http://127.0.0.1:4545
@@ -599,7 +599,7 @@ R24/R25 async hosted debate behavior:
 - Live model judge requests use `judgeConfig.mode: "model"` and require `realRuntimeOptIn: true` plus `confirmLiveProviderSpend: true`.
 - Debate participant and judge execution use existing run/runtime contracts and preserve run/message/event/artifact traceability.
 
-## R24 Debate Negative Smoke
+## R25 Debate Negative Smoke
 
 Real participant missing opt-in:
 

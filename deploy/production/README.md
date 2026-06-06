@@ -1,4 +1,4 @@
-# Switchyard Production Manifest Pack (R24)
+# Switchyard Production Manifest Pack (R25)
 
 This directory contains a production operator manifest pack for hosted server, hosted worker, and optional connected node. It is API/ops-only and keeps the checked-in default fake-only (`fake.deterministic`) and no-spend.
 
@@ -33,7 +33,7 @@ Generate unique high-entropy values for at least:
 - Object-store credentials
 - Bootstrap API key and node token records
 
-## Runtime, Tool, And Debate Boundary (R24)
+## Runtime, Tool, And Debate Boundary (R25)
 
 Checked-in production defaults are fake-only:
 
@@ -41,12 +41,16 @@ Checked-in production defaults are fake-only:
 - `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=disabled`
 - `SWITCHYARD_SANDBOX_REAL_EXECUTION=disabled` (safe default)
 
-R24 keeps hosted runtime defaults fake-only and allows explicit provider opt-in for exactly:
+R25 keeps hosted runtime defaults fake-only and allows explicit provider opt-in for exactly:
+
 - `codex.exec_json`
 - `claude_code.sdk`
 - `opencode.acp`
+- `agentfield.async_rest`
+- `generic_http.async_rest`
 
 Provider activation requires:
+
 - `SWITCHYARD_HOSTED_REAL_RUNTIME_EXECUTION=enabled`
 - allowlist includes fake plus explicit provider modes
 - `SWITCHYARD_PROVIDER_RUNTIME_POLICY_JSON` or `SWITCHYARD_PROVIDER_RUNTIME_POLICY_PATH`
@@ -59,13 +63,13 @@ R22 hosted/connected-node real-tool execution ships only for:
 - hosted worker tools: `fetch`, `web_search`, `github`, command-catalog `shell`
 - connected-node tools: `fetch`, `web_search`, `github`, `repo`, command-catalog `shell`
 
-R24 hosted debate ships through the existing route family only:
+R24/R25 hosted debate ships through the existing route family only:
 
 - `POST /debates`
 - `GET /debates/:id`
 - `GET /debates/:id/events`
 
-Fake deterministic hosted debate is the default no-spend path for production preflight and canary. Opt-in live debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`. Live debate participants require request-level `realRuntimeOptIn: true`; hosted live participants require `placement: "hosted"` plus provider activation. The internal bounded judge runner defaults to deterministic no-spend judging; live model judging requires request opt-in and `confirmLiveProviderSpend: true`.
+Fake deterministic hosted debate is the default no-spend path for production preflight and canary. Opt-in live debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`. Live debate participants require request-level `realRuntimeOptIn: true`; hosted live participants require `placement: "hosted"` plus provider activation. Wrapper participants also require configured wrapper endpoints, advertised input/approval bridge capabilities, durable bridge command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness. The internal bounded judge runner defaults to deterministic no-spend judging; live model judging requires request opt-in and `confirmLiveProviderSpend: true`.
 
 Hosted debate readiness requires:
 
@@ -75,20 +79,21 @@ Hosted debate readiness requires:
 - Ownership, quota, and audit stores.
 - Queue/outbox and worker readiness.
 - Object-store readiness for final report artifacts.
-- Provider activation for live participant or live judge probes.
+- Provider activation for live participant, wrapper participant, or live judge probes.
 - R23 bridge command/payload stores when `claude_code.sdk` or `opencode.acp` are allowlisted.
+- R25 wrapper bridge config/capability checks when `agentfield.async_rest` or `generic_http.async_rest` are allowlisted.
 
-R24 still does not ship:
+R25 still does not ship:
 
 - browser automation (`browser_tool_unshipped`)
 - hosted `repo` execution (`repo_hosted_unshipped`)
 - generic `/exec` `/shell` `/process` `/command` `/pty` `/terminal` `/sandbox` public routes
 - dashboard or TUI surfaces are not shipped
 - generic process/PTY adapters are not shipped
-- hosted runtime approval/input/terminal bridges outside the R23 `claude_code.sdk` and `opencode.acp` bridge boundary
+- hosted runtime terminal bridges
 - Cursor/OpenClaw/Paperclip adapters
 - hosted `codex.interactive`
-- AgentField/Generic HTTP hosted debate bridges
+- arbitrary AgentField/Generic HTTP endpoint execution, per-run wrapper URL/auth overrides, or wrapper webhooks
 - public model judge routes are not shipped (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family)
 - managed SaaS/public signup, billing, OAuth, SSO, or SCIM are not shipped
 
@@ -107,7 +112,7 @@ R24 still does not ship:
 8. Deploy worker.
 9. Optionally deploy node:
    - `docker compose -f deploy/production/docker-compose.yml --profile optional-node up -d node`
-10. Run default R24 canary (fake hosted debate, deterministic/no-spend):
+10. Run default R25 canary (fake hosted debate, deterministic/no-spend):
     - `pnpm tsx scripts/production-canary.ts --base-url https://replace-with-public-server-url --api-key replace-with-operator-api-key`
 11. Run production sandbox smoke:
     - `pnpm production:sandbox-smoke`

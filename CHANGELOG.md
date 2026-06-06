@@ -35,6 +35,7 @@ All notable changes to Switchyard will be documented in this file.
 - Updated daemon startup reconciliation to cover `starting`, `running`, `waiting_for_input`, and `waiting_for_approval` states with idempotent recovery counters.
 - Updated daemon main entrypoint to export reusable `startDaemon()` helper used by CLI command flows.
 - Updated hosted debate and adapter docs to include R25 wrapper participant gates while preserving fake/no-spend defaults and non-goals for hosted cancel, arbitrary execution routes, public model judge routes, browser automation, hosted repo execution, dashboard/TUI, and managed SaaS surfaces.
+- Updated architecture and developer docs with current repo/runtime diagrams, removed stale nonexistent package references, and aligned README/development/production summaries with the R25 hosted wrapper bridge boundary.
 - Updated Codex active runtime checks to forward optional-check probe diagnostics so required-pass plus optional-fail checks surface as `partial` with warning diagnostics.
 - Updated daemon active doctor check behavior and smoke coverage to assert partial-state propagation through `POST /runtime-modes/:id/check`, runtime-mode availability snapshots, and `GET /doctor`.
 - Updated product and API docs to reflect shipped-tense R3 runtime capability infrastructure and concrete runtime-mode/doctor payload examples.

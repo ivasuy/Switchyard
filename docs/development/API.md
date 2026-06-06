@@ -709,12 +709,12 @@ Example `GET /runtime-modes?provider=openai` response:
         "sandbox.danger_full_access"
       ],
       "limitations": [
-        { "code": "one_shot_no_input", "message": "No post-start interactive input support in R3." }
+        { "code": "one_shot_no_input", "message": "codex.exec_json is one-shot. Use explicit local codex.interactive for supported local post-start input." }
       ],
       "placement": {
         "local": { "support": "supported", "reason": "Requires a PATH-reachable local codex binary and local workspace." },
-        "hosted": { "support": "unsupported", "reason": "Hosted subprocess execution is not shipped in R3." },
-        "connectedLocalNode": { "support": "future", "reason": "Hybrid node execution is planned for R10." }
+        "hosted": { "support": "supported", "reason": "Hosted codex.exec_json is operator opt-in and requires provider runtime policy, credentials, queue, object store, and readiness gates." },
+        "connectedLocalNode": { "support": "supported", "reason": "Connected nodes can claim approved assignments and enforce local node policy before execution." }
       },
       "availability": {
         "state": "partial",
@@ -764,12 +764,12 @@ Example `GET /runtime-modes/codex.exec_json` response:
       "sandbox.danger_full_access"
     ],
     "limitations": [
-      { "code": "one_shot_no_input", "message": "No post-start interactive input support in R3." }
+      { "code": "one_shot_no_input", "message": "codex.exec_json is one-shot. Use explicit local codex.interactive for supported local post-start input." }
     ],
     "placement": {
       "local": { "support": "supported", "reason": "Requires a PATH-reachable local codex binary and local workspace." },
-      "hosted": { "support": "unsupported", "reason": "Hosted subprocess execution is not shipped in R3." },
-      "connectedLocalNode": { "support": "future", "reason": "Hybrid node execution is planned for R10." }
+      "hosted": { "support": "supported", "reason": "Hosted codex.exec_json is operator opt-in and requires provider runtime policy, credentials, queue, object store, and readiness gates." },
+      "connectedLocalNode": { "support": "supported", "reason": "Connected nodes can claim approved assignments and enforce local node policy before execution." }
     },
     "availability": {
       "state": "partial",

@@ -2,7 +2,7 @@
 
 Date: 2026-05-11
 
-This audit checks the Switchyard architecture diagram against the current spec and master implementation plan.
+This audit checked the Switchyard architecture diagram against the spec and master implementation plan on 2026-05-11. The current shipped repo structure is documented in `ARCHITECTURE.md`; this decision record is historical.
 
 ## Result
 
@@ -20,7 +20,7 @@ The spec and master plan now represent these as explicit modules.
 | Diagram block | Planned module/package | Status |
 |---|---|---|
 | Client/App Layer | REST, SSE, WebSocket, acpx, SDK, CLI | Covered |
-| Public Gateway API | `packages/protocol-rest`, `protocol-sse`, `protocol-ws`, `protocol-acpx` | Covered |
+| Public Gateway API | `packages/protocol-rest`, `packages/protocol-sse`, `packages/protocol-acpx`; public WebSocket package unshipped | Covered |
 | Run Manager | `packages/core/src/services/run-service.ts` | Covered |
 | Debate / Deliberation Manager | `packages/core/src/services/debate-service.ts` | Covered |
 | Provider / Model Registry | `registry-service`, `registry-store`, registry contracts | Covered |
@@ -31,7 +31,7 @@ The spec and master plan now represent these as explicit modules.
 | Message Router | `message-router`, `message-store`, message contracts | Covered |
 | Tool Router | `tool-router`, `tool-adapter`, tool contracts, tool policy | Covered |
 | Context Builder | `context-builder`, `context-source`, context packet contracts | Covered |
-| Approval / Policy Layer | `approval-service`, `approval-store`, `packages/policy` | Covered |
+| Approval / Policy Layer | `approval-service`, `approval-store`, policy services/ports in `packages/core` | Covered |
 | Memory Layer | `memory-service`, `memory-store`, memory contracts | Covered |
 | Artifact Manager | `artifact-service`, `artifact-store`, artifact contracts | Covered |
 | Runtime Registry | `registry-service`, adapter package metadata | Covered |

@@ -33,7 +33,7 @@ Claude Code ships in R8 as the first bounded interactive coding runtime through 
 
 ## Hosted Debate Boundary
 
-- R24 allows `claude_code.sdk` as an opt-in local/hosted debate participant runtime.
+- R24/R25 allows `claude_code.sdk` as an opt-in local/hosted debate participant runtime.
 - Hosted debate use depends on the R23 hosted runtime bridge command and payload stores shared by server and worker.
 - Missing bridge stores fail closed with `hosted_runtime_bridge_store_unavailable`.
 - Hosted debate still uses normal run/runtime contracts and preserves child run, message, event, evidence, and artifact traceability.
@@ -41,4 +41,4 @@ Claude Code ships in R8 as the first bounded interactive coding runtime through 
 
 ## Status
 
-Implemented for local bounded interactive sessions in R8 and for the R23 hosted bridge boundary. R24 hosted debate may use `claude_code.sdk` only when hosted provider activation and R23 bridge readiness pass. Generic PTY execution remains unshipped.
+Implemented for local bounded interactive sessions in R8 and for the R23 hosted bridge boundary. R24/R25 hosted debate may use `claude_code.sdk` only when hosted provider activation and R23 bridge readiness pass. Generic PTY execution remains unshipped.

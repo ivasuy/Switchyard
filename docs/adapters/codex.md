@@ -36,7 +36,7 @@ Codex should support coding/repo tasks through a structured headless path; PTY f
 
 ## Hosted Debate Boundary
 
-- R24 allows `codex.exec_json` as an opt-in local/hosted debate participant runtime.
+- R24/R25 allows `codex.exec_json` as an opt-in local/hosted debate participant runtime.
 - `codex.exec_json` remains one-shot; each debate turn is a normal bounded child run, not a resumed interactive session.
 - Hosted input and approval bridges are unsupported for `codex.exec_json`.
 - Hosted `codex.interactive`, hosted Codex live-resume, public PTY/terminal routes, and PTY/TUI automation remain unshipped.
@@ -47,4 +47,4 @@ For prebuilt local curls, focused verification commands, PID checks, SQLite quer
 
 ## Status
 
-Implemented for `codex.exec_json` one-shot runs and explicit local-only `codex.interactive` runs. R24 hosted debate may use `codex.exec_json` only as an opt-in one-shot participant. Hosted `codex.interactive`, hosted Codex live-resume, hosted post-start input/approval for Codex, public PTY/terminal routes, PTY/TUI automation, and managed hosted Codex execution remain unshipped.
+Implemented for `codex.exec_json` one-shot runs and explicit local-only `codex.interactive` runs. R24/R25 hosted debate may use `codex.exec_json` only as an opt-in one-shot participant. Hosted `codex.interactive`, hosted Codex live-resume, hosted post-start input/approval for Codex, public PTY/terminal routes, PTY/TUI automation, and managed hosted Codex execution remain unshipped.

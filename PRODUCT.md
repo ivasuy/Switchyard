@@ -9,8 +9,8 @@ This document answers: what exists in the system right now, what can be used, wh
 - `PRODUCT.md`: owner-facing current truth. Read this to know what Switchyard can do today.
 - `CHANGELOG.md`: user-facing release history. Read this to know what changed between releases.
 - `README.md`: public product overview and positioning.
-- `ARCHITECTURE.md`: system reference and target architecture. It intentionally includes planned modules that are not shipped yet.
-- `docs/development/API.md`: current local daemon HTTP contract.
+- `ARCHITECTURE.md`: system reference for the current repo structure, runtime structure, deployment modes, and architecture boundaries.
+- `docs/development/API.md`: current local daemon and hosted server HTTP contracts.
 - `docs/development/DEVELOPMENT.md`: local setup, smoke commands, inspection, and verification commands.
 - `docs/development/adapters/`: runtime-specific local debugging notes.
 - `docs/superpowers/specs/`: release specs. Only one future release spec should be active at a time.
@@ -683,7 +683,7 @@ Local verification:
 - AgentField doctor reports configured/unconfigured states clearly.
 - fake AgentField flow passes CI without uncontrolled model spend.
 - local fake smoke can create an execution, poll it, normalize completion/failure, and retrieve transcript/result artifacts.
-- active cancel returns `agentfield_cancel_unsupported`; R25 later adds conditional wrapper input/approval bridges for bridge-ready AgentField sessions.
+- active cancel returns `agentfield_cancel_unsupported`; the current R25 boundary adds conditional wrapper input/approval bridges for bridge-ready AgentField sessions.
 - Switchyard timeout persists `timeout` even though upstream cancellation is unsupported.
 
 Promotion criteria:
@@ -1161,7 +1161,7 @@ Explicitly not shipped in R15:
 - Production arbitrary subprocess/PTY sandboxing is not shipped in R15.
 - Generic process/PTY adapters are not shipped in R15.
 - Public `/sandbox`, `/exec`, `/pty`, or `/terminal` APIs.
-- Hosted Generic HTTP/AgentField/Cursor/OpenClaw/Paperclip/browser/search/fetch/GitHub/repo/shell execution.
+- Hosted wrapper/runtime execution for Generic HTTP, AgentField, Cursor, OpenClaw, Paperclip, browser/search, fetch, GitHub, repo, or shell.
 - Interactive Codex sessions, Codex session resume, approval bridges, hosted debate with real participants/model judging, enterprise auth/billing/tenant controls, dashboard, or TUI are not shipped in R15.
 
 ## R16 Interactive Codex And Approval Bridges (Shipped Local Codex Slice)
@@ -1290,7 +1290,7 @@ Shipped in this phase:
 Explicitly not shipped in R21:
 
 - Hosted `codex.interactive`.
-- Wrapper hosted bridges for `agentfield.async_rest` and `generic_http.async_rest`; R25 later adds these conditionally.
+- Wrapper hosted bridges for `agentfield.async_rest` and `generic_http.async_rest`; the current R25 boundary adds these conditionally.
 - Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
 - Generic process/PTY product adapters, browser automation, hosted `repo` execution, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM are not shipped in R21.
 
@@ -1322,7 +1322,7 @@ Explicitly not shipped in R23:
 
 - `codex.exec_json` input or approval bridges; it remains one-shot.
 - Hosted `codex.interactive`.
-- Wrapper hosted input/approval bridges for `agentfield.async_rest` and `generic_http.async_rest`; R25 later adds these conditionally.
+- Wrapper hosted input/approval bridges for `agentfield.async_rest` and `generic_http.async_rest`; the current R25 boundary adds these conditionally.
 - Public arbitrary execution APIs: no `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox`.
 - Generic process/PTY product adapters, browser automation, hosted `repo` execution, dashboard/TUI, managed SaaS, billing, OAuth, SSO, or SCIM are not shipped in R23.
 

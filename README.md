@@ -21,13 +21,15 @@ Instead of integrating separately with shipped runtime interfaces (Claude Code, 
 
 ```text
 POST /runs
+GET  /runs
 GET  /runs/:id
 GET  /runs/:id/events
 GET  /metrics
 POST /debates
 GET  /debates/:id
 GET  /debates/:id/events
-POST /runs/:id/approve
+POST /runs/:id/input
+POST /approvals/:id/approve
 GET  /runs/:id/artifacts
 GET  /artifacts/:id
 GET  /artifacts/:id/content
@@ -46,11 +48,11 @@ R22 ships hosted/connected-node real-tool execution with policy-first controls f
 
 Production fake-only/no-spend remains the default posture for tests, smoke, preflight, and default canary.
 
-R23 adds hosted runtime bridge support only for worker-owned `claude_code.sdk` and structured `opencode.acp` through existing `POST /runs/:id/input` and hosted approval resolution routes. Usable hosted bridges require shared Postgres-backed hosted runtime bridge command and payload stores across server and worker. Missing bridge command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`). Stale claimed non-idempotent provider input after worker crash is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`. `codex.exec_json` remains one-shot with hosted input/approval unsupported. `codex.interactive` remains local-only and unshipped for hosted.
+R23 adds hosted runtime bridge support for worker-owned `claude_code.sdk` and structured `opencode.acp` through existing `POST /runs/:id/input` and hosted approval resolution routes. R25 extends the same bridge family conditionally to wrapper modes `agentfield.async_rest` and `generic_http.async_rest` when wrapper config, advertised bridge capabilities, durable command/payload stores, queue/outbox, object store, ownership, quota, audit, and worker readiness all pass. Missing bridge command/payload stores fail closed in preflight/readiness/admission with named bridge-store errors (for example `hosted_runtime_bridge_store_unavailable`). Stale claimed non-idempotent provider input after worker crash is not blindly retried and fails closed with `hosted_runtime_bridge_non_idempotent_retry_blocked`. `codex.exec_json` remains one-shot with hosted input/approval unsupported. `codex.interactive` remains local-only and unshipped for hosted.
 
-R24 ships hosted/server-safe debate through the existing `/debates` route family only: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`. Fake deterministic hosted debate is the default no-spend path. Opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, and `opencode.acp`. The internal bounded judge runner defaults to deterministic no-spend judging; live model judging is available only through request opt-in and spend confirmation inside `POST /debates`, not through a public judge route.
+R24 ships hosted/server-safe debate through the existing `/debates` route family only: `POST /debates`, `GET /debates/:id`, and `GET /debates/:id/events`. R25 allows conditional hosted wrapper debate participants for `agentfield.async_rest` and `generic_http.async_rest` under the same wrapper bridge gates. Fake deterministic hosted debate is the default no-spend path. Opt-in local/hosted debate participant runs are allowed only for `fake.deterministic`, `codex.exec_json`, `claude_code.sdk`, `opencode.acp`, `agentfield.async_rest`, and `generic_http.async_rest`. The internal bounded judge runner defaults to deterministic no-spend judging; live model judging is available only through request opt-in and spend confirmation inside `POST /debates`, not through a public judge route.
 
-R24 boundary non-goals remain explicit:
+R25 boundary non-goals remain explicit:
 
 - does not ship generic process/pty runtime adapters.
 - does not ship cursor/openclaw/paperclip.
@@ -59,7 +61,7 @@ R24 boundary non-goals remain explicit:
 - does not ship any public arbitrary execution route (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`).
 - does not ship hosted `codex.interactive`.
 - does not ship hosted Codex live-resume guarantees.
-- does not ship hosted AgentField/Generic HTTP input, approval, or debate bridges.
+- hosted AgentField/Generic HTTP bridges are conditional only; there is no arbitrary wrapper endpoint execution, no per-run wrapper URL/auth override, and no webhook control-plane proxy.
 - does not ship public model judge routes (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family).
 - does not ship hosted terminal bridge, PTY/TUI automation, or dashboard/TUI surfaces.
 - no managed SaaS/public signup, no payment-provider integration (invoices/checkout/webhooks), no OAuth/OIDC/SAML/SSO/SCIM, no dashboard, and no TUI.
@@ -157,7 +159,7 @@ Switchyard exposes product-level endpoints:
 /providers
 /memory
 /tools
-/artifacts (planned, not implemented in local MVP)
+/artifacts
 /approvals
 ```
 
@@ -228,9 +230,9 @@ Example registry facts:
 ```text
 Claude Code available: yes
 Codex available: yes
-OpenClaw URL configured: not shipped in R22
+OpenCode ACP available: config-dependent
 AgentField URL configured: yes
-Paperclip adapter configured: not shipped in R22
+Generic HTTP URL configured: config-dependent
 ```
 
 The registry is also used by placement policy to decide where and how work should run.
@@ -247,7 +249,7 @@ Shipped runtime interfaces:
 - AgentField async REST wrapper
 - Generic HTTP async REST wrapper
 
-Not shipped in R24:
+Not shipped in R25:
 
 - Cursor
 - OpenClaw
@@ -356,7 +358,9 @@ Workers
  ├── fake.deterministic (default no-spend runtime)
  ├── codex.exec_json (opt-in one-shot hosted provider runtime)
  ├── claude_code.sdk (opt-in hosted provider runtime; R23 bridge store required)
- └── opencode.acp (opt-in hosted provider runtime; R23 bridge store required)
+ ├── opencode.acp (opt-in hosted provider runtime; R23 bridge store required)
+ ├── agentfield.async_rest (conditional wrapper bridge; R25 gates required)
+ └── generic_http.async_rest (conditional wrapper bridge; R25 gates required)
 
 Storage:
   Postgres + Redis/BullMQ + local object volume or S3/R2-compatible object store
