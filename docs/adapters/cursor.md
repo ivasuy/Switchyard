@@ -2,7 +2,7 @@
 
 ## Target
 
-Cursor Agent support is planned if its headless interface is stable enough for normalized event streaming.
+Cursor Agent support is scaffolded behind `cursor.agent_stream_json`. Execution remains blocked until its headless interface is stable enough for normalized event streaming.
 
 ## Preferred Protocol
 
@@ -17,9 +17,10 @@ Cursor Agent support is planned if its headless interface is stable enough for n
 
 ## Implementation Notes
 
-- Auth/keychain behavior must be understood before implementation.
+- Auth/keychain behavior must be understood before execution is admitted.
 - Parser fixtures are required before enabling a real adapter.
+- The current adapter exposes manifest/check coverage and returns safe start denial.
 
 ## Status
 
-Deferred until auth and stream shape are verified.
+Scaffolded. Execution remains deferred until auth and stream shape are verified.

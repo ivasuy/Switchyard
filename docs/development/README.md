@@ -37,7 +37,7 @@ Today an app cannot yet:
 - Use public arbitrary `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` routes.
 - Use hosted `codex.interactive`.
 - Use generic process/PTY product adapters.
-- Use Cursor, OpenClaw, or Paperclip adapters.
+- Execute Cursor, OpenClaw, or Paperclip runs; current adapter scaffolds are manifest/check only.
 - Use hosted browser automation or hosted `repo` execution.
 - Use a public model judge route.
 - Use managed SaaS signup, payment-provider billing, OAuth/OIDC/SAML/SSO/SCIM, or tenant self-service UI.

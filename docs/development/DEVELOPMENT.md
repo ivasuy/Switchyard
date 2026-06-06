@@ -186,7 +186,7 @@ R25 non-goals reminder:
 
 - No managed SaaS/public signup, payments/webhooks, OAuth/OIDC/SAML/SSO/SCIM, dashboard, or TUI setup is shipped here.
 - does not ship generic process/pty runtime adapters.
-- does not ship cursor/openclaw/paperclip.
+- does not ship executable cursor/openclaw/paperclip runtime integration; current adapter scaffolds are manifest/check only.
 - does not ship hosted browser automation.
 - does not ship hosted `repo` execution.
 - does not ship public model judge routes (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family).

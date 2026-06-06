@@ -25,5 +25,5 @@ Recommended order:
 5. Generic HTTP adapter.
 6. AgentField adapter.
 7. Claude Code headless adapter.
-8. Cursor adapter.
-9. OpenClaw and Paperclip after API verification.
+8. Cursor manifest/check scaffold, then executable Cursor integration after auth and stream-shape verification.
+9. OpenClaw and Paperclip manifest/check scaffolds, then executable integration after API verification.

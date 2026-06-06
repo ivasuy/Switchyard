@@ -55,7 +55,7 @@ R24 ships hosted/server-safe debate through the existing `/debates` route family
 R25 boundary non-goals remain explicit:
 
 - does not ship generic process/pty runtime adapters.
-- does not ship cursor/openclaw/paperclip.
+- does not ship executable Cursor/OpenClaw/Paperclip runtime integration; current adapter scaffolds are manifest/check only.
 - does not ship hosted browser automation.
 - does not ship hosted `repo` execution.
 - does not ship any public arbitrary execution route (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`).

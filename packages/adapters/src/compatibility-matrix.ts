@@ -4,8 +4,11 @@ import { ClaudeCodeAdapter, createClaudeCodeCliClient } from "./claude-code/inde
 import { CodexExecJsonAdapter } from "./codex/codex-exec-json-adapter.js";
 import { CodexInteractiveAdapter } from "./codex/codex-interactive-adapter.js";
 import { AgentFieldAsyncRestAdapter } from "./agentfield/agentfield-async-rest-adapter.js";
+import { CursorAgentAdapter } from "./cursor/cursor-agent-adapter.js";
 import { GenericHttpAsyncRestAdapter } from "./generic-http/generic-http-adapter.js";
+import { OpenClawAdapter } from "./openclaw/openclaw-adapter.js";
 import { OpenCodeAcpAdapter } from "./opencode/opencode-acp-adapter.js";
+import { PaperclipAdapter } from "./paperclip/paperclip-adapter.js";
 
 export type CompatibilityStatus = "pass" | "skip" | "fail";
 
@@ -239,6 +242,40 @@ function buildMatrixSeeds(): MatrixSeed[] {
         ciStatus: "skip",
         reason: "ci_no_spend"
       })
+    },
+    {
+      adapter: new CursorAgentAdapter({
+        probeVersion: async () => ({
+          ok: false,
+          version: null,
+          reasonCode: "cursor_binary_missing",
+          message: "cursor-agent is not required in CI"
+        })
+      }),
+      noSpendHarness: {
+        type: "manifest_and_check_only",
+        mode: "deferred_auth_stream_shape"
+      },
+      coveredScenarios: ["manifest_coverage", "binary_check_failure_mapping", "start_denied_until_verified"],
+      evaluate: async (adapter) => evaluateCheckOnlyAdapter(adapter)
+    },
+    {
+      adapter: new OpenClawAdapter(),
+      noSpendHarness: {
+        type: "manifest_and_check_only",
+        mode: "deferred_api_boundary"
+      },
+      coveredScenarios: ["manifest_coverage", "config_missing_check", "start_denied_until_verified"],
+      evaluate: async (adapter) => evaluateCheckOnlyAdapter(adapter)
+    },
+    {
+      adapter: new PaperclipAdapter(),
+      noSpendHarness: {
+        type: "manifest_and_check_only",
+        mode: "deferred_api_boundary"
+      },
+      coveredScenarios: ["manifest_coverage", "config_missing_check", "start_denied_until_verified"],
+      evaluate: async (adapter) => evaluateCheckOnlyAdapter(adapter)
     }
   ];
 }

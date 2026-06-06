@@ -320,9 +320,9 @@ These are planned or designed in docs, but not shipped product:
 - Presigned direct upload/download URLs, bucket provisioning automation, lifecycle policy management, provider-managed encryption setup, and CDN integration.
 - WebSocket protocol package.
 - Policy package beyond current contracts/ports.
-- Cursor adapter.
-- OpenClaw adapter.
-- Paperclip adapter.
+- Executable Cursor adapter beyond manifest/check scaffold.
+- Executable OpenClaw adapter beyond manifest/check scaffold.
+- Executable Paperclip adapter beyond manifest/check scaffold.
 - Browser/search adapter.
 - Generic process adapter is not shipped.
 - PTY adapter is not shipped.
@@ -1199,7 +1199,7 @@ Explicitly not shipped in R17:
 - Hosted or connected-node real-tool execution.
 - Browser automation.
 - Generic process/PTY runtimes or arbitrary shell/exec/pty/terminal/sandbox routes are not shipped in R17.
-- Cursor, OpenClaw, or Paperclip adapters.
+- Executable Cursor, OpenClaw, or Paperclip runtime integration.
 - Runtime-specific approval bridges for OpenCode, AgentField, Generic HTTP, or hosted Codex.
 - Managed production hosted platform deployment.
 - Enterprise auth, billing, tenant controls, dashboard, or TUI are not shipped in R17.
@@ -1229,7 +1229,7 @@ Explicitly not shipped in R18:
 - Hosted or connected-node real tools.
 - Browser automation.
 - Arbitrary process/PTY execution, generic process/PTY adapters, or public `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` execution APIs are not shipped in R18.
-- Cursor, OpenClaw, or Paperclip adapters.
+- Executable Cursor, OpenClaw, or Paperclip runtime integration.
 - Runtime-specific approval bridge expansion for OpenCode, AgentField, Generic HTTP, or hosted Codex.
 - Hosted debate with real participant runtimes or model judging.
 
@@ -1255,7 +1255,7 @@ Explicitly not shipped in R19:
 - Production arbitrary subprocess/PTY execution, generic process/PTY adapters, or public `/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, or `/sandbox` execution APIs are not shipped in R19.
 - Hosted or connected-node real-tool execution.
 - Browser automation.
-- Cursor, OpenClaw, or Paperclip adapters.
+- Executable Cursor, OpenClaw, or Paperclip runtime integration.
 - Runtime-specific hosted approval bridge expansion for Codex/OpenCode/AgentField/Generic HTTP.
 - Hosted debate with real participant runtimes or model judging.
 
@@ -1275,7 +1275,7 @@ Explicitly not shipped in R20:
 - Hosted provider execution (Codex/Claude/OpenCode) in production.
 - Hosted or connected-node real-tool execution.
 - Browser automation.
-- Cursor, OpenClaw, or Paperclip adapters.
+- Executable Cursor, OpenClaw, or Paperclip runtime integration.
 - Dashboard or TUI is not shipped in R20.
 - Hosted debate runtime execution with real participant runtimes or model judging.
 

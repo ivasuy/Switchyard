@@ -34,7 +34,7 @@ describe("adapter compatibility matrix", () => {
 
     expect(matrix.summary.pass).toBe(2);
     expect(matrix.summary.fail).toBe(0);
-    expect(matrix.summary.skip).toBe(5);
+    expect(matrix.summary.skip).toBe(8);
     expect(matrix.generatedAt).toBe("1970-01-01T00:00:00.000Z");
   });
 
