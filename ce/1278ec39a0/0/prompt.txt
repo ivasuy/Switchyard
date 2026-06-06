@@ -1,0 +1,9 @@
+carefull update the readme docs and archietcture and developer and api and other docs for archietecture create a proper and clean diagram for how the app is structure in repo and at runtime clean and structure docs update all the docs
+
+---
+
+do one more pass and make sure nothing is left
+
+---
+
+so how much of the app is done ?

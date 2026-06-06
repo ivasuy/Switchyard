@@ -1,0 +1,37 @@
+{
+  "cli_version": "0.6.1",
+  "checkpoint_id": "ce1278ec39a0",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "PRODUCT.md",
+    "README.md",
+    "deploy/production/README.md",
+    "docs/adapters/claude-code.md",
+    "docs/adapters/codex.md",
+    "docs/adapters/opencode.md",
+    "docs/decisions/2026-05-11-module-coverage-audit.md",
+    "docs/development/API.md",
+    "docs/development/DEVELOPMENT.md",
+    "docs/development/README.md",
+    "docs/development/adapters/README.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ce/1278ec39a0/0/metadata.json",
+      "transcript": "/ce/1278ec39a0/0/full.jsonl",
+      "content_hash": "/ce/1278ec39a0/0/content_hash.txt",
+      "prompt": "/ce/1278ec39a0/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 385430,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 5985024,
+    "output_tokens": 23458,
+    "api_call_count": 50
+  }
+}
