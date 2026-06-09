@@ -32,7 +32,7 @@ Important non-goals remain part of the architecture boundary:
 - No generic process/PTY product adapter.
 - No hosted `codex.interactive`.
 - No hosted browser automation and no hosted `repo` tool execution.
-- No Cursor/OpenClaw/Paperclip adapter in the shipped repo.
+- Cursor/OpenClaw/Paperclip adapters are scaffolded for manifest/check coverage only; executable integration is not shipped.
 - No public model-judge route. Live judging is internal to `POST /debates` and spend-gated.
 
 ## Runtime Mental Model

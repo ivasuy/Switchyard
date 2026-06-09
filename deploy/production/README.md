@@ -91,7 +91,7 @@ R25 still does not ship:
 - dashboard or TUI surfaces are not shipped
 - generic process/PTY adapters are not shipped
 - hosted runtime terminal bridges
-- Cursor/OpenClaw/Paperclip adapters
+- executable Cursor/OpenClaw/Paperclip runtime integration beyond manifest/check scaffolds
 - hosted `codex.interactive`
 - arbitrary AgentField/Generic HTTP endpoint execution, per-run wrapper URL/auth overrides, or wrapper webhooks
 - public model judge routes are not shipped (`/debates/judge`, `/model-judge`, `/judging`, `/judge`, or equivalent route family)

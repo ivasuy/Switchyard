@@ -27,6 +27,7 @@ All notable changes to Switchyard will be documented in this file.
 - Added deterministic no-spend fake Codex interactive session factory coverage, daemon smoke for interactive input/approval paths, and compatibility matrix coverage for `codex.interactive`.
 - Added runtime approval expiration/startup reconciliation and terminalization hooks (`timeout`, `cancel`, `run.failed`, `daemon_restarted`) so runtime approvals cannot remain pending after terminal outcomes.
 - Added R25 product/API documentation for conditional hosted wrapper runtime bridges on `agentfield.async_rest` and `generic_http.async_rest`, reusing only existing run input, approval list/get/approve/reject, and debate routes.
+- Added manifest/check scaffolds for deferred Cursor, OpenClaw, and Paperclip adapters with safe start denial until auth/API fixtures are verified.
 
 ### Changed
 
@@ -64,7 +65,7 @@ All notable changes to Switchyard will be documented in this file.
 ### Safety Boundaries
 
 - R20 does not ship public arbitrary execution routes (`/exec`, `/shell`, `/process`, `/command`, `/pty`, `/terminal`, `/sandbox`).
-- R20 does not ship production hosted Codex/Claude/OpenCode execution, hosted real tools, browser automation, Cursor/OpenClaw/Paperclip adapters, dashboard/TUI, or hosted debate participant runtime execution.
+- R20 does not ship production hosted Codex/Claude/OpenCode execution, hosted real tools, browser automation, executable Cursor/OpenClaw/Paperclip runtime integration, dashboard/TUI, or hosted debate participant runtime execution.
 
 ## 2026-05-30 - Roadmap Release Train R13 S3/R2 Object-Store Client Wiring
 
